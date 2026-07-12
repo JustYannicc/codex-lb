@@ -47,8 +47,17 @@ PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
 PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
 
 
-def openai_error(code: str, message: str, error_type: str = "server_error") -> OpenAIErrorEnvelope:
-    return {"error": {"message": message, "type": error_type, "code": code}}
+def openai_error(
+    code: str,
+    message: str,
+    error_type: str = "server_error",
+    *,
+    resets_at: int | float | None = None,
+) -> OpenAIErrorEnvelope:
+    detail: OpenAIErrorDetail = {"message": message, "type": error_type, "code": code}
+    if resets_at is not None:
+        detail["resets_at"] = int(resets_at)
+    return {"error": detail}
 
 
 def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:

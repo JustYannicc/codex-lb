@@ -55,6 +55,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1741,7 +1742,6 @@ class _HTTPBridgeMixin(
                     # pre-dispatch route failure: preserve the original
                     # sanitized failure instead of generating ``no_accounts``.
                     raise proxy_connect_failover.last_error
-                is_local_account_cap = _is_local_account_cap_code(selection.error_code)
                 if (
                     require_preferred_account
                     and preferred_account_id is not None
@@ -1749,16 +1749,8 @@ class _HTTPBridgeMixin(
                     and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE
                 ):
                     raise _http_bridge_previous_response_owner_unavailable_error()
-                status_code = 429 if is_local_account_cap else 503
-                error_type = "rate_limit_error" if status_code == 429 else "server_error"
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type=error_type,
-                    ),
-                )
+                status_code, error_payload = selection_failure_response(selection)
+                raise ProxyResponseError(status_code, error_payload)
             if require_preferred_account and preferred_account_id is not None and account.id != preferred_account_id:
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None
@@ -2220,16 +2212,9 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     continue
                 record_selected_account_takeover(None)
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
+                status_code, error_payload = selection_failure_response(selection)
                 complete_failed_handoff()
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type="rate_limit_error" if status_code == 429 else "server_error",
-                    ),
-                )
+                raise ProxyResponseError(status_code, error_payload)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     selected_account_lease = selection.lease
