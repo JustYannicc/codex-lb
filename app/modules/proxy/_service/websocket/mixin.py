@@ -3005,6 +3005,13 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+
+        async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
+            if request_state.api_key_reservation is not None:
+                request_state.deferred_account_error_backoffs.setdefault(account.id, account)
+                return
+            await proxy._load_balancer.record_error_backoff(account)
+
         if (
             request_state.useragent is None
             and request_state.useragent_group is None
@@ -3188,7 +3195,7 @@ class _WebSocketMixin:
                     await proxy._load_balancer.release_account_lease(selected_stream_lease)
                     selected_stream_lease = None
                     if confirmed_pre_dispatch:
-                        await proxy._load_balancer.record_error_backoff(account)
+                        await _record_or_defer_confirmed_route_backoff(account)
                     last_failover_exc = exc
                     last_failover_account = account
                     excluded_account_ids.add(account.id)
@@ -3199,7 +3206,7 @@ class _WebSocketMixin:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
                 if confirmed_pre_dispatch:
-                    await proxy._load_balancer.record_error_backoff(account)
+                    await _record_or_defer_confirmed_route_backoff(account)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
@@ -5394,8 +5401,7 @@ class _WebSocketMixin:
 
         if request_state.draining_until_terminal:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
-            await proxy._release_websocket_reservation(request_state.api_key_reservation)
-            request_state.api_key_reservation = None
+            await proxy._release_websocket_request_state_reservation(request_state)
             # The reservation is settled; clear any terminal-bookkeeping
             # settlement claim so abort handling does not settle it again.
             request_state.terminal_settlement_phase = None
@@ -5489,6 +5495,7 @@ class _WebSocketMixin:
             # persistence. The health write remains ordered below.
             upstream_control.reconnect_requested = True
             upstream_control.retire_after_drain = True
+        lifecycle = request_state.deferred_account_backoff_lifecycle
         settlement_committed = await proxy._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
@@ -5496,13 +5503,27 @@ class _WebSocketMixin:
             response_id,
             # The reservation must be settled before the load-balancer
             # health write below (settlement-ordering invariant).
-            wait_for_settlement=settlement.account_health_error or settlement.record_success,
+            wait_for_settlement=(
+                lifecycle is not None
+                or settlement.account_health_error
+                or settlement.record_success
+                or bool(request_state.deferred_account_error_backoffs)
+            ),
         )
         # Settlement responsibility has transferred (the settle path tracks
         # its own failure/cancellation fallback release). Clear any terminal-
         # bookkeeping settlement claim so a later abort of the surrounding
         # continuation does not race a duplicate release against it.
         request_state.terminal_settlement_phase = None
+        if settlement_committed:
+            request_state.api_key_reservation = None
+            if lifecycle is not None:
+                lifecycle.settlement_confirmed = True
+            pending_backoffs = (
+                lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
+            )
+            if pending_backoffs:
+                await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (
