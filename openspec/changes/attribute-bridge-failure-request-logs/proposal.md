@@ -35,5 +35,8 @@ None.
 ## Impact
 
 - Code: `app/modules/proxy/_service/websocket/mixin.py`
-- Tests: `tests/unit/test_websocket_upstream_transport_observability.py`
+- Tests: `tests/unit/test_websocket_upstream_transport_observability.py`,
+  `tests/integration/test_http_responses_bridge.py` (route-level regression at
+  the externally failing surface: authenticated `/v1/responses` bridge send
+  failure → persisted `RequestLog.api_key_id`)
 - Specs: `openspec/specs/api-keys/spec.md`
