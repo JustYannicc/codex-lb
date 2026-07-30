@@ -127,6 +127,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -197,6 +198,37 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+def _http_bridge_can_replay_same_anchor_before_created(request_state: _WebSocketRequestState) -> bool:
+    if not request_state.request_text:
+        return False
+    if request_state.replay_count >= _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS:
+        return False
+    return (
+        request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.awaiting_response_created
+        and request_state.response_event_count == 0
+        and request_state.last_downstream_sequence_number is None
+        and not request_state.downstream_visible
+        and not request_state.upstream_model_output_seen
+    )
+
+
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[T],
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = cancellation or exc
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -1545,7 +1577,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     or any(pending_request is not request_state for pending_request in session.pending_requests)
                     or request_state.draining_until_terminal
                     or not _http_bridge_request_counts_against_queue(request_state)
-                    or not _websocket_request_can_replay_before_visible_output(request_state)
+                    or not (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_expired_deadline
+                            and hard_owner_bound
+                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                        )
+                    )
                     or (
                         not allow_expired_deadline
                         and request_state.bridge_request_deadline is not None
@@ -1558,7 +1597,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal
-                    and _websocket_request_can_replay_before_visible_output(request_state)
+                    and (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_expired_deadline
+                            and hard_owner_bound
+                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                        )
+                    )
                     and (
                         allow_expired_deadline
                         or request_state.bridge_request_deadline is None
@@ -1572,6 +1618,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.proxy_injected_previous_response_id
                 and request_state.fresh_upstream_request_is_retry_safe
                 and request_state.fresh_upstream_request_text
+            ) and not (
+                allow_expired_deadline
+                and hard_owner_bound
+                and _http_bridge_can_replay_same_anchor_before_created(request_state)
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
