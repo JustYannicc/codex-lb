@@ -49,6 +49,9 @@ from app.core.metrics.prometheus import (
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
+    api_key_fair_share_rejections_total,
+    stream_pool_capacity,
+    stream_pool_inflight,
 )
 from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
@@ -114,6 +117,11 @@ from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
     get_cap_partition,
     partition_cap,
+)
+from app.modules.proxy.fair_share import (
+    FairShareDecision,
+    effective_stream_pool_capacity,
+    evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
@@ -316,6 +324,7 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float,
         record_selection: bool = True,
+        api_key_id: str | None = None,
     ) -> AccountLease:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
         lease = AccountLease(
@@ -324,6 +333,7 @@ class LoadBalancer:
             kind=kind,
             acquired_at=time.monotonic(),
             estimated_tokens=max(0.0, estimated_tokens),
+            api_key_id=api_key_id,
         )
         if runtime.leases is None:
             runtime.leases = {}
@@ -332,6 +342,10 @@ class LoadBalancer:
             runtime.inflight_response_creates += 1
         else:
             runtime.inflight_streams += 1
+            if api_key_id is not None:
+                if runtime.stream_key_inflight is None:
+                    runtime.stream_key_inflight = {}
+                runtime.stream_key_inflight[api_key_id] = runtime.stream_key_inflight.get(api_key_id, 0) + 1
         runtime.leased_tokens += lease.estimated_tokens
         if record_selection:
             runtime.last_selected_at = time.time()
@@ -356,6 +370,66 @@ class LoadBalancer:
         effective_cap = max(1, cap - max(0, stream_reserve_slots))
         return cap <= 0 or runtime.inflight_streams < effective_cap
 
+    def _api_key_stream_fair_share_denial_locked(
+        self,
+        *,
+        api_key_id: str | None,
+        lease_kind: AccountLeaseKind | None,
+        candidate_account_ids: Collection[str],
+        caps: AccountConcurrencyCaps,
+        stream_reserve_slots: int,
+        threshold_pct: int,
+        redact_sensitive_details: bool = False,
+    ) -> FairShareDecision | None:
+        """Return the denial decision, or None when admitted or inactive.
+
+        Must be called under ``_runtime_lock``: it reads the same runtime
+        lease counters the admission path mutates.
+        """
+        if lease_kind != "stream" or api_key_id is None or threshold_pct <= 0:
+            return None
+        pool_capacity = effective_stream_pool_capacity(
+            candidate_account_count=len(candidate_account_ids),
+            stream_limit=caps.stream_limit,
+            stream_reserve_slots=stream_reserve_slots,
+        )
+        if pool_capacity <= 0:
+            return None
+        pool_inflight = 0
+        requester_inflight = 0
+        other_active_keys: set[str] = set()
+        for account_id in candidate_account_ids:
+            runtime = self._runtime.get(account_id)
+            if runtime is None:
+                continue
+            pool_inflight += runtime.inflight_streams
+            if runtime.stream_key_inflight:
+                requester_inflight += runtime.stream_key_inflight.get(api_key_id, 0)
+                other_active_keys.update(runtime.stream_key_inflight)
+        other_active_keys.discard(api_key_id)
+        decision = evaluate_stream_fair_share(
+            pool_capacity=pool_capacity,
+            pool_inflight=pool_inflight,
+            requester_inflight=requester_inflight,
+            other_active_key_count=len(other_active_keys),
+            threshold_pct=threshold_pct,
+        )
+        _record_stream_pool_gauges(decision.pool_capacity, decision.pool_inflight)
+        if decision.admitted:
+            return None
+        _record_api_key_fair_share_rejection()
+        logger.warning(
+            "API key stream fair share denial api_key_id=%s key_inflight=%s fair_share=%s "
+            "pool_inflight=%s pool_capacity=%s active_keys=%s",
+            "<redacted>" if redact_sensitive_details else api_key_id,
+            decision.requester_inflight,
+            decision.fair_share,
+            decision.pool_inflight,
+            decision.pool_capacity,
+            decision.active_key_count,
+        )
+        return decision
+
     def _release_account_lease_locked(
         self,
         lease: AccountLease,
@@ -373,6 +447,12 @@ class LoadBalancer:
             runtime.inflight_response_creates = max(0, runtime.inflight_response_creates - 1)
         else:
             runtime.inflight_streams = max(0, runtime.inflight_streams - 1)
+            if current.api_key_id is not None and runtime.stream_key_inflight is not None:
+                remaining = runtime.stream_key_inflight.get(current.api_key_id, 0) - 1
+                if remaining > 0:
+                    runtime.stream_key_inflight[current.api_key_id] = remaining
+                else:
+                    runtime.stream_key_inflight.pop(current.api_key_id, None)
         runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
         runtime.version += 1
         _record_account_lease_released(current.kind, reason)
@@ -444,6 +524,8 @@ class LoadBalancer:
         concurrency_caps: AccountConcurrencyCaps | None = None,
         redact_sensitive_details: bool = False,
         allow_usage_exhaustion_error: bool = True,
+        api_key_id: str | None = None,
+        api_key_stream_fair_share_threshold_pct: int = 0,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -640,6 +722,8 @@ class LoadBalancer:
                     traffic_class=traffic_class,
                     concurrency_caps=caps,
                     redact_sensitive_details=redact_sensitive_details,
+                    api_key_id=api_key_id,
+                    api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
@@ -686,6 +770,8 @@ class LoadBalancer:
                     traffic_class=traffic_class,
                     concurrency_caps=caps,
                     redact_sensitive_details=redact_sensitive_details,
+                    api_key_id=api_key_id,
+                    api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
@@ -1941,6 +2027,18 @@ def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
         return
     if PROMETHEUS_AVAILABLE and account_cap_rejections_total is not None:
         account_cap_rejections_total.labels(kind=kind).inc()
+
+
+def _record_stream_pool_gauges(pool_capacity: int, pool_inflight: int) -> None:
+    if PROMETHEUS_AVAILABLE and stream_pool_capacity is not None:
+        stream_pool_capacity.set(pool_capacity)
+    if PROMETHEUS_AVAILABLE and stream_pool_inflight is not None:
+        stream_pool_inflight.set(pool_inflight)
+
+
+def _record_api_key_fair_share_rejection() -> None:
+    if PROMETHEUS_AVAILABLE and api_key_fair_share_rejections_total is not None:
+        api_key_fair_share_rejections_total.inc()
 
 
 def _normalize_account_routing_policy(value: str | None) -> str:

@@ -2737,6 +2737,7 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
         http_responses_session_bridge_enabled=False,
         sse_keepalive_interval_seconds=0.01,
         proxy_account_stream_recovery_reserve=1,
+        proxy_api_key_fair_share_congestion_threshold_pct=0,
     )
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
@@ -2929,6 +2930,7 @@ async def test_codex_route_stream_responses_starts_event_keepalive_before_first_
         http_responses_session_bridge_enabled=False,
         sse_keepalive_interval_seconds=0.01,
         proxy_account_stream_recovery_reserve=1,
+        proxy_api_key_fair_share_congestion_threshold_pct=0,
     )
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
