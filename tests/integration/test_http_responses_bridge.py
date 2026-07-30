@@ -8186,8 +8186,8 @@ async def test_v1_responses_http_bridge_retries_when_upstream_never_acknowledges
     _install_bridge_settings_with_limits(
         monkeypatch,
         enabled=True,
-        stuck_gate_retire_after_seconds=0.01,
     )
+    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_missing_created_retry",

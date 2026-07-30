@@ -643,7 +643,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     _extract_model_class(session.request_model) if session.request_model else None
                                 ),
                             )
-                            retried = await self._retry_http_bridge_precreated_request(session)
+                            retried = await self._retry_http_bridge_precreated_request(
+                                session,
+                                allow_expired_deadline=True,
+                            )
                             if retried:
                                 continue
                             # Claim the session only after the safe pre-created

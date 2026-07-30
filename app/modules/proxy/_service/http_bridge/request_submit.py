@@ -1530,12 +1530,14 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
+        allow_expired_deadline: bool = False,
     ) -> bool:
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
+        now = _service_time().monotonic()
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1544,6 +1546,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     or request_state.draining_until_terminal
                     or not _http_bridge_request_counts_against_queue(request_state)
                     or not _websocket_request_can_replay_before_visible_output(request_state)
+                    or (
+                        not allow_expired_deadline
+                        and request_state.bridge_request_deadline is not None
+                        and request_state.bridge_request_deadline <= now
+                    )
                 ):
                     return False
             else:
@@ -1552,6 +1559,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal
                     and _websocket_request_can_replay_before_visible_output(request_state)
+                    and (
+                        allow_expired_deadline
+                        or request_state.bridge_request_deadline is None
+                        or request_state.bridge_request_deadline > now
+                    )
                 ]
                 if len(retryable_requests) != 1:
                     return False
