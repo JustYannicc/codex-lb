@@ -191,12 +191,29 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
+_HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS = 1
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+def _http_bridge_can_replay_same_anchor_before_created(request_state: _WebSocketRequestState) -> bool:
+    if not request_state.request_text:
+        return False
+    if request_state.replay_count >= _HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS:
+        return False
+    return (
+        request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.awaiting_response_created
+        and request_state.response_event_count == 0
+        and request_state.last_downstream_sequence_number is None
+        and not request_state.downstream_visible
+        and not request_state.upstream_model_output_seen
+    )
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -1530,6 +1547,7 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
+        allow_same_anchor_before_created: bool = False,
     ) -> bool:
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -1543,7 +1561,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     or any(pending_request is not request_state for pending_request in session.pending_requests)
                     or request_state.draining_until_terminal
                     or not _http_bridge_request_counts_against_queue(request_state)
-                    or not _websocket_request_can_replay_before_visible_output(request_state)
+                    or not (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_same_anchor_before_created
+                            and hard_owner_bound
+                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                        )
+                    )
                 ):
                     return False
             else:
@@ -1551,15 +1576,30 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal
-                    and _websocket_request_can_replay_before_visible_output(request_state)
+                    and (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_same_anchor_before_created
+                            and hard_owner_bound
+                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                        )
+                    )
                 ]
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
-            if request_state.previous_response_id is not None and not (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
+            if (
+                request_state.previous_response_id is not None
+                and not (
+                    request_state.proxy_injected_previous_response_id
+                    and request_state.fresh_upstream_request_is_retry_safe
+                    and request_state.fresh_upstream_request_text
+                )
+                and not (
+                    allow_same_anchor_before_created
+                    and hard_owner_bound
+                    and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                )
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
