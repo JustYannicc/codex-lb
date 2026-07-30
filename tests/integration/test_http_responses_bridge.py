@@ -8194,9 +8194,9 @@ async def test_v1_responses_http_bridge_retries_when_upstream_never_acknowledges
         "http-bridge-missing-created-retry@example.com",
     )
     account = await _get_account(account_id)
-    silent_upstream = _SilentUpstreamWebSocket()
+    silent_upstreams = [_SilentUpstreamWebSocket() for _ in range(5)]
     recovered_upstream = _FakeBridgeUpstreamWebSocket()
-    upstreams = [silent_upstream, recovered_upstream]
+    upstreams = [*silent_upstreams, recovered_upstream]
     connect_count = 0
 
     async def fake_select_account_with_budget(
@@ -8274,9 +8274,9 @@ async def test_v1_responses_http_bridge_retries_when_upstream_never_acknowledges
     )
 
     assert response.status_code == 200
-    assert connect_count == 2
-    assert silent_upstream.closed is True
-    assert len(silent_upstream.sent_text) == 1
+    assert connect_count == len(silent_upstreams) + 1
+    assert all(upstream.closed for upstream in silent_upstreams)
+    assert [len(upstream.sent_text) for upstream in silent_upstreams] == [1] * len(silent_upstreams)
     assert len(recovered_upstream.sent_text) == 1
 
 

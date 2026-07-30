@@ -9250,7 +9250,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     assert failed_event["response"]["error"]["code"] == "stream_incomplete"
     assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1
-    assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
+    assert log_calls[0]["request_id"] == "resp_ws_eof"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"
 

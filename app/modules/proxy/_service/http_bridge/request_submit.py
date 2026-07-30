@@ -191,7 +191,7 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
-_HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS = 1
+_HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS = 20
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
