@@ -7,8 +7,8 @@ Create Date: 2026-07-22 00:00:00.000000
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
+from hashlib import pbkdf2_hmac
 
 import sqlalchemy as sa
 from alembic import op
@@ -30,7 +30,7 @@ _BATCH_NAMING_CONVENTION = {
 
 
 def _identifier_digest(value: str) -> str:
-    return hashlib.sha256(value.encode(), usedforsecurity=False).hexdigest()
+    return pbkdf2_hmac("sha256", value.encode(), b"codex-lb-marker-v1", 120_000).hex()
 
 
 def _columns(connection: Connection, table_name: str) -> dict[str, Mapping[str, object]]:
