@@ -29,6 +29,10 @@ _BATCH_NAMING_CONVENTION = {
 }
 
 
+def _identifier_digest(value: str) -> str:
+    return hashlib.sha256(value.encode(), usedforsecurity=False).hexdigest()
+
+
 def _columns(connection: Connection, table_name: str) -> dict[str, Mapping[str, object]]:
     inspector = sa.inspect(connection)
     if not inspector.has_table(table_name):
@@ -48,12 +52,12 @@ def _account_foreign_key(connection: Connection, table_name: str) -> Mapping[str
 
 def _marker_key(lineage_id: str, api_key_scope: str | None) -> str:
     scope = (api_key_scope or "").strip() or _ANONYMOUS_SCOPE
-    digest = hashlib.sha256(f"{scope}\0{lineage_id}".encode()).hexdigest()
+    digest = _identifier_digest(f"{scope}\0{lineage_id}")
     return f"{_MARKER_PREFIX}{digest}"
 
 
 def _legacy_marker_key(lineage_id: str) -> str:
-    return f"{_MARKER_PREFIX}{hashlib.sha256(lineage_id.encode()).hexdigest()}"
+    return f"{_MARKER_PREFIX}{_identifier_digest(lineage_id)}"
 
 
 def _insert_marker(bind: Connection, marker_key: str) -> None:
