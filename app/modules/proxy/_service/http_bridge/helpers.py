@@ -680,11 +680,12 @@ async def _close_http_bridge_session_bounded(
     session: "_HTTPBridgeSession",
     *,
     reason: str,
+    clear_continuity: bool = False,
 ) -> None:
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
     close_task = asyncio.create_task(
-        service._close_http_bridge_session(session),
+        service._close_http_bridge_session(session, clear_continuity=clear_continuity),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
 

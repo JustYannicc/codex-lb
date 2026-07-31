@@ -15417,6 +15417,7 @@ async def test_http_bridge_retire_after_drain_waits_for_queued_submission(
         instance_id="instance-retire-drain",
         owner_epoch=3,
         draining=False,
+        clear_continuity=False,
     )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
@@ -15482,6 +15483,7 @@ async def test_http_bridge_retire_after_drain_does_not_cancel_current_upstream_r
         instance_id="instance-reader-retire",
         owner_epoch=7,
         draining=False,
+        clear_continuity=False,
     )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
@@ -18993,10 +18995,41 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
         instance_id="instance-cleanup",
         owner_epoch=7,
         draining=False,
+        clear_continuity=False,
     )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retire_missing_created_http_bridge_session_clears_durable_continuity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    release_live_session = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(release_live_session=release_live_session),
+    )
+    session = _make_bridge_session(key_value="bridge-missing-created-cleanup")
+    session.durable_session_id = "durable-missing-created"
+    session.durable_owner_epoch = 9
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-missing-created"),
+    )
+
+    await service._retire_stale_pending_http_bridge_session(session, detail="missing_response_created_timeout")
+
+    release_live_session.assert_awaited_once_with(
+        session_id="durable-missing-created",
+        instance_id="instance-missing-created",
+        owner_epoch=9,
+        draining=False,
+        clear_continuity=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -19634,6 +19667,7 @@ async def test_http_bridge_reader_failed_precreated_replay_retires_when_request_
         instance_id="instance-log-fails",
         owner_epoch=3,
         draining=False,
+        clear_continuity=False,
     )
     cast(Any, upstream).close.assert_awaited_once()
 
@@ -19715,6 +19749,7 @@ async def test_http_bridge_reader_unexpected_processing_error_fails_pending_requ
         instance_id="instance-reader-crash",
         owner_epoch=9,
         draining=False,
+        clear_continuity=False,
     )
     cast(Any, upstream).close.assert_awaited_once()
     write_request_log.assert_awaited_once()

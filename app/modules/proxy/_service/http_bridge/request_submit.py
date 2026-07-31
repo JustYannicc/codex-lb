@@ -1476,7 +1476,11 @@ class _HTTPBridgeRequestSubmitMixin:
             if should_close:
                 session.upstream_close_attempted = True
         if should_close:
-            await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
+            await self._close_http_bridge_session_bounded(
+                session,
+                reason="retire_stale_pending",
+                clear_continuity=detail == "missing_response_created_timeout",
+            )
         _log_http_bridge_event(
             "retire_stale_pending",
             session.key,
