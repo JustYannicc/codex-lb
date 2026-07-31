@@ -10,7 +10,9 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -29,6 +31,12 @@ CODEX_CLEAN_RE = re.compile(
     re.IGNORECASE,
 )
 CODEX_FINDING_RE = re.compile(r"(?:\bP[0-3]\s+Badge\b|badge/P[0-3]-|(?m:(?:^|\n)\s*(?:\*\*)?(?:\[P[0-3]\]|P[0-3]\b)))")
+CODEX_USAGE_LIMIT_RE = re.compile(
+    r"(reached your Codex usage limits|Codex usage limit|usage-limit|usage limit)",
+    re.IGNORECASE,
+)
+DEFAULT_CODEX_USAGE_LIMIT_BACKOFF_HOURS = 24.0
+DEFAULT_CODEX_REVIEW_RESPONSE_WAIT_SECONDS = 10.0
 SUCCESS_CHECK_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 FAIL_CHECK_STATES = {"ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"}
 PENDING_CHECK_STATES = {"EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"}
@@ -366,6 +374,10 @@ def is_needs_work_codex_body(body: object) -> bool:
     return isinstance(body, str) and CODEX_FINDING_RE.search(body) is not None
 
 
+def is_codex_usage_limit_body(body: object) -> bool:
+    return isinstance(body, str) and CODEX_USAGE_LIMIT_RE.search(body) is not None
+
+
 def body_mentions_head(body: object, head_sha: str) -> bool:
     if not isinstance(body, str):
         return False
@@ -460,6 +472,77 @@ def timeline_node_timestamp(node: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def parse_github_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def current_viewer_login() -> str:
+    payload = gh_api("/user")
+    login = payload.get("login") if isinstance(payload, dict) else None
+    if not isinstance(login, str) or not login:
+        raise GhError("gh api /user did not return a login")
+    return login
+
+
+def is_normal_codex_response_node(node: dict[str, Any]) -> bool:
+    body = node_body(node)
+    if is_codex_usage_limit_body(body):
+        return False
+    return node.get("__typename") in {"IssueComment", "PullRequestReview", "PullRequestReviewComment"} and bool(
+        body.strip()
+    )
+
+
+@dataclass
+class CodexReviewUsageBackoff:
+    request_author: str
+    allowed_authors: set[str]
+    window: timedelta
+    now: datetime
+    latest_usage_limit_at: datetime | None = None
+    latest_usage_limit_url: str | None = None
+    latest_normal_response_at: datetime | None = None
+
+    def observe(self, timeline_nodes: list[dict[str, Any]]) -> None:
+        active_request_author: str | None = None
+        for node in timeline_nodes:
+            timestamp = parse_github_timestamp(timeline_node_timestamp(node))
+            if is_codex_review_request_comment(node):
+                active_request_author = node_author_login(node)
+                continue
+            if timestamp is None or timestamp < self.now - self.window:
+                continue
+            if active_request_author != self.request_author:
+                continue
+            if not is_timeline_codex_author(node, self.allowed_authors):
+                continue
+            if is_codex_usage_limit_body(node_body(node)):
+                if self.latest_usage_limit_at is None or timestamp > self.latest_usage_limit_at:
+                    self.latest_usage_limit_at = timestamp
+                    self.latest_usage_limit_url = node_url(node)
+            elif is_normal_codex_response_node(node):
+                if self.latest_normal_response_at is None or timestamp > self.latest_normal_response_at:
+                    self.latest_normal_response_at = timestamp
+
+    def is_limited(self) -> bool:
+        if self.latest_usage_limit_at is None:
+            return False
+        return self.latest_normal_response_at is None or self.latest_normal_response_at < self.latest_usage_limit_at
+
+    def skip_warning(self, decision: SyncDecision) -> str:
+        when = self.latest_usage_limit_at.isoformat() if self.latest_usage_limit_at else "unknown time"
+        suffix = f" ({self.latest_usage_limit_url})" if self.latest_usage_limit_url else ""
+        return (
+            f"request Codex review on {decision.repo}#{decision.number}: skipped because "
+            f"{self.request_author} has a recent Codex usage-limit reply at {when}{suffix}"
+        )
 
 
 def unresolved_review_comment_urls(repo: str, number: int) -> set[str]:
@@ -1133,8 +1216,11 @@ def decide_pr(
     *,
     allowed_authors: set[str],
     ignore_checks: bool,
+    timeline_observer: Callable[[int, list[dict[str, Any]]], None] | None = None,
 ) -> SyncDecision:
     head_sha, timeline_nodes = pr_timeline_evidence(repo, number)
+    if timeline_observer is not None:
+        timeline_observer(number, timeline_nodes)
     labels = issue_label_names(repo, number)
     checks_state = commit_checks_state(repo, head_sha)
     merge_state = pr_merge_state(repo, number)
@@ -1407,6 +1493,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Issue comment body used to request a missing Codex review.",
     )
     parser.add_argument(
+        "--codex-usage-limit-backoff-hours",
+        type=float,
+        default=DEFAULT_CODEX_USAGE_LIMIT_BACKOFF_HOURS,
+        help=(
+            "Skip new @codex review comments when the same comment sender account received a Codex usage-limit "
+            "reply within this many hours, unless that same account has a newer normal Codex response."
+        ),
+    )
+    parser.add_argument(
+        "--codex-review-response-wait-seconds",
+        type=float,
+        default=DEFAULT_CODEX_REVIEW_RESPONSE_WAIT_SECONDS,
+        help=(
+            "After posting the first @codex review without recent quota evidence, wait this long, reread the PR "
+            "timeline, and stop further review requests if Codex replied with a usage limit."
+        ),
+    )
+    parser.add_argument(
         "--ignore-checks",
         action="store_true",
         help="Ignore current-head CI state when deciding the ok label. Normally do not use this.",
@@ -1482,6 +1586,12 @@ def main(argv: list[str] | None = None) -> int:
             had_error = True
             continue
 
+        timeline_nodes_by_number: dict[int, list[dict[str, Any]]] = {}
+
+        def observe_timeline(_number: int, timeline_nodes: list[dict[str, Any]]) -> None:
+            timeline_nodes_by_number[_number] = timeline_nodes
+
+        decisions: list[SyncDecision] = []
         classified_count = 0
         for number in sorted(set(numbers)):
             try:
@@ -1490,6 +1600,7 @@ def main(argv: list[str] | None = None) -> int:
                     number,
                     allowed_authors=allowed_authors,
                     ignore_checks=args.ignore_checks,
+                    timeline_observer=observe_timeline,
                 )
             except GhError as exc:
                 if not args.tolerate_read_errors:
@@ -1502,8 +1613,40 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             classified_count += 1
+            decisions.append(decision)
+
+        if args.tolerate_read_errors and classified_count == 0:
+            had_error = True
+            print(
+                f"{repo}: all selected PRs failed classification; refusing a false-green tolerant run",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        usage_backoff: CodexReviewUsageBackoff | None = None
+        if (
+            args.apply
+            and not args.no_trigger_missing_codex
+            and any(decision.trigger_codex_review for decision in decisions)
+        ):
+            try:
+                usage_backoff = CodexReviewUsageBackoff(
+                    request_author=current_viewer_login(),
+                    allowed_authors=allowed_authors,
+                    window=timedelta(hours=args.codex_usage_limit_backoff_hours),
+                    now=datetime.now(UTC),
+                )
+            except GhError as exc:
+                had_error = True
+                print(f"{repo}: cannot determine @codex review sender: {exc}", file=sys.stderr, flush=True)
+                continue
+            for timeline_nodes in timeline_nodes_by_number.values():
+                usage_backoff.observe(timeline_nodes)
+
+        for decision in decisions:
             try:
                 write_warnings: tuple[str, ...] = ()
+                trigger_codex_review_now = decision.trigger_codex_review and not args.no_trigger_missing_codex
                 if args.apply:
                     accumulated_warnings: list[str] = []
                     accumulated_warnings.extend(
@@ -1519,7 +1662,10 @@ def main(argv: list[str] | None = None) -> int:
                                 tolerate_permission_errors=args.tolerate_write_permission_errors,
                             )
                         )
-                    if decision.trigger_codex_review and not args.no_trigger_missing_codex:
+                    if trigger_codex_review_now and usage_backoff is not None and usage_backoff.is_limited():
+                        accumulated_warnings.append(usage_backoff.skip_warning(decision))
+                        trigger_codex_review_now = False
+                    if trigger_codex_review_now:
                         accumulated_warnings.extend(
                             trigger_codex_review(
                                 decision,
@@ -1527,6 +1673,11 @@ def main(argv: list[str] | None = None) -> int:
                                 tolerate_permission_errors=args.tolerate_write_permission_errors,
                             )
                         )
+                        if usage_backoff is not None and args.codex_review_response_wait_seconds > 0:
+                            time.sleep(args.codex_review_response_wait_seconds)
+                        if usage_backoff is not None:
+                            _head_sha, timeline_nodes = pr_timeline_evidence(decision.repo, decision.number)
+                            usage_backoff.observe(timeline_nodes)
                     write_warnings = tuple(accumulated_warnings)
                 mode = "apply" if args.apply else "dry-run"
                 print(
@@ -1540,7 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{decision.needs_rebase_action} "
                     f"legacy={','.join(sorted(decision.legacy_labels)) or '-'} "
                     f"approve_runs={','.join(str(run_id) for run_id in decision.approve_workflow_run_ids) or '-'} "
-                    f"trigger_codex={decision.trigger_codex_review and not args.no_trigger_missing_codex} "
+                    f"trigger_codex={trigger_codex_review_now} "
                     f"reason={decision.reason}",
                     flush=True,
                 )
@@ -1551,14 +1702,6 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
-
-        if args.tolerate_read_errors and classified_count == 0:
-            had_error = True
-            print(
-                f"{repo}: all selected PRs failed classification; refusing a false-green tolerant run",
-                file=sys.stderr,
-                flush=True,
-            )
 
     return 1 if had_error else 0
 
