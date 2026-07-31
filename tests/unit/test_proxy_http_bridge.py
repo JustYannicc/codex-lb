@@ -1540,6 +1540,88 @@ async def test_response_create_gate_timeout_retires_old_precreated_request_after
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_stream_gate_wait_retires_stale_pre_submit_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    await session.response_create_gate.acquire()
+    old_pending = proxy_service._WebSocketRequestState(
+        request_id="req-old-pre-submit-holder",
+        model="gpt-5.4-mini",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        response_create_gate=session.response_create_gate,
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        downstream_visible=False,
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-gate-waiter",
+        model="gpt-5.4-mini",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.4-mini","input":"retry"}',
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(old_pending)
+        session.queued_request_count = 1
+
+    retire_calls: list[str] = []
+
+    async def fake_retire(
+        retire_session: proxy_service._HTTPBridgeSession,
+        *,
+        detail: str,
+    ) -> None:
+        retire_calls.append(detail)
+        retire_session.closed = True
+
+    async def no_wait_capacity_sse(**_kwargs: object):
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", fake_retire)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", no_wait_capacity_sse)
+    waiter_text = waiter.request_text
+    assert waiter_text is not None
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=waiter,
+        text_data=waiter_text,
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            async for _event in events:
+                pass
+    finally:
+        await events.aclose()
+        if session.response_create_gate.locked():
+            session.response_create_gate.release()
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+    assert retire_calls[0] == "response_create_gate_timeout_stuck_pending"
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
         "awaiting_response_created",
