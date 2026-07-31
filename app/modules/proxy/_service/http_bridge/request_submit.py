@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import anyio
 
+from app.core import shutdown as shutdown_state
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -1465,6 +1466,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         detail: str,
     ) -> None:
+        clear_continuity = detail == "missing_response_created_timeout"
         session.closed = True
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
@@ -1479,8 +1481,19 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._close_http_bridge_session_bounded(
                 session,
                 reason="retire_stale_pending",
-                clear_continuity=detail == "missing_response_created_timeout",
+                clear_continuity=clear_continuity,
             )
+        elif clear_continuity and session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            try:
+                await self._durable_bridge.release_live_session(
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                    clear_continuity=True,
+                )
+            except Exception:
+                logger.warning("Failed to clear durable HTTP bridge continuity during stale retire", exc_info=True)
         _log_http_bridge_event(
             "retire_stale_pending",
             session.key,

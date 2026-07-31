@@ -19033,6 +19033,39 @@ async def test_retire_missing_created_http_bridge_session_clears_durable_continu
 
 
 @pytest.mark.asyncio
+async def test_retire_missing_created_http_bridge_session_clears_durable_continuity_after_close_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    release_live_session = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(release_live_session=release_live_session),
+    )
+    session = _make_bridge_session(key_value="bridge-missing-created-after-close")
+    session.durable_session_id = "durable-missing-created-after-close"
+    session.durable_owner_epoch = 11
+    session.upstream_close_attempted = True
+    close = cast(Any, session.upstream).close
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-missing-created-after-close"),
+    )
+
+    await service._retire_stale_pending_http_bridge_session(session, detail="missing_response_created_timeout")
+
+    close.assert_not_awaited()
+    release_live_session.assert_awaited_once_with(
+        session_id="durable-missing-created-after-close",
+        instance_id="instance-missing-created-after-close",
+        owner_epoch=11,
+        draining=False,
+        clear_continuity=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reader_failed_precreated_replay_retires_registered_session(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
