@@ -47,6 +47,26 @@ def decision(module: ModuleType, **overrides: Any) -> Any:
     return module.SyncDecision(**values)
 
 
+def codex_review_request(author: str, created_at: str) -> dict[str, Any]:
+    return {
+        "__typename": "IssueComment",
+        "author": {"login": author},
+        "bodyText": "@codex review",
+        "createdAt": created_at,
+        "url": f"https://github.test/request/{created_at}",
+    }
+
+
+def codex_issue_comment(body: str, created_at: str) -> dict[str, Any]:
+    return {
+        "__typename": "IssueComment",
+        "author": {"login": "chatgpt-codex-connector"},
+        "bodyText": body,
+        "createdAt": created_at,
+        "url": f"https://github.test/codex/{created_at}",
+    }
+
+
 @pytest.mark.parametrize("merge_state", ["CONFLICTING", "DIRTY"])
 def test_needs_rebase_label_target_adds_for_confirmed_conflicts(merge_state: str) -> None:
     module = load_sync_module()
@@ -558,6 +578,132 @@ def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pyt
 
     assert len(warnings) == 1
     assert "request Codex review on Soju06/codex-lb#714" in warnings[0]
+
+
+def test_codex_usage_backoff_blocks_recent_limit_for_same_sender() -> None:
+    module = load_sync_module()
+    backoff = module.CodexReviewUsageBackoff(
+        request_author="Komzpa",
+        allowed_authors={"chatgpt-codex-connector"},
+        window=module.timedelta(hours=24),
+        now=module.datetime.fromisoformat("2026-07-31T16:00:00+00:00"),
+    )
+
+    backoff.observe(
+        [
+            codex_review_request("Komzpa", "2026-07-31T15:00:00Z"),
+            codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T15:01:00Z"),
+        ]
+    )
+
+    assert backoff.is_limited() is True
+
+
+def test_codex_usage_backoff_allows_after_newer_normal_reply() -> None:
+    module = load_sync_module()
+    backoff = module.CodexReviewUsageBackoff(
+        request_author="Komzpa",
+        allowed_authors={"chatgpt-codex-connector"},
+        window=module.timedelta(hours=24),
+        now=module.datetime.fromisoformat("2026-07-31T16:00:00+00:00"),
+    )
+
+    backoff.observe(
+        [
+            codex_review_request("Komzpa", "2026-07-31T14:00:00Z"),
+            codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T14:01:00Z"),
+            codex_review_request("Komzpa", "2026-07-31T15:00:00Z"),
+            codex_issue_comment("Codex Review: Didn't find any major issues.", "2026-07-31T15:02:00Z"),
+        ]
+    )
+
+    assert backoff.is_limited() is False
+
+
+def test_codex_usage_backoff_keeps_accounts_independent() -> None:
+    module = load_sync_module()
+    backoff = module.CodexReviewUsageBackoff(
+        request_author="Komzpa",
+        allowed_authors={"chatgpt-codex-connector"},
+        window=module.timedelta(hours=24),
+        now=module.datetime.fromisoformat("2026-07-31T16:00:00+00:00"),
+    )
+
+    backoff.observe(
+        [
+            codex_review_request("Komzpa", "2026-07-31T14:00:00Z"),
+            codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T14:01:00Z"),
+            codex_review_request("OtherUser", "2026-07-31T15:00:00Z"),
+            codex_issue_comment("Codex Review: Didn't find any major issues.", "2026-07-31T15:02:00Z"),
+        ]
+    )
+
+    assert backoff.is_limited() is True
+
+
+def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+    monkeypatch.setattr(module, "current_viewer_login", lambda: "Komzpa")
+    monkeypatch.setattr(module, "apply_decision", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "approve_workflow_runs", lambda *_args, **_kwargs: ())
+
+    def fake_decide_pr(_repo: str, number: int, **kwargs: Any) -> Any:
+        observer = kwargs.get("timeline_observer")
+        if observer is not None:
+            observer(
+                number,
+                [
+                    {
+                        "__typename": "PullRequestCommit",
+                        "commit": {"oid": "a" * 40},
+                        "committedDate": "2026-07-31T14:50:00Z",
+                    }
+                ],
+            )
+        return decision(module, number=number, trigger_codex_review=True, ok_action="keep", checks_state="success")
+
+    posted: list[int] = []
+
+    def fake_trigger(decision: Any, **_kwargs: Any) -> tuple[str, ...]:
+        posted.append(decision.number)
+        return ()
+
+    def fake_timeline(_repo: str, _number: int) -> tuple[str, list[dict[str, Any]]]:
+        return (
+            "a" * 40,
+            [
+                codex_review_request("Komzpa", "2026-07-31T15:00:00Z"),
+                codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T15:01:00Z"),
+            ],
+        )
+
+    monkeypatch.setattr(module, "decide_pr", fake_decide_pr)
+    monkeypatch.setattr(module, "trigger_codex_review", fake_trigger)
+    monkeypatch.setattr(module, "pr_timeline_evidence", fake_timeline)
+
+    result = module.main(
+        [
+            "--repo",
+            "Soju06/codex-lb",
+            "--all-open",
+            "--apply",
+            "--codex-review-response-wait-seconds",
+            "0",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert posted == [710]
+    assert "apply Soju06/codex-lb#714" in captured.out
+    assert "trigger_codex=False" in captured.out
+    assert "recent Codex usage-limit reply" in captured.out
 
 
 def test_workflow_prefers_privileged_token_and_enables_tolerant_apply() -> None:
