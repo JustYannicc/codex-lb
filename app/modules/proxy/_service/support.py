@@ -1161,7 +1161,16 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     if not request_state.request_text:
         return False
     if request_state.replay_count >= 1:
-        return False
+        unanchored_precreated_pending = (
+            request_state.previous_response_id is None
+            and request_state.response_id is None
+            and request_state.awaiting_response_created
+        )
+        if (
+            not unanchored_precreated_pending
+            or request_state.replay_count >= _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS
+        ):
+            return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm
         and request_state.last_downstream_sequence_number == 0
