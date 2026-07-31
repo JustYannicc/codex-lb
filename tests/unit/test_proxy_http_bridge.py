@@ -18497,7 +18497,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()
-    assert fail_reader.await_args.kwargs["penalize_account"] is False
+    assert fail_reader.await_args.kwargs["penalize_account"] is True
     assert fail_reader.await_args.kwargs["force_retire"] is True
     record_stuck_retire.assert_called_once_with(
         reason="missing_response_created_timeout",
