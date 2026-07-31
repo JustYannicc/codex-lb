@@ -311,7 +311,9 @@ async def test_http_bridge_missing_response_created_retries_once_before_terminal
         require_same_account=True,
     )
     send_text.assert_awaited_once()
-    assert json.loads(send_text.await_args.args[0])["previous_response_id"] == "resp-owner-anchor"
+    send_text_call = send_text.await_args
+    assert send_text_call is not None
+    assert json.loads(send_text_call.args[0])["previous_response_id"] == "resp-owner-anchor"
     assert request_state.missing_response_created_retry_count == 1
     assert request_state.replay_count == 1
     assert request_state.awaiting_response_created is True
@@ -359,7 +361,9 @@ async def test_http_bridge_missing_response_created_rebinds_hard_owner_when_full
 
     assert retried is True
     reconnect.assert_awaited_once()
-    reconnect_kwargs = reconnect.await_args.kwargs
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    reconnect_kwargs = reconnect_call.kwargs
     assert reconnect_kwargs["request_state"] is request_state
     assert reconnect_kwargs["require_same_account"] is False
     assert reconnect_kwargs["owner_rebind_affinity"] is original_affinity
@@ -368,7 +372,9 @@ async def test_http_bridge_missing_response_created_rebinds_hard_owner_when_full
     assert selection_affinity.kind is None
     assert selection_affinity.reallocate_sticky is True
     send_text.assert_awaited_once()
-    assert json.loads(send_text.await_args.args[0]).get("previous_response_id") is None
+    send_text_call = send_text.await_args
+    assert send_text_call is not None
+    assert json.loads(send_text_call.args[0]).get("previous_response_id") is None
     assert request_state.request_text == fresh_text
     assert request_state.previous_response_id is None
     assert request_state.preferred_account_id is None
@@ -3476,7 +3482,7 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
     assert finalize_call.kwargs["event_type"] == "response.failed"
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
-    close_session.assert_awaited_once_with(session)
+    close_session.assert_awaited_once_with(session, clear_continuity=False)
 
 
 @pytest.mark.asyncio
@@ -8190,9 +8196,14 @@ async def test_close_http_bridge_session_bounded_timeout_keeps_close_task_runnin
     close_finished = asyncio.Event()
     close_cancelled = False
 
-    async def close_http_bridge_session(target: proxy_service._HTTPBridgeSession) -> None:
+    async def close_http_bridge_session(
+        target: proxy_service._HTTPBridgeSession,
+        *,
+        clear_continuity: bool = False,
+    ) -> None:
         nonlocal close_cancelled
         assert target is session
+        assert clear_continuity is False
         close_started.set()
         try:
             await release_close.wait()
@@ -8232,9 +8243,14 @@ async def test_close_http_bridge_session_bounded_cancellation_keeps_close_task_t
     close_finished = asyncio.Event()
     close_cancelled = False
 
-    async def close_http_bridge_session(target: proxy_service._HTTPBridgeSession) -> None:
+    async def close_http_bridge_session(
+        target: proxy_service._HTTPBridgeSession,
+        *,
+        clear_continuity: bool = False,
+    ) -> None:
         nonlocal close_cancelled
         assert target is session
+        assert clear_continuity is False
         close_started.set()
         try:
             await release_close.wait()

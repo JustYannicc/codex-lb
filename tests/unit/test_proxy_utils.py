@@ -37037,7 +37037,7 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
         request_id="req_bridge_retry_deadline",
     )
     acquire_admission = AsyncMock(return_value=replacement_admission)
-    retry_times = iter((9.0, 11.0))
+    retry_times = iter((9.0, 9.5, 11.0))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_retry_deadline",
         model="gpt-5.6-sol",
