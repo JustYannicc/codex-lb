@@ -193,6 +193,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
+_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_MAX_RETRIES = 1
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
@@ -213,6 +214,13 @@ def _http_bridge_can_replay_same_anchor_before_created(request_state: _WebSocket
         and request_state.last_downstream_sequence_number is None
         and not request_state.downstream_visible
         and not request_state.upstream_model_output_seen
+    )
+
+
+def _http_bridge_can_retry_missing_response_created(request_state: _WebSocketRequestState) -> bool:
+    return (
+        request_state.missing_response_created_retry_count < _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_MAX_RETRIES
+        and _http_bridge_can_replay_same_anchor_before_created(request_state)
     )
 
 
@@ -1570,6 +1578,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         now = _service_time().monotonic()
+        missing_created_retry = False
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1582,7 +1591,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         or (
                             allow_expired_deadline
                             and hard_owner_bound
-                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                            and _http_bridge_can_retry_missing_response_created(request_state)
                         )
                     )
                     or (
@@ -1602,7 +1611,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         or (
                             allow_expired_deadline
                             and hard_owner_bound
-                            and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                            and _http_bridge_can_retry_missing_response_created(request_state)
                         )
                     )
                     and (
@@ -1621,7 +1630,7 @@ class _HTTPBridgeRequestSubmitMixin:
             ) and not (
                 allow_expired_deadline
                 and hard_owner_bound
-                and _http_bridge_can_replay_same_anchor_before_created(request_state)
+                and _http_bridge_can_retry_missing_response_created(request_state)
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
@@ -1629,6 +1638,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 # injected retry-safe anchors are equivalent to the client's own
                 # full resend once the anchor is stripped.
                 return False
+            missing_created_retry = (
+                allow_expired_deadline
+                and hard_owner_bound
+                and _http_bridge_can_retry_missing_response_created(request_state)
+            )
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
                 response_events_seen=request_state.response_event_count,
@@ -1678,6 +1692,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
+            if missing_created_retry:
+                request_state.missing_response_created_retry_count += 1
             if session.account.id in request_state.excluded_account_ids:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None

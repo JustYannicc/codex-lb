@@ -268,6 +268,55 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
     )
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_missing_response_created_retries_once_before_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_text = (
+        '{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp-owner-anchor","input":"hello"}'
+    )
+    request_state = _make_eventless_http_bridge_owner(request_id="req-missing-created-once")
+    request_state.previous_response_id = "resp-owner-anchor"
+    request_state.request_text = request_text
+    request_state.bridge_request_deadline = time.monotonic() - 1.0
+    session = _make_bridge_session(
+        key_value="missing-created-once",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=None))
+
+    first_retry = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_expired_deadline=True,
+    )
+    second_retry = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_expired_deadline=True,
+    )
+
+    assert first_retry is True
+    assert second_retry is False
+    reconnect.assert_awaited_once_with(
+        session,
+        request_state=request_state,
+        require_same_account=True,
+    )
+    send_text.assert_awaited_once()
+    assert json.loads(send_text.await_args.args[0])["previous_response_id"] == "resp-owner-anchor"
+    assert request_state.missing_response_created_retry_count == 1
+    assert request_state.replay_count == 1
+    assert request_state.awaiting_response_created is True
+
+
 def _make_account_neutral_replay_session_key(
     nonce: str,
     api_key_id: str | None = None,
