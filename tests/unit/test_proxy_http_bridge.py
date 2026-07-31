@@ -136,14 +136,14 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 115.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=30.0,
+            stuck_gate_retire_after_seconds=10.0,
         )
-        == 130.0
+        == 110.0
     )
 
     request_state.latency_first_upstream_event_ms = 25
@@ -152,7 +152,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 115.0
     )
 
 
