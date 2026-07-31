@@ -68,7 +68,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
-    _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_payload_looks_like_full_resend,
@@ -231,6 +230,11 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     code = error.get("code")
     message = error.get("message")
     return (str(code) if code is not None else None, str(message) if message is not None else None)
+
+
+def _http_bridge_owner_failure_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+    code, _message = _proxy_error_code_message(exc)
+    return code in {"previous_response_owner_unavailable", "continuity_owner_conflict"}
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -1190,7 +1194,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal durable_full_resend_retains_prior_output
 
             if (
-                not _http_bridge_is_previous_response_owner_unavailable(exc)
+                not _http_bridge_owner_failure_allows_account_neutral_replay(exc)
                 or forwarded_request
                 or rewritten_file_account_id is not None
                 or durable_full_resend_anchor_count is None
