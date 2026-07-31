@@ -225,21 +225,6 @@ def _http_bridge_can_retry_missing_response_created(request_state: _WebSocketReq
     )
 
 
-async def _await_task_deferring_cancellation(
-    task: asyncio.Task[T],
-) -> tuple[T, asyncio.CancelledError | None]:
-    """Finish critical cleanup while preserving the caller's cancellation."""
-
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            return await asyncio.shield(task), cancellation
-        except asyncio.CancelledError as exc:
-            if task.cancelled():
-                raise
-            cancellation = cancellation or exc
-
-
 async def _rollback_http_bridge_recovery_turn_state_registration(
     service: Any,
     receipt: DurableBridgeAliasRegistrationReceipt,
@@ -1643,14 +1628,18 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
-            if request_state.previous_response_id is not None and not (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
-            ) and not (
-                allow_expired_deadline
-                and hard_owner_bound
-                and _http_bridge_can_retry_missing_response_created(request_state)
+            if (
+                request_state.previous_response_id is not None
+                and not (
+                    request_state.proxy_injected_previous_response_id
+                    and request_state.fresh_upstream_request_is_retry_safe
+                    and request_state.fresh_upstream_request_text
+                )
+                and not (
+                    allow_expired_deadline
+                    and hard_owner_bound
+                    and _http_bridge_can_retry_missing_response_created(request_state)
+                )
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
