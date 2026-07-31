@@ -1579,6 +1579,9 @@ class _HTTPBridgeRequestSubmitMixin:
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         now = _service_time().monotonic()
         missing_created_retry = False
+        rebind_missing_created_owner = False
+        owner_rebind_affinity: _AffinityPolicy | None = None
+        selection_rebind_affinity: _AffinityPolicy | None = None
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1680,7 +1683,25 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    if not hard_owner_bound:
+                    if missing_created_retry and hard_owner_bound:
+                        request_state.preferred_account_id = None
+                        request_state.excluded_account_ids.add(session.account.id)
+                        request_state.affinity_policy = replace(
+                            request_state.affinity_policy,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                        )
+                        rebind_missing_created_owner = True
+                        owner_rebind_affinity = session.affinity
+                        selection_rebind_affinity = replace(
+                            session.affinity,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                            codex_session_source=None,
+                        )
+                    elif not hard_owner_bound:
                         request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = account_neutral_recovery
@@ -1710,7 +1731,18 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
-            if hard_owner_bound:
+            if rebind_missing_created_owner:
+                await _call_with_supported_optional_kwargs(
+                    self._reconnect_http_bridge_session,
+                    session,
+                    optional_kwargs={
+                        "owner_rebind_affinity": owner_rebind_affinity,
+                        "selection_affinity": selection_rebind_affinity,
+                    },
+                    request_state=request_state,
+                    require_same_account=account_neutral_recovery,
+                )
+            elif hard_owner_bound:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,

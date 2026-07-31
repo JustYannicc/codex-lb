@@ -317,6 +317,68 @@ async def test_http_bridge_missing_response_created_retries_once_before_terminal
     assert request_state.awaiting_response_created is True
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_missing_response_created_rebinds_hard_owner_when_full_resend_is_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    anchored_text = (
+        '{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp-owner-anchor","input":"trimmed"}'
+    )
+    fresh_text = (
+        '{"type":"response.create","model":"gpt-5.6-sol",'
+        '"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}'
+    )
+    request_state = _make_eventless_http_bridge_owner(request_id="req-missing-created-rebind")
+    request_state.previous_response_id = "resp-owner-anchor"
+    request_state.proxy_injected_previous_response_id = True
+    request_state.fresh_upstream_request_is_retry_safe = True
+    request_state.fresh_upstream_request_text = fresh_text
+    request_state.request_text = anchored_text
+    request_state.bridge_request_deadline = time.monotonic() - 1.0
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "missing-created-rebind", None),
+        key_value="missing-created-rebind",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    original_affinity = session.affinity
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=None))
+
+    retried = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_expired_deadline=True,
+    )
+
+    assert retried is True
+    reconnect.assert_awaited_once()
+    reconnect_kwargs = reconnect.await_args.kwargs
+    assert reconnect_kwargs["request_state"] is request_state
+    assert reconnect_kwargs["require_same_account"] is False
+    assert reconnect_kwargs["owner_rebind_affinity"] is original_affinity
+    selection_affinity = reconnect_kwargs["selection_affinity"]
+    assert selection_affinity.key is None
+    assert selection_affinity.kind is None
+    assert selection_affinity.reallocate_sticky is True
+    send_text.assert_awaited_once()
+    assert json.loads(send_text.await_args.args[0]).get("previous_response_id") is None
+    assert request_state.request_text == fresh_text
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {"acc-bridge"}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    assert request_state.missing_response_created_retry_count == 1
+    assert request_state.replay_count == 1
+    assert request_state.awaiting_response_created is True
+
+
 def _make_account_neutral_replay_session_key(
     nonce: str,
     api_key_id: str | None = None,
