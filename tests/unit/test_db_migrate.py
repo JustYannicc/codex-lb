@@ -2038,11 +2038,16 @@ def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp
     url = _db_url(db_path)
     parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
     target_revision = "20260731_000000_add_capability_lineage_markers"
+    merge_revision = "20260802_000000_merge_bridge_and_capability_lineage_heads"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)
     script_directory = ScriptDirectory.from_config(config)
-    assert script_directory.get_heads() == [target_revision]
+    assert script_directory.get_heads() == [merge_revision]
+    assert script_directory.get_revision(merge_revision).down_revision == (
+        "20260729_000000_drop_legacy_bridge_pending_tool_columns",
+        target_revision,
+    )
 
     engine = create_engine(to_sync_database_url(url))
     try:
