@@ -1311,6 +1311,7 @@ class _HTTPBridgeStreamingMixin:
             if (
                 durable_model_transition_lookup is None
                 or not _http_bridge_owner_failure_allows_account_neutral_replay(exc)
+                or owner_unavailable_allows_account_neutral_replay(exc)
                 or request_state.previous_response_id is not None
                 or rewritten_file_account_id is not None
             ):
