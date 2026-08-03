@@ -661,7 +661,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 session,
                                 error_code="upstream_request_timeout",
                                 error_message=receive_timeout.error_message,
-                                penalize_account=False,
+                                penalize_account=True,
                                 retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 force_retire=True,
                             )
