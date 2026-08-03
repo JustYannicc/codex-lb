@@ -32,7 +32,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
-from app.db.models import AccountStatus, HttpBridgeSessionState
+from app.db.models import Account, AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
@@ -18567,6 +18567,16 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     upstream = _TrackingUpstream()
     session = _make_bridge_session(key_value=f"eventless-{leading_telemetry}")
+    session.account = Account(
+        id="acc-bridge",
+        email="bridge@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"",
+        refresh_token_encrypted=b"",
+        id_token_encrypted=b"",
+        last_refresh=datetime.now(timezone.utc),
+        status=AccountStatus.ACTIVE,
+    )
     session.upstream = cast(UpstreamWebSocket, upstream)
     service._http_bridge_sessions[session.key] = session
     settings = _make_app_settings(
@@ -18578,7 +18588,8 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     retry_precreated = AsyncMock(return_value=False)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
-    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     write_request_log = AsyncMock()
     monkeypatch.setattr(service, "_write_request_log", write_request_log)
     record_stuck_retire = Mock()
@@ -18659,8 +18670,13 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()
-    assert fail_reader.await_args.kwargs["penalize_account"] is False
+    assert fail_reader.await_args.kwargs["penalize_account"] is True
     assert fail_reader.await_args.kwargs["force_retire"] is True
+    handle_stream_error.assert_awaited_once()
+    handle_stream_error_args = handle_stream_error.await_args
+    assert handle_stream_error_args is not None
+    assert handle_stream_error_args.args[0] is session.account
+    assert handle_stream_error_args.args[2] == "upstream_request_timeout"
     record_stuck_retire.assert_called_once_with(
         reason="missing_response_created_timeout",
         session=session,
@@ -19409,7 +19425,6 @@ async def test_http_bridge_eventless_timeout_force_retires_with_admission_waiter
         session,
         error_code="upstream_request_timeout",
         error_message="missing response.created",
-        penalize_account=False,
         retire_detail="missing_response_created_timeout",
         force_retire=True,
     )
@@ -19419,7 +19434,7 @@ async def test_http_bridge_eventless_timeout_force_retires_with_admission_waiter
     retire.assert_awaited_once_with(session, detail="missing_response_created_timeout")
     fail_pending_await_args = fail_pending.await_args
     assert fail_pending_await_args is not None
-    assert fail_pending_await_args.kwargs["penalize_account"] is False
+    assert fail_pending_await_args.kwargs["penalize_account"] is True
 
 
 @pytest.mark.asyncio
