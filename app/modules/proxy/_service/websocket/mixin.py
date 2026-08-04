@@ -5358,6 +5358,9 @@ class _WebSocketMixin:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
             await proxy._release_websocket_reservation(request_state.api_key_reservation)
             request_state.api_key_reservation = None
+            # The reservation is settled; clear any terminal-bookkeeping
+            # settlement claim so abort handling does not settle it again.
+            request_state.terminal_settlement_phase = None
             return
 
         if request_state.latency_first_token_ms is None:
@@ -5451,6 +5454,11 @@ class _WebSocketMixin:
             # health write below (settlement-ordering invariant).
             wait_for_settlement=settlement.account_health_error or settlement.record_success,
         )
+        # Settlement responsibility has transferred (the settle path tracks
+        # its own failure/cancellation fallback release). Clear any terminal-
+        # bookkeeping settlement claim so a later abort of the surrounding
+        # continuation does not race a duplicate release against it.
+        request_state.terminal_settlement_phase = None
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (

@@ -5,6 +5,8 @@ import logging
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
+import anyio
+
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -1101,6 +1103,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         event = parse_sse_event_payload(payload)
         event_type = _event_type_from_payload(event, payload)
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
+        claimed_terminal_request_states: list[_WebSocketRequestState] = []
         try:
             await self._process_parsed_http_bridge_upstream_event(
                 session,
@@ -1110,10 +1113,79 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event=event,
                 event_type=event_type,
                 completed_delivery_scope=completed_delivery_scope,
+                claimed_terminal_request_states=claimed_terminal_request_states,
             )
+        except BaseException:
+            # Includes CancelledError. A terminal request popped from
+            # session.pending_requests is owned exclusively by this
+            # bookkeeping continuation: the reader's failure path and the
+            # downstream detach backstop only settle requests still in
+            # pending ownership, so an abort here would otherwise leak the
+            # API-key reservation and its heartbeat forever (issue #1594).
+            await self._settle_aborted_http_bridge_terminal_states(
+                session,
+                claimed_terminal_request_states,
+            )
+            raise
+        else:
+            for claimed_request_state in claimed_terminal_request_states:
+                claimed_request_state.terminal_settlement_phase = None
         finally:
             if completed_delivery_scope is not None:
                 completed_delivery_scope.active = False
+
+    async def _settle_aborted_http_bridge_terminal_states(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_states: list[_WebSocketRequestState],
+    ) -> None:
+        """Settle claimed-but-unfinalized terminal requests after an abort.
+
+        Once terminal-event bookkeeping pops a request from
+        ``session.pending_requests`` it is the sole owner of that request's
+        reservation settlement. If the bookkeeping continuation raises or is
+        cancelled before ``_finalize_websocket_request_state`` transfers the
+        settlement, nothing else can reach the request: the orphaned
+        reservation heartbeat would keep refreshing ``updated_at`` and defeat
+        the stale-reservation janitor permanently. Settle those requests here
+        under a shielded scope. Requests a retry branch restored to pending
+        ownership are skipped; they are reachable by ordinary cleanup again.
+        Settlement is idempotent (release only flips ``status == "reserved"``),
+        so overlapping with an already-transferred finalize is safe.
+        """
+        if not request_states:
+            return
+        with anyio.CancelScope(shield=True):
+            for request_state in request_states:
+                if request_state.terminal_settlement_phase is None:
+                    continue
+                async with session.pending_lock:
+                    if request_state in session.pending_requests:
+                        request_state.terminal_settlement_phase = None
+                        continue
+                request_state.terminal_settlement_phase = "abandoned"
+                try:
+                    self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                    await self._release_websocket_request_state_reservation(request_state)
+                    request_state.api_key_reservation = None
+                    request_state.terminal_settlement_phase = None
+                except Exception:
+                    # Leave the "abandoned" marker so the downstream detach
+                    # backstop can retry the settlement later.
+                    logger.warning(
+                        "Failed to settle aborted HTTP bridge terminal request request_id=%s account_id=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        session.account.id,
+                        exc_info=True,
+                    )
+                # Best effort: unblock the downstream waiter so it observes
+                # end-of-stream instead of waiting for its idle timeout.
+                event_queue = request_state.event_queue
+                if event_queue is not None:
+                    try:
+                        event_queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
 
     async def _process_parsed_http_bridge_upstream_event(
         self: Any,
@@ -1125,6 +1197,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         event: OpenAIEvent | None,
         event_type: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
+        claimed_terminal_request_states: list[_WebSocketRequestState],
     ) -> None:
         original_text = text
         response_id = _websocket_response_id(event, payload)
@@ -1357,6 +1430,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if completed_event_queue is not None and completed_delivery_scope is not None:
                         completed_delivery_scope.active = True
                         terminal_request_state.completed_delivery_scope = completed_delivery_scope
+
+            # Every request popped from pending ownership above is now owned
+            # exclusively by this bookkeeping continuation. Record the claim
+            # (still under pending_lock) so an abort before finalization can
+            # settle the reservation instead of leaking it (issue #1594).
+            for claimed_request_state in (terminal_request_state, *grouped_previous_response_request_states):
+                if claimed_request_state is not None and claimed_request_state not in session.pending_requests:
+                    claimed_request_state.terminal_settlement_phase = "claimed"
+                    if claimed_request_state not in claimed_terminal_request_states:
+                        claimed_terminal_request_states.append(claimed_request_state)
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True

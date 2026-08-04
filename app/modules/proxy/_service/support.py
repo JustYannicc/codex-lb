@@ -924,6 +924,13 @@ class _WebSocketRequestState:
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
+    # Exactly-once reservation settlement for terminal HTTP bridge events
+    # (issue #1594). "claimed" marks a request popped from pending ownership
+    # whose in-flight terminal bookkeeping continuation exclusively owns
+    # settlement; "abandoned" marks a claim whose continuation aborted and
+    # whose shielded abort settlement also failed, allowing a later detach to
+    # reclaim settlement; None means unclaimed or settled.
+    terminal_settlement_phase: Literal["claimed", "abandoned"] | None = None
     account_capacity_waiting: bool = False
     account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None

@@ -3602,6 +3602,73 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
 
 
 @pytest.mark.asyncio
+async def test_release_stale_usage_reservations_max_age_ceiling_beats_orphaned_heartbeat(async_client, monkeypatch):
+    """Issue #1594: a leaked heartbeat keeps refreshing ``updated_at`` forever.
+
+    Reservations older than the hard ``max_age_cutoff`` ceiling must be
+    reclaimed even while their ``updated_at`` stays fresh.
+    """
+    del async_client
+    now = utcnow()
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        yield
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="orphaned-heartbeat-cleanup",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=50_000),
+                ],
+            )
+        )
+        heartbeat_kept = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        # An orphaned heartbeat keeps the reservation's updated_at current
+        # even though it was created past the hard age ceiling.
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == heartbeat_kept.reservation_id)
+            .values(created_at=now - timedelta(hours=25), updated_at=now)
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == fresh.reservation_id)
+            .values(created_at=now - timedelta(hours=1), updated_at=now)
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(
+            cutoff=now - timedelta(hours=6),
+            max_age_cutoff=now - timedelta(hours=24),
+        )
+        assert released_count == 1
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        heartbeat_kept_reservation = await repo.get_usage_reservation(heartbeat_kept.reservation_id)
+        fresh_reservation = await repo.get_usage_reservation(fresh.reservation_id)
+        assert heartbeat_kept_reservation is not None
+        assert heartbeat_kept_reservation.status == "released"
+        assert heartbeat_kept_reservation.items[0].actual_delta == 0
+        assert fresh_reservation is not None
+        assert fresh_reservation.status == "reserved"
+
+        limits = await repo.get_limits_by_key(created.id)
+        assert len(limits) == 1
+        assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
+
+
+@pytest.mark.asyncio
 async def test_release_stale_usage_reservations_uses_sqlite_writer_section(async_client, monkeypatch):
     del async_client
     entered = False
