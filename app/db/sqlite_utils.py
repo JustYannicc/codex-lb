@@ -46,6 +46,10 @@ def _sqlite_path_is_raw_windows_drive(path: str) -> bool:
     return len(path) >= 3 and path[1] == ":" and path[0].isalpha() and path[2] in ("\\", "/")
 
 
+def _sqlite_path_is_raw_windows_unc(path: str) -> bool:
+    return path.startswith("\\\\")
+
+
 def _decode_sqlalchemy_windows_sqlite_path(path: str) -> str:
     if not _sqlite_path_uses_sqlalchemy_windows_escapes(path):
         return path
@@ -62,7 +66,11 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
         return None
 
     path = url[marker_index + len(marker) :]
-    if _sqlite_path_is_raw_windows_drive(path):
+    if _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
+        # Raw Windows drive and UNC paths are filesystem paths, not URL-encoded
+        # forms: a `#` is a legal path character there (e.g. the decoded output
+        # of `normalize_sqlite_url()`), so it must not be stripped as a URL
+        # fragment separator.
         path = path.partition("?")[0]
     else:
         path = path.partition("?")[0]

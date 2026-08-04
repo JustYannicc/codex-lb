@@ -2,9 +2,11 @@
 
 ## ADDED Requirements
 
-### Requirement: SQLite file paths are percent-decoded before opening
+### Requirement: SQLAlchemy-rendered Windows SQLite paths are percent-decoded before opening
 
-When a SQLite database URL is converted to a filesystem path for direct filesystem use (e.g. startup directory creation, startup integrity checks, migration locks, or the usage repository's read-only helper), the path MUST be percent-decoded before being handed to the filesystem. SQLAlchemy's `URL.render_as_string()` percent-encodes a Windows-style default path (`C:\Users\...` -> `C%3A%5CUsers%5C...`); without decoding, the literal escaped string either fails to open with "unable to open database file" or creates a stray 0-byte database next to the current working directory, which breaks account/usage reads with `no such table`.
+When a SQLite database URL is converted to a filesystem path for direct filesystem use (e.g. startup directory creation, startup integrity checks, migration locks, or the usage repository's read-only helper), a path that matches a recognizable SQLAlchemy-rendered Windows form — an encoded drive marker (`<letter>%3A` followed by an encoded or raw path separator) or an encoded UNC prefix (`%5C%5C`) — MUST be percent-decoded before being handed to the filesystem. SQLAlchemy's `URL.render_as_string()` percent-encodes a Windows-style default path (`C:\Users\...` -> `C%3A%5CUsers%5C...`); without decoding, the literal escaped string either fails to open with "unable to open database file" or creates a stray 0-byte database next to the current working directory, which breaks account/usage reads with `no such table`.
+
+Paths that do NOT match those rendered Windows forms MUST be preserved literally. Settings builds the default SQLite URL directly from the configured data directory without URL-encoding it, so a percent sequence in a POSIX or raw Windows path (e.g. `/var/lib/codex%20lb/store.db`) names a real directory and MUST NOT be rewritten by decoding.
 
 #### Scenario: Windows default path resolves to the real file
 
@@ -33,6 +35,19 @@ When a SQLite database URL is converted to a filesystem path for direct filesyst
 - **THEN** the returned URL contains the real decoded Windows filesystem path
 - **AND** filesystem extraction from that normalized URL returns the same decoded path
 - **AND** a raw Windows URL containing a literal percent sequence such as `%23` is not decoded unless it first matched a SQLAlchemy-rendered encoded Windows form
+
+#### Scenario: Literal percent sequences in POSIX paths are preserved
+
+- **GIVEN** a POSIX SQLite URL whose path contains a literal percent sequence (`sqlite+aiosqlite:////var/lib/codex%20lb/store.db`) built directly from the configured data directory
+- **WHEN** the path is extracted for filesystem use or the URL is normalized
+- **THEN** the filesystem path remains `/var/lib/codex%20lb/store.db` and the URL is unchanged (the sequence is not decoded to a space)
+
+#### Scenario: Normalized UNC paths keep fragment characters
+
+- **GIVEN** an encoded UNC SQLite URL whose decoded share path contains a legal `#` character (`sqlite:///%5C%5Cserver%5Cshare%23x%5Cstore.db`)
+- **WHEN** the URL is normalized and the filesystem path is then extracted from the normalized URL
+- **THEN** the extracted path is `\\server\share#x\store.db`
+- **AND** the path is not truncated at the `#` as if it were a URL fragment separator
 
 #### Scenario: POSIX paths are unchanged
 

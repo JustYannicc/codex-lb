@@ -134,6 +134,35 @@ class TestSqlitePathFromUrlWindows:
         assert str(path) == r"C:\data%23set\store.db"
         assert normalize_sqlite_url(url) == url
 
+    def test_normalized_unc_path_keeps_hash_at_filesystem_boundary(self) -> None:
+        # Regression: after normalize_sqlite_url() decodes an encoded UNC URL,
+        # a legal '#' in the share path must not be stripped as a URL fragment
+        # when the normalized URL is fed back into sqlite_db_path_from_url()
+        # (init_db(), migration locks); previously the path was truncated to
+        # '\\\\server\\share'.
+        url = "sqlite:///%5C%5Cserver%5Cshare%23x%5Cstore.db"
+
+        normalized = normalize_sqlite_url(url)
+
+        assert normalized == r"sqlite:///\\server\share#x\store.db"
+        assert sqlite_db_path_from_url(normalized) == Path(r"\\server\share#x\store.db")
+
+    def test_encoded_unc_path_decodes_hash_directly(self) -> None:
+        url = "sqlite:///%5C%5Cserver%5Cshare%23x%5Cstore.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == r"\\server\share#x\store.db"
+
+    def test_raw_unc_path_preserves_query_suffix_only(self) -> None:
+        url = r"sqlite:///\\server\share#x\store.db?mode=ro"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == r"\\server\share#x\store.db"
+
     def test_lowercase_windows_encoded_drive_segment_is_decoded(self) -> None:
         url = "sqlite+aiosqlite:///c%3A/cache.db"
 

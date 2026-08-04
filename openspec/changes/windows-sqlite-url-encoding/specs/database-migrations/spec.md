@@ -11,7 +11,7 @@ When the application builds an Alembic `Config` for migration inspection or upgr
 - **GIVEN** the default SQLite URL on Windows, percent-encoded by `URL.render_as_string()` into `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`
 - **WHEN** the Alembic `Config` is built for migration inspection
 - **THEN** no `ValueError: invalid interpolation syntax` is raised
-- **AND** `get_main_option("sqlalchemy.url")` returns the original percent-encoded URL unchanged
+- **AND** `get_main_option("sqlalchemy.url")` returns the normalized sync URL whose path is the decoded Windows filesystem path (`sqlite:///C:\Users\...\store.db`), because `to_sync_database_url` normalizes recognizable SQLAlchemy-rendered Windows SQLite URLs before the value is stored in the Alembic `Config`
 
 #### Scenario: Round-trip preserves an already-encoded percent
 
