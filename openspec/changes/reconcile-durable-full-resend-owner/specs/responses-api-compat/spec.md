@@ -2,9 +2,9 @@
 
 ### Requirement: HTTP bridge MUST support fresh upstream reattach from durable continuity
 
-When a bridged HTTP request arrives for a valid hard continuity key but no live
-local session or active remote owner remains, the service MUST retain the
-durable owner account for routing. If the client supplies a full resend whose
+The service MUST retain the durable owner account for routing when a bridged
+HTTP request arrives for a valid hard continuity key but no live local session
+or active remote owner remains. If the client supplies a full resend whose
 stored prefix matches the durable input count and fingerprint and whose suffix
 either proves that prior assistant output is retained before the new input or
 exactly settles the response-bound pending-tool-call manifest, the service MUST

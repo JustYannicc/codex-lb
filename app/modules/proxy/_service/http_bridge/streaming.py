@@ -342,6 +342,10 @@ class _VerifiedDurableFullResend:
         replay_projection = project_responses_input_for_account_neutral_fresh_replay(
             input_items,
             stored_count=stored_count,
+            # Classification only, mirroring classify_durable_full_resend:
+            # inline Responses-Lite developer IDs must remain visible until
+            # the exact-manifest check rejects response-owned messages.
+            preserve_developer_message_ids=True,
         )
         pending_tool_calls = durable_lookup.latest_pending_tool_calls
         if replay_projection is None:
@@ -349,12 +353,14 @@ class _VerifiedDurableFullResend:
         safe_fresh_context = responses_input_suffix_retains_prior_output(
             replay_projection.input_items,
             stored_count=replay_projection.stored_prefix_count,
+            canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
         ) or (
             pending_tool_calls is not None
             and responses_input_suffix_matches_pending_tool_calls(
                 replay_projection.input_items,
                 stored_count=replay_projection.stored_prefix_count,
                 pending_tool_calls=pending_tool_calls,
+                canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
             )
         )
         if not safe_fresh_context:
@@ -1528,12 +1534,11 @@ class _HTTPBridgeStreamingMixin:
             request_state.proxy_injected_previous_response_id = True
             request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
-            # Durable-anchor injection actually runs when the incoming
-            # payload is *not* a full resend (see the
-            # ``not _http_bridge_payload_looks_like_full_resend(payload)``
-            # guard above), so the captured unanchored text is typically
-            # just a short follow-up. Replaying it as a fresh turn would
-            # drop the conversational context the anchor was pointing at.
+            # Durable-anchor injection runs when the incoming payload is
+            # *not* a full resend, or when a full resend failed the sealed
+            # owner-bound proof (missing owner metadata or fingerprint), so
+            # the captured unanchored text cannot be assumed to carry the
+            # complete conversational context the anchor was pointing at.
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False

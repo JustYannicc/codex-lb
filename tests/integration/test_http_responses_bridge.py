@@ -7877,6 +7877,140 @@ async def test_backend_responses_verified_full_resend_ignores_stale_broad_owner_
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_verified_full_resend_fails_over_to_new_account_after_owner_loss(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_backend_full_resend_failover_owner",
+        "backend-full-resend-failover-owner@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    owner_chatgpt_account_id = cast(str, owner_account.chatgpt_account_id)
+    owner_upstream = _ClosingBridgeUpstreamWebSocket("resp_failover_owner")
+    alternate_upstream = _FakeBridgeUpstreamWebSocket("resp_failover_alternate")
+    connected_account_ids: list[str] = []
+    connect_headers_by_account: dict[str, dict[str, str]] = {}
+    degraded_reasons: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, account, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return account
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        connect_headers_by_account[account_id_header] = dict(headers)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        return alternate_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+
+    session_id = "backend-full-resend-failover-session"
+    historical_input: list[proxy_module.JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        }
+    ]
+    first_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": historical_input,
+            "stream": True,
+        },
+        headers={"session_id": session_id},
+    )
+    first_response = first_events[-1]["response"]
+    assert first_response["id"] == "resp_failover_owner_1"
+
+    service = get_proxy_service_for_app(app_instance)
+    durable_lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value=session_id,
+        api_key_id=None,
+        turn_state=None,
+        session_header=session_id,
+        previous_response_id=None,
+    )
+    assert durable_lookup is not None
+    assert durable_lookup.account_id == owner_account.id
+    assert durable_lookup.latest_input_item_count == len(historical_input)
+    assert durable_lookup.latest_input_full_fingerprint is not None
+
+    alternate_account_id = await _import_account(
+        async_client,
+        "acc_backend_full_resend_failover_alternate",
+        "backend-full-resend-failover-alternate@example.com",
+    )
+    alternate_account = await _get_account(alternate_account_id)
+    alternate_chatgpt_account_id = cast(str, alternate_account.chatgpt_account_id)
+    pause = await async_client.post(f"/api/accounts/{owner_account_id}/pause")
+    assert pause.status_code == 200, pause.text
+
+    full_resend = [
+        *historical_input,
+        first_response["output"][0],
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "second question"}],
+        },
+    ]
+    second_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": full_resend,
+            "stream": True,
+        },
+        headers={"session_id": session_id, "x-request-trace": "keep-me"},
+    )
+    second_response = second_events[-1]["response"]
+    assert second_response["id"] == "resp_failover_alternate_1"
+
+    assert connected_account_ids == [owner_chatgpt_account_id, alternate_chatgpt_account_id]
+    alternate_connect_headers = {
+        key.lower(): value for key, value in connect_headers_by_account[alternate_chatgpt_account_id].items()
+    }
+    assert alternate_connect_headers["x-request-trace"] == "keep-me"
+    assert (
+        not {
+            "session_id",
+            "session-id",
+            "thread-id",
+            "x-codex-conversation-id",
+            "x-codex-session-id",
+            "x-codex-turn-state",
+        }
+        & alternate_connect_headers.keys()
+    )
+    assert len(owner_upstream.sent_text) == 1
+    assert len(alternate_upstream.sent_text) == 1
+    replay_payload = json.loads(alternate_upstream.sent_text[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == full_resend
+    assert degraded_reasons == []
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_real_selector_recovers_full_resend_without_degrading_pool(
     async_client, monkeypatch
 ):
