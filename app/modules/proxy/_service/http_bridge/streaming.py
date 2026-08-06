@@ -101,6 +101,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_session_key_quarantined,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
     _codex_keepalive_frame,
@@ -1411,6 +1414,27 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
+            if (
+                fresh_reattach_can_use_durable_anchor
+                and payload_looks_like_full_resend
+                and _http_bridge_session_key_quarantined(self, bridge_session_key)
+            ):
+                # The previous attach on this key proved silent/wedged
+                # (#1534). The client's own payload already carries the full
+                # conversation, so send it unanchored on the fresh path
+                # instead of rebuilding the same reattach. Delta-only
+                # payloads keep the anchor: it is their only way to convey
+                # prior context (same boundary as the fenced anchor clear).
+                fresh_reattach_can_use_durable_anchor = False
+                _log_http_bridge_event(
+                    "fresh_reattach_anchor_skipped_quarantined",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail=f"response_id={durable_lookup.latest_response_id}",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
             if (
                 fresh_reattach_can_use_durable_anchor
                 and payload_looks_like_full_resend

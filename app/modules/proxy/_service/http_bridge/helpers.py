@@ -1303,6 +1303,9 @@ def _http_bridge_session_reusable_for_lookup(
     )
     return (
         live_or_retained
+        # A quarantined session has proven silent/wedged; a new request must
+        # take the fresh session path instead of re-attaching to it.
+        and not session.quarantined
         and _http_bridge_session_allows_api_key(session, api_key)
         and _http_bridge_session_reusable_for_request(
             session=session,

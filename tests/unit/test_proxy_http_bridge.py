@@ -40,6 +40,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
@@ -23374,3 +23375,258 @@ async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_pr
         assert chunks == ['data: {"type":"response.completed"}\n\n']
         assert preferred_account_ids == ["acc-capped", None]
         assert request_state.preferred_account_id is None
+
+
+# --- Silent-session quarantine (fix for #1534; first-party takeover of #1405) ---
+
+
+def _make_wedged_reattach_request_state(
+    *,
+    request_id: str = "req-wedged-reattach",
+    response_event_count: int = 3,
+) -> proxy_service._WebSocketRequestState:
+    request_state = _make_eventless_http_bridge_owner(request_id=request_id, sent_at=100.0)
+    request_state.proxy_injected_previous_response_id = True
+    request_state.response_event_count = response_event_count
+    return request_state
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        pytest.param(lambda state: None, True, id="wedged-reattach"),
+        pytest.param(lambda state: setattr(state, "response_id", "resp_created"), False, id="created-assigned"),
+        pytest.param(
+            lambda state: setattr(state, "latency_response_created_ms", 1200),
+            False,
+            id="created-latency-observed",
+        ),
+        pytest.param(lambda state: setattr(state, "response_event_count", 0), False, id="fully-eventless"),
+        pytest.param(
+            lambda state: setattr(state, "proxy_injected_previous_response_id", False),
+            False,
+            id="not-a-proxy-injected-reattach",
+        ),
+        pytest.param(lambda state: setattr(state, "response_create_sent_at", None), False, id="create-never-sent"),
+        pytest.param(lambda state: setattr(state, "transport", "websocket"), False, id="websocket-transport"),
+        pytest.param(lambda state: setattr(state, "skip_request_log", True), False, id="internal-request"),
+    ],
+)
+def test_http_bridge_wedged_reattach_predicate(mutate, expected: bool) -> None:
+    request_state = _make_wedged_reattach_request_state()
+    mutate(request_state)
+    assert http_bridge_quarantine_module._http_bridge_request_state_wedged_reattach(request_state) is expected
+
+
+def test_http_bridge_quarantine_marks_key_and_expires_by_ttl(caplog: pytest.LogCaptureFixture) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-ttl")
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        http_bridge_quarantine_module._quarantine_http_bridge_session(
+            service,
+            session,
+            reason="reattach_missing_response_created",
+        )
+
+    assert session.quarantined is True
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    assert "http_bridge_event event=session_quarantined" in caplog.text
+    assert "reason=reattach_missing_response_created" in caplog.text
+
+    # Expire the entry: the key leaves quarantine and the registry is pruned.
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    entry.quarantined_until = time.monotonic() - 1.0
+    entry.last_touched_monotonic = (
+        time.monotonic() - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    assert session.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+
+
+def test_http_bridge_quarantine_registry_is_size_bounded() -> None:
+    service = SimpleNamespace()
+    max_entries = http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES
+    for index in range(max_entries + 8):
+        session = _make_bridge_session(key_value=f"quarantine-bound-{index}")
+        http_bridge_quarantine_module._quarantine_http_bridge_session(
+            service,
+            session,
+            reason="repeated_eventless_timeout",
+        )
+    assert len(http_bridge_quarantine_module._http_bridge_quarantine_registry(service)) <= max_entries
+
+
+def test_http_bridge_quarantine_eventless_strikes_require_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-strikes")
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    assert session.quarantined is False
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    assert session.quarantined is True
+    assert "reason=repeated_eventless_timeout" in caplog.text
+
+
+def test_http_bridge_quarantine_cleared_by_completed_response(caplog: pytest.LogCaptureFixture) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-clear")
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+
+    # A healthy completion resets the strike counter before the threshold.
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, session)
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        http_bridge_quarantine_module._clear_http_bridge_quarantine(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    assert "http_bridge_event event=session_quarantine_cleared" in caplog.text
+
+
+def test_http_bridge_session_reusable_for_lookup_excludes_quarantined() -> None:
+    session = _make_bridge_session(key_value="quarantine-reuse")
+
+    def reusable() -> bool:
+        return http_bridge_helpers_module._http_bridge_session_reusable_for_lookup(
+            session=session,
+            key=session.key,
+            api_key=None,
+            incoming_turn_state=None,
+            previous_response_id=None,
+            preferred_account_id=None,
+            require_preferred_account=False,
+            service_tier_supported=True,
+            allow_closed_admission_handoff=False,
+        )
+
+    assert reusable() is True
+    session.quarantined = True
+    assert reusable() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_assigned", "expect_quarantined"),
+    [
+        pytest.param(False, True, id="wedged-reattach-quarantined"),
+        pytest.param(True, False, id="created-assigned-never-quarantined"),
+    ],
+)
+async def test_http_bridge_reader_failure_quarantines_wedged_reattach_session(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    created_assigned: bool,
+    expect_quarantined: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_wedged_reattach_request_state()
+    if created_assigned:
+        # The deferred-reasoning-style live turn: response.created was
+        # observed and events keep flowing with long gaps. Its retirement
+        # must never quarantine the session.
+        request_state.response_id = "resp_deferred_reasoning"
+        request_state.latency_response_created_ms = 900
+    session = _make_bridge_session(
+        key_value="quarantine-reader-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code="stream_incomplete",
+            error_message="upstream closed mid-reattach",
+        )
+
+    assert session.quarantined is expect_quarantined
+    assert (
+        http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is expect_quarantined
+    )
+    assert ("http_bridge_event event=session_quarantined" in caplog.text) is expect_quarantined
+
+
+@pytest.mark.asyncio
+async def test_fail_stale_http_bridge_pending_requests_quarantines_wedged_gate_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    wedged = _make_wedged_reattach_request_state(request_id="req-stale-wedged")
+    session = _make_bridge_session(
+        key_value="quarantine-stale-gate",
+        pending_requests=deque([wedged]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    record_failure = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+
+    await service._fail_stale_http_bridge_pending_requests(
+        session,
+        [wedged],
+        detail="response_create_gate_timeout_stuck_pending",
+    )
+
+    assert session.quarantined is True
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    # The wedged holder saw response events, so the eventless retry circuit
+    # is deliberately not charged for it.
+    record_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_missing_created_timeout_records_eventless_quarantine_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _SilentEventlessUpstream()
+    session = _make_bridge_session(key_value="quarantine-eventless-strike")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        sse_keepalive_interval_seconds=0.0,
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(request_id="req-quarantine-strike", sent_at=0.0)
+    owner.started_at = time.monotonic() - 30.0
+    owner.response_create_sent_at = None
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        owner,
+        owner.request_text,
+    )
+    await asyncio.wait_for(reader_task, timeout=1.0)
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.consecutive_eventless_timeouts == 1
+    # A single eventless timeout stays on the merged recovery path.
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False

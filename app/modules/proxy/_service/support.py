@@ -1030,6 +1030,11 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # Set when the session proved silent/wedged (reattached stream with
+    # response events but no ``response.created``, or repeated eventless
+    # timeouts). A quarantined session must never be selected for reuse or
+    # re-attach; later requests take the fresh session/no-anchor path.
+    quarantined: bool = False
     # Set while a reader handoff is replacing the socket. Idle pruning must
     # retain the registered session during this short transition even though
     # ``closed`` is fail-closed for normal request reuse.

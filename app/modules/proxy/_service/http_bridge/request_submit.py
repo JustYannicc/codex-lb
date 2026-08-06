@@ -84,6 +84,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
 )
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _record_http_bridge_quarantine_wedged_pending,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
     _classify_upstream_close,
@@ -1747,6 +1750,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 stale_requests.append(request_state)
         if not stale_requests:
             return
+        # A stale gate holder that streamed response events without ever
+        # receiving ``response.created`` proves the reattach wedge (#1534)
+        # even when the session itself survives with other active requests.
+        _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
         if response_events_seen == 0:
             await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
         await self._fail_pending_websocket_requests(
