@@ -1727,6 +1727,7 @@ class _WebSocketMixin:
                             ("previous response", previous_response_owner_account_id),
                         )
                     except ProxyResponseError as exc:
+                        response_create_request_state = request_state
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
                             error.code if error else None,
@@ -1735,7 +1736,7 @@ class _WebSocketMixin:
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
                         error_param = error.param if error else None
-                        await proxy._release_websocket_request_state_reservation(request_state)
+                        await proxy._release_websocket_request_state_reservation(response_create_request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=None,
                             api_key=api_key,
