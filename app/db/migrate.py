@@ -86,7 +86,13 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_logs_dash_usage_covering",
         }
     ),
-    "additional_usage_history": frozenset({"ix_additional_usage_distinct_labels"}),
+    "additional_usage_history": frozenset(
+        {
+            "ix_additional_usage_distinct_labels",
+            "ix_additional_usage_alias_limit_latest",
+            "ix_additional_usage_alias_feature_latest",
+        }
+    ),
     "account_limit_warmups": frozenset(
         {
             "idx_account_limit_warmups_account_attempted",

@@ -2133,3 +2133,21 @@ Index(
     AdditionalUsageHistory.used_percent.desc(),
     AdditionalUsageHistory.id.desc(),
 )
+Index(
+    "ix_additional_usage_alias_limit_latest",
+    func.lower(AdditionalUsageHistory.limit_name),
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
+)
+Index(
+    "ix_additional_usage_alias_feature_latest",
+    func.lower(AdditionalUsageHistory.metered_feature),
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
+)

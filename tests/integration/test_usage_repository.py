@@ -1078,3 +1078,220 @@ async def test_bulk_history_since_per_account_cutoffs_parity(db_setup):
     # Parity with the shared-floor fetch after per-account trimming.
     trimmed = [snapshot for snapshot in unbounded["acc-short"] if snapshot.recorded_at >= cutoffs["acc-short"]]
     assert [snapshot.used_percent for snapshot in trimmed] == [20.0]
+
+
+def _legacy_additional_entry(
+    account_id: str,
+    *,
+    quota_key: str,
+    limit_name: str,
+    metered_feature: str,
+    used_percent: float,
+    recorded_at: datetime,
+    window: str = "primary",
+):
+    from app.db.models import AdditionalUsageHistory
+
+    return AdditionalUsageHistory(
+        account_id=account_id,
+        quota_key=quota_key,
+        limit_name=limit_name,
+        metered_feature=metered_feature,
+        window=window,
+        used_percent=used_percent,
+        recorded_at=recorded_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_additional_latest_by_account_merges_alias_rows(db_setup):
+    """Alias-era rows (legacy quota_key, registry-known aliases) merge with
+    canonical rows under the newest-first ordering on every backend."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = AdditionalUsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+        await accounts_repo.upsert(_make_account("acc3"))
+
+        # acc1: the limit_name-alias row is newer than the canonical row.
+        await repo.add_entry(
+            "acc1",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            quota_key="codex_spark",
+            window="primary",
+            used_percent=10.0,
+            recorded_at=now - timedelta(hours=1),
+        )
+        session.add(
+            _legacy_additional_entry(
+                "acc1",
+                quota_key="legacy_spark_key",
+                limit_name="codex_other",
+                metered_feature="legacy_feature",
+                used_percent=55.0,
+                recorded_at=now,
+            )
+        )
+        # acc2: the canonical row is newer than the metered_feature-alias row.
+        session.add(
+            _legacy_additional_entry(
+                "acc2",
+                quota_key="legacy_spark_key",
+                limit_name="unrelated_limit",
+                metered_feature="codex_bengalfox",
+                used_percent=70.0,
+                recorded_at=now - timedelta(hours=2),
+            )
+        )
+        await session.commit()
+        await repo.add_entry(
+            "acc2",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            quota_key="codex_spark",
+            window="primary",
+            used_percent=30.0,
+            recorded_at=now,
+        )
+        # acc3: alias-only history.
+        session.add(
+            _legacy_additional_entry(
+                "acc3",
+                quota_key="legacy_spark_key",
+                limit_name="codex_other",
+                metered_feature="legacy_feature",
+                used_percent=90.0,
+                recorded_at=now - timedelta(minutes=30),
+            )
+        )
+        await session.commit()
+
+        latest = await repo.latest_by_account("codex_spark", "primary")
+        assert set(latest.keys()) == {"acc1", "acc2", "acc3"}
+        assert latest["acc1"].used_percent == 55.0
+        assert latest["acc2"].used_percent == 30.0
+        assert latest["acc3"].used_percent == 90.0
+
+        scoped = await repo.latest_by_account("codex_spark", "primary", account_ids=["acc1"])
+        assert set(scoped.keys()) == {"acc1"}
+        assert scoped["acc1"].used_percent == 55.0
+
+        recent = await repo.latest_by_account(
+            "codex_spark",
+            "primary",
+            since=now - timedelta(minutes=45),
+        )
+        assert set(recent.keys()) == {"acc1", "acc2", "acc3"}
+        older_only = await repo.latest_by_account(
+            "codex_spark",
+            "primary",
+            account_ids=["acc2"],
+            since=now - timedelta(hours=3),
+        )
+        assert older_only["acc2"].used_percent == 30.0
+
+
+@pytest.mark.asyncio
+async def test_additional_latest_by_account_postgres_uses_top1_probes(db_setup):
+    now = utcnow()
+    statements: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only SQL shape test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = AdditionalUsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+        await repo.add_entry(
+            "acc1",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            quota_key="codex_spark",
+            window="primary",
+            used_percent=20.0,
+            recorded_at=now,
+        )
+        await repo.add_entry(
+            "acc2",
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            quota_key="codex_spark",
+            window="primary",
+            used_percent=40.0,
+            recorded_at=now,
+        )
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            latest = await repo.latest_by_account("codex_spark", "primary")
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
+    assert latest["acc1"].used_percent == 20.0
+    assert latest["acc2"].used_percent == 40.0
+    emitted_sql = "\n".join(statements).lower()
+    assert "distinct on" not in emitted_sql
+    assert "row_number" not in emitted_sql
+    assert "lateral" in emitted_sql
+
+
+@pytest.mark.asyncio
+async def test_list_quota_keys_postgres_loose_scan_matches_distinct(db_setup):
+    now = utcnow()
+    statements: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only loose scan test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = AdditionalUsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+        for offset_minutes in range(5):
+            await repo.add_entry(
+                "acc1",
+                limit_name="GPT-5.3-Codex-Spark",
+                metered_feature="codex_bengalfox",
+                quota_key="codex_spark",
+                window="primary",
+                used_percent=10.0 + offset_minutes,
+                recorded_at=now - timedelta(minutes=offset_minutes),
+            )
+        session.add(
+            _legacy_additional_entry(
+                "acc2",
+                quota_key="legacy_other_key",
+                limit_name="legacy_other_key",
+                metered_feature="legacy_other_feature",
+                used_percent=5.0,
+                recorded_at=now,
+            )
+        )
+        await session.commit()
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            all_keys = await repo.list_quota_keys()
+            scoped_keys = await repo.list_quota_keys(account_ids=["acc1"])
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
+        since_keys = await repo.list_quota_keys(since=now - timedelta(minutes=1))
+
+    assert all_keys == sorted({"codex_spark", "legacy_other_key"})
+    assert scoped_keys == ["codex_spark"]
+    assert "codex_spark" in since_keys
+    emitted_sql = "\n".join(statements).lower()
+    assert "distinct" not in emitted_sql
