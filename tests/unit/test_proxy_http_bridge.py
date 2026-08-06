@@ -4506,7 +4506,11 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
     ]
 
     assert len(events) == 1
-    assert '"code":"stream_idle_timeout"' in events[0]
+    # Pre-response-start failures are never stream_idle_timeout: that budget
+    # only starts at response.created.
+    assert '"code":"bridge_eventless_timeout"' in events[0]
+    assert "stream_idle_timeout" not in events[0]
+    assert "Upstream" not in events[0]
     release.assert_awaited_once_with(request_state)
     assert request_state.api_key_reservation is None
 
@@ -4552,7 +4556,8 @@ async def test_http_bridge_post_submit_cooldown_race_detaches_request(
     ]
 
     assert len(events) == 1
-    assert '"code":"stream_idle_timeout"' in events[0]
+    assert '"code":"bridge_eventless_timeout"' in events[0]
+    assert "stream_idle_timeout" not in events[0]
     assert cooldown.await_count == 2
     detach.assert_awaited_once_with(session, request_state=request_state)
 
