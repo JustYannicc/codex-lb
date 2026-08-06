@@ -1825,6 +1825,14 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_circuit_detail: str | None = None,
         response_events_seen: int | None = None,
     ) -> None:
+        async with session.pending_lock:
+            retired_request_states = list(session.pending_requests)
+        # Direct retirement (for example the all-stale stuck-gate path, where
+        # the wedged reattach is the only pending request) cancels the reader
+        # and fails the pendings without passing the partial-cleanup hook or
+        # the reader-failure funnel, so evaluate the wedge shape (#1534) here
+        # too; recording is idempotent for callers that already quarantined.
+        _record_http_bridge_quarantine_wedged_pending(self, session, retired_request_states)
         if response_events_seen is None or response_events_seen == 0:
             await self._record_http_bridge_retry_circuit_failure(
                 session,

@@ -23528,6 +23528,7 @@ def test_http_bridge_quarantine_clear_restores_session_reusability() -> None:
 
 
 def test_http_bridge_session_reusable_for_lookup_excludes_quarantined() -> None:
+    service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-reuse")
 
     def reusable() -> bool:
@@ -23541,11 +23542,104 @@ def test_http_bridge_session_reusable_for_lookup_excludes_quarantined() -> None:
             require_preferred_account=False,
             service_tier_supported=True,
             allow_closed_admission_handoff=False,
+            session_key_quarantined=http_bridge_quarantine_module._http_bridge_session_key_quarantined(
+                service, session.key
+            ),
         )
 
     assert reusable() is True
-    session.quarantined = True
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
     assert reusable() is False
+
+
+def test_http_bridge_session_reusable_for_lookup_recovers_after_quarantine_ttl() -> None:
+    """Registry pruning never resets ``session.quarantined``; the lookup must
+    treat the registry TTL as the source of truth so a live session does not
+    stay rejected forever past expiry."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-ttl-reuse")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+
+    def reusable() -> bool:
+        return http_bridge_helpers_module._http_bridge_session_reusable_for_lookup(
+            session=session,
+            key=session.key,
+            api_key=None,
+            incoming_turn_state=None,
+            previous_response_id=None,
+            preferred_account_id=None,
+            require_preferred_account=False,
+            service_tier_supported=True,
+            allow_closed_admission_handoff=False,
+            session_key_quarantined=http_bridge_quarantine_module._http_bridge_session_key_quarantined(
+                service, session.key
+            ),
+        )
+
+    assert reusable() is False
+
+    # Expire the registry entry the way the TTL prune does: the entry vanishes
+    # but the per-session flag survives untouched.
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    entry.quarantined_until = time.monotonic() - 1.0
+    entry.last_touched_monotonic = (
+        time.monotonic() - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    assert session.quarantined is True
+
+    assert reusable() is True
+    # The lookup also resets the stale flag so session state agrees with the
+    # registry again.
+    assert session.quarantined is False
+
+
+def test_http_bridge_session_reusable_for_lookup_rejects_fresh_session_under_quarantined_key() -> None:
+    """The registry verdict is authoritative for the key: a freshly created
+    replacement session (per-session flag still False) under a
+    still-quarantined key must not be reusable, or a concurrent full-resend
+    could restore the suppressed durable anchor through session hydration."""
+    service = SimpleNamespace()
+    wedged = _make_bridge_session(key_value="quarantine-key-authority")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        wedged,
+        reason="reattach_missing_response_created",
+    )
+    replacement = _make_bridge_session(key_value="quarantine-key-authority")
+    assert replacement.key == wedged.key
+    assert replacement.quarantined is False
+
+    def reusable() -> bool:
+        return http_bridge_helpers_module._http_bridge_session_reusable_for_lookup(
+            session=replacement,
+            key=replacement.key,
+            api_key=None,
+            incoming_turn_state=None,
+            previous_response_id=None,
+            preferred_account_id=None,
+            require_preferred_account=False,
+            service_tier_supported=True,
+            allow_closed_admission_handoff=False,
+            session_key_quarantined=http_bridge_quarantine_module._http_bridge_session_key_quarantined(
+                service, replacement.key
+            ),
+        )
+
+    assert reusable() is False
+
+    # A completed response on the key clears the quarantine and the
+    # replacement becomes reusable.
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, replacement)
+    assert reusable() is True
 
 
 @pytest.mark.asyncio
@@ -23665,3 +23759,277 @@ async def test_http_bridge_missing_created_timeout_records_eventless_quarantine_
     assert entry.consecutive_eventless_timeouts == 1
     # A single eventless timeout stays on the merged recovery path.
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_assigned", "expect_quarantined"),
+    [
+        pytest.param(False, True, id="wedged-reattach-quarantined"),
+        pytest.param(True, False, id="created-assigned-never-quarantined"),
+    ],
+)
+async def test_retire_stale_pending_http_bridge_session_quarantines_wedged_reattach(
+    monkeypatch: pytest.MonkeyPatch,
+    created_assigned: bool,
+    expect_quarantined: bool,
+) -> None:
+    """Direct session retirement (the all-stale stuck-gate path) bypasses both
+    the partial-cleanup hook and the reader-failure funnel; it must still
+    quarantine the key when the retired pending proves the wedge shape."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    wedged = _make_wedged_reattach_request_state(request_id="req-direct-retire-wedged")
+    if created_assigned:
+        wedged.response_id = "resp_created_direct_retire"
+        wedged.latency_response_created_ms = 700
+    session = _make_bridge_session(
+        key_value="quarantine-direct-retire",
+        pending_requests=deque([wedged]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", AsyncMock())
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="response_create_gate_timeout_stuck_pending",
+        response_events_seen=wedged.response_event_count,
+    )
+
+    assert session.quarantined is expect_quarantined
+    assert (
+        http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is expect_quarantined
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_reattach_gate_already_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The quarantine suppression must be evaluated independently of the
+    fresh-reattach eligibility gate: when that gate is already false (here a
+    live alias session), a quarantined full-resend must still dispatch
+    unanchored instead of restoring the wedged durable anchor through session
+    hydration and session-level injection."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    historical_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {"role": "developer", "content": [{"type": "input_text", "text": "historical control"}]},
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
+    ]
+    # Full resend with a trimmable durable prefix and a fresh suffix that does
+    # NOT retain the prior output (plain user turn).
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "input": [
+                *historical_input,
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+            ],
+        }
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("session_header", "quarantine-eligibility-bypass", None)
+    prefix_fingerprint = http_bridge_streaming_module._fingerprint_input_items(
+        cast(list[Any], payload.input)[: len(historical_input)]
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-quarantine-bypass",
+        canonical_kind=bridge_key.affinity_kind,
+        canonical_key=bridge_key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-bridge",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id="resp_wedged_anchor",
+        model="gpt-5.6-sol",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=prefix_fingerprint,
+    )
+    quarantined_session = _make_bridge_session(key=bridge_key, key_value=bridge_key.affinity_key)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        quarantined_session,
+        reason="reattach_missing_response_created",
+    )
+    fresh_session = _make_bridge_session(key=bridge_key, key_value=bridge_key.affinity_key)
+    fresh_session.codex_session = True
+
+    prepared_payloads: list[proxy_service.ResponsesRequest] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+        **prepare_kwargs: object,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip, prepare_kwargs
+        prepared_payloads.append(prepared_payload)
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-quarantine-bypass-{len(prepared_payloads)}",
+            model=prepared_payload.model,
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=asyncio.Queue(),
+            transport="http",
+        )
+        request_state.previous_response_id = prepared_payload.previous_response_id
+        return request_state, json.dumps(dict(prepared_payload.to_payload()), separators=(",", ":"))
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        del kwargs
+        assert key == bridge_key
+        return fresh_session
+
+    dispatched_text: list[str] = []
+
+    async def fake_stream_events(*args: object, **kwargs: object):
+        dispatched_text.append(cast(str, kwargs["text_data"]))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+    )
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+        gateway_safe_mode=False,
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    # The bypass shape: a live (alias) session makes the fresh-reattach
+    # durable-anchor gate false before the quarantine is ever consulted.
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    stream = service._stream_http_bridge_or_retry(
+        payload,
+        {"x-codex-session-id": bridge_key.affinity_key},
+        codex_session_affinity=True,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+    )
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(dispatched_text) == 1
+    dispatched_payload = json.loads(dispatched_text[0])
+    # Genuinely unanchored: the suppressed durable anchor did not come back
+    # through session hydration or session-level injection, and the client's
+    # payload was not prefix-trimmed against the durable stored context.
+    assert "previous_response_id" not in dispatched_payload
+    assert len(dispatched_payload["input"]) == len(historical_input) + 1
+    assert fresh_session.last_completed_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_has_live_local_session_treats_quarantined_as_absent() -> None:
+    """A quarantined session is detached at lookup time, so anchor selection
+    must treat it as absent: a delta-only fresh reattach then keeps the
+    durable anchor exactly as if the session were already gone."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="quarantine-live-lookup")
+    service._http_bridge_sessions[session.key] = session
+
+    assert (
+        await service._http_bridge_has_live_local_session(
+            key=session.key,
+            incoming_turn_state=None,
+            api_key=None,
+        )
+        is True
+    )
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    assert (
+        await service._http_bridge_has_live_local_session(
+            key=session.key,
+            incoming_turn_state=None,
+            api_key=None,
+        )
+        is False
+    )
+
+    # The registry verdict is authoritative for the key: a freshly created
+    # replacement session (per-session flag still False) under the
+    # still-quarantined key counts as absent too.
+    replacement = _make_bridge_session(key_value="quarantine-live-lookup")
+    assert replacement.quarantined is False
+    service._http_bridge_sessions[session.key] = replacement
+    assert (
+        await service._http_bridge_has_live_local_session(
+            key=session.key,
+            incoming_turn_state=None,
+            api_key=None,
+        )
+        is False
+    )
+    service._http_bridge_sessions[session.key] = session
+
+    # Registry expiry ends the quarantine even though pruning left the
+    # per-session flag set: the session counts as live again.
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    entry.quarantined_until = time.monotonic() - 1.0
+    assert (
+        await service._http_bridge_has_live_local_session(
+            key=session.key,
+            incoming_turn_state=None,
+            api_key=None,
+        )
+        is True
+    )
