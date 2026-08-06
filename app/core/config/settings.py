@@ -166,6 +166,7 @@ DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 DEFAULT_CONVERSATION_ARCHIVE_DIR = DEFAULT_HOME_DIR / "conversation-archive"
 DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+_MAX_OAUTH_EXCHANGE_TIMEOUT_SECONDS = 300.0
 type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
@@ -269,14 +270,15 @@ class Settings(BaseSettings):
     # fail locally with a 1009 before upstream completion.
     max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
     upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
-    oauth_timeout_seconds: float = 30.0
+    oauth_timeout_seconds: float = Field(default=30.0, gt=0, le=_MAX_OAUTH_EXCHANGE_TIMEOUT_SECONDS)
     oauth_callback_host: str = _default_oauth_callback_host()
-    token_refresh_timeout_seconds: float = 8.0
+    token_refresh_timeout_seconds: float = Field(default=8.0, gt=0, le=_MAX_OAUTH_EXCHANGE_TIMEOUT_SECONDS)
     # Cross-replica token-refresh claim (account_refresh_claims table).
     # The TTL bounds how long a crashed claimant can block refresh for one
     # account; it is validated to stay >= proxy_admission_wait_timeout_seconds
-    # + 2x token_refresh_timeout_seconds because the claim is held across the
-    # refresh-admission wait AND the OAuth exchange, and a healthy claimant
+    # + 3x token_refresh_timeout_seconds because the claim is held across the
+    # refresh-admission wait, the upstream OAuth exchange, and the
+    # post-exchange database persist/status-CAS section; a healthy claimant
     # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     auth_guardian_enabled: bool = False
@@ -663,12 +665,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_token_refresh_claim_ttl(self) -> "Settings":
         # The claim is acquired BEFORE the refresh-admission wait and held
-        # through the OAuth exchange, so the TTL floor must cover both: the
-        # admission wait ceiling plus the HTTP exchange (2x for margin). A TTL
-        # sized only around the HTTP timeout can expire under a healthy
-        # claimant stuck in admission, letting another replica claim the same
-        # account and reuse the single-use refresh token.
-        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 2.0 * self.token_refresh_timeout_seconds
+        # through the upstream exchange and post-exchange guarded DB writes,
+        # so the TTL floor must dominate all three windows: admission wait +
+        # upstream exchange + DB exchange/persist section. A TTL sized only
+        # around the HTTP timeout can expire under a healthy claimant stuck in
+        # admission or finishing the persist path, letting another replica
+        # claim the same account and reuse the single-use refresh token.
+        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 3.0 * self.token_refresh_timeout_seconds
         if "token_refresh_claim_ttl_seconds" not in self.model_fields_set:
             # The operator has not opted into the new setting. Derive the
             # default from the related timeouts so a deployment that only
@@ -680,8 +683,8 @@ class Settings(BaseSettings):
         if self.token_refresh_claim_ttl_seconds < minimum_ttl:
             raise ValueError(
                 "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "
-                f"+ 2x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
-                "its claim while waiting for refresh admission or mid-exchange"
+                f"+ 3x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
+                "its claim while waiting for refresh admission, mid-exchange, or during post-exchange persistence"
             )
         return self
 
