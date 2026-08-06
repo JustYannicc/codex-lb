@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.time import utcnow
 from app.db.models import (
+    Account,
     Base,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
@@ -1535,6 +1537,95 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
     assert renewed.owner_epoch == claimed.owner_epoch
     assert renewed.latest_turn_state == "http_turn_2"
     assert renewed.latest_response_id == "resp_2"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_concurrent_claims_use_distinct_epochs_and_consistent_anchor(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim read/decision/write is serialized and fenced as one unit."""
+    import app.modules.proxy.durable_bridge_repository as repository_module
+    from app.db import session as db_session
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'durable-bridge.db'}",
+        echo=False,
+        **db_session._sqlite_file_async_engine_kwargs(),
+    )
+    db_session._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        session.add(
+            Account(
+                id="account-seed",
+                email="account-seed@example.test",
+                plan_type="plus",
+                access_token_encrypted=b"x",
+                refresh_token_encrypted=b"x",
+                id_token_encrypted=b"x",
+                last_refresh=utcnow(),
+            )
+        )
+        await session.commit()
+        seeded = await DurableBridgeRepository(session).claim_session(
+            session_key_kind="session_header",
+            session_key_value="concurrent-claim",
+            api_key_scope="-",
+            instance_id="instance-seed",
+            owner_process_epoch="process-seed",
+            lease_ttl_seconds=60.0,
+            account_id="account-seed",
+            model="gpt-5.4",
+            service_tier=None,
+            latest_turn_state="turn-seed",
+            latest_response_id="response-seed",
+            allow_takeover=True,
+        )
+
+    barrier = asyncio.Barrier(2)
+    real_writer_section = repository_module.sqlite_writer_section
+
+    @contextlib.asynccontextmanager
+    async def barriered_writer_section():
+        await barrier.wait()
+        async with real_writer_section():
+            yield
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", barriered_writer_section)
+
+    async def claim(instance_id: str, account_id: str, response_id: str):
+        async with maker() as session:
+            return await DurableBridgeRepository(session).claim_session(
+                session_key_kind="session_header",
+                session_key_value="concurrent-claim",
+                api_key_scope="-",
+                instance_id=instance_id,
+                owner_process_epoch=f"process-{instance_id}",
+                lease_ttl_seconds=60.0,
+                account_id=account_id,
+                model="gpt-5.4",
+                service_tier=None,
+                latest_turn_state=f"turn-{account_id}",
+                latest_response_id=response_id,
+                allow_takeover=True,
+            )
+
+    snapshots = await asyncio.gather(
+        claim("instance-a", "account-seed", "response-a"),
+        claim("instance-b", "account-seed", "response-b"),
+    )
+    async with maker() as session:
+        stored = (
+            await session.execute(
+                select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == seeded.id)
+            )
+        ).scalar_one()
+    await engine.dispose()
+    assert len({snapshot.owner_epoch for snapshot in snapshots}) == 2
+    assert stored.latest_response_id in {snapshot.latest_response_id for snapshot in snapshots}
 
 
 @pytest.mark.asyncio
