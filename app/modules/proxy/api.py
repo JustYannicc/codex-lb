@@ -2050,8 +2050,14 @@ async def _rate_limit_headers_for_request(
 async def _release_reservation_deferring_cancellation(
     reservation: ApiKeyUsageReservationData,
 ) -> None:
+    await _await_cleanup_deferring_cancellation(_release_reservation(reservation))
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish a required cleanup operation despite repeated cancellation delivery."""
+
+    task = asyncio.create_task(awaitable)
     with anyio.CancelScope(shield=True):
-        task = asyncio.create_task(_release_reservation(reservation))
         while True:
             try:
                 await asyncio.shield(task)
@@ -4790,6 +4796,10 @@ async def _source_chat_completion_response(
             upstream_status_code=exc.upstream_status_code,
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+    except BaseException:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+        raise
 
     if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
@@ -5004,8 +5014,11 @@ async def _source_chat_stream_with_settlement(
         status = "cancelled"
         error_code = "client_disconnected"
         error_message = "client disconnected before stream completed"
-        await _aclose_stream(stream)
-        await _release_reservation(reservation)
+        try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
+        finally:
+            if reservation is not None:
+                await _release_reservation_deferring_cancellation(reservation)
         raise
     except ModelSourceForwardingError as exc:
         status = "error"
@@ -5036,17 +5049,19 @@ async def _source_chat_stream_with_settlement(
                 model,
             )
     finally:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=model,
-            status=status,
-            usage=usage_holder.usage,
-            timings=usage_holder.timings,
-            error_code=error_code,
-            error_message=error_message,
-            upstream_status_code=None,
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status=status,
+                usage=usage_holder.usage,
+                timings=usage_holder.timings,
+                error_code=error_code,
+                error_message=error_message,
+                upstream_status_code=None,
+            )
         )
 
 
