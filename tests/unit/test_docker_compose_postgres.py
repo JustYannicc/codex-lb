@@ -5,10 +5,14 @@ from typing import Any
 
 import yaml
 
+from app.core.config.settings import Settings
+from app.core.prestop import PRESTOP_REQUEST_TIMEOUT_SECONDS
+from app.core.server import POST_DRAIN_CLEANUP_TIMEOUT_SECONDS
 
-def _compose() -> dict[str, Any]:
+
+def _compose(path: str = "docker-compose.yml") -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[2]
-    return yaml.safe_load((repo_root / "docker-compose.yml").read_text(encoding="utf-8"))
+    return yaml.safe_load((repo_root / path).read_text(encoding="utf-8"))
 
 
 def test_postgres18_compose_upgrade_helper_is_digest_pinned() -> None:
@@ -33,3 +37,28 @@ def test_postgres18_compose_upgrade_helper_is_digest_pinned() -> None:
     assert upgrade["environment"]["PGAUTO_ONESHOT"] == "yes"
     assert upgrade["volumes"] == ["codex-lb-postgres-data:/var/lib/postgresql"]
     assert upgrade["restart"] == "no"
+
+
+def _drain_budget_seconds() -> float:
+    settings = Settings()
+    return (
+        settings.shutdown_drain_timeout_seconds
+        + PRESTOP_REQUEST_TIMEOUT_SECONDS
+        + POST_DRAIN_CLEANUP_TIMEOUT_SECONDS
+        + 5
+    )
+
+
+def _parse_compose_duration_seconds(raw_value: Any) -> float:
+    assert isinstance(raw_value, str)
+    if raw_value.endswith("s"):
+        raw_value = raw_value[:-1]
+    return float(raw_value)
+
+
+def test_prod_compose_has_stop_grace_above_drain_budget() -> None:
+    services = _compose("docker-compose.prod.yml")["services"]
+    server = services["server"]
+
+    stop_grace_seconds = _parse_compose_duration_seconds(server["stop_grace_period"])
+    assert stop_grace_seconds >= _drain_budget_seconds()

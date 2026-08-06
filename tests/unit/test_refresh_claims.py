@@ -263,21 +263,22 @@ def test_process_default_coordinator_yields_distinct_claimants_across_fork() -> 
         reset_refresh_claim_coordinator()
 
 
-def test_claim_ttl_must_cover_admission_wait_plus_twice_the_refresh_timeout() -> None:
+def test_claim_ttl_must_cover_admission_wait_plus_exchange_and_persist_timeout() -> None:
     # The claim is held across the refresh-admission wait AND the OAuth
-    # exchange, so a TTL sized only around the HTTP timeout is rejected.
+    # exchange plus the post-exchange DB persist path, so a TTL sized only
+    # around the HTTP timeout is rejected.
     with pytest.raises(ValidationError, match="token_refresh_claim_ttl_seconds"):
         Settings(
             token_refresh_timeout_seconds=8.0,
             proxy_admission_wait_timeout_seconds=10.0,
-            token_refresh_claim_ttl_seconds=16.0,
+            token_refresh_claim_ttl_seconds=55.0,
         )
     settings = Settings(
         token_refresh_timeout_seconds=8.0,
         proxy_admission_wait_timeout_seconds=10.0,
-        token_refresh_claim_ttl_seconds=26.0,
+        token_refresh_claim_ttl_seconds=56.0,
     )
-    assert settings.token_refresh_claim_ttl_seconds == 26.0
+    assert settings.token_refresh_claim_ttl_seconds == 56.0
 
 
 def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -> None:
@@ -290,11 +291,30 @@ def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -
         token_refresh_timeout_seconds=11.0,
         proxy_admission_wait_timeout_seconds=14.0,
     )
-    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 2.0 * settings.token_refresh_timeout_seconds
+    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 30.0 + 2.0 * settings.token_refresh_timeout_seconds
     assert settings.token_refresh_claim_ttl_seconds >= minimum_ttl
     assert settings.token_refresh_claim_ttl_seconds == minimum_ttl
 
-    # A default deployment keeps the fixed 30s default (which already covers
-    # the default timeout floor of 26s).
+    # A default deployment derives the fixed default above the complete floor.
     default_settings = Settings()
-    assert default_settings.token_refresh_claim_ttl_seconds == 30.0
+    assert default_settings.token_refresh_claim_ttl_seconds == 56.0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "kwargs"),
+    [
+        ("oauth_timeout_seconds", {"oauth_timeout_seconds": 0.0}),
+        ("token_refresh_timeout_seconds", {"token_refresh_timeout_seconds": 0.0}),
+        (
+            "oauth_timeout_seconds",
+            {"oauth_timeout_seconds": 301.0},
+        ),
+        (
+            "token_refresh_timeout_seconds",
+            {"token_refresh_timeout_seconds": 301.0},
+        ),
+    ],
+)
+def test_exchange_timeouts_must_be_positive_and_bounded(field_name: str, kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValidationError, match=field_name):
+        Settings(**kwargs)
