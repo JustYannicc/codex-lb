@@ -1449,6 +1449,23 @@ def _api_key_fair_share_threshold_pct_from_settings(settings: object) -> int:
     return int(threshold)
 
 
+def _selection_api_key_fair_share_threshold_pct(
+    settings: object,
+    *,
+    lease_kind: str | None,
+    request_stage: str,
+) -> int:
+    """Fair-share threshold for one account selection; 0 disables the gate.
+
+    Only stream leases are fair-share gated. Reattach resumes an existing
+    in-flight response; denying it would strand running work, so it bypasses
+    the fair-share gate the same way it bypasses the recovery reserve.
+    """
+    if lease_kind != "stream" or request_stage == "reattach":
+        return 0
+    return _api_key_fair_share_threshold_pct_from_settings(settings)
+
+
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
     if not isinstance(payload, dict):
         return None

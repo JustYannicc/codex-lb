@@ -3638,6 +3638,69 @@ async def test_api_key_fair_share_response_create_leases_never_touch_stream_key_
 
 
 @pytest.mark.asyncio
+async def test_direct_acquire_counts_api_key_and_enforces_fair_share_under_congestion() -> None:
+    """``acquire_account_lease`` joins per-key accounting and the fair-share gate.
+
+    Regression for the warm HTTP bridge session reacquire path (review P2):
+    direct account-pinned acquires previously ignored ``api_key_id``, so keyed
+    turns on reused bridge sessions took uncounted stream capacity and were
+    never congestion-gated. The pinned account is the key's whole usable pool
+    here, so fair share is measured against that single account.
+    """
+    direct_caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=4)
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct", account_count=1)
+    account = accounts[0]
+    # C = 1 account * 4 slots = 4; heavy holds 2, other holds 1 -> T = 3.
+    # threshold 50: 300 >= 200 -> congested; share = max(2, 4 // 2) = 2.
+    await _grab_stream(balancer, account.id, "heavy")
+    await _grab_stream(balancer, account.id, "heavy")
+    await _grab_stream(balancer, account.id, "other")
+    runtime = balancer._runtime[account.id]
+
+    with pytest.raises(load_balancer_module.ApiKeyFairShareDenialError) as exc_info:
+        await balancer.acquire_account_lease(
+            account.id,
+            kind="stream",
+            concurrency_caps=direct_caps,
+            api_key_id="heavy",
+            api_key_stream_fair_share_threshold_pct=50,
+        )
+
+    assert exc_info.value.decision.congested is True
+    assert "fair share" in str(exc_info.value)
+    # The denial neither installed a lease nor perturbed the accounting.
+    assert runtime.inflight_streams == 3
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1}
+
+    # A key under the minimum guarantee admits despite the congestion and is
+    # counted into the per-key map; release returns its count symmetrically.
+    light = await balancer.acquire_account_lease(
+        account.id,
+        kind="stream",
+        concurrency_caps=direct_caps,
+        api_key_id="light",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+    assert light is not None
+    assert light.api_key_id == "light"
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1, "light": 1}
+    await balancer.release_account_lease(light)
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1}
+
+    # A zero threshold disables the gate (pre-feature outcome) but keyed
+    # direct acquires still join the accounting.
+    ungated = await balancer.acquire_account_lease(
+        account.id,
+        kind="stream",
+        concurrency_caps=direct_caps,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=0,
+    )
+    assert ungated is not None
+    assert runtime.stream_key_inflight == {"heavy": 3, "other": 1}
+
+
+@pytest.mark.asyncio
 async def test_api_key_fair_share_sticky_path_denies_with_stable_code_and_preserves_mapping() -> None:
     sticky_repo = _StubStickySessionsRepository()
     balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-sticky", sticky_repo=sticky_repo)

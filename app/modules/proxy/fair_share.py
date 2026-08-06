@@ -105,6 +105,21 @@ def evaluate_stream_fair_share(
     )
 
 
+class ApiKeyFairShareDenialError(Exception):
+    """Fair-share gate denial from a direct (selection-less) lease acquire.
+
+    ``LoadBalancer.select_account`` reports denials through the selection
+    error surface; ``LoadBalancer.acquire_account_lease`` returns ``None``
+    only for plain per-account cap denials, so the fair-share denial raises
+    this instead of overloading that return value. Carries the full
+    ``FairShareDecision`` for callers that surface the denial numbers.
+    """
+
+    def __init__(self, decision: FairShareDecision) -> None:
+        super().__init__(fair_share_denial_message(decision))
+        self.decision = decision
+
+
 def fair_share_denial_message(decision: FairShareDecision) -> str:
     """Human-readable denial message carrying the decision's numbers."""
     return (

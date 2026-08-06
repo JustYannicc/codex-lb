@@ -119,6 +119,7 @@ from app.modules.proxy.cap_partitioning import (
     partition_cap,
 )
 from app.modules.proxy.fair_share import (
+    ApiKeyFairShareDenialError,
     FairShareDecision,
     effective_stream_pool_capacity,
     evaluate_stream_fair_share,
@@ -289,7 +290,19 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        api_key_id: str | None = None,
+        api_key_stream_fair_share_threshold_pct: int = 0,
     ) -> AccountLease | None:
+        """Acquire a lease pinned to one account, or None on a cap denial.
+
+        Keyed stream acquires join the same per-key accounting and
+        congestion-gated fair-share admission as selection. A direct acquire
+        is pinned to one account (e.g. a warm HTTP bridge session reacquiring
+        its slot between turns), so the key's usable pool -- and therefore the
+        fair-share candidate set -- is exactly that account. Fair-share
+        denials raise ``ApiKeyFairShareDenialError`` so callers can
+        distinguish them from the plain cap denial ``None``.
+        """
         caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
@@ -304,10 +317,21 @@ class LoadBalancer:
                 if cap > 0 and runtime.inflight_streams >= cap:
                     _record_account_cap_rejection("stream")
                     return None
+                denial = self._api_key_stream_fair_share_denial_locked(
+                    api_key_id=api_key_id,
+                    lease_kind=kind,
+                    candidate_account_ids=(account_id,),
+                    caps=caps,
+                    stream_reserve_slots=0,
+                    threshold_pct=api_key_stream_fair_share_threshold_pct,
+                )
+                if denial is not None:
+                    raise ApiKeyFairShareDenialError(denial)
             return self._acquire_account_lease_locked(
                 account_id,
                 kind=kind,
                 estimated_tokens=estimated_tokens,
+                api_key_id=api_key_id,
             )
 
     async def account_pressure_snapshot(self, account_id: str) -> tuple[int, int, float]:

@@ -132,6 +132,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _api_key_fair_share_threshold_pct_from_settings,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -185,6 +186,10 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
     durable_bridge_hash,
+)
+from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+    ApiKeyFairShareDenialError,
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -1561,22 +1566,46 @@ class _HTTPBridgeRequestSubmitMixin:
         another, because those turns multiplex over the session's single
         upstream WebSocket — unchanged from the pre-existing per-session
         lease lifecycle.
+
+        Keyed sessions thread their API key through the reacquire so the
+        turn joins the per-key stream accounting and passes the same
+        congestion-gated fair-share admission as initial selection; a
+        fair-share denial raises the standard local-cap envelope with the
+        fair-share code so the recoverable capacity wait applies.
         """
         if session.account_lease is not None or session.closed:
             return
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
-        lease = await load_balancer.acquire_account_lease(
-            session.account.id,
-            kind="stream",
-            # Carry the turn's usage-budget estimate like initial selection
-            # and reconnect do, so capacity-weighted routing pressure still
-            # sees large turns on reused warm sessions.
-            estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
-                request_state.request_usage_budget if request_state is not None else None
-            ),
-        )
+        api_key_id = session.key.api_key_id
+        fair_share_threshold_pct = 0
+        if api_key_id is not None:
+            fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(
+                await _service_get_settings_cache().get()
+            )
+        try:
+            lease = await load_balancer.acquire_account_lease(
+                session.account.id,
+                kind="stream",
+                # Carry the turn's usage-budget estimate like initial selection
+                # and reconnect do, so capacity-weighted routing pressure still
+                # sees large turns on reused warm sessions.
+                estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                    request_state.request_usage_budget if request_state is not None else None
+                ),
+                api_key_id=api_key_id,
+                api_key_stream_fair_share_threshold_pct=fair_share_threshold_pct,
+            )
+        except ApiKeyFairShareDenialError as denial:
+            raise ProxyResponseError(
+                429,
+                openai_error(
+                    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+                    str(denial),
+                    error_type="rate_limit_error",
+                ),
+            ) from None
         if lease is None:
             raise ProxyResponseError(
                 429,

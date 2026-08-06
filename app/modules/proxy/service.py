@@ -554,7 +554,6 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
-    _api_key_fair_share_threshold_pct_from_settings,
     _ApiKeyReservationTouchState,  # noqa: F401
     _call_with_supported_optional_kwargs,
     _clear_websocket_request_error_overrides,  # noqa: F401
@@ -576,6 +575,7 @@ from app.modules.proxy._service.support import (
     _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
+    _selection_api_key_fair_share_threshold_pct,
     _stream_settlement_error_payload,  # noqa: F401
     _StreamSettlement,  # noqa: F401
     _supported_optional_kwargs,  # noqa: F401
@@ -1794,13 +1794,8 @@ class ProxyService(
                     if lease_kind == "stream" and request_stage != "reattach"
                     else 0
                 )
-                # Reattach resumes an existing in-flight response; denying it
-                # would strand running work, so it bypasses the fair-share
-                # gate the same way it bypasses the recovery reserve.
-                api_key_fair_share_threshold_pct = (
-                    _api_key_fair_share_threshold_pct_from_settings(settings)
-                    if lease_kind == "stream" and request_stage != "reattach"
-                    else 0
+                api_key_fair_share_threshold_pct = _selection_api_key_fair_share_threshold_pct(
+                    settings, lease_kind=lease_kind, request_stage=request_stage
                 )
                 api_key_id = api_key.id if api_key is not None else None
                 required_preferred_account = (
