@@ -196,10 +196,14 @@ _TaskResultT = TypeVar("_TaskResultT")
 _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
 _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float] = {}
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-# A healthy upstream acknowledges response.create promptly. Keep the
-# Keep the owner-side watchdog within the client-safe contract while honoring
-# the configured stuck-gate threshold when it is shorter.
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
+# A healthy upstream usually acknowledges response.create promptly, but a
+# persistent Responses session may legitimately spend longer preparing a
+# server-side continuation (especially after a large tool-heavy turn). Keep
+# the owner-side watchdog within the 240-second client-safe contract while
+# honoring the configured stuck-gate threshold when it is shorter. A shorter
+# cap falsely retires these sessions and opens their retry circuits before
+# upstream has had a chance to emit response.created.
+_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
