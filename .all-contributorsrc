@@ -1162,6 +1162,37 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "joschi655",
+      "name": "joschi655",
+      "avatar_url": "https://avatars.githubusercontent.com/u/183807437?v=4",
+      "profile": "https://github.com/joschi655",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "johnjheejin",
+      "name": "daydreamer.jin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11205554?v=4",
+      "profile": "https://github.com/johnjheejin",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "rknightion",
+      "name": "rknightion",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12484127?v=4",
+      "profile": "https://github.com/rknightion",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

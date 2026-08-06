@@ -22,6 +22,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
 	tests/integration/test_plan_downgrade_observation_store.py \
 	tests/integration/test_accounts_api_probe.py::test_force_probe_confirms_paid_to_free_plan_downgrade \

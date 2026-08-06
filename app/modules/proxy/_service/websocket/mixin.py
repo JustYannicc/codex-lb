@@ -755,6 +755,16 @@ def _websocket_enforce_response_create_text_size(
         request_state.request_text = original_request_text
 
 
+def _refine_websocket_request_kind_from_completion(
+    request_state: _WebSocketRequestState,
+    *,
+    event_type: str | None,
+    output_tokens: int | None,
+) -> None:
+    if event_type == "response.completed" and request_state.connection_request_kind == "prewarm" and output_tokens == 0:
+        request_state.request_kind = "prewarm"
+
+
 def _track_websocket_owned_task(
     proxy: _WebSocketServiceProtocol,
     task: asyncio.Task[Any],
@@ -5083,6 +5093,11 @@ class _WebSocketMixin:
         completed_usage = (
             event.response.usage if event_type == "response.completed" and event and event.response else None
         )
+        _refine_websocket_request_kind_from_completion(
+            request_state,
+            event_type=event_type,
+            output_tokens=completed_usage.output_tokens if completed_usage is not None else None,
+        )
         completed_empty_prewarm = (
             event_type == "response.completed"
             and request_state.request_kind == "prewarm"
@@ -5396,6 +5411,12 @@ class _WebSocketMixin:
             if event and event.response and event.response.id:
                 response_id = event.response.id
 
+        _refine_websocket_request_kind_from_completion(
+            request_state,
+            event_type=event_type,
+            output_tokens=usage.output_tokens if usage is not None else None,
+        )
+
         actual_service_tier = _facade()._service_tier_from_event_payload(payload)
         if actual_service_tier is not None:
             request_state.actual_service_tier = actual_service_tier
@@ -5514,6 +5535,7 @@ class _WebSocketMixin:
                     conversation_id=request_state.conversation_id,
                     client_ip=request_state.client_ip,
                     request_kind=request_state.request_kind,
+                    connection_request_kind=request_state.connection_request_kind,
                 )
             except Exception:
                 request_log_handoff_succeeded = False
@@ -5652,6 +5674,7 @@ class _WebSocketMixin:
             conversation_id=request_state.conversation_id,
             client_ip=request_state.client_ip,
             request_kind=request_state.request_kind,
+            connection_request_kind=request_state.connection_request_kind,
         )
         _record_upstream_transport_decision(
             downstream_transport=request_state.transport,
@@ -6005,6 +6028,7 @@ class _WebSocketMixin:
                     conversation_id=request_state.conversation_id,
                     client_ip=request_state.client_ip,
                     request_kind=request_state.request_kind,
+                    connection_request_kind=request_state.connection_request_kind,
                 )
             except Exception:
                 request_log_handoff_succeeded = False
