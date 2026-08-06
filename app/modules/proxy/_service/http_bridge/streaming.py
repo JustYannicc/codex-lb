@@ -409,10 +409,13 @@ def _http_bridge_dead_owner_previous_response_not_found_terminal(
 ) -> dict[str, JsonValue]:
     """Return the standard not-found terminal for an unreplayable dead owner."""
 
-    error = _http_bridge_previous_response_error_envelope(
-        previous_response_id,
-        _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
-    )["error"]
+    error = cast(
+        dict[str, JsonValue],
+        _http_bridge_previous_response_error_envelope(
+            previous_response_id,
+            _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
+        )["error"],
+    )
     return cast(
         dict[str, JsonValue],
         response_failed_event(
