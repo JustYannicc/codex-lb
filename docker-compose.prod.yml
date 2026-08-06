@@ -28,6 +28,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    # Keep shutdown grace above the app drain budget so SIGKILL does not cut shutdown short.
+    stop_grace_period: 75s
     restart: unless-stopped
     deploy:
       resources:
