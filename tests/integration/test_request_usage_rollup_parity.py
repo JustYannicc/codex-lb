@@ -133,6 +133,18 @@ def _corpus() -> list[RequestLog]:
     for offset in (timedelta(hours=30), timedelta(days=5, hours=1), timedelta(days=9, hours=20)):
         rows.append(_log(BASE + offset, request_id_suffix="w", request_kind="warmup", cost_usd=0.002))
         rows.append(_log(BASE + offset + timedelta(minutes=20), request_id_suffix="lw", request_kind="limit_warmup"))
+    # Cancelled rows on both sides of every candidate watermark: the listing
+    # count's default status split (success+error) must exclude them from
+    # the folded sum and the raw tail alike.
+    for offset in (timedelta(days=1, hours=5), timedelta(days=9, hours=23)):
+        rows.append(
+            _log(
+                BASE + offset,
+                request_id_suffix="cx",
+                status="cancelled",
+                cost_usd=None,
+            )
+        )
     # Soft-deleted orphans (account detached): kept by dashboard buckets and
     # top-error, excluded by the planner.
     for offset in (timedelta(days=1, hours=2), timedelta(days=6, hours=7, minutes=31)):
@@ -280,7 +292,32 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
             "trends_key2": await api_keys.trends_by_key("key_2", SINCE_ALIGNED, UNTIL_UNALIGNED, 7200),
             "trends_raw_degrade": await api_keys.trends_by_key("key_1", lead_since, NOW, 5400),
             "trends_no_logs": await api_keys.trends_by_key("key_none", lead_since, NOW, 3600),
+            "listing_totals": await _listing_totals(logs, lead_since),
         }
+
+
+async def _listing_totals(logs: RequestLogsRepository, lead_since: datetime) -> dict[str, int]:
+    """Every rollup-expressible listing count shape (the demand-rollup path),
+    plus a non-expressible search fallback for contrast."""
+
+    async def _total(**kwargs) -> int:
+        result = await logs.list_recent(limit=1, **kwargs)
+        return result.total
+
+    return {
+        "default": await _total(),
+        "success_only": await _total(include_error_other=False),
+        "error_only": await _total(include_success=False),
+        "no_status_filter": await _total(include_success=False, include_error_other=False),
+        "windowed": await _total(since=lead_since, until=UNTIL_UNALIGNED),
+        "folded_only": await _total(since=FOLDED_ONLY_WINDOW[0], until=FOLDED_ONLY_WINDOW[1]),
+        "tail_only": await _total(since=TAIL_ONLY_WINDOW[0], until=TAIL_ONLY_WINDOW[1]),
+        "account": await _total(account_ids=["acc_par_a"]),
+        "api_key": await _total(api_key_ids=["key_2"], since=lead_since),
+        "models": await _total(models=[_MODELS[0]]),
+        "model_effort_pairs": await _total(model_options=[(_MODELS[1], None)]),
+        "search_fallback": await _total(search="gpt-5.1"),
+    }
 
 
 def _project_demand(bins) -> dict:
@@ -449,7 +486,7 @@ async def test_escape_hatch_reset_degrades_to_legacy_then_rebackfills(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_statistics_survive_retention_pruning_folded_raw(db_setup):
+async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeypatch):
     """The headline guarantee: after raw rows below the retention gate
     (watermark - FOLD_LAG) are physically deleted, every rollup-served
     statistic is unchanged. Distinct-conversation metrics shrink to the
@@ -487,8 +524,21 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup):
             # degrade path: after pruning they only see the surviving tail.
             "buckets_raw_degrade",
             "trends_raw_degrade",
+            "listing_totals",  # search fallback is raw-bound (asserted below)
         ),
     )
+    # Listing totals track LISTABLE rows, not the permanent folded
+    # statistics: after pruning they must equal the legacy raw counts over
+    # the surviving corpus (the rollup window is clamped to the earliest
+    # surviving live row).
+    original_count_recent = RequestLogsRepository._count_recent
+
+    async def _raw_only_count(self, filters, demand_params=None):
+        return await original_count_recent(self, filters, None)
+
+    monkeypatch.setattr(RequestLogsRepository, "_count_recent", _raw_only_count)
+    raw_expected = (await _snapshot())["listing_totals"]
+    assert pruned["listing_totals"] == raw_expected
     # Additive activity totals are unchanged (modulo the pruned partial
     # leading hour for unaligned starts); only the distinct-conversation
     # metrics dropped to what raw still holds.
@@ -552,3 +602,24 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
     after = await async_client.get("/api/dashboard/overview?timeframe=7d")
     assert after.status_code == 200
     assert after.json() == before.json()
+
+
+@pytest.mark.asyncio
+async def test_listing_total_accepts_offset_aware_bounds(db_setup):
+    """The dashboard sends ISO `Z` bounds (offset-aware); the rollup window
+    arithmetic and the raw path must both accept them and agree with the
+    naive-UTC equivalents."""
+    from datetime import timezone
+
+    await _seed_corpus()
+    await run_hourly_fold_pass(now=NOW)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        naive = await logs.list_recent(limit=1, since=SINCE_UNALIGNED, until=UNTIL_UNALIGNED)
+        aware = await logs.list_recent(
+            limit=1,
+            since=SINCE_UNALIGNED.replace(tzinfo=timezone.utc),
+            until=UNTIL_UNALIGNED.replace(tzinfo=timezone.utc),
+        )
+    assert aware.total == naive.total
+    assert naive.total > 0

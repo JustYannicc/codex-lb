@@ -139,8 +139,16 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         )
                     return total
                 effective_cutoff = min(cutoff, watermark - FOLD_LAG)
+                # Oldest-first batches keep min(requested_at) a contiguous
+                # retention frontier: an interrupted pass never leaves
+                # deleted holes above the oldest surviving row, which the
+                # rollup-served listing count relies on when clamping its
+                # folded window to listable history.
                 batch_ids = (
-                    select(RequestLog.id).where(RequestLog.requested_at < effective_cutoff).limit(BATCH_SIZE)
+                    select(RequestLog.id)
+                    .where(RequestLog.requested_at < effective_cutoff)
+                    .order_by(RequestLog.requested_at.asc(), RequestLog.id.asc())
+                    .limit(BATCH_SIZE)
                 ).scalar_subquery()
                 result = await session.execute(
                     delete(RequestLog).where(RequestLog.id.in_(batch_ids)).returning(RequestLog.id)

@@ -35,11 +35,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import BigInteger, ColumnElement, Integer, and_, func, or_, select
+from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import RequestLog, RequestUsageHourlyRollup
+from app.db.models import AccountUsageRollupState, RequestDemandQuarterRollup, RequestLog, RequestUsageHourlyRollup
 from app.modules.accounts.usage_time_rollup import (
+    _STATE_ROW_ID,
     HOURLY_BUCKET_SECONDS,
     QUARTER_SLOT_SECONDS,
     WARMUP_REQUEST_KINDS,
@@ -137,6 +139,58 @@ async def read_demand_window(
 ) -> tuple[list[QuarterDemandRollupRow], list[RawWindow]]:
     repo = RequestUsageTimeRollupRepository(session)
     return await _read_window(repo.read_demand, "slot_epoch", since, until, QUARTER_SLOT_SECONDS, filters)
+
+
+async def sum_demand_window(
+    session: AsyncSession,
+    since: datetime,
+    until: datetime | None = None,
+    *,
+    filters: Sequence[ColumnElement[bool]] = (),
+) -> tuple[int, list[RawWindow]]:
+    """Watermark-consistent SUM(request_count) over the demand rollup.
+
+    Same partitioning rule as the row readers, aggregated in SQL so counting
+    a long window does not materialize every demand-grain row. The watermark
+    and the folded sum come from ONE statement (state LEFT JOIN demand, with
+    the slot upper bound expressed against the state row's own watermark
+    epoch), so an escape-hatch reset committing concurrently can never pair
+    an old watermark with already-truncated rollups. With no watermark the
+    sum is 0 and the raw windows cover the full range — the caller degrades
+    to the exact legacy raw read.
+    """
+    lo_epoch = epoch_seconds(ceil_to_grid(since, QUARTER_SLOT_SECONDS))
+    if session.get_bind().dialect.name == "postgresql":
+        watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
+    else:
+        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+    join_conditions = [
+        *filters,
+        RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
+        RequestDemandQuarterRollup.slot_epoch < watermark_epoch,
+    ]
+    if until is not None:
+        join_conditions.append(
+            RequestDemandQuarterRollup.slot_epoch < epoch_seconds(floor_to_grid(until, QUARTER_SLOT_SECONDS))
+        )
+    stmt = (
+        select(
+            AccountUsageRollupState.hourly_folded_through,
+            func.coalesce(func.sum(RequestDemandQuarterRollup.request_count), 0),
+        )
+        .select_from(AccountUsageRollupState)
+        .outerjoin(RequestDemandQuarterRollup, and_(*join_conditions))
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .group_by(AccountUsageRollupState.hourly_folded_through)
+    )
+    row = (await session.execute(stmt)).first()
+    if row is None:
+        return 0, [(since, until)]
+    watermark, folded_total = row[0], int(row[1])
+    folded_until_epoch, raw_windows = _partition_raw_windows(since, until, watermark, QUARTER_SLOT_SECONDS)
+    if folded_until_epoch is None:
+        return 0, raw_windows
+    return folded_total, raw_windows
 
 
 def raw_windows_clause(windows: Sequence[RawWindow]) -> ColumnElement[bool]:
