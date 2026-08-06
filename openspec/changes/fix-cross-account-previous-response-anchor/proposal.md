@@ -34,16 +34,32 @@ recurrence because the session re-injects the same cross-account anchor.
   owning account equals the session's serving account. Otherwise the request
   falls through to a full-history resend (correct output, slightly more tokens),
   never a cross-account `previous_response_id`.
+- The owner-forward recovery anchor injection gets the same guard. That rebind
+  runs with `allow_previous_response_recovery_rebind` /
+  `allow_bootstrap_owner_rebind`, which are explicitly allowed to bind the
+  session to an account other than the durable owner, so it is the second site
+  where a proxy-injected anchor can cross an account boundary.
+- Both declines emit a `cross_account_anchor_declined` bridge event naming the
+  injection site and the anchor's owning account, so the wedge family stays
+  observable from bridge event logs.
+
+The remaining proxy-side injection site, the pre-binding durable "fresh reattach"
+anchor, is already covered: setting `previous_response_id` there makes the durable
+owner a *required* account (`require_preferred_account`), so session creation and
+session reuse both refuse to serve that request on another account, and an
+unavailable owner degrades along the account-neutral full-resend path instead.
 
 ## Impact
 
 - Affected specs: `sticky-session-operations`
 - Affected code: `_service/support.py` (`_HTTPBridgeSession`),
-  `_service/http_bridge/streaming.py` (injection guard + durable-restore owner),
-  `_service/http_bridge/upstream_events.py` (completion owner).
+  `_service/http_bridge/streaming.py` (both injection guards + durable-restore
+  owner), `_service/http_bridge/upstream_events.py` (completion owner),
+  `_service/http_bridge/mixin.py` (clear the owner with the anchor on an
+  account-changing reconnect).
 - Behavior: on cross-account failover, continuity is preserved by resending full
   history instead of an unresolvable anchor. No client-visible protocol change.
-- Follow-ups (tracked separately, not in this change): the durable direct-anchor
-  injection performed before session/account binding, the WebSocket-transport
-  anchor path, and a proactive `response.created` watchdog that replays the
-  stored full-history payload if any anchored request stalls.
+- Follow-ups (tracked separately, not in this change): the WebSocket-transport
+  anchor path (`websocket_session_anchor_injected`), and a proactive
+  `response.created` watchdog that replays the stored full-history payload if any
+  anchored request stalls.
