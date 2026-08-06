@@ -154,10 +154,12 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     """
     now = time.monotonic()
     registry = _http_bridge_quarantine_registry(service)
+    # Prune before touching the entry: a strike whose TTL already lapsed must
+    # not be resurrected into a "consecutive" second strike hours later.
+    _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     entry.consecutive_eventless_timeouts += 1
     entry.last_touched_monotonic = now
-    _prune_http_bridge_quarantine_registry(registry, now)
     if entry.consecutive_eventless_timeouts < _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD:
         return
     _quarantine_http_bridge_session(
@@ -170,6 +172,7 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
 def _clear_http_bridge_quarantine(service: Any, session: _HTTPBridgeSession) -> None:
     """A completed response on this key disproves the wedge; drop all state."""
     registry = _http_bridge_quarantine_registry(service)
+    session.quarantined = False
     entry = registry.pop(session.key, None)
     if entry is None:
         return

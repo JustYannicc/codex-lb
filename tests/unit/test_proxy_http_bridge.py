@@ -23492,6 +23492,41 @@ def test_http_bridge_quarantine_cleared_by_completed_response(caplog: pytest.Log
     assert "http_bridge_event event=session_quarantine_cleared" in caplog.text
 
 
+def test_http_bridge_quarantine_expired_strike_is_not_resurrected() -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-stale-strike")
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    # Age the first strike past its TTL: the next timeout must count as a
+    # fresh first strike, not a "consecutive" second one.
+    entry.last_touched_monotonic = (
+        time.monotonic() - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    )
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    fresh_entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert fresh_entry.consecutive_eventless_timeouts == 1
+
+
+def test_http_bridge_quarantine_clear_restores_session_reusability() -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-clear-flag")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    assert session.quarantined is True
+
+    # A completed response disproves the wedge: the surviving session must be
+    # reusable again, not permanently rejected by the session-object flag.
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, session)
+    assert session.quarantined is False
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+
 def test_http_bridge_session_reusable_for_lookup_excludes_quarantined() -> None:
     session = _make_bridge_session(key_value="quarantine-reuse")
 
