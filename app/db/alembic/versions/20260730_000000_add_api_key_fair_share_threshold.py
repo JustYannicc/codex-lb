@@ -1,7 +1,7 @@
 """add api key fair share threshold
 
 Revision ID: 20260730_000000_add_api_key_fair_share_threshold
-Revises: 20260804_230000_add_request_log_connection_request_kind
+Revises: 20260806_010000_add_conversation_presence_rollup
 Create Date: 2026-07-30
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260730_000000_add_api_key_fair_share_threshold"
-down_revision = "20260804_230000_add_request_log_connection_request_kind"
+down_revision = "20260806_010000_add_conversation_presence_rollup"
 branch_labels = None
 depends_on = None
 
