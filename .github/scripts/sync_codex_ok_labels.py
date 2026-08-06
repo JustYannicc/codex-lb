@@ -1673,15 +1673,15 @@ def main(argv: list[str] | None = None) -> int:
                                 tolerate_permission_errors=args.tolerate_write_permission_errors,
                             )
                         )
-                        if usage_backoff is not None and args.codex_review_response_wait_seconds > 0:
-                            time.sleep(args.codex_review_response_wait_seconds)
-                        if usage_backoff is not None:
+                        if usage_backoff is not None and usage_backoff.latest_normal_response_at is None:
+                            if args.codex_review_response_wait_seconds > 0:
+                                time.sleep(args.codex_review_response_wait_seconds)
                             _head_sha, timeline_nodes = pr_timeline_evidence(decision.repo, decision.number)
                             usage_backoff.observe(timeline_nodes)
                     write_warnings = tuple(accumulated_warnings)
                 mode = "apply" if args.apply else "dry-run"
                 print(
-                    f"{mode} {repo}#{number}: "
+                    f"{mode} {decision.repo}#{decision.number}: "
                     f"head={decision.head_sha[:12]} checks={decision.checks_state} "
                     f"merge={decision.merge_state} review={decision.review_state} "
                     f"ok={decision.has_ok_label}->{decision.wants_ok_label}/{decision.ok_action} "
@@ -1701,7 +1701,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  write_warning={warning}", flush=True)
             except Exception as exc:  # noqa: BLE001
                 had_error = True
-                print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+                print(f"{decision.repo}#{decision.number}: {exc}", file=sys.stderr, flush=True)
 
     return 1 if had_error else 0
 

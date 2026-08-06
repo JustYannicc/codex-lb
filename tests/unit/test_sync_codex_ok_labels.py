@@ -641,6 +641,11 @@ def test_codex_usage_backoff_keeps_accounts_independent() -> None:
     assert backoff.is_limited() is True
 
 
+def recent_timestamp(module: ModuleType, *, minutes_ago: int) -> str:
+    moment = module.datetime.now(module.UTC) - module.timedelta(minutes=minutes_ago)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -662,7 +667,7 @@ def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
                     {
                         "__typename": "PullRequestCommit",
                         "commit": {"oid": "a" * 40},
-                        "committedDate": "2026-07-31T14:50:00Z",
+                        "committedDate": recent_timestamp(module, minutes_ago=70),
                     }
                 ],
             )
@@ -678,8 +683,11 @@ def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
         return (
             "a" * 40,
             [
-                codex_review_request("Komzpa", "2026-07-31T15:00:00Z"),
-                codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T15:01:00Z"),
+                codex_review_request("Komzpa", recent_timestamp(module, minutes_ago=2)),
+                codex_issue_comment(
+                    "You've reached your Codex usage limits.",
+                    recent_timestamp(module, minutes_ago=1),
+                ),
             ],
         )
 
@@ -701,9 +709,75 @@ def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
     captured = capsys.readouterr()
     assert result == 0
     assert posted == [710]
-    assert "apply Soju06/codex-lb#714" in captured.out
-    assert "trigger_codex=False" in captured.out
+    apply_lines = [line for line in captured.out.splitlines() if line.startswith("apply ")]
+    assert len(apply_lines) == 2
+    assert apply_lines[0].startswith("apply Soju06/codex-lb#710: ")
+    assert "trigger_codex=True" in apply_lines[0]
+    assert apply_lines[1].startswith("apply Soju06/codex-lb#714: ")
+    assert "trigger_codex=False" in apply_lines[1]
     assert "recent Codex usage-limit reply" in captured.out
+
+
+def test_main_skips_probe_after_normal_codex_response_observed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+    monkeypatch.setattr(module, "current_viewer_login", lambda: "Komzpa")
+    monkeypatch.setattr(module, "apply_decision", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "approve_workflow_runs", lambda *_args, **_kwargs: ())
+
+    def fake_decide_pr(_repo: str, number: int, **kwargs: Any) -> Any:
+        observer = kwargs.get("timeline_observer")
+        if observer is not None:
+            observer(
+                number,
+                [
+                    codex_review_request("Komzpa", recent_timestamp(module, minutes_ago=30)),
+                    codex_issue_comment(
+                        "Codex Review: Didn't find any major issues.",
+                        recent_timestamp(module, minutes_ago=29),
+                    ),
+                ],
+            )
+        return decision(module, number=number, trigger_codex_review=True, ok_action="keep", checks_state="success")
+
+    posted: list[int] = []
+
+    def fake_trigger(decision: Any, **_kwargs: Any) -> tuple[str, ...]:
+        posted.append(decision.number)
+        return ()
+
+    probe_calls: list[int] = []
+
+    def fake_timeline(_repo: str, number: int) -> tuple[str, list[dict[str, Any]]]:
+        probe_calls.append(number)
+        return ("a" * 40, [])
+
+    monkeypatch.setattr(module, "decide_pr", fake_decide_pr)
+    monkeypatch.setattr(module, "trigger_codex_review", fake_trigger)
+    monkeypatch.setattr(module, "pr_timeline_evidence", fake_timeline)
+
+    result = module.main(
+        [
+            "--repo",
+            "Soju06/codex-lb",
+            "--all-open",
+            "--apply",
+            "--codex-review-response-wait-seconds",
+            "0",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert posted == [710, 714]
+    assert probe_calls == []
+    assert "apply Soju06/codex-lb#710: " in captured.out
+    assert "apply Soju06/codex-lb#714: " in captured.out
 
 
 def test_workflow_prefers_privileged_token_and_enables_tolerant_apply() -> None:
