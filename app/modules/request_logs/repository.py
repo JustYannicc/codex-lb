@@ -35,12 +35,14 @@ from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
     HOURLY_BUCKET_SECONDS,
     WARMUP_REQUEST_KINDS,
+    conversation_id_expr,
     floor_to_hour,
     from_dimension,
     to_dimension,
 )
 from app.modules.accounts.usage_time_rollup_read import (
     RawWindow,
+    conversation_presence_union,
     earliest_hourly_bucket_at,
     raw_windows_clause,
     read_errors_window,
@@ -210,11 +212,7 @@ class RequestLogsRepository:
 
     @staticmethod
     def _conversation_id_expr() -> ColumnElement:
-        trimmed = func.ltrim(
-            func.rtrim(RequestLog.conversation_id, _CONVERSATION_WHITESPACE),
-            _CONVERSATION_WHITESPACE,
-        )
-        return func.nullif(trimmed, "")
+        return conversation_id_expr()
 
     def _conversation_output_expr(self) -> ColumnElement:
         return func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -663,22 +661,40 @@ class RequestLogsRepository:
         since: datetime,
         bucket_seconds: int = 21600,
     ) -> list[BucketConversationAggregate]:
-        bucket_expr = self._bucket_epoch_expr(bucket_seconds)
-        bucket_col = bucket_expr.label("bucket_epoch")
-        conversation_id = self._conversation_id_expr()
-        stmt = (
-            select(
-                bucket_col,
-                func.count(func.distinct(conversation_id)).label("conversation_count"),
+        # Hour-multiple display buckets merge the conversation satellite with
+        # the raw tail in one UNION statement: COUNT(DISTINCT) over the merge
+        # dedups a conversation present on both sides of the fold boundary
+        # within one display bucket. Any other granularity degrades to the
+        # legacy full-raw scan (a display bucket would split a folded hour).
+        if bucket_seconds > 0 and bucket_seconds % HOURLY_BUCKET_SECONDS == 0:
+            union = conversation_presence_union(
+                self._session,
+                since,
+                include_deleted=False,
+                raw_conditions=self._eligible_conversation_row_conditions(),
+                display_bucket_seconds=bucket_seconds,
+            ).subquery()
+            stmt = (
+                select(union.c.bucket_epoch, func.count(func.distinct(union.c.cid)).label("conversation_count"))
+                .group_by(union.c.bucket_epoch)
+                .order_by(union.c.bucket_epoch)
             )
-            .where(
-                RequestLog.requested_at >= since,
-                *self._eligible_conversation_row_conditions(),
-                conversation_id.is_not(None),
+        else:
+            bucket_col = self._bucket_epoch_expr(bucket_seconds).label("bucket_epoch")
+            conversation_id = self._conversation_id_expr()
+            stmt = (
+                select(
+                    bucket_col,
+                    func.count(func.distinct(conversation_id)).label("conversation_count"),
+                )
+                .where(
+                    RequestLog.requested_at >= since,
+                    *self._eligible_conversation_row_conditions(),
+                    conversation_id.is_not(None),
+                )
+                .group_by(bucket_col)
+                .order_by(bucket_col)
             )
-            .group_by(bucket_col)
-            .order_by(bucket_col)
-        )
         result = await self._session.execute(stmt)
         return [
             BucketConversationAggregate(
@@ -734,20 +750,23 @@ class RequestLogsRepository:
             cost_usd += float(row.cost_usd or 0.0)
 
         # Distinct conversation counts are not additive across the fold
-        # boundary, so they always come from raw over the FULL window (a
-        # documented non-goal: they only reach as far back as retention keeps
-        # raw rows). This splits the legacy single-statement read in two —
+        # boundary, so they merge the conversation satellite with the raw
+        # tail via UNION ALL in one statement: COUNT(DISTINCT) dedups a
+        # conversation straddling the boundary, SUM(request_count) stays
+        # additive. This keeps the legacy read split in two statements —
         # totals and conversation metrics can straddle a concurrent insert,
         # which the periodically-polled dashboard tolerates.
+        union = conversation_presence_union(
+            self._session,
+            since,
+            until,
+            include_deleted=False,
+            raw_conditions=self._eligible_conversation_row_conditions(),
+        ).subquery()
         conversation_stmt = select(
-            func.count(func.distinct(self._conversation_id_expr())).label("conversation_count"),
-            func.count(self._conversation_id_expr()).label("conversation_request_count"),
-        ).where(
-            RequestLog.requested_at >= since,
-            *self._eligible_conversation_row_conditions(),
+            func.count(func.distinct(union.c.cid)).label("conversation_count"),
+            func.coalesce(func.sum(union.c.request_count), 0).label("conversation_request_count"),
         )
-        if until is not None:
-            conversation_stmt = conversation_stmt.where(RequestLog.requested_at < until)
         conversation_row = (await self._session.execute(conversation_stmt)).one()
 
         return RequestActivityAggregate(
@@ -1054,7 +1073,9 @@ class RequestLogsRepository:
         A matching row below the watermarks can only be a client-reused
         request id colliding with unrelated old traffic — the rewrite's
         target is the row the caller inserted moments ago. The fold-state
-        lock serializes this against an in-flight fold slice.
+        lock serializes this against an in-flight fold slice. The
+        conversation satellite needs no bound here: neither ``model`` nor
+        ``cost_usd`` is folded into it.
 
         Returns the number of rows that were updated.
         """

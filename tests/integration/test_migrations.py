@@ -1551,3 +1551,69 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
         assert rollup_tables <= tables_after_downgrade
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'conversation-presence-rollup.sqlite'}"
+    parent_revision = "20260806_000000_add_additional_usage_alias_probe_indexes"
+    rollup_revision = "20260806_010000_add_conversation_presence_rollup"
+    table = "request_conversation_hourly_rollups"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "has_table": inspector.has_table(table),
+            "state_columns": {column["name"] for column in inspector.get_columns("account_usage_rollup_state")},
+            "pk": (inspector.get_pk_constraint(table)["constrained_columns"] if inspector.has_table(table) else None),
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert not state["has_table"]
+        assert "conversation_folded_through" not in state["state_columns"]
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollup_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["has_table"]
+        assert "conversation_folded_through" in state["state_columns"]
+        assert state["pk"] == ["bucket_epoch", "conversation_id", "account_id", "is_deleted"]
+
+        # The migration-seeded fold-state row (older revision) must have been
+        # backfilled to the epoch by the new column's server default — the
+        # satellite starts its own from-zero backfill — without touching the
+        # lifetime or hourly watermarks.
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT hourly_folded_through, conversation_folded_through "
+                        "FROM account_usage_rollup_state WHERE id = 1"
+                    )
+                )
+            ).one()
+        assert str(row[1]).startswith("1970-01-01")
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert not state["has_table"]
+        assert "conversation_folded_through" not in state["state_columns"]
+
+        # Idempotent re-upgrade.
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollup_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["has_table"]
+        assert "conversation_folded_through" in state["state_columns"]
+    finally:
+        await engine.dispose()

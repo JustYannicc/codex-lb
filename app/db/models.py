@@ -232,6 +232,15 @@ class AccountUsageRollupState(Base):
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    # Watermark for the conversation presence satellite. Separate from
+    # `hourly_folded_through` (same alignment invariant, same state row and
+    # row lock) so the satellite added later backfills from epoch without
+    # rewinding — and without being gated on — the other time-axis rollups.
+    conversation_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
 
 
 class RequestUsageHourlyRollup(Base):
@@ -337,6 +346,34 @@ class RequestDemandQuarterRollup(Base):
     )
     cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+
+
+class RequestConversationHourlyRollup(Base):
+    """Hour-bucketed conversation presence (distinct-conversation satellite).
+
+    One row means "this conversation had ``request_count`` countable requests
+    in this UTC hour under this (account, is_deleted) attribution". Distinct
+    conversation counts are not additive across buckets, so the reads UNION
+    the folded ``conversation_id`` values with the raw live tail and count
+    distinct over the merge; ``request_count`` stays additive for the
+    conversation-request totals.
+
+    ``conversation_id`` is the normalized value (whitespace-trimmed,
+    non-empty — NULL/blank rows are excluded by the fold filter, matching
+    every reader). ``is_deleted`` is a dimension because the dashboard
+    conversation reads exclude soft-deleted rows while the reports reads
+    include them; ``account_id`` (NULL-sentinel encoded) is carried only so
+    the account lifecycle mirrors can re-attribute or remove folded presence
+    exactly as the raw mutation does. No FKs: rows must outlive accounts.
+    """
+
+    __tablename__ = "request_conversation_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
 
 
 class AdditionalUsageHistory(Base):
