@@ -191,12 +191,13 @@ class _SilentEventlessUpstream:
 def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
+    assert http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS == 240.0
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 160.0
+        == 340.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
@@ -213,7 +214,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 160.0
+        == 340.0
     )
 
 
