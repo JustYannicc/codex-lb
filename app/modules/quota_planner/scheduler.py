@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
+from app.core.utils.time import to_utc_naive
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states
@@ -163,7 +164,7 @@ class QuotaPlannerScheduler:
                         separators=(",", ":"),
                     ),
                 )
-                due = action.scheduled_at is None or action.scheduled_at <= now
+                due = action.scheduled_at is None or to_utc_naive(action.scheduled_at) <= to_utc_naive(now)
                 if (
                     settings.mode == "auto"
                     and action.action == "warmup"

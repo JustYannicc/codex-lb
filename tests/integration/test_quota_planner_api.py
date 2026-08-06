@@ -690,7 +690,7 @@ async def test_quota_planner_scheduler_reclaims_expired_executing_warmup_claim(m
             PlannerAction(
                 account_id="acc-warm-expired-claim",
                 action="warmup",
-                scheduled_at=utcnow() - timedelta(minutes=1),
+                scheduled_at=utcnow().replace(tzinfo=None) - timedelta(minutes=1),
                 score=3.0,
                 reason="expired_claim_reclaim",
                 warmup_cycle_key=cycle_key,

@@ -167,6 +167,9 @@ DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 DEFAULT_CONVERSATION_ARCHIVE_DIR = DEFAULT_HOME_DIR / "conversation-archive"
 DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
 _MAX_OAUTH_EXCHANGE_TIMEOUT_SECONDS = 300.0
+# Both SQLite busy waits and PostgreSQL pool checkout use a fixed 30-second
+# budget. Refresh claims cover this DB section as well as admission and OAuth.
+_TOKEN_REFRESH_DB_EXCHANGE_TIMEOUT_SECONDS = 30.0
 type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
@@ -276,10 +279,8 @@ class Settings(BaseSettings):
     # Cross-replica token-refresh claim (account_refresh_claims table).
     # The TTL bounds how long a crashed claimant can block refresh for one
     # account; it is validated to stay >= proxy_admission_wait_timeout_seconds
-    # + 3x token_refresh_timeout_seconds because the claim is held across the
-    # refresh-admission wait, the upstream OAuth exchange, and the
-    # post-exchange database persist/status-CAS section; a healthy claimant
-    # must not lose its claim mid-work.
+    # + the fixed DB exchange budget + 2x token_refresh_timeout_seconds because
+    # the claim is held across admission, OAuth, and post-exchange DB work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     auth_guardian_enabled: bool = False
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
@@ -671,7 +672,11 @@ class Settings(BaseSettings):
         # around the HTTP timeout can expire under a healthy claimant stuck in
         # admission or finishing the persist path, letting another replica
         # claim the same account and reuse the single-use refresh token.
-        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 3.0 * self.token_refresh_timeout_seconds
+        minimum_ttl = (
+            self.proxy_admission_wait_timeout_seconds
+            + _TOKEN_REFRESH_DB_EXCHANGE_TIMEOUT_SECONDS
+            + 2.0 * self.token_refresh_timeout_seconds
+        )
         if "token_refresh_claim_ttl_seconds" not in self.model_fields_set:
             # The operator has not opted into the new setting. Derive the
             # default from the related timeouts so a deployment that only
@@ -683,8 +688,8 @@ class Settings(BaseSettings):
         if self.token_refresh_claim_ttl_seconds < minimum_ttl:
             raise ValueError(
                 "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "
-                f"+ 3x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
-                "its claim while waiting for refresh admission, mid-exchange, or during post-exchange persistence"
+                f"+ {_TOKEN_REFRESH_DB_EXCHANGE_TIMEOUT_SECONDS:g}s DB exchange budget + 2x "
+                f"token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose its claim"
             )
         return self
 

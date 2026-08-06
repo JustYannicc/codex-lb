@@ -271,14 +271,14 @@ def test_claim_ttl_must_cover_admission_wait_plus_exchange_and_persist_timeout()
         Settings(
             token_refresh_timeout_seconds=8.0,
             proxy_admission_wait_timeout_seconds=10.0,
-            token_refresh_claim_ttl_seconds=33.0,
+            token_refresh_claim_ttl_seconds=55.0,
         )
     settings = Settings(
         token_refresh_timeout_seconds=8.0,
         proxy_admission_wait_timeout_seconds=10.0,
-        token_refresh_claim_ttl_seconds=34.0,
+        token_refresh_claim_ttl_seconds=56.0,
     )
-    assert settings.token_refresh_claim_ttl_seconds == 34.0
+    assert settings.token_refresh_claim_ttl_seconds == 56.0
 
 
 def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -> None:
@@ -291,14 +291,13 @@ def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -
         token_refresh_timeout_seconds=11.0,
         proxy_admission_wait_timeout_seconds=14.0,
     )
-    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 3.0 * settings.token_refresh_timeout_seconds
+    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 30.0 + 2.0 * settings.token_refresh_timeout_seconds
     assert settings.token_refresh_claim_ttl_seconds >= minimum_ttl
     assert settings.token_refresh_claim_ttl_seconds == minimum_ttl
 
-    # A default deployment keeps the fixed 30s default (which already covers
-    # the default timeout floor of 32s only after derivation.
+    # A default deployment derives the fixed default above the complete floor.
     default_settings = Settings()
-    assert default_settings.token_refresh_claim_ttl_seconds == 34.0
+    assert default_settings.token_refresh_claim_ttl_seconds == 56.0
 
 
 @pytest.mark.parametrize(
