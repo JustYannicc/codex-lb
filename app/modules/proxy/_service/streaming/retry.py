@@ -1965,7 +1965,25 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     await _record_or_defer_confirmed_route_backoff(account)
-                                    can_try_other_account = (
+                                    # A confirmed pre-dispatch connect failure
+                                    # guarantees zero upstream bytes, so a
+                                    # locally verified full-resend replay is
+                                    # safe to move off the dead owner before
+                                    # the hard-ownership raise (same file/
+                                    # turn-state/single-account guards as the
+                                    # post-visible failover path below).
+                                    verified_owner_replay_moved = False
+                                    if (
+                                        attempt < max_attempts - 1
+                                        and routing_strategy != "single_account"
+                                        and file_preferred_account_id is None
+                                        and turn_state_owner_account_id is None
+                                    ):
+                                        verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
+                                            account_id=account.id,
+                                            outcome="owner_pre_dispatch_proxy_connect_failure",
+                                        )
+                                    can_try_other_account = verified_owner_replay_moved or (
                                         not require_preferred_account
                                         and account.id != file_preferred_account_id
                                         and attempt < max_attempts - 1
@@ -1980,7 +1998,8 @@ class _StreamingRetryMixin:
                                     last_pre_dispatch_transport_error = tex
                                     transient_failed_account_id = account.id
                                     excluded_account_ids.add(account.id)
-                                    affinity = replace(affinity, reallocate_sticky=True)
+                                    if not verified_owner_replay_moved:
+                                        affinity = replace(affinity, reallocate_sticky=True)
                                     _facade().logger.info(
                                         "Retrying stream after confirmed pre-dispatch proxy connect failure "
                                         "request_id=%s account_id=%s attempt=%d",
