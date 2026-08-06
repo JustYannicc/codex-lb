@@ -1034,3 +1034,47 @@ async def test_trends_by_bucket_sqlite_avoids_window_function_for_latest_metadat
     ]
     assert len(trend_queries) == 1
     assert "row_number()" not in trend_queries[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_per_account_cutoffs_parity(db_setup):
+    """Per-account cutoffs bound the PostgreSQL fetch without changing what
+    callers keep after their own trimming; SQLite keeps the shared floor."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-short"))
+        await accounts_repo.upsert(_make_account("acc-wide"))
+
+        # acc-short: rows inside and outside its 5h cutoff.
+        await repo.add_entry("acc-short", 10.0, window="primary", recorded_at=now - timedelta(hours=20))
+        await repo.add_entry("acc-short", 20.0, window="primary", recorded_at=now - timedelta(hours=1))
+        # acc-wide: an old row that only its wide cutoff keeps.
+        await repo.add_entry("acc-wide", 30.0, window="primary", recorded_at=now - timedelta(hours=20))
+        await repo.add_entry("acc-wide", 40.0, window="primary", recorded_at=now - timedelta(hours=1))
+
+        shared_floor = now - timedelta(days=7)
+        cutoffs = {
+            "acc-short": now - timedelta(hours=5),
+            "acc-wide": now - timedelta(days=7),
+        }
+        bounded = await repo.bulk_history_since(
+            ["acc-short", "acc-wide"],
+            "primary",
+            shared_floor,
+            cutoffs=cutoffs,
+        )
+        unbounded = await repo.bulk_history_since(["acc-short", "acc-wide"], "primary", shared_floor)
+
+    dialect = "postgresql" if str(engine.url).startswith("postgresql") else "sqlite"
+    if dialect == "postgresql":
+        assert [snapshot.used_percent for snapshot in bounded["acc-short"]] == [20.0]
+    else:
+        # SQLite keeps the shared floor; callers trim per account.
+        assert [snapshot.used_percent for snapshot in bounded["acc-short"]] == [10.0, 20.0]
+    assert [snapshot.used_percent for snapshot in bounded["acc-wide"]] == [30.0, 40.0]
+
+    # Parity with the shared-floor fetch after per-account trimming.
+    trimmed = [snapshot for snapshot in unbounded["acc-short"] if snapshot.recorded_at >= cutoffs["acc-short"]]
+    assert [snapshot.used_percent for snapshot in trimmed] == [20.0]

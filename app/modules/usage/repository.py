@@ -783,8 +783,19 @@ class UsageRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
-        """Fetch minimal usage history fields for multiple accounts in a single query."""
+        """Fetch minimal usage history fields for multiple accounts in a single query.
+
+        ``since`` is the global floor. ``cutoffs`` optionally tightens the
+        lookback per account: callers whose accounts have different window
+        lengths would otherwise widen the fetch to the longest window for
+        every account and discard the surplus in Python. The SQLite path
+        ignores ``cutoffs`` (its snapshot cache is keyed on the shared
+        floor); callers keep their own per-account trimming, so honoring the
+        bound here only changes how many rows are read, never the result.
+        """
         if not account_ids:
             return {}
         bind = self._session.get_bind()
@@ -799,6 +810,21 @@ class UsageRepository:
                 since,
             )
 
+        if cutoffs:
+            recency_clause = or_(
+                *(
+                    and_(
+                        UsageHistory.account_id == account_id,
+                        UsageHistory.recorded_at >= max(cutoffs.get(account_id, since), since),
+                    )
+                    for account_id in account_ids
+                )
+            )
+        else:
+            recency_clause = and_(
+                UsageHistory.account_id.in_(account_ids),
+                UsageHistory.recorded_at >= since,
+            )
         stmt = (
             select(
                 UsageHistory.id,
@@ -809,9 +835,8 @@ class UsageRepository:
                 UsageHistory.window_minutes,
             )
             .where(
-                UsageHistory.account_id.in_(account_ids),
+                recency_clause,
                 _window_clause(window),
-                UsageHistory.recorded_at >= since,
             )
             .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
         )
