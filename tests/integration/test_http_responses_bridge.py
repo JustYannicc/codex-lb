@@ -13362,6 +13362,7 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
     upstream = _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket()
     connect_count = 0
 
@@ -13467,6 +13468,10 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             first_response, second_response = await asyncio.wait_for(
                 asyncio.gather(first, second),
                 timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
+
+            assert not any(
+                not future.done() for future in service._http_bridge_inflight_sessions.values()
             )
 
     assert first_response.status_code == 200
