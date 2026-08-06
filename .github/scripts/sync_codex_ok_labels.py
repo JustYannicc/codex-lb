@@ -31,10 +31,14 @@ CODEX_CLEAN_RE = re.compile(
     re.IGNORECASE,
 )
 CODEX_FINDING_RE = re.compile(r"(?:\bP[0-3]\s+Badge\b|badge/P[0-3]-|(?m:(?:^|\n)\s*(?:\*\*)?(?:\[P[0-3]\]|P[0-3]\b)))")
+# Anchored to the real quota envelope ("You have reached your Codex usage limits
+# for code reviews. ...") so ordinary reviews that merely discuss usage limits do
+# not latch the backoff.
 CODEX_USAGE_LIMIT_RE = re.compile(
-    r"(reached your Codex usage limits|Codex usage limit|usage-limit|usage limit)",
+    r"^\s*You(?: have|['’]ve) reached your Codex usage limits",
     re.IGNORECASE,
 )
+CLEAN_REACTION_CONTENTS = frozenset({"THUMBS_UP", "+1"})
 DEFAULT_CODEX_USAGE_LIMIT_BACKOFF_HOURS = 24.0
 DEFAULT_CODEX_REVIEW_RESPONSE_WAIT_SECONDS = 10.0
 SUCCESS_CHECK_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -253,7 +257,13 @@ class SyncDecision:
     approve_workflow_run_ids: tuple[int, ...]
 
 
-def run_gh(args: list[str], *, input_json: Any | None = None, timeout_seconds: int = 30) -> Any:
+def run_gh(
+    args: list[str],
+    *,
+    input_json: Any | None = None,
+    timeout_seconds: int = 30,
+    fallback_retry: bool = True,
+) -> Any:
     command = ["gh", *args]
     input_text = json.dumps(input_json) if input_json is not None else None
     safe_to_retry = _gh_args_safe_to_retry(args)
@@ -280,6 +290,14 @@ def run_gh(args: list[str], *, input_json: Any | None = None, timeout_seconds: i
 
         detail = proc.stderr.strip() or proc.stdout.strip()
         if _RATE_LIMIT_MARKER in detail and _activate_fallback_token():
+            if not fallback_retry:
+                # Identity-sensitive commands (e.g. the @codex review comment)
+                # must not silently retry under the fallback token's identity;
+                # later calls still benefit from the activated fallback.
+                raise GhError(
+                    f"{' '.join(command)}: rate-limited; switched to GH_FALLBACK_TOKEN "
+                    f"without retrying this identity-sensitive command ({detail})"
+                )
             print(
                 "warning: active token rate-limited; retrying with GH_FALLBACK_TOKEN",
                 file=sys.stderr,
@@ -447,7 +465,7 @@ def codex_request_reaction_state(node: dict[str, Any], *, allowed_authors: set[s
         if reaction_user_login(reaction) not in allowed_authors:
             continue
         content = str(reaction.get("content") or "").upper()
-        if content in {"THUMBS_UP", "+1"}:
+        if content in CLEAN_REACTION_CONTENTS:
             state = "clean"
         elif content == "EYES" and state == "none":
             state = "pending"
@@ -491,6 +509,27 @@ def current_viewer_login() -> str:
     return login
 
 
+def resolve_codex_request_sender() -> str | None:
+    """Resolve the login GitHub records as the author of our `@codex review` comments.
+
+    GitHub App installation tokens cannot call ``GET /user``, so prefer the app
+    slug the workflow exports (installation comments are authored as
+    ``<slug>[bot]``) and fall back to ``GET /user`` for PAT-backed runs.
+    The slug describes the primary token only, so it is ignored once the run
+    has switched to ``GH_FALLBACK_TOKEN``. Returns ``None`` when no path can
+    resolve a login.
+    """
+
+    slug = os.environ.get("GH_APP_SLUG", "").strip()
+    if slug and not _fallback_token_active:
+        return slug if slug.endswith("[bot]") else f"{slug}[bot]"
+    try:
+        return current_viewer_login()
+    except GhError as exc:
+        print(f"warning: cannot resolve @codex review sender via GET /user: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
 def is_normal_codex_response_node(node: dict[str, Any]) -> bool:
     body = node_body(node)
     if is_codex_usage_limit_body(body):
@@ -516,6 +555,8 @@ class CodexReviewUsageBackoff:
             timestamp = parse_github_timestamp(timeline_node_timestamp(node))
             if is_codex_review_request_comment(node):
                 active_request_author = node_author_login(node)
+                if active_request_author == self.request_author:
+                    self._observe_clean_request_reactions(node)
                 continue
             if timestamp is None or timestamp < self.now - self.window:
                 continue
@@ -531,6 +572,26 @@ class CodexReviewUsageBackoff:
                 if self.latest_normal_response_at is None or timestamp > self.latest_normal_response_at:
                     self.latest_normal_response_at = timestamp
 
+    def _observe_clean_request_reactions(self, node: dict[str, Any]) -> None:
+        """Count clean THUMBS_UP reactions on the sender's requests as normal responses."""
+
+        reactions = node.get("reactions")
+        reaction_nodes = reactions.get("nodes") if isinstance(reactions, dict) else None
+        if not isinstance(reaction_nodes, list):
+            return
+        for reaction in reaction_nodes:
+            if not isinstance(reaction, dict):
+                continue
+            if reaction_user_login(reaction) not in self.allowed_authors:
+                continue
+            if str(reaction.get("content") or "").upper() not in CLEAN_REACTION_CONTENTS:
+                continue
+            timestamp = parse_github_timestamp(reaction.get("createdAt"))
+            if timestamp is None or timestamp < self.now - self.window:
+                continue
+            if self.latest_normal_response_at is None or timestamp > self.latest_normal_response_at:
+                self.latest_normal_response_at = timestamp
+
     def is_limited(self) -> bool:
         if self.latest_usage_limit_at is None:
             return False
@@ -543,6 +604,42 @@ class CodexReviewUsageBackoff:
             f"request Codex review on {decision.repo}#{decision.number}: skipped because "
             f"{self.request_author} has a recent Codex usage-limit reply at {when}{suffix}"
         )
+
+
+def recent_issue_comment_timelines(repo: str, *, since: datetime) -> list[list[dict[str, Any]]]:
+    """Return repo-wide recent issue comments grouped per issue as timeline nodes.
+
+    Sender quota evidence can live on pull requests outside the current
+    selection (single --pr runs, closed PRs), so the backoff also observes
+    every issue comment in the window, grouped per issue to keep request ->
+    reply attribution intact.
+    """
+
+    since_text = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    comments = paged_api(f"/repos/{repo}/issues/comments?since={quote(since_text, safe='')}")
+    nodes_by_issue: dict[str, list[dict[str, Any]]] = {}
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
+        issue_url = str(comment.get("issue_url") or "")
+        nodes_by_issue.setdefault(issue_url, []).append(
+            {
+                "__typename": "IssueComment",
+                "author": {"login": author_login(comment)},
+                "bodyText": body,
+                "createdAt": comment.get("created_at"),
+                "url": comment.get("html_url"),
+            }
+        )
+    return [sorted(nodes, key=lambda node: str(node.get("createdAt") or "")) for nodes in nodes_by_issue.values()]
+
+
+def backoff_timeline_observer(backoff: CodexReviewUsageBackoff) -> Callable[[int, list[dict[str, Any]]], None]:
+    def observe(_number: int, timeline_nodes: list[dict[str, Any]]) -> None:
+        backoff.observe(timeline_nodes)
+
+    return observe
 
 
 def unresolved_review_comment_urls(repo: str, number: int) -> set[str]:
@@ -1008,6 +1105,18 @@ def commit_checks_state(repo: str, head_sha: str) -> str:
     )
 
 
+def decision_requires_writes(decision: SyncDecision) -> bool:
+    """Return whether applying this decision would mutate GitHub state."""
+
+    return (
+        decision.ok_action != "keep"
+        or decision.needs_work_action != "keep"
+        or decision.needs_rebase_action != "keep"
+        or bool(decision.legacy_labels)
+        or bool(decision.approve_workflow_run_ids)
+    )
+
+
 def pr_merge_state(repo: str, number: int) -> str:
     payload = run_gh(
         ["pr", "view", str(number), "--repo", repo, "--json", "mergeStateStatus,mergeable"],
@@ -1163,9 +1272,10 @@ def run_gh_write(
     timeout_seconds: int,
     tolerate_permission_errors: bool,
     action: str,
+    fallback_retry: bool = True,
 ) -> str | None:
     try:
-        run_gh(args, timeout_seconds=timeout_seconds)
+        run_gh(args, timeout_seconds=timeout_seconds, fallback_retry=fallback_retry)
     except GhError as exc:
         if tolerate_permission_errors and is_github_app_write_denial(exc):
             return write_warning(action, exc)
@@ -1444,6 +1554,7 @@ def trigger_codex_review(
         timeout_seconds=30,
         tolerate_permission_errors=tolerate_permission_errors,
         action=f"request Codex review on {decision.repo}#{decision.number}",
+        fallback_retry=False,
     )
     return (warning,) if warning else ()
 
@@ -1545,6 +1656,13 @@ def main(argv: list[str] | None = None) -> int:
     repos = [repo_path(repo) for repo in args.repo]
     allowed_authors = CODEX_REVIEW_AUTHORS | set(args.reviewer_login)
     had_error = False
+    # Per-sender quota state is shared across every --repo in the run: a usage
+    # limit observed in one repository suppresses review requests in the rest.
+    # Timelines classified before the backoff exists are retained so evidence
+    # from repositories without their own triggers still counts.
+    usage_backoff: CodexReviewUsageBackoff | None = None
+    unobserved_timelines: list[list[dict[str, Any]]] = []
+    codex_sender_unresolved = False
 
     for repo in repos:
         setup_warnings: list[str] = []
@@ -1623,30 +1741,92 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
 
-        usage_backoff: CodexReviewUsageBackoff | None = None
-        if (
-            args.apply
-            and not args.no_trigger_missing_codex
-            and any(decision.trigger_codex_review for decision in decisions)
-        ):
-            try:
-                usage_backoff = CodexReviewUsageBackoff(
-                    request_author=current_viewer_login(),
-                    allowed_authors=allowed_authors,
-                    window=timedelta(hours=args.codex_usage_limit_backoff_hours),
-                    now=datetime.now(UTC),
-                )
-            except GhError as exc:
-                had_error = True
-                print(f"{repo}: cannot determine @codex review sender: {exc}", file=sys.stderr, flush=True)
-                continue
-            for timeline_nodes in timeline_nodes_by_number.values():
-                usage_backoff.observe(timeline_nodes)
+        if args.apply and not args.no_trigger_missing_codex:
+            unobserved_timelines.extend(timeline_nodes_by_number.values())
+            repo_has_triggers = any(decision.trigger_codex_review for decision in decisions)
+            if repo_has_triggers:
+                # Quota evidence may live outside the selected PRs (single
+                # --pr runs, closed PRs), so also observe the repo's recent
+                # issue comments before posting anything here.
+                try:
+                    unobserved_timelines.extend(
+                        recent_issue_comment_timelines(
+                            repo,
+                            since=datetime.now(UTC) - timedelta(hours=args.codex_usage_limit_backoff_hours),
+                        )
+                    )
+                except GhError as exc:
+                    print(
+                        f"warning: {repo}: could not gather repo-wide Codex quota evidence: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if usage_backoff is None and not codex_sender_unresolved and repo_has_triggers:
+                sender = resolve_codex_request_sender()
+                if sender is None:
+                    # Only the trigger/backoff path depends on the sender;
+                    # label sync and workflow approvals proceed regardless.
+                    codex_sender_unresolved = True
+                    print(
+                        f"{repo}: cannot determine @codex review sender; "
+                        "skipping review triggers but continuing label sync",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    usage_backoff = CodexReviewUsageBackoff(
+                        request_author=sender,
+                        allowed_authors=allowed_authors,
+                        window=timedelta(hours=args.codex_usage_limit_backoff_hours),
+                        now=datetime.now(UTC),
+                    )
+            if usage_backoff is not None:
+                for timeline_nodes in unobserved_timelines:
+                    usage_backoff.observe(timeline_nodes)
+                unobserved_timelines.clear()
 
         for decision in decisions:
             try:
                 write_warnings: tuple[str, ...] = ()
                 trigger_codex_review_now = decision.trigger_codex_review and not args.no_trigger_missing_codex
+                if args.apply and (decision_requires_writes(decision) or trigger_codex_review_now):
+                    # Under --all-open every PR is classified before any is
+                    # applied; evidence (head, checks, reviews, mergeability)
+                    # may have moved meanwhile. Reclassify immediately before
+                    # writing and act on the fresh decision only. The fresh
+                    # timeline also feeds the shared backoff so a quota reply
+                    # that arrived after bulk classification suppresses the
+                    # remaining review requests.
+                    try:
+                        fresh_decision = decide_pr(
+                            decision.repo,
+                            decision.number,
+                            allowed_authors=allowed_authors,
+                            ignore_checks=args.ignore_checks,
+                            timeline_observer=(
+                                backoff_timeline_observer(usage_backoff) if usage_backoff is not None else None
+                            ),
+                        )
+                    except GhError as exc:
+                        if not args.tolerate_read_errors:
+                            had_error = True
+                        print(
+                            f"{decision.repo}#{decision.number}: apply-time reclassification failed: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        continue
+                    if fresh_decision.head_sha != decision.head_sha:
+                        print(
+                            f"warning: {decision.repo}#{decision.number}: head moved from "
+                            f"{decision.head_sha[:12]} to {fresh_decision.head_sha[:12]} after classification; "
+                            "skipping stale decision",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        continue
+                    trigger_codex_review_now = trigger_codex_review_now and fresh_decision.trigger_codex_review
+                    decision = fresh_decision
                 if args.apply:
                     accumulated_warnings: list[str] = []
                     accumulated_warnings.extend(
@@ -1662,18 +1842,38 @@ def main(argv: list[str] | None = None) -> int:
                                 tolerate_permission_errors=args.tolerate_write_permission_errors,
                             )
                         )
+                    if trigger_codex_review_now and _fallback_token_active:
+                        # Comments would now be authored by the fallback token's
+                        # identity, not the resolved sender, so quota replies
+                        # could no longer be attributed. Stop posting.
+                        accumulated_warnings.append(
+                            f"request Codex review on {decision.repo}#{decision.number}: skipped because "
+                            "the run switched to GH_FALLBACK_TOKEN and the resolved sender no longer "
+                            "matches the active token"
+                        )
+                        trigger_codex_review_now = False
+                    if trigger_codex_review_now and codex_sender_unresolved:
+                        accumulated_warnings.append(
+                            f"request Codex review on {decision.repo}#{decision.number}: skipped because "
+                            "the @codex review sender could not be resolved"
+                        )
+                        trigger_codex_review_now = False
                     if trigger_codex_review_now and usage_backoff is not None and usage_backoff.is_limited():
                         accumulated_warnings.append(usage_backoff.skip_warning(decision))
                         trigger_codex_review_now = False
                     if trigger_codex_review_now:
-                        accumulated_warnings.extend(
-                            trigger_codex_review(
-                                decision,
-                                body=args.codex_review_command,
-                                tolerate_permission_errors=args.tolerate_write_permission_errors,
-                            )
+                        trigger_warnings = trigger_codex_review(
+                            decision,
+                            body=args.codex_review_command,
+                            tolerate_permission_errors=args.tolerate_write_permission_errors,
                         )
-                        if usage_backoff is not None and usage_backoff.latest_normal_response_at is None:
+                        accumulated_warnings.extend(trigger_warnings)
+                        review_request_posted = not trigger_warnings
+                        if (
+                            review_request_posted
+                            and usage_backoff is not None
+                            and usage_backoff.latest_normal_response_at is None
+                        ):
                             if args.codex_review_response_wait_seconds > 0:
                                 time.sleep(args.codex_review_response_wait_seconds)
                             _head_sha, timeline_nodes = pr_timeline_evidence(decision.repo, decision.number)
