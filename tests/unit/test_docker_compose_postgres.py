@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
 from app.core.config.settings import Settings
 from app.core.prestop import PRESTOP_REQUEST_TIMEOUT_SECONDS
 from app.core.server import POST_DRAIN_CLEANUP_TIMEOUT_SECONDS
