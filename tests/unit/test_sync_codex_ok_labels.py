@@ -675,11 +675,14 @@ def test_main_stops_codex_review_triggers_after_probe_hits_usage_limit(
         return ()
 
     def fake_timeline(_repo: str, _number: int) -> tuple[str, list[dict[str, Any]]]:
+        now = module.datetime.now(module.UTC)
+        request_at = (now - module.timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
+        limit_at = (now - module.timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
         return (
             "a" * 40,
             [
-                codex_review_request("Komzpa", "2026-07-31T15:00:00Z"),
-                codex_issue_comment("You've reached your Codex usage limits.", "2026-07-31T15:01:00Z"),
+                codex_review_request("Komzpa", request_at),
+                codex_issue_comment("You've reached your Codex usage limits.", limit_at),
             ],
         )
 
