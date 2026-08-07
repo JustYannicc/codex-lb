@@ -5,7 +5,6 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -76,19 +75,23 @@ class _AccountSelectionCache:
         self.invalidate_calls += 1
 
 
-def test_select_auth_guardian_candidates_returns_stale_active_only() -> None:
+def test_select_auth_guardian_candidates_returns_stale_eligible_accounts_only() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
         _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
         _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
         _account("oldest-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=20)),
-        _account("paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=20)),
-        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=20)),
+        _account("stale-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=18)),
+        _account("fresh-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=1)),
+        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=24)),
+        _account("deactivated", status=AccountStatus.DEACTIVATED, last_refresh=now - timedelta(hours=24)),
+        _account("rate-limited", status=AccountStatus.RATE_LIMITED, last_refresh=now - timedelta(hours=24)),
+        _account("quota-exceeded", status=AccountStatus.QUOTA_EXCEEDED, last_refresh=now - timedelta(hours=24)),
     ]
 
-    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=2)
+    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=3)
 
-    assert [account.id for account in selected] == ["oldest-active", "stale-active"]
+    assert [account.id for account in selected] == ["oldest-active", "stale-paused", "stale-active"]
 
 
 def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
@@ -107,6 +110,19 @@ def test_build_auth_guardian_scheduler_allows_single_replica_without_leader_elec
 
     scheduler = build_auth_guardian_scheduler()
 
+    assert scheduler.enabled is True
+
+
+def test_build_auth_guardian_scheduler_enabled_by_default_for_single_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODEX_LB_AUTH_GUARDIAN_ENABLED", raising=False)
+    settings = _settings(leader_election_enabled=True)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+
+    assert settings.auth_guardian_enabled is True
     assert scheduler.enabled is True
 
 
@@ -203,7 +219,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     accounts = [
         _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
         _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
-        _account("paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=13)),
+        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=13)),
     ]
     repo = _Repo(accounts)
     calls: list[str] = []
@@ -229,6 +245,37 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     await scheduler._refresh_once()
 
     assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changing_status() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    paused = _account("stale-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([paused])
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-paused"]
+    assert paused.status is AccountStatus.PAUSED
 
 
 @pytest.mark.asyncio
@@ -610,12 +657,16 @@ async def _noop_sleep() -> None:
 
 def _settings(
     *,
-    auth_guardian_enabled: bool,
     leader_election_enabled: bool,
+    auth_guardian_enabled: bool | None = None,
     instance_ring: list[str] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        auth_guardian_enabled=auth_guardian_enabled,
+) -> settings_module.Settings:
+    settings = settings_module.Settings(
+        _env_file=None,
         leader_election_enabled=leader_election_enabled,
+        http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_instance_ring=instance_ring or [],
     )
+    if auth_guardian_enabled is not None:
+        settings.auth_guardian_enabled = auth_guardian_enabled
+    return settings

@@ -129,7 +129,7 @@ the host side of the compose `ports` mapping instead.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
-| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | `bool` | `False` |
+| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | `bool` | `True` |
 | `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` | `float` | `30.0` |
 | `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | `int` | `8` |
 | `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` | `float` | `8.0` |

@@ -279,7 +279,7 @@ class Settings(BaseSettings):
     # refresh-admission wait AND the OAuth exchange, and a healthy claimant
     # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
-    auth_guardian_enabled: bool = False
+    auth_guardian_enabled: bool = True
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0

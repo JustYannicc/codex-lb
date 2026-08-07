@@ -23,9 +23,9 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 logger = logging.getLogger(__name__)
 
 # Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
-# The guardian is an off-by-default background refresher; these values are
-# implementation details, not operator contract. ``AuthGuardianScheduler``
-# keeps them as constructor fields so tests can exercise the behavior.
+# The guardian is a background refresher; these values are implementation
+# details, not operator contract. ``AuthGuardianScheduler`` keeps them as
+# constructor fields so tests can exercise the behavior.
 _INTERVAL_SECONDS = 21600
 _MAX_REFRESH_AGE_SECONDS = 43200
 _BATCH_SIZE = 100
@@ -33,6 +33,10 @@ _CONCURRENCY = 3
 _JITTER_SECONDS = 300.0
 _FAILURE_BACKOFF_BASE_SECONDS = 300.0
 _FAILURE_BACKOFF_MAX_SECONDS = 3600.0
+
+# RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
+# reconciliation, then become guardian-eligible within the max-age window.
+_AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
 
 
 _T = TypeVar("_T")
@@ -165,7 +169,7 @@ class AuthGuardianScheduler:
                 if account is None:
                     self._failures.pop(account_id, None)
                     return
-                if not _auth_guardian_account_is_stale_active(
+                if not _auth_guardian_account_is_stale_eligible(
                     account,
                     now=self.now(),
                     max_age_seconds=self.max_age_seconds,
@@ -242,7 +246,7 @@ def select_auth_guardian_candidates(
     candidates = [
         account
         for account in accounts
-        if _auth_guardian_account_is_stale_active(
+        if _auth_guardian_account_is_stale_eligible(
             account,
             now=now,
             max_age_seconds=max_age_seconds,
@@ -280,13 +284,13 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
     )
 
 
-def _auth_guardian_account_is_stale_active(
+def _auth_guardian_account_is_stale_eligible(
     account: Account,
     *,
     now: datetime,
     max_age_seconds: int,
 ) -> bool:
-    if account.status != AccountStatus.ACTIVE:
+    if account.status not in _AUTH_GUARDIAN_ELIGIBLE_STATUSES:
         return False
     age = to_utc_naive(now) - to_utc_naive(account.last_refresh)
     return age > timedelta(seconds=max_age_seconds)
