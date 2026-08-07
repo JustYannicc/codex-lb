@@ -9957,6 +9957,7 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10058,6 +10059,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10187,6 +10189,7 @@ async def test_v1_responses_http_bridge_inflight_waiter_rejects_service_tier_pro
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10307,6 +10310,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10408,6 +10412,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10754,6 +10759,7 @@ async def test_v1_responses_http_bridge_request_key_follower_isolates_different_
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10867,6 +10873,7 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10999,6 +11006,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11091,6 +11099,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11186,6 +11195,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11281,6 +11291,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11378,6 +11389,7 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
