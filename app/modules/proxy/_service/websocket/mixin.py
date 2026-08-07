@@ -1676,8 +1676,18 @@ class _WebSocketMixin:
                     and upstream_control is not None
                     and upstream_control.reconnect_requested
                     and upstream_reader is not None
+                    and (
+                        upstream_reader.done()
+                        or upstream_control.replay_request_state is not None
+                        or not pending_requests
+                    )
                 ):
-                    await upstream_reader
+                    try:
+                        await upstream_reader
+                    except asyncio.CancelledError:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
                     if replay_request_state is None:
                         replay_request_state = upstream_control.replay_request_state
                     upstream_reader = None
