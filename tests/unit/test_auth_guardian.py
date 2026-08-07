@@ -89,9 +89,13 @@ def test_select_auth_guardian_candidates_returns_stale_eligible_accounts_only() 
         _account("quota-exceeded", status=AccountStatus.QUOTA_EXCEEDED, last_refresh=now - timedelta(hours=24)),
     ]
 
-    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=3)
+    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=10)
 
     assert [account.id for account in selected] == ["oldest-active", "stale-paused", "stale-active"]
+
+    batched = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=2)
+
+    assert [account.id for account in batched] == ["oldest-active", "stale-paused"]
 
 
 def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:

@@ -169,6 +169,7 @@ class AuthGuardianScheduler:
                 if account is None:
                     self._failures.pop(account_id, None)
                     return
+                source_status = account.status.value
                 if not _auth_guardian_account_is_stale_eligible(
                     account,
                     now=self.now(),
@@ -189,9 +190,11 @@ class AuthGuardianScheduler:
                     if exc.is_permanent:
                         get_account_selection_cache().invalidate()
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s code=%s permanent=%s transport=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s code=%s permanent=%s "
+                        "transport=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.code,
                         exc.is_permanent,
                         exc.transport_error,
@@ -200,9 +203,10 @@ class AuthGuardianScheduler:
                 except Exception as exc:
                     self._record_failure(account_id)
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s error_type=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s error_type=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.__class__.__name__,
                         exc_info=True,
                     )
@@ -210,9 +214,10 @@ class AuthGuardianScheduler:
                 self._failures.pop(account_id, None)
                 get_account_selection_cache().invalidate()
                 logger.info(
-                    "Auth Guardian refreshed account_id=%s account_alias=%s",
+                    "Auth Guardian refreshed account_id=%s account_alias=%s status=%s",
                     account.id,
                     _safe_account_alias(account),
+                    source_status,
                 )
 
     def _in_backoff(self, account_id: str) -> bool:
