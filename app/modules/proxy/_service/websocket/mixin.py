@@ -1677,6 +1677,9 @@ class _WebSocketMixin:
                     and upstream_control.reconnect_requested
                     and upstream_reader is not None
                     and (
+                        # Keep receiving downstream controls while a live
+                        # reader still owns pending work; only replay or a
+                        # completed/empty drain needs immediate settlement.
                         upstream_reader.done()
                         or upstream_control.replay_request_state is not None
                         or not pending_requests
