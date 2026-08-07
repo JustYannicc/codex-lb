@@ -13470,9 +13470,7 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
                 timeout=_TEST_SYNC_TIMEOUT_SECONDS,
             )
 
-            assert not any(
-                not future.done() for future in service._http_bridge_inflight_sessions.values()
-            )
+            assert not any(not future.done() for future in service._http_bridge_inflight_sessions.values())
 
     assert first_response.status_code == 200
     assert first_response.json()["output"][0]["content"][0]["text"] == "OK"
