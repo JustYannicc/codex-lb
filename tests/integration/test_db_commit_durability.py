@@ -164,7 +164,7 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
         reservation_id = f"res-{uuid4().hex[:8]}"
         used_at = utcnow()
         coalescer = ApiKeyLastUsedCoalescer()
-        coalescer.record(key_id, used_at)
+        await coalescer.record(key_id, used_at)
         with _captured_statements() as statements:
             await repo.create_usage_reservation(reservation_id, key_id=key_id, model="gpt-5", items=[])
             await repo.commit()

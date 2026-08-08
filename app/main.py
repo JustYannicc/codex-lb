@@ -626,8 +626,11 @@ async def lifespan(app: FastAPI):
             # A stopped poller must not keep receiving propagation requests.
             set_cache_invalidation_poller(None)
         await api_key_limit_reset_scheduler.stop()
-        # Final last_used_at flush; settlement tasks were drained above, so
-        # every recorded touch is pending by now.
+        # Final last_used_at flush (bounded retries). Settlement tasks were
+        # drained above; if that drain timed out, a surviving task's later
+        # record() write-throughs immediately (stop() switches the coalescer
+        # to shutdown write-through mode before the final flush), so a late
+        # touch is never parked in a pending map with no remaining flusher.
         await api_key_last_used_flush_scheduler.stop()
         await usage_scheduler.stop()
         await stop_live_usage_ingestor()
