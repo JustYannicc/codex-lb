@@ -1,7 +1,7 @@
 """add owner process epoch to durable HTTP bridge sessions
 
 Revision ID: 20260806_120000_add_http_bridge_owner_process_epoch
-Revises: 20260730_000000_add_api_key_fair_share_threshold
+Revises: 20260808_000000_tune_usage_history_autovacuum
 Create Date: 2026-08-06 12:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260806_120000_add_http_bridge_owner_process_epoch"
-down_revision = "20260730_000000_add_api_key_fair_share_threshold"
+down_revision = "20260808_000000_tune_usage_history_autovacuum"
 branch_labels = None
 depends_on = None
 
