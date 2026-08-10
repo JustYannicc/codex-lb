@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.utils.time import to_utc_naive
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
@@ -51,7 +52,11 @@ class DurableBridgeLookup:
             return False
         if self.lease_expires_at is None:
             return False
-        return self.lease_expires_at > now
+        # lease_expires_at is a timestamptz column: PostgreSQL yields it
+        # offset-aware while the app clock (utcnow) and SQLite yield naive
+        # UTC. Normalize both sides — comparing them raw raises TypeError
+        # on the anchored-lookup hot path.
+        return to_utc_naive(self.lease_expires_at) > to_utc_naive(now)
 
 
 class DurableBridgeSessionCoordinator:

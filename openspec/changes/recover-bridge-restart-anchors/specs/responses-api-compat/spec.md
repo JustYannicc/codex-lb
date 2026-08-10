@@ -107,3 +107,9 @@ exist. The default threshold MUST be no greater than seven failures.
 - **AND** retires the session despite the admission waiter
 - **AND** the next attach starts from fresh durable state rather than the
   poisoned previous-response anchor
+
+#### Scenario: Lease liveness comparison is timezone-safe
+- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
+- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
+- **THEN** both timestamps MUST be normalized to naive UTC before comparison
+- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes

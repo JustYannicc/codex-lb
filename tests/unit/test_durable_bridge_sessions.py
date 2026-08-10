@@ -3045,3 +3045,45 @@ async def test_durable_bridge_retry_circuit_round_trip(
     assert cleared.consecutive_failures == 0
     assert cleared.cooldown_until_epoch == 0.0
     assert cleared.last_detail is None
+
+
+def _lookup_with_lease(lease_expires_at):
+    from app.db.models import HttpBridgeSessionState
+    from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
+
+    return DurableBridgeLookup(
+        session_id="sess-tz",
+        canonical_kind="session_header",
+        canonical_key="key-tz",
+        api_key_scope="scope-tz",
+        account_id="acc-tz",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=lease_expires_at,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+    )
+
+
+def test_lease_is_active_accepts_timestamptz_aware_expiry():
+    """lease_expires_at is a timestamptz column: PostgreSQL yields it
+    offset-aware while utcnow() (and SQLite) are naive UTC. The raw
+    comparison raised TypeError on the anchored-lookup hot path in
+    production (v1.23.0-beta.5); lease_is_active must normalize."""
+    from datetime import timedelta, timezone
+
+    from app.core.utils.time import utcnow
+
+    naive_now = utcnow()
+    aware_future = (naive_now + timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+    aware_past = (naive_now - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+
+    assert _lookup_with_lease(aware_future).lease_is_active(now=naive_now) is True
+    assert _lookup_with_lease(aware_past).lease_is_active(now=naive_now) is False
+    # Naive expiry against an aware clock must normalize the same way.
+    aware_now = naive_now.replace(tzinfo=timezone.utc)
+    assert _lookup_with_lease(naive_now + timedelta(minutes=5)).lease_is_active(now=aware_now) is True
+    # Existing naive-vs-naive behaviour is unchanged.
+    assert _lookup_with_lease(naive_now + timedelta(minutes=5)).lease_is_active(now=naive_now) is True
+    assert _lookup_with_lease(None).lease_is_active(now=naive_now) is False
