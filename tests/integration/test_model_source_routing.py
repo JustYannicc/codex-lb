@@ -945,6 +945,69 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
 
 
 @pytest.mark.asyncio
+async def test_cancelled_buffered_stream_releases_reservation_when_close_fails(async_client, monkeypatch):
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsageHolder
+
+    released: list[object] = []
+
+    async def record_release(reservation: object) -> None:
+        released.append(reservation)
+
+    async def fail_close(_stream: object) -> None:
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", record_release)
+    monkeypatch.setattr(proxy_api, "_aclose_stream", fail_close)
+
+    async def cancelled_stream() -> AsyncIterator[bytes]:
+        yield b"data: partial\n\n"
+        raise asyncio.CancelledError()
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_cancelled_close_fails",
+        name="cancelled-close-fails",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_cancelled_close_fails",
+        key_id="key_cancelled_close_fails",
+        model="cancelled-model",
+    )
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await proxy_api._buffered_limited_source_chat_stream_response(
+            request,
+            source=source,
+            api_key=None,
+            model="cancelled-model",
+            reservation=reservation,
+            stream=cancelled_stream(),
+            usage_holder=SourceUsageHolder(),
+            rate_limit_headers={},
+        )
+
+    assert released == [reservation]
+
+
+@pytest.mark.asyncio
 async def test_downstream_disconnect_closes_source_stream(async_client, monkeypatch):
     from starlette.requests import Request
 

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -288,6 +288,7 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
@@ -2053,18 +2054,25 @@ async def _release_reservation_deferring_cancellation(
     await _await_cleanup_deferring_cancellation(_release_reservation(reservation))
 
 
-async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
-    """Finish a required cleanup operation despite repeated cancellation delivery."""
+async def _await_result_deferring_cancellation(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
+    """Finish an owned awaitable despite repeated cancellation and report whether cancellation arrived."""
 
     task = asyncio.ensure_future(awaitable)
+    cancellation_deferred = False
     with anyio.CancelScope(shield=True):
         while True:
             try:
-                await asyncio.shield(task)
-                return
+                return await asyncio.shield(task), cancellation_deferred
             except asyncio.CancelledError:
                 if task.cancelled():
                     raise
+                cancellation_deferred = True
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish a required cleanup operation despite repeated cancellation delivery."""
+
+    await _await_result_deferring_cancellation(awaitable)
 
 
 async def _rate_limit_headers_with_reservation_cleanup(
@@ -4824,7 +4832,25 @@ async def _source_chat_completion_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    settled, settlement_deferred_cancellation = await _await_result_deferring_cancellation(
+        _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    )
+    if settlement_deferred_cancellation:
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="cancelled",
+                usage=result.usage,
+                timings=result.timings,
+                error_code="client_disconnected",
+                error_message="client disconnected during source usage settlement",
+                upstream_status_code=result.upstream_status_code,
+            )
+        )
+        raise asyncio.CancelledError
     if not settled:
         await _log_source_chat_completion(
             request,
@@ -4901,9 +4927,11 @@ async def _buffered_limited_source_chat_stream_response(
         # Starlette cancels this task when the downstream client disconnects;
         # CancelledError is a BaseException, so without this branch the
         # reservation would stay charged until stale-reservation cleanup.
-        await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
-        if reservation is not None:
-            await _release_reservation_deferring_cancellation(reservation)
+        try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
+        finally:
+            if reservation is not None:
+                await _release_reservation_deferring_cancellation(reservation)
         raise
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
