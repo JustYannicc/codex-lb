@@ -11536,6 +11536,60 @@ async def test_stream_once_marks_downstream_cancel_after_visible_event(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stream_once_keeps_first_terminal_frame_success_after_downstream_close(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_first_terminal_close")
+    settlement = proxy_service._StreamSettlement()
+    completed_line = (
+        'data: {"type":"response.completed","response":{"id":"resp_first_terminal_close","status":"completed"}}\n\n'
+    )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        yield completed_line
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_once(
+        account,
+        payload,
+        {"session_id": "sid-stream"},
+        "req_stream_first_terminal_close",
+        False,
+        request_started_at=0.0,
+        api_key=None,
+        api_key_reservation=None,
+        settlement=settlement,
+        suppress_text_done_events=False,
+        upstream_stream_transport=None,
+        request_transport="http",
+    )
+
+    first_chunk = await anext(stream)
+    assert "event: response.completed" in first_chunk
+    assert '"id":"resp_first_terminal_close"' in first_chunk
+    await cast(Any, stream).aclose()
+
+    assert settlement.status == "success"
+    assert settlement.error is None
+    assert settlement.account_health_error is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["error_code"] is None
+    assert request_logs.calls[0]["request_id"] == "resp_first_terminal_close"
+
+
+@pytest.mark.asyncio
 async def test_stream_once_marks_downstream_cancel_before_first_event(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

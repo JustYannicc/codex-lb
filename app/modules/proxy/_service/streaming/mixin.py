@@ -749,6 +749,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
+                    if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                        terminal_event_seen = True
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
@@ -759,8 +761,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
-            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                terminal_event_seen = True
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event_payload(event_payload)

@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
+import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
@@ -483,6 +484,30 @@ class _StreamingRetryMixin:
                 settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
                 return settled
             return True
+
+        async def _finalize_terminal_settlement_after_downstream_close(
+            current_settlement: _StreamSettlement,
+            account: Account,
+        ) -> None:
+            nonlocal settled
+
+            async def _finalize() -> None:
+                nonlocal settled
+                if not settled:
+                    settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
+                if not settled:
+                    return
+                if current_settlement.account_health_error:
+                    await proxy._handle_stream_error(
+                        account,
+                        _stream_settlement_error_payload(current_settlement),
+                        current_settlement.error_code or "upstream_error",
+                    )
+                elif current_settlement.record_success:
+                    await proxy._load_balancer.record_success(account)
+
+            with anyio.CancelScope(shield=True):
+                await _finalize()
 
         async def _wait_for_process_network_recovery(
             account: Account,
@@ -1810,16 +1835,14 @@ class _StreamingRetryMixin:
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
-                        except asyncio.CancelledError:
+                        except (asyncio.CancelledError, GeneratorExit):
                             # A terminal frame may already have been yielded when
                             # downstream cancellation is delivered on the next
-                            # generator resume. Finalize that successful usage and
+                            # generator resume. Finalize that terminal usage and
                             # health result before propagating cancellation so the
                             # reservation is not released as abandoned.
-                            if settlement.status == "success" and not settled:
-                                settled = await _settle_stream_usage_before_pending_penalty(settlement)
-                                if settled and settlement.record_success:
-                                    await proxy._load_balancer.record_success(account)
+                            if settlement.status in {"success", "error"} and not settled:
+                                await _finalize_terminal_settlement_after_downstream_close(settlement, account)
                             raise
                         except (_TransientStreamError, ProxyResponseError) as tex:
                             if account.id == account_model_replacement_account_id:

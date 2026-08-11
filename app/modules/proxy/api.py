@@ -2056,7 +2056,7 @@ async def _release_reservation_deferring_cancellation(
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
     """Finish a required cleanup operation despite repeated cancellation delivery."""
 
-    task = asyncio.create_task(awaitable)
+    task = asyncio.ensure_future(awaitable)
     with anyio.CancelScope(shield=True):
         while True:
             try:
