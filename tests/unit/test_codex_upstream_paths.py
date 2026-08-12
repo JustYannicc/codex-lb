@@ -318,7 +318,7 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
 
     assert response.object == "response.compact"
     assert response.id == "compact_1"
-    assert client.calls[0]["url"].endswith("/backend-api/codex/responses/compact")
+    assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
     assert trace.endpoint_id == "ep_1"

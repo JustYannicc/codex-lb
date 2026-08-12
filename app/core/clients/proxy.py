@@ -3599,7 +3599,7 @@ class _CompactCommandTransport:
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
         upstream_base = settings.upstream_base_url.rstrip("/")
-        url = f"{upstream_base}/codex/responses/compact"
+        url = f"{upstream_base}/codex/responses"
         require_route_or_direct_egress_opt_in(
             route=self.route,
             allow_direct_egress=self.allow_direct_egress,
