@@ -75,10 +75,11 @@ class _CompactStreamContent:
     async def iter_chunked(self, size: int):
         del size
         yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"id":"msg_compact_1","type":"message","role":"assistant",'
+            b'"status":"completed","content":[{"type":"output_text","text":"enc_compact_1"}]}}\n\n'
             b'data: {"type":"response.completed","response":'
-            b'{"object":"response","id":"resp_compact_1","status":"completed",'
-            b'"output":[{"id":"cmp_1","type":"compaction_summary",'
-            b'"encrypted_content":"enc_compact_1"}]}}\n\n'
+            b'{"object":"response","id":"resp_compact_1","status":"completed","output":[]}}\n\n'
         )
 
 
@@ -336,7 +337,9 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert response.object == "response.compaction"
     assert response.id == "resp_compact_1"
     assert response.model_extra == {
-        "output": [{"id": "cmp_1", "type": "compaction", "encrypted_content": "enc_compact_1"}]
+        "output": [
+            {"id": "msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
+        ]
     }
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route

@@ -1203,17 +1203,30 @@ async def _iter_sse_events(
         yield bytes(buffer).decode("utf-8", errors="replace")
 
 
-async def _compact_response_payload_from_sse(resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int) -> JsonValue:
+async def _compact_response_payload_from_sse(
+    resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int
+) -> JsonValue:
     last_payload: dict[str, JsonValue] | None = None
+    output_items: dict[int, dict[str, JsonValue]] = {}
     async for event_block in _iter_sse_events(resp, idle_timeout_seconds, max_event_bytes):
         payload = parse_sse_data_json(event_block)
         if payload is None:
             continue
         last_payload = payload
         event_type = payload.get("type")
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            output_index = payload.get("output_index")
+            item = payload.get("item")
+            if isinstance(output_index, int) and isinstance(item, dict):
+                output_items[output_index] = dict(item)
         if event_type == "response.completed":
             response = payload.get("response")
             if isinstance(response, dict):
+                existing_output = response.get("output")
+                if output_items and not (isinstance(existing_output, list) and existing_output):
+                    merged_response = dict(response)
+                    merged_response["output"] = [item for _, item in sorted(output_items.items())]
+                    return merged_response
                 return response
             raise ValueError("response.completed event missing response object")
         if event_type in {"response.failed", "response.incomplete", "error"}:
@@ -1270,9 +1283,50 @@ def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[
                 normalized = _normalize_compact_output_item(raw_item)
                 if normalized is not None:
                     return normalized
+            if item_type == "message":
+                normalized = _compact_output_item_from_message(raw_item)
+                if normalized is not None:
+                    return normalized
     summary = payload.get("compaction_summary")
     if is_json_mapping(summary):
         return _normalize_compact_output_item(summary)
+    return None
+
+
+def _compact_output_item_from_message(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    text = _compact_message_text(item)
+    if not text:
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": text,
+    }
+    for key in ("id", "status"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value
+    return normalized
+
+
+def _compact_message_text(item: Mapping[str, JsonValue]) -> str | None:
+    direct_text = item.get("text")
+    if isinstance(direct_text, str) and direct_text:
+        return direct_text
+    content = item.get("content")
+    content_parts: list[Mapping[str, JsonValue]]
+    if is_json_mapping(content):
+        content_parts = [content]
+    elif isinstance(content, list):
+        content_parts = [part for part in content if is_json_mapping(part)]
+    else:
+        content_parts = []
+    text_parts: list[str] = []
+    for part in content_parts:
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            text_parts.append(text)
+    if text_parts:
+        return "".join(text_parts)
     return None
 
 
