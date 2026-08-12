@@ -1231,7 +1231,10 @@ async def _compact_response_payload_from_success_response(
 ) -> JsonValue:
     headers = _codex_response_headers(resp)
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
-    if "text/event-stream" in content_type.lower():
+    content = getattr(resp, "content", None)
+    if "text/event-stream" in content_type.lower() or (
+        not content_type and callable(getattr(content, "iter_chunked", None))
+    ):
         return await _compact_response_payload_from_sse(cast(SSEResponse, resp), idle_timeout_seconds, max_event_bytes)
     return await _codex_response_json(resp)
 

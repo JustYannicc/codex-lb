@@ -82,7 +82,7 @@ class _CompactStreamContent:
 
 class _CompactStreamResponse:
     status_code = 200
-    headers = {"content-type": "text/event-stream"}
+    headers: dict[str, str] = {}
     content = _CompactStreamContent()
 
 

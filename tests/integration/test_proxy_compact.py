@@ -225,7 +225,7 @@ class _SseContent:
 class _SseResponse:
     status = 200
     reason = "OK"
-    headers = {"content-type": "text/event-stream"}
+    headers: dict[str, str] = {}
     content = _SseContent()
 
     async def __aenter__(self):
