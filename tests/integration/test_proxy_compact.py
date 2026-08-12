@@ -821,7 +821,8 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     call_json = _session_call_json(session)
     assert call_json["stream"] is True
     assert call_json["store"] is False
-    assert session.calls[0]["headers"]["Accept"] == "text/event-stream"
+    call_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert call_headers["Accept"] == "text/event-stream"
 
 
 @pytest.mark.asyncio

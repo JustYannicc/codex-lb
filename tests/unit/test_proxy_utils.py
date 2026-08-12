@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
+from typing import Any, AsyncIterator, Iterator, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock
 from unittest.mock import call as mock_call
 
@@ -5957,17 +5957,31 @@ class _JsonCompactResponse:
         return self._payload
 
 
+def _compact_sse_response(
+    *,
+    response_id: str = "resp_compact_1",
+    encrypted_content: str = "enc_summary_1",
+) -> "_SsePostResponse":
+    return _SsePostResponse(
+        [
+            (
+                b'data: {"type":"response.output_item.done","output_index":0,'
+                b'"item":{"id":"msg_compact_1","type":"message","role":"assistant",'
+                b'"status":"completed","content":[{"type":"output_text","text":"'
+                + encrypted_content.encode()
+                + b'"}]}}\n\n'
+            ),
+            (
+                b'data: {"type":"response.completed","response":{"object":"response","id":"'
+                + response_id.encode()
+                + b'","status":"completed","output":[]}}\n\n'
+            ),
+        ]
+    )
+
+
 class _CompactSession:
-    class _CompactResponseLike(Protocol):
-        status: int
-
-        async def __aenter__(self) -> Self: ...
-
-        async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool: ...
-
-        async def json(self, *, content_type: str | None = None) -> dict[str, object]: ...
-
-    def __init__(self, response: _CompactResponseLike) -> None:
+    def __init__(self, response: object) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
@@ -10034,6 +10048,8 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         upstream_compact_timeout_seconds = 12.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
         image_inline_fetch_enabled = True
         trace_channels = frozenset()
 
@@ -10062,11 +10078,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(
-        _JsonCompactResponse(
-            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
-        )
-    )
+    session = _CompactSession(_compact_sse_response(encrypted_content="enc_summary_1"))
 
     result = await proxy_module.compact_responses(
         payload,
@@ -10083,7 +10095,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     assert timeout.sock_read == pytest.approx(6.5)
     dumped = result.model_dump(mode="json", exclude_none=True)
     assert dumped["object"] == "response.compaction"
-    assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
+    assert dumped["output"][0]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 205.5
 
 
@@ -10093,6 +10105,8 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         upstream_compact_timeout_seconds = 12.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
 
@@ -10129,11 +10143,7 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
             "reasoning": {"context": "turn", "effort": "high", "vendor_hint": 7},
         }
     )
-    session = _CompactSession(
-        _JsonCompactResponse(
-            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
-        )
-    )
+    session = _CompactSession(_compact_sse_response(encrypted_content="enc_summary_1"))
 
     await proxy_module.compact_responses(
         payload,
@@ -10224,11 +10234,14 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
         upstream_compact_timeout_seconds = 123.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
 
     class _TimeoutCompactResponse:
         status = 200
+        headers: dict[str, str] = {}
 
         async def __aenter__(self):
             return self
@@ -10236,8 +10249,13 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def json(self, *, content_type=None):
-            raise proxy_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+        class _TimeoutContent:
+            async def iter_chunked(self, size: int):
+                del size
+                raise proxy_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+                yield b""
+
+        content = _TimeoutContent()
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -10274,6 +10292,8 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
         upstream_compact_timeout_seconds = None
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
 
@@ -10284,11 +10304,7 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
     payload = proxy_module.ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
-    session = _CompactSession(
-        _JsonCompactResponse(
-            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_2"}}
-        )
-    )
+    session = _CompactSession(_compact_sse_response(response_id="resp_compact_2", encrypted_content="enc_summary_2"))
 
     result = await proxy_module.compact_responses(
         payload,
@@ -10305,7 +10321,7 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
     assert timeout.sock_read is None
     dumped = result.model_dump(mode="json", exclude_none=True)
     assert dumped["object"] == "response.compaction"
-    assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_2"
+    assert dumped["output"][0]["encrypted_content"] == "enc_summary_2"
 
 
 def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():
