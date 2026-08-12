@@ -450,6 +450,7 @@ class _CodexSSEResponse:
     def __init__(self, response: Any) -> None:
         self._response = response
         self.status = _codex_response_status(response)
+        self.headers = _codex_response_headers(response)
         self.content = _CodexSSEContent(response)
 
     async def json(self, *, content_type: str | None = None) -> JsonValue:
@@ -1200,6 +1201,39 @@ async def _iter_sse_events(
         if len(buffer) > max_event_bytes:
             raise StreamEventTooLargeError(len(buffer), max_event_bytes)
         yield bytes(buffer).decode("utf-8", errors="replace")
+
+
+async def _compact_response_payload_from_sse(resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int) -> JsonValue:
+    last_payload: dict[str, JsonValue] | None = None
+    async for event_block in _iter_sse_events(resp, idle_timeout_seconds, max_event_bytes):
+        payload = parse_sse_data_json(event_block)
+        if payload is None:
+            continue
+        last_payload = payload
+        event_type = payload.get("type")
+        if event_type == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                return response
+            raise ValueError("response.completed event missing response object")
+        if event_type in {"response.failed", "response.incomplete", "error"}:
+            raise ValueError(f"upstream SSE terminal event {event_type}")
+    if last_payload is not None:
+        raise ValueError("upstream SSE ended before response.completed")
+    raise ValueError("empty upstream SSE response")
+
+
+async def _compact_response_payload_from_success_response(
+    resp: Any,
+    *,
+    idle_timeout_seconds: float,
+    max_event_bytes: int,
+) -> JsonValue:
+    headers = _codex_response_headers(resp)
+    content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
+    if "text/event-stream" in content_type.lower():
+        return await _compact_response_payload_from_sse(cast(SSEResponse, resp), idle_timeout_seconds, max_event_bytes)
+    return await _codex_response_json(resp)
 
 
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
@@ -3612,13 +3646,14 @@ class _CompactCommandTransport:
             self.headers,
             self.access_token,
             upstream_account_id,
-            accept="application/json",
+            accept="text/event-stream",
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = dict(self.payload.to_payload())
         payload_dict["store"] = False
+        payload_dict["stream"] = True
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
@@ -3738,7 +3773,11 @@ class _CompactCommandTransport:
                         upstream_status_code=status_code,
                     )
                 try:
-                    data = await _codex_response_json(resp)
+                    data = await _compact_response_payload_from_success_response(
+                        _CodexSSEResponse(resp),
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3816,7 +3855,11 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                     )
                 try:
-                    data = await resp.json(content_type=None)
+                    data = await _compact_response_payload_from_success_response(
+                        resp,
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"
                     error_code = process_network_error_code(

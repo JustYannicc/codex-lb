@@ -71,6 +71,21 @@ class _CompactResponse:
         return {"object": "response.compact", "id": "compact_1"}
 
 
+class _CompactStreamContent:
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.completed","response":'
+            b'{"object":"response.compact","id":"compact_1"}}\n\n'
+        )
+
+
+class _CompactStreamResponse:
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = _CompactStreamContent()
+
+
 class _TranscribeResponse:
     status_code = 200
     headers = {"content-type": "application/json"}
@@ -301,7 +316,7 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
 
 @pytest.mark.asyncio
 async def test_compact_responses_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
-    client = _CodexClient(_CompactResponse())
+    client = _CodexClient(_CompactStreamResponse())
     trace = UpstreamProxyRouteTrace()
     payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
 
@@ -321,6 +336,9 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
+    assert client.calls[0]["json"]["store"] is False
+    assert client.calls[0]["json"]["stream"] is True
+    assert client.calls[0]["headers"]["Accept"] == "text/event-stream"
     assert trace.endpoint_id == "ep_1"
 
 
