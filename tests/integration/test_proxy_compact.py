@@ -794,7 +794,7 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert _session_call_url(session).endswith("/codex/responses")
     call_json = _session_call_json(session)
     assert "stream" not in call_json
-    assert "store" not in call_json
+    assert call_json["store"] is False
 
 
 @pytest.mark.asyncio

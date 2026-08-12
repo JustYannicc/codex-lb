@@ -3618,6 +3618,7 @@ class _CompactCommandTransport:
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = dict(self.payload.to_payload())
+        payload_dict["store"] = False
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
