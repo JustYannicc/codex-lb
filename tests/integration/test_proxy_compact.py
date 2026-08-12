@@ -217,8 +217,9 @@ class _SseContent:
         del size
         yield (
             b'data: {"type":"response.completed","response":'
-            b'{"object":"response.compaction","compaction_summary":'
-            b'{"encrypted_content":"enc_compact_summary_1","summary_text":"condensed thread state"}}}\n\n'
+            b'{"object":"response","id":"resp_compact_summary_1","status":"completed",'
+            b'"output":[{"id":"cmp_compact_summary_1","type":"compaction_summary",'
+            b'"encrypted_content":"enc_compact_summary_1"}]}}\n\n'
         )
 
 
@@ -806,10 +807,10 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "response.compaction"
-    assert body["compaction_summary"] == {
-        "encrypted_content": "enc_compact_summary_1",
-        "summary_text": "condensed thread state",
-    }
+    assert body["id"] == "resp_compact_summary_1"
+    assert body["output"] == [
+        {"id": "cmp_compact_summary_1", "type": "compaction", "encrypted_content": "enc_compact_summary_1"}
+    ]
     assert _session_call_url(session).endswith("/codex/responses")
     call_json = _session_call_json(session)
     assert call_json["stream"] is True

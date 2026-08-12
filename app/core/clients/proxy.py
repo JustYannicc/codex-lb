@@ -1239,6 +1239,58 @@ async def _compact_response_payload_from_success_response(
     return await _codex_response_json(resp)
 
 
+def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
+    if not is_json_mapping(payload):
+        return payload
+    object_value = payload.get("object")
+    if isinstance(object_value, str) and object_value.startswith("response.compact"):
+        return payload
+    compaction_item = _compact_output_item_from_payload(payload)
+    if compaction_item is None:
+        return payload
+    normalized: dict[str, JsonValue] = {
+        "object": "response.compaction",
+        "output": [compaction_item],
+    }
+    for key in ("id", "status", "usage"):
+        value = payload.get(key)
+        if value is not None:
+            normalized[key] = value
+    return normalized
+
+
+def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for raw_item in output:
+            if not is_json_mapping(raw_item):
+                continue
+            item_type = raw_item.get("type")
+            if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
+                normalized = _normalize_compact_output_item(raw_item)
+                if normalized is not None:
+                    return normalized
+    summary = payload.get("compaction_summary")
+    if is_json_mapping(summary):
+        return _normalize_compact_output_item(summary)
+    return None
+
+
+def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    for key in ("id", "status"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value
+    return normalized
+
+
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
     try:
         return await resp.json(content_type=None), None
@@ -3795,6 +3847,7 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=status_code,
                     ) from exc
+                data = _normalize_compact_response_payload_shape(data)
                 parsed = parse_compact_response_payload(data)
                 archive_json(
                     direction="server_to_codex",
@@ -3899,6 +3952,7 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
                     ) from exc
+                data = _normalize_compact_response_payload_shape(data)
                 parsed = parse_compact_response_payload(data)
                 archive_json(
                     direction="server_to_codex",

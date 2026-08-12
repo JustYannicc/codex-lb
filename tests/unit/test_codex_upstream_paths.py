@@ -76,7 +76,9 @@ class _CompactStreamContent:
         del size
         yield (
             b'data: {"type":"response.completed","response":'
-            b'{"object":"response.compact","id":"compact_1"}}\n\n'
+            b'{"object":"response","id":"resp_compact_1","status":"completed",'
+            b'"output":[{"id":"cmp_1","type":"compaction_summary",'
+            b'"encrypted_content":"enc_compact_1"}]}}\n\n'
         )
 
 
@@ -331,8 +333,11 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
         route_trace=trace,
     )
 
-    assert response.object == "response.compact"
-    assert response.id == "compact_1"
+    assert response.object == "response.compaction"
+    assert response.id == "resp_compact_1"
+    assert response.model_extra == {
+        "output": [{"id": "cmp_1", "type": "compaction", "encrypted_content": "enc_compact_1"}]
+    }
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
