@@ -11590,6 +11590,35 @@ async def test_stream_once_keeps_first_terminal_frame_success_after_downstream_c
 
 
 @pytest.mark.asyncio
+async def test_streaming_retry_cleanup_helper_finishes_task_before_reporting_cancellation():
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup() -> str:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+        return "settled"
+
+    cleanup_task = asyncio.create_task(cleanup())
+    waiter_task = asyncio.create_task(streaming_retry_module._await_task_deferring_cancellation(cleanup_task))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+
+    waiter_task.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup_task.done()
+    assert not waiter_task.done()
+
+    release_cleanup.set()
+    result, cancellation = await asyncio.wait_for(waiter_task, timeout=1)
+
+    assert result == "settled"
+    assert cancellation is not None
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_stream_once_marks_downstream_cancel_before_first_event(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

@@ -1008,6 +1008,85 @@ async def test_cancelled_buffered_stream_releases_reservation_when_close_fails(a
 
 
 @pytest.mark.asyncio
+async def test_cancelled_buffered_stream_finishes_usage_settlement(async_client, monkeypatch):
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsage, SourceUsageHolder
+
+    settlement_started = asyncio.Event()
+    settlement_can_finish = asyncio.Event()
+    settled: list[object] = []
+    logs: list[dict[str, object]] = []
+
+    async def settle(reservation: object, **_kwargs: object) -> bool:
+        settlement_started.set()
+        await settlement_can_finish.wait()
+        settled.append(reservation)
+        return True
+
+    async def record_log(*_args: object, **kwargs: object) -> None:
+        logs.append(kwargs)
+
+    monkeypatch.setattr(proxy_api, "_settle_source_reservation", settle)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", record_log)
+
+    async def complete_stream() -> AsyncIterator[bytes]:
+        yield b"data: done\n\n"
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_settlement_cancelled",
+        name="settlement-cancelled",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_settlement_cancelled",
+        key_id="key_settlement_cancelled",
+        model="cancelled-model",
+    )
+    usage_holder = SourceUsageHolder(usage=SourceUsage(input_tokens=3, output_tokens=5))
+
+    task = asyncio.create_task(
+        proxy_api._buffered_limited_source_chat_stream_response(
+            request,
+            source=source,
+            api_key=None,
+            model="cancelled-model",
+            reservation=reservation,
+            stream=complete_stream(),
+            usage_holder=usage_holder,
+            rate_limit_headers={},
+        )
+    )
+    await asyncio.wait_for(settlement_started.wait(), timeout=1)
+    task.cancel()
+    settlement_can_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert settled == [reservation]
+    assert logs[-1]["status"] == "cancelled"
+    assert logs[-1]["error_code"] == "client_disconnected"
+    assert logs[-1]["usage"] == usage_holder.usage
+
+
+@pytest.mark.asyncio
 async def test_downstream_disconnect_closes_source_stream(async_client, monkeypatch):
     from starlette.requests import Request
 

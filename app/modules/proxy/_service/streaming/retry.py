@@ -7,10 +7,9 @@ import logging
 import sys
 import time
 from dataclasses import replace
-from typing import Any, AsyncIterator, Mapping, cast
+from typing import Any, AsyncIterator, Mapping, TypeVar, cast
 
 import aiohttp
-import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
@@ -87,6 +86,22 @@ _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT = "smart"
 _HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always_websocket", "pinned"})
 
 logger = logging.getLogger(__name__)
+_TaskResultT = TypeVar("_TaskResultT")
+
+
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[_TaskResultT],
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = cancellation or exc
 
 
 def _facade() -> Any:
@@ -506,8 +521,10 @@ class _StreamingRetryMixin:
                 elif current_settlement.record_success:
                     await proxy._load_balancer.record_success(account)
 
-            with anyio.CancelScope(shield=True):
-                await _finalize()
+            finalize_task = asyncio.create_task(_finalize(), name=f"stream-terminal-settlement-{request_id}")
+            _, cancellation = await _await_task_deferring_cancellation(finalize_task)
+            if cancellation is not None:
+                raise cancellation
 
         async def _wait_for_process_network_recovery(
             account: Account,
@@ -1794,7 +1811,7 @@ class _StreamingRetryMixin:
                         )
                         try:
                             settlement = _StreamSettlement()
-                            async for line in proxy._stream_once(
+                            inner_stream = proxy._stream_once(
                                 account,
                                 payload,
                                 headers,
@@ -1833,8 +1850,12 @@ class _StreamingRetryMixin:
                                 ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                            ):
-                                yield line
+                            )
+                            try:
+                                async for line in inner_stream:
+                                    yield line
+                            finally:
+                                await inner_stream.aclose()
                         except (asyncio.CancelledError, GeneratorExit):
                             # A terminal frame may already have been yielded when
                             # downstream cancellation is delivered on the next
