@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -357,3 +357,63 @@ async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled
     sticky_repo.purge_prompt_cache_before.assert_not_awaited()
     bridge_repo.purge_closed_before.assert_not_awaited()
     bridge_repo.purge_operation_spool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_once_bumps_http_bridge_purge_only_when_abandoned_rows_deleted(monkeypatch) -> None:
+    """Issue #1354 fix (b): the leader signals owner replicas through the
+    http_bridge_purge invalidation namespace exactly when the abandoned purge
+    actually deleted rows."""
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=600,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+    )
+    settings_repo = AsyncMock()
+    settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_idle_ttl_seconds=120.0,
+            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+        ),
+    )
+    sticky_repo = AsyncMock()
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
+    sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    for deleted_count, expected_bumps in ((3, 1), (0, 0)):
+        bridge_repo = AsyncMock()
+        bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+        bridge_repo.purge_abandoned_before = AsyncMock(return_value=deleted_count)
+        bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+        bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+        poller = Mock()
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=True)
+
+        with (
+            patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+            patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+            patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+            patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+            patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+            patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+            patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller),
+            patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+        ):
+            await scheduler._cleanup_once()
+
+        assert poller.request_bump.call_count == expected_bumps, f"deleted_count={deleted_count}"
+        if expected_bumps:
+            poller.request_bump.assert_called_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)

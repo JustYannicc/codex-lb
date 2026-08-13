@@ -325,6 +325,7 @@ async def lifespan(app: FastAPI):
         NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
         NAMESPACE_FIREWALL,
+        NAMESPACE_HTTP_BRIDGE_PURGE,
         NAMESPACE_MODEL_REGISTRY,
         NAMESPACE_RESET_CREDITS,
         NAMESPACE_SETTINGS,
@@ -365,6 +366,18 @@ async def lifespan(app: FastAPI):
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
+
+    # The leader's abandoned-session purge deletes durable rows only; owner
+    # replicas reconcile their in-memory bridge sessions (and the account
+    # stream leases those hold) against the durable table on this bump
+    # (issue #1354). Late-bound through app.state so a replica that has not
+    # constructed the proxy service yet has nothing to reconcile.
+    async def _reconcile_purged_bridge_sessions() -> None:
+        proxy_service = getattr(app.state, "proxy_service", None)
+        if proxy_service is not None and hasattr(proxy_service, "reconcile_purged_http_bridge_sessions"):
+            await proxy_service.reconcile_purged_http_bridge_sessions()
+
+    cache_poller.on_invalidation(NAMESPACE_HTTP_BRIDGE_PURGE, _reconcile_purged_bridge_sessions)
     if settings.model_registry_enabled:
         from app.core.openai.model_registry_store import reconcile_model_registry_from_store
 

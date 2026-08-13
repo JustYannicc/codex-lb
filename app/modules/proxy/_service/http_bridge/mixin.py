@@ -1660,6 +1660,71 @@ class _HTTPBridgeMixin(
                 sessions_to_close.append(session)
         return sessions_to_close
 
+    async def reconcile_purged_http_bridge_sessions(self) -> int:
+        """Close idle in-memory bridge sessions whose durable row was purged.
+
+        The leader's abandoned-session purge only deletes durable rows; the
+        owner replica's in-memory session — and the account stream lease it
+        may hold — survives it, which is the observed "DB empty but the
+        in-memory stream cap stays full" state from issue #1354. Invoked from
+        the ``http_bridge_purge`` cache-invalidation bump, this pass releases
+        those orphans. Only quiescent sessions are eligible: anything with
+        pending work, an admission waiter, an in-progress handoff, or an
+        unanchored reservation is left to its own lifecycle.
+        """
+        async with self._http_bridge_lock:
+            candidates: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession, str]] = []
+            for key, session in self._http_bridge_sessions.items():
+                if session.closed or session.handoff_in_progress:
+                    continue
+                if _http_bridge_session_has_admission_waiter(session):
+                    continue
+                if getattr(session, "unanchored_reservation_id", None) is not None:
+                    continue
+                durable_session_id = getattr(session, "durable_session_id", None)
+                if durable_session_id is None:
+                    continue
+                pending_count = self._http_bridge_pending_count_nowait(session, context="purge_reconcile")
+                if pending_count is None or pending_count:
+                    continue
+                candidates.append((key, session, durable_session_id))
+        if not candidates:
+            return 0
+        lookups = await self._durable_bridge.lookup_sessions(
+            session_ids=[durable_session_id for _key, _session, durable_session_id in candidates]
+        )
+        live_session_ids = {lookup.session_id for lookup in lookups}
+        sessions_to_close: list[_HTTPBridgeSession] = []
+        async with self._http_bridge_lock:
+            for key, session, durable_session_id in candidates:
+                if durable_session_id in live_session_ids:
+                    continue
+                # Re-validate under the lock: the session may have picked up
+                # work or been replaced while the durable lookup ran.
+                if session.closed or session.handoff_in_progress:
+                    continue
+                if _http_bridge_session_has_admission_waiter(session):
+                    continue
+                pending_count = self._http_bridge_pending_count_nowait(session, context="purge_reconcile")
+                if pending_count is None or pending_count:
+                    continue
+                detached = self._detach_http_bridge_session_locked(key, expected_session=session)
+                if detached is None:
+                    continue
+                _log_http_bridge_event(
+                    "evict_purged",
+                    key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                sessions_to_close.append(detached)
+        for session in sessions_to_close:
+            # The durable row is already gone, so skip the release round trip.
+            await self._close_http_bridge_session(session, release_durable_session=False)
+        return len(sessions_to_close)
+
     _close_http_bridge_session = _helpers_close_http_bridge_session
 
     async def _create_http_bridge_session(

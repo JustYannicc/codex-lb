@@ -26811,3 +26811,61 @@ async def test_http_bridge_eventless_timeout_signal_drains_after_repeated_sessio
     await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
     await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
     record_errors.assert_awaited_once_with(account, 2)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1354 fix (b): a quiescent in-memory session whose durable row the
+    leader purged is detached and closed on the purge bump, releasing its
+    account stream lease; sessions with live rows are untouched."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    lease = proxy_service.AccountLease("lease-purged", "acc-bridge", "stream", time.monotonic())
+    purged = _make_bridge_session(key_value="purged-session")
+    purged.durable_session_id = "dur-purged"
+    purged.account_lease = lease
+    live = _make_bridge_session(key_value="live-session")
+    live.durable_session_id = "dur-live"
+    service._http_bridge_sessions[purged.key] = purged
+    service._http_bridge_sessions[live.key] = live
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    lookup_sessions = AsyncMock(return_value=[SimpleNamespace(session_id="dur-live")])
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=lookup_sessions))
+
+    closed_count = await service.reconcile_purged_http_bridge_sessions()
+
+    assert closed_count == 1
+    assert purged.key not in service._http_bridge_sessions
+    assert live.key in service._http_bridge_sessions
+    assert purged.closed is True
+    assert live.closed is False
+    assert lookup_sessions.await_args.kwargs["session_ids"] == ["dur-purged", "dur-live"]
+    assert any(call.args == (lease,) for call in release_account_lease.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purged_sessions_skips_inflight_and_unclaimed_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sessions with queued/pending work stay on their own turn lifecycle even
+    when their durable row is missing, and sessions without a durable claim are
+    never candidates; with no candidates the durable lookup is skipped."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    busy = _make_bridge_session(key_value="busy-session", queued_request_count=1)
+    busy.durable_session_id = "dur-busy"
+    unclaimed = _make_bridge_session(key_value="unclaimed-session")
+    unclaimed.durable_session_id = None
+    service._http_bridge_sessions[busy.key] = busy
+    service._http_bridge_sessions[unclaimed.key] = unclaimed
+    lookup_sessions = AsyncMock(return_value=[])
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=lookup_sessions))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    closed_count = await service.reconcile_purged_http_bridge_sessions()
+
+    assert closed_count == 0
+    assert busy.key in service._http_bridge_sessions
+    assert unclaimed.key in service._http_bridge_sessions
+    lookup_sessions.assert_not_awaited()

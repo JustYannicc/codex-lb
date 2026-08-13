@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Protocol, TypeVar, cast
 
 from app.core import startup as startup_module
+from app.core.cache.invalidation import NAMESPACE_HTTP_BRIDGE_PURGE, get_cache_invalidation_poller
 from app.core.config.settings import Settings, get_settings
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
@@ -157,6 +158,15 @@ class StickySessionCleanupScheduler:
                                 logger.info(
                                     "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
                                 )
+                                # The purge only removes durable rows; the owner
+                                # replica's in-memory session (and its account
+                                # stream lease) survives it. Bump the purge
+                                # namespace so every replica reconciles its
+                                # in-memory sessions against the durable table
+                                # and releases orphaned leases (issue #1354).
+                                poller = get_cache_invalidation_poller()
+                                if poller is not None:
+                                    poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
                             retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
                                 time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
                             )
