@@ -11109,6 +11109,31 @@ async def test_close_http_bridge_session_bounded_timeout_keeps_close_task_runnin
 
 
 @pytest.mark.asyncio
+async def test_drain_http_bridge_background_cleanup_waits_for_purge_reconcile_close() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+
+    task = asyncio.create_task(cleanup(), name="http-bridge-purge-reconcile-close")
+    service._background_cleanup_tasks.add(task)
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+
+    drain_task = asyncio.create_task(service._drain_http_bridge_background_cleanup_tasks(reason="shutdown"))
+    await asyncio.sleep(0)
+    assert not drain_task.done()
+
+    release_cleanup.set()
+    await asyncio.wait_for(drain_task, timeout=1.0)
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_await_cancelled_task_consumes_child_cancellation() -> None:
     child = asyncio.create_task(asyncio.sleep(60))
 

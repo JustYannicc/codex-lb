@@ -166,7 +166,8 @@ class StickySessionCleanupScheduler:
                                 # and releases orphaned leases (issue #1354).
                                 poller = get_cache_invalidation_poller()
                                 if poller is not None:
-                                    poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
+                                    if not await poller.bump(NAMESPACE_HTTP_BRIDGE_PURGE):
+                                        poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
                             retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
                                 time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
                             )
