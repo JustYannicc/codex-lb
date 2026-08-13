@@ -11,6 +11,12 @@ persisted account row. A workspace-local suffix, shard suffix, or other string
 shape on an unknown internal account ID MUST NOT by itself justify stripping or
 rewriting the ID.
 
+When an exact internal account ID and a ChatGPT account identity both resolve
+but identify different persisted account rows, the snapshot MUST be dropped
+without failing the proxied request. The ingestor MUST NOT let cached ChatGPT
+identity resolution attribute a snapshot to a row that no longer owns that
+ChatGPT identity.
+
 When neither identity path resolves to exactly one persisted account row, the
 snapshot MUST be dropped without failing the proxied request. After a raw
 snapshot identity resolves to a persisted account row, duplicate coalescing
@@ -37,3 +43,17 @@ per-account write interval.
 - **GIVEN** a raw snapshot identity has resolved to a persisted account row
 - **WHEN** the same raw identity publishes an unchanged snapshot inside the write coalescing interval
 - **THEN** the duplicate snapshot is skipped using the resolved account ID
+
+#### Scenario: Conflicting identities are dropped
+
+- **GIVEN** a proxy path publishes a live usage snapshot with an exact internal account ID for one persisted account
+- **AND** it also supplies a ChatGPT account identity that uniquely maps to a different persisted account
+- **WHEN** the live usage ingestor processes it
+- **THEN** no usage rows are written for either conflicting account
+
+#### Scenario: Moved ChatGPT identities are revalidated
+
+- **GIVEN** a ChatGPT account identity previously resolved to one persisted account
+- **AND** that ChatGPT account identity now belongs to a different persisted account
+- **WHEN** a later snapshot uses the same ChatGPT account identity with an unknown internal account ID
+- **THEN** the usage rows are written only for the current persisted account that owns the ChatGPT identity

@@ -259,6 +259,9 @@ class LiveUsageIngestor:
             if chatgpt_account_id:
                 resolved = await self._resolve_account_id_by_chatgpt_account_id(chatgpt_account_id)
                 if resolved is not None:
+                    exact = await self._resolve_account_id_by_account_id(account_id)
+                    if exact is not None and exact != resolved:
+                        return None
                     return resolved
             return await self._resolve_account_id_by_account_id(account_id)
         return await self._resolve_account_id_by_chatgpt_account_id(chatgpt_account_id)
@@ -266,10 +269,6 @@ class LiveUsageIngestor:
     async def _resolve_account_id_by_chatgpt_account_id(self, chatgpt_account_id: str | None) -> str | None:
         if not chatgpt_account_id:
             return None
-        cached = self._resolution_cache.get(f"chatgpt:{chatgpt_account_id}")
-        now = time.monotonic()
-        if cached is not None and now - cached[1] < _RESOLUTION_TTL_SECONDS:
-            return cached[0]
         async with get_background_session() as session:
             rows = (
                 (await session.execute(select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)))
@@ -279,7 +278,6 @@ class LiveUsageIngestor:
         # Ambiguous identities (multiple workspace slots) are dropped rather
         # than guessed; the poller stays authoritative for them.
         resolved = rows[0] if len(rows) == 1 else None
-        self._resolution_cache[f"chatgpt:{chatgpt_account_id}"] = (resolved, now)
         return resolved
 
     async def _resolve_account_id_by_account_id(self, account_id: str) -> str | None:
