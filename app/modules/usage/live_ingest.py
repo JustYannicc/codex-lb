@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from dataclasses import dataclass
 
@@ -21,7 +20,6 @@ from app.modules.usage.repository import UsageRepository
 logger = logging.getLogger(__name__)
 
 _RESOLUTION_TTL_SECONDS = 300.0
-_WORKSPACE_ACCOUNT_SUFFIX_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
 # Write-coalescing tuning (fixed; issue #1340 / PRINCIPLES.md P2). The
 # ingestor keeps both as constructor fields so tests can exercise queue
@@ -71,6 +69,7 @@ class LiveUsageIngestor:
         self._write_min_interval_seconds = write_min_interval_seconds
         self._last_write: dict[str, tuple[tuple[object, ...], float]] = {}
         self._resolution_cache: dict[str, tuple[str | None, float]] = {}
+        self._resolution_aliases: dict[str, str] = {}
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
@@ -84,7 +83,8 @@ class LiveUsageIngestor:
         chatgpt_account_id: str | None = None,
     ) -> None:
         item = _QueuedSnapshot(account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot)
-        if account_id is not None and self._should_skip(account_id, snapshot):
+        coalesce_account_id = self._resolution_aliases.get(account_id, account_id)
+        if coalesce_account_id is not None and self._should_skip(coalesce_account_id, snapshot):
             return
         try:
             self._queue.put_nowait(item)
@@ -144,6 +144,7 @@ class LiveUsageIngestor:
 
     async def _ingest(self, item: _QueuedSnapshot) -> None:
         account_id = item.account_id
+        raw_account_id = account_id
         if account_id is None:
             account_id = await self._resolve_account_id_by_chatgpt_account_id(item.chatgpt_account_id)
         else:
@@ -156,6 +157,8 @@ class LiveUsageIngestor:
             account_id = resolved_account_id
         if account_id is None:
             return
+        if raw_account_id and raw_account_id != account_id:
+            self._resolution_aliases[raw_account_id] = account_id
         if self._should_skip(account_id, item.snapshot):
             return
 
@@ -253,11 +256,11 @@ class LiveUsageIngestor:
         account_id: str | None = None,
     ) -> str | None:
         if account_id:
-            resolved = await self._resolve_account_id_by_account_id(account_id)
-            if resolved is not None:
-                return resolved
             if chatgpt_account_id:
-                return await self._resolve_account_id_by_chatgpt_account_id(chatgpt_account_id)
+                resolved = await self._resolve_account_id_by_chatgpt_account_id(chatgpt_account_id)
+                if resolved is not None:
+                    return resolved
+            return await self._resolve_account_id_by_account_id(account_id)
         return await self._resolve_account_id_by_chatgpt_account_id(chatgpt_account_id)
 
     async def _resolve_account_id_by_chatgpt_account_id(self, chatgpt_account_id: str | None) -> str | None:
@@ -286,25 +289,10 @@ class LiveUsageIngestor:
         if cached is not None and now - cached[1] < _RESOLUTION_TTL_SECONDS:
             return cached[0]
 
-        candidates = self._account_resolution_candidates(account_id)
         async with get_background_session() as session:
-            resolved: str | None = None
-            for candidate in candidates:
-                row = (await session.execute(select(Account.id).where(Account.id == candidate))).scalar_one_or_none()
-                if row is not None:
-                    resolved = row
-                    break
+            resolved = (await session.execute(select(Account.id).where(Account.id == account_id))).scalar_one_or_none()
         self._resolution_cache[cache_key] = (resolved, now)
         return resolved
-
-    @staticmethod
-    def _account_resolution_candidates(account_id: str) -> list[str]:
-        if "_" not in account_id:
-            return [account_id]
-        base, _, suffix = account_id.rpartition("_")
-        if base and _WORKSPACE_ACCOUNT_SUFFIX_RE.fullmatch(suffix):
-            return [account_id, base]
-        return [account_id]
 
 
 _ingestor: LiveUsageIngestor | None = None

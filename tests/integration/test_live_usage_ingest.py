@@ -268,14 +268,69 @@ async def test_live_ingestor_resolves_workspace_suffixed_account_id(db_setup) ->
     ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
     ingestor.start()
     try:
-        ingestor.publish(_snapshot(), account_id=f"{stored_account_id}_49115a1d")
+        live_hub.register_live_usage_publisher(ingestor.publish)
+        live_hub.publish_live_usage(
+            _snapshot(),
+            account_id=f"{stored_account_id}_49115a1d",
+            chatgpt_account_id="workspace-live-suffix",
+        )
         primary, secondary = await _wait_for_rows(stored_account_id)
     finally:
+        live_hub.register_live_usage_publisher(None)
         await ingestor.stop()
 
     assert primary is not None
     assert primary.account_id == stored_account_id
     assert secondary is not None
+
+
+@pytest.mark.asyncio
+async def test_live_ingestor_drops_unproven_workspace_suffix(db_setup) -> None:
+    del db_setup
+    stored_account_id = "acc_live_workspace_a"
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account(
+                stored_account_id,
+                "live-workspace-a@example.com",
+                chatgpt_account_id="workspace-live-a",
+            )
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(_snapshot(), account_id=f"{stored_account_id}_49115a1d")
+        primary, secondary = await _wait_for_rows(stored_account_id, timeout=0.3)
+    finally:
+        await ingestor.stop()
+
+    assert primary is None
+    assert secondary is None
+
+
+@pytest.mark.asyncio
+async def test_live_ingestor_coalesces_resolved_account_alias(db_setup) -> None:
+    del db_setup
+    stored_account_id = "acc_live_alias"
+    raw_account_id = f"{stored_account_id}_49115a1d"
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account(stored_account_id, "live-alias@example.com", chatgpt_account_id="workspace-live-alias")
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=30.0)
+    ingestor.start()
+    try:
+        ingestor.publish(_snapshot(), account_id=raw_account_id, chatgpt_account_id="workspace-live-alias")
+        primary, secondary = await _wait_for_rows(stored_account_id)
+        assert primary is not None and secondary is not None
+
+        ingestor.publish(_snapshot(), account_id=raw_account_id)
+        await asyncio.sleep(0)
+        assert ingestor._queue.qsize() == 0
+    finally:
+        await ingestor.stop()
 
 
 @pytest.mark.asyncio
