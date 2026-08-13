@@ -437,11 +437,34 @@ SSEResponse: TypeAlias = aiohttp.ClientResponse | SSEResponseProtocol
 
 class _CodexSSEContent:
     def __init__(self, response: Any) -> None:
-        self._response = response
+        content = getattr(response, "content", None)
+        self._body = content if isinstance(content, bytes | bytearray) else None
+        self._content = content
 
     def iter_chunked(self, size: int) -> "SSEChunkIteratorProtocol":
-        del size
-        return cast(SSEChunkIteratorProtocol, self._response.content.iter_chunked(1024))
+        if self._body is not None:
+            return cast(SSEChunkIteratorProtocol, _BytesSSEChunkIterator(bytes(self._body), size))
+        if self._content is None:
+            raise TypeError("SSE response content is missing")
+        return cast(SSEChunkIteratorProtocol, self._content.iter_chunked(size))
+
+
+class _BytesSSEChunkIterator:
+    def __init__(self, body: bytes, size: int) -> None:
+        self._body = body
+        self._size = max(1, size)
+        self._offset = 0
+
+    def __aiter__(self) -> "_BytesSSEChunkIterator":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._offset >= len(self._body):
+            raise StopAsyncIteration
+        end = min(len(self._body), self._offset + self._size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
 
 
 class _CodexSSEResponse:
@@ -1230,7 +1253,7 @@ async def _compact_response_payload_from_sse(
                 return response
             raise ValueError("response.completed event missing response object")
         if event_type in {"response.failed", "response.incomplete", "error"}:
-            raise ValueError(f"upstream SSE terminal event {event_type}")
+            raise _proxy_response_error_from_compact_sse_terminal(payload, event_type)
     if last_payload is not None:
         raise ValueError("upstream SSE ended before response.completed")
     raise ValueError("empty upstream SSE response")
@@ -1265,11 +1288,21 @@ def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
         "object": "response.compaction",
         "output": [compaction_item],
     }
-    for key in ("id", "status", "usage"):
+    for key in ("id", "status", "usage", "service_tier"):
         value = payload.get(key)
         if value is not None:
             normalized[key] = value
     return normalized
+
+
+def _responses_compact_payload_for_responses_endpoint(payload: ResponsesCompactRequest) -> dict[str, JsonValue]:
+    payload_dict = dict(payload.to_payload())
+    input_value = payload_dict.get("input")
+    input_items = list(input_value) if isinstance(input_value, list) else [input_value]
+    if not (input_items and is_json_mapping(input_items[-1]) and input_items[-1].get("type") == "compaction_trigger"):
+        input_items.append({"type": "compaction_trigger"})
+    payload_dict["input"] = input_items
+    return payload_dict
 
 
 def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
@@ -1283,6 +1316,10 @@ def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[
                 normalized = _normalize_compact_output_item(raw_item)
                 if normalized is not None:
                     return normalized
+        for raw_item in output:
+            if not is_json_mapping(raw_item):
+                continue
+            item_type = raw_item.get("type")
             if item_type == "message":
                 normalized = _compact_output_item_from_message(raw_item)
                 if normalized is not None:
@@ -1343,6 +1380,82 @@ def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, J
         if isinstance(value, str) and value.strip():
             normalized[key] = value
     return normalized
+
+
+def _proxy_response_error_from_compact_sse_terminal(
+    payload: Mapping[str, JsonValue],
+    event_type: object,
+) -> ProxyResponseError:
+    error_payload = _compact_sse_terminal_error_payload(payload, event_type)
+    error_code, error_message = _error_details_from_envelope(error_payload)
+    status_code = _compact_sse_terminal_status_code(payload)
+    return ProxyResponseError(
+        status_code,
+        error_payload,
+        failure_phase="upstream",
+        failure_detail=error_message,
+        upstream_status_code=status_code,
+        upstream_error_code=error_code,
+    )
+
+
+def _compact_sse_terminal_error_payload(
+    payload: Mapping[str, JsonValue],
+    event_type: object,
+) -> OpenAIErrorEnvelope:
+    error = parse_error_payload(dict(payload))
+    if error:
+        return {"error": _openai_error_detail(error)}
+    if event_type == "error":
+        error_code = payload.get("code")
+        error_message = payload.get("message")
+        if isinstance(error_code, str) and error_code and isinstance(error_message, str) and error_message:
+            detail: OpenAIErrorDetail = {
+                "code": error_code,
+                "message": error_message,
+                "type": "server_error",
+            }
+            error_type = payload.get("type")
+            if isinstance(error_type, str) and error_type and error_type != "error":
+                detail["type"] = error_type
+            param = payload.get("param")
+            if isinstance(param, str) and param:
+                detail["param"] = param
+            return {"error": detail}
+    response = payload.get("response")
+    if is_json_mapping(response):
+        response_error = parse_error_payload(dict(response))
+        if response_error:
+            return {"error": _openai_error_detail(response_error)}
+    message = _extract_upstream_message(cast(Mapping[str, Any], payload))
+    if not message and is_json_mapping(response):
+        message = _extract_upstream_message(cast(Mapping[str, Any], response))
+    code = "upstream_error"
+    if event_type == "response.incomplete":
+        code = "incomplete"
+    elif event_type == "response.failed":
+        code = "upstream_error"
+    elif event_type == "error":
+        code = "upstream_error"
+    return openai_error(code, message or f"Upstream SSE terminal event: {event_type}")
+
+
+def _compact_sse_terminal_status_code(payload: Mapping[str, JsonValue]) -> int:
+    response = payload.get("response")
+    candidates: list[JsonValue] = []
+    if is_json_mapping(response):
+        candidates.extend(
+            [
+                response.get("status_code"),
+                response.get("statusCode"),
+                response.get("status"),
+            ]
+        )
+    candidates.extend([payload.get("status_code"), payload.get("statusCode"), payload.get("status")])
+    for value in candidates:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 502
 
 
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
@@ -3760,7 +3873,7 @@ class _CompactCommandTransport:
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = dict(self.payload.to_payload())
+        payload_dict = _responses_compact_payload_for_responses_endpoint(self.payload)
         payload_dict["store"] = False
         payload_dict["stream"] = True
         if settings.image_inline_fetch_enabled:
@@ -3887,6 +4000,8 @@ class _CompactCommandTransport:
                         idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
                         max_event_bytes=settings.max_sse_event_bytes,
                     )
+                except ProxyResponseError:
+                    raise
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3992,6 +4107,8 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                         failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
                     ) from exc
+                except ProxyResponseError:
+                    raise
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"

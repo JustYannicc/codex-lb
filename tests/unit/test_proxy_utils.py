@@ -4827,6 +4827,32 @@ class _DummyResponse(proxy_module.SSEResponseProtocol):
         self.content = _DummyContent(chunks)
 
 
+@pytest.mark.asyncio
+async def test_compact_sse_terminal_error_preserves_error_envelope() -> None:
+    response = _DummyResponse(
+        [
+            (
+                b'data: {"type":"response.failed","response":{"status_code":400,'
+                b'"error":{"code":"previous_response_not_found","message":"missing anchor",'
+                b'"param":"previous_response_id"}}}\n\n'
+            )
+        ]
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module._compact_response_payload_from_sse(
+            response,
+            idle_timeout_seconds=1.0,
+            max_event_bytes=4096,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 400
+    assert _proxy_error_code(exc) == "previous_response_not_found"
+    assert _proxy_error_message(exc) == "missing anchor"
+    assert exc.payload["error"]["param"] == "previous_response_id"
+
+
 class _TranscribeResponse:
     def __init__(
         self,
