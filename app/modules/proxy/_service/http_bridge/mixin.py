@@ -1699,11 +1699,17 @@ class _HTTPBridgeMixin(
             for key, session, durable_session_id in candidates:
                 if durable_session_id in live_session_ids:
                     continue
-                # Re-validate under the lock: the session may have picked up
-                # work or been replaced while the durable lookup ran.
+                # Re-validate the FULL candidate predicate under the lock: the
+                # session may have picked up work, gained an unanchored
+                # reservation, re-claimed a fresh durable row, or been replaced
+                # while the durable lookup ran.
                 if session.closed or session.handoff_in_progress:
                     continue
                 if _http_bridge_session_has_admission_waiter(session):
+                    continue
+                if getattr(session, "unanchored_reservation_id", None) is not None:
+                    continue
+                if getattr(session, "durable_session_id", None) != durable_session_id:
                     continue
                 pending_count = self._http_bridge_pending_count_nowait(session, context="purge_reconcile")
                 if pending_count is None or pending_count:
@@ -1720,10 +1726,32 @@ class _HTTPBridgeMixin(
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 sessions_to_close.append(detached)
-        for session in sessions_to_close:
-            # The durable row is already gone, so skip the release round trip.
-            await self._close_http_bridge_session(session, release_durable_session=False)
+        if sessions_to_close:
+            # Close in a tracked background task: each close may wait on a
+            # slow upstream-reader cancel, and running them inline would pin
+            # the sole cache-invalidation poller for the duration. The
+            # sessions are already detached, so a concurrent bump cannot
+            # double-process them; shutdown drains the tracked task.
+            close_task = asyncio.create_task(
+                self._close_purged_http_bridge_sessions(sessions_to_close),
+                name="http-bridge-purge-reconcile-close",
+            )
+            self._background_cleanup_tasks.add(close_task)
+            close_task.add_done_callback(self._background_cleanup_tasks.discard)
         return len(sessions_to_close)
+
+    async def _close_purged_http_bridge_sessions(self, sessions: list[_HTTPBridgeSession]) -> None:
+        for session in sessions:
+            try:
+                # The durable row is already gone, so skip the release round trip.
+                await self._close_http_bridge_session(session, release_durable_session=False)
+            except Exception:
+                logger.warning(
+                    "Failed to close purged HTTP bridge session account_id=%s model=%s",
+                    session.account.id,
+                    session.request_model,
+                    exc_info=True,
+                )
 
     _close_http_bridge_session = _helpers_close_http_bridge_session
 

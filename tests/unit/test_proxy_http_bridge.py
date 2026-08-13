@@ -26839,10 +26839,47 @@ async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
     assert closed_count == 1
     assert purged.key not in service._http_bridge_sessions
     assert live.key in service._http_bridge_sessions
+    # Closes run in a tracked background task so the reconcile never pins the
+    # cache-invalidation poller on slow upstream-reader cancels.
+    assert service._background_cleanup_tasks
+    await asyncio.gather(*service._background_cleanup_tasks)
     assert purged.closed is True
     assert live.closed is False
     assert lookup_sessions.await_args.kwargs["session_ids"] == ["dur-purged", "dur-live"]
     assert any(call.args == (lease,) for call in release_account_lease.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purged_sessions_respects_reservation_taken_during_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that gains an unanchored reservation (or re-claims a fresh
+    durable row) while the durable lookup is awaited must survive the
+    under-lock re-validation."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    reserved = _make_bridge_session(key_value="reserved-session")
+    reserved.durable_session_id = "dur-reserved"
+    reclaimed = _make_bridge_session(key_value="reclaimed-session")
+    reclaimed.durable_session_id = "dur-old"
+    service._http_bridge_sessions[reserved.key] = reserved
+    service._http_bridge_sessions[reclaimed.key] = reclaimed
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    async def lookup_sessions(*, session_ids):
+        # Simulate concurrent activity while the lookup round trip runs.
+        reserved.unanchored_reservation_id = "res-1"
+        reclaimed.durable_session_id = "dur-new"
+        return []
+
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=lookup_sessions))
+
+    closed_count = await service.reconcile_purged_http_bridge_sessions()
+
+    assert closed_count == 0
+    assert reserved.key in service._http_bridge_sessions
+    assert reclaimed.key in service._http_bridge_sessions
+    assert reserved.closed is False
+    assert reclaimed.closed is False
 
 
 @pytest.mark.asyncio
