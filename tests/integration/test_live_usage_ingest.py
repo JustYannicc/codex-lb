@@ -253,6 +253,32 @@ async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_resolves_workspace_suffixed_account_id(db_setup) -> None:
+    del db_setup
+    stored_account_id = "acc_live_workspace"
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account(
+                stored_account_id,
+                "live-workspace-suffix@example.com",
+                chatgpt_account_id="workspace-live-suffix",
+            )
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(_snapshot(), account_id=f"{stored_account_id}_49115a1d")
+        primary, secondary = await _wait_for_rows(stored_account_id)
+    finally:
+        await ingestor.stop()
+
+    assert primary is not None
+    assert primary.account_id == stored_account_id
+    assert secondary is not None
+
+
+@pytest.mark.asyncio
 async def test_live_ingestion_kill_switch_disables_publishing(monkeypatch, db_setup) -> None:
     del db_setup
     from app.core.config.settings import get_settings
