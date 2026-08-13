@@ -1,7 +1,7 @@
 # http-ingress-limits Specification
 
 ## Purpose
-TBD - created by archiving change bound-raw-http-ingress. Update Purpose after archive.
+Incremental, budget-reusing bounds on raw HTTP request ingress, including encoded bodies before and after decompression and exact route-owned multipart exceptions.
 ## Requirements
 ### Requirement: Raw HTTP request ingress is bounded incrementally
 

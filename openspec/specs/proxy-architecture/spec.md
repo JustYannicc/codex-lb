@@ -1,7 +1,7 @@
 # proxy-architecture Specification
 
 ## Purpose
-TBD - created by archiving change restore-proxy-architecture-ratchets. Update Purpose after archive.
+Structural fitness gates for the proxy: ProxyService stays a stable façade and internal decomposition (selection orchestration, bridge mixins) cannot drift behavior or re-grow god-modules.
 ## Requirements
 ### Requirement: Proxy architecture fitness gates are enforced
 

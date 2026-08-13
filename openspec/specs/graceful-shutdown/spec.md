@@ -1,7 +1,7 @@
 # graceful-shutdown Specification
 
 ## Purpose
-TBD - created by archiving change drain-active-websocket-turns. Update Purpose after archive.
+Ordered process drain: a pre-connection barrier, WebSocket admission closure, and finalization of active turns so shutdown never strands in-flight work or settlement.
 ## Requirements
 ### Requirement: Process shutdown establishes a pre-connection drain barrier
 

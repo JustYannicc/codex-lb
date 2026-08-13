@@ -1,7 +1,7 @@
 # date-display-format Specification
 
 ## Purpose
-TBD - created by archiving change date-display-format-setting. Update Purpose after archive.
+Operator-selectable dashboard date/time rendering (localStorage preference, ISO 8601 contract) without disturbing chart axis formats.
 ## Requirements
 ### Requirement: Date format preference is stored in localStorage
 

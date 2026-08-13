@@ -1,7 +1,7 @@
 # account-import Specification
 
 ## Purpose
-TBD - created by archiving change bound-multipart-uploads. Update Purpose after archive.
+Authorization and resource bounds for importing account auth material (auth.json uploads and equivalent flows) into the pool.
 ## Requirements
 ### Requirement: Account auth imports are authorized and bounded
 

@@ -1,7 +1,7 @@
 # usage-error-metrics Specification
 
 ## Purpose
-TBD - created by archiving change fix-dashboard-error-rate-cancelled. Update Purpose after archive.
+Error-rate accounting that counts only genuinely-failed terminals: cancelled client disconnects fold into a separate cancelled_count in live metrics and hourly rollups, with historical rows kept compatible.
 ## Requirements
 ### Requirement: Error metrics count only genuinely-failed terminals
 

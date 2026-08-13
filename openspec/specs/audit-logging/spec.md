@@ -1,7 +1,7 @@
 # audit-logging Specification
 
 ## Purpose
-TBD - created by archiving change drain-audit-fleet-tasks. Update Purpose after archive.
+Ownership and shutdown-drain guarantees for asynchronous dashboard audit-log writes, so records are neither lost nor left to leaked tasks.
 ## Requirements
 ### Requirement: Asynchronous audit writes remain owned until completion
 
