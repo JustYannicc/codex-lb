@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from pydantic import ValidationError
 
@@ -570,6 +571,13 @@ def normalize_responses_request_payload(
     return responses
 
 
+def validate_top_level_compaction_trigger_input_shape(payload: Mapping[str, JsonValue]) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    _validate_terminal_compaction_trigger_input_items(input_value)
+
+
 def strip_terminal_compaction_trigger_input(
     payload: ResponsesRequest | ResponsesCompactRequest,
     *,
@@ -578,14 +586,28 @@ def strip_terminal_compaction_trigger_input(
     input_value = payload.input
     if not is_json_list(input_value):
         return None
+    return _strip_terminal_compaction_trigger_input_items(input_value, strip_trigger=strip_trigger)
 
-    stripped_input: list[JsonValue] = []
+
+def _strip_terminal_compaction_trigger_input_items(
+    input_value: list[JsonValue],
+    *,
+    strip_trigger: bool,
+) -> list[JsonValue] | None:
+    trigger_seen = _validate_terminal_compaction_trigger_input_items(input_value)
+    if not trigger_seen:
+        return None
+    if not strip_trigger:
+        return input_value
+    return [item for item in input_value if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")]
+
+
+def _validate_terminal_compaction_trigger_input_items(input_value: list[JsonValue]) -> bool:
     trigger_seen = False
     last_index = len(input_value) - 1
 
     for index, item in enumerate(input_value):
         if not (is_json_mapping(item) and item.get("type") == "compaction_trigger"):
-            stripped_input.append(item)
             continue
 
         if trigger_seen or index != last_index:
@@ -597,11 +619,7 @@ def strip_terminal_compaction_trigger_input(
             )
         trigger_seen = True
 
-    if not trigger_seen:
-        return None
-    if not strip_trigger:
-        return input_value
-    return stripped_input
+    return trigger_seen
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:

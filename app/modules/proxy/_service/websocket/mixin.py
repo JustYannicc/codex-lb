@@ -474,6 +474,7 @@ from app.modules.proxy.request_policy import (
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
+    validate_top_level_compaction_trigger_input_shape,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
@@ -2705,6 +2706,7 @@ class _WebSocketMixin:
             header_values=capability_header_values,
             client_metadata_values=_websocket_capability_metadata_values(payload),
         )
+        validate_top_level_compaction_trigger_input_shape(payload)
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,

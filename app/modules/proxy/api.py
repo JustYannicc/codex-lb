@@ -241,6 +241,7 @@ from app.modules.proxy.request_policy import (
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
+    validate_top_level_compaction_trigger_input_shape,
 )
 from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
@@ -5495,13 +5496,23 @@ async def _collect_responses(
 )
 async def responses_compact(
     request: Request,
-    payload: ResponsesCompactRequest = Body(...),
+    payload_data: JsonValue = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
         return capability_transport_denial
+    try:
+        if is_json_mapping(payload_data):
+            validate_top_level_compaction_trigger_input_shape(payload_data)
+        payload = ResponsesCompactRequest.model_validate(payload_data)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     return await _compact_responses(
         request,
         payload,
@@ -5564,11 +5575,6 @@ async def _compact_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     validate_model_access(api_key, payload.model)
-    try:
-        strip_terminal_compaction_trigger_input(payload, strip_trigger=False)
-    except ClientPayloadError as exc:
-        error = openai_client_payload_error(exc)
-        return _logged_error_json_response(request, 400, error)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:

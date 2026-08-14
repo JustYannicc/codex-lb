@@ -1215,6 +1215,12 @@ def _compact_discard_consumed_continuity_output_pairs(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type == "compaction_trigger":
+        if latest_index == 0:
+            return
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
     if (
         latest_mapping is None
         or not isinstance(latest_type, str)
@@ -1289,7 +1295,7 @@ def _compact_terminal_required_indices(
         token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     )
     if latest_index in paired_tail:
-        return paired_tail, bool(terminal_trigger_indices), False
+        return paired_tail, False, False
     return terminal_trigger_indices, bool(terminal_trigger_indices), False
 
 

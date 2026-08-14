@@ -31,6 +31,7 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 import app.core.clients.proxy as proxy_module
+import app.core.openai.requests as openai_requests_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core import shutdown as shutdown_state
@@ -10276,6 +10277,69 @@ def test_responses_wire_payload_normalizes_internal_duplicate_compaction_trigger
         {"role": "user", "content": "hello"},
         {"type": "compaction_trigger"},
     ]
+
+
+def test_compact_wire_payload_omits_oversized_optional_tool_tail_even_with_terminal_trigger():
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call_route_tail",
+                    "arguments": "x" * 450_000,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_route_tail",
+                    "output": "latest ordinary result",
+                },
+                {"type": "compaction_trigger"},
+            ],
+        }
+    )
+
+    dumped = payload.to_payload()
+    compact_input = cast(list[dict[str, object]], dumped["input"])
+
+    assert compact_input[-1] == {"type": "compaction_trigger"}
+    assert all(item.get("call_id") != "call_route_tail" for item in compact_input if isinstance(item, dict))
+    assert "[compact trim]" in json.dumps(compact_input)
+    assert "latest ordinary result" not in json.dumps(compact_input)
+
+
+def test_compact_discard_consumed_continuity_output_pairs_treats_terminal_trigger_as_suffix():
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "read_file",
+            "call_id": "call_reused",
+            "arguments": '{"path":"old.txt"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_reused",
+            "output": "consumed old output",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_reused",
+            "output": "latest output from the prior response",
+        },
+        {"type": "compaction_trigger"},
+    ]
+    selected_indices = {0, 1, 2, 3}
+    required_indices = {2, 3}
+
+    openai_requests_module._compact_discard_consumed_continuity_output_pairs(
+        input_items,
+        selected_indices=selected_indices,
+        required_indices=required_indices,
+    )
+
+    assert selected_indices == {2, 3}
 
 
 @pytest.mark.asyncio

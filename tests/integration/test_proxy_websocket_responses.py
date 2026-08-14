@@ -8678,7 +8678,6 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
     assert duplicate_event["status"] == 400
     assert len(list(tmp_path.glob("*.response-create.json.gz"))) == 1
     assert len(list(tmp_path.glob("*.meta.json"))) == 1
-
     meta_files[0].unlink()
     with TestClient(app_instance) as client:
         orphan_retry_event = send_oversized_request()
@@ -8689,6 +8688,88 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
         if (tmp_path / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
     ]
     assert complete_pairs
+
+
+def test_backend_responses_websocket_rejects_non_terminal_compaction_trigger_before_upstream(
+    app_instance,
+    monkeypatch,
+):
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fail_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        raise AssertionError("malformed compaction trigger must fail before upstream websocket connect")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"type": "compaction_trigger"},
+            {"role": "developer", "content": [{"type": "input_text", "text": "still trailing"}]},
+        ],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            error_event = json.loads(websocket.receive_text())
+
+    assert error_event["type"] == "error"
+    assert error_event["status"] == 400
+    assert error_event["error"]["code"] == "invalid_request_error"
+    assert error_event["error"]["type"] == "invalid_request_error"
+    assert error_event["error"]["param"] == "input"
+    assert (
+        "compaction_trigger must appear exactly once as the final top-level input item"
+        in error_event["error"]["message"]
+    )
 
 
 def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succeeds(
