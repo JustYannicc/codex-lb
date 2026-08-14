@@ -599,103 +599,128 @@ class DurableBridgeRepository:
         for attempt in range(2):
             now = utcnow()
             lease_expires_at = now + timedelta(seconds=max(1.0, lease_ttl_seconds))
-            row = await self._session.execute(
-                select(HttpBridgeSessionRecord)
-                .where(
-                    HttpBridgeSessionRecord.session_key_kind == session_key_kind,
-                    HttpBridgeSessionRecord.session_key_hash == session_key_hash,
-                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
-                )
-                .with_for_update()
-            )
-            existing = row.scalar_one_or_none()
-            if existing is None:
-                record = HttpBridgeSessionRecord(
-                    session_key_kind=session_key_kind,
-                    session_key_value=session_key_value,
-                    session_key_hash=session_key_hash,
-                    api_key_scope=api_key_scope,
-                    owner_instance_id=instance_id,
-                    owner_process_epoch=owner_process_epoch,
-                    owner_epoch=1,
-                    lease_expires_at=lease_expires_at,
-                    state=HttpBridgeSessionState.ACTIVE,
-                    account_id=account_id,
-                    model=model,
-                    service_tier=service_tier,
-                    latest_turn_state=latest_turn_state,
-                    latest_response_id=latest_response_id,
-                    last_seen_at=now,
-                    closed_at=None,
-                )
-                self._session.add(record)
-                try:
-                    await self._commit_writer_section()
-                except IntegrityError:
-                    await self._session.rollback()
-                    if attempt == 0:
-                        continue
-                    raise
-                await self._session.refresh(record)
-                return _to_snapshot_required(record)
-
-            state_closed = existing.state == HttpBridgeSessionState.CLOSED
-            owner_absent = existing.owner_instance_id is None
-            account_changed = existing.account_id != account_id
-            owner_changed = existing.owner_instance_id != instance_id
-            if owner_changed:
-                lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
-                live_owned_draining = (
-                    existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
-                )
-                if live_owned_draining or (
-                    not allow_takeover and not lease_expired and not owner_absent and not state_closed
-                ):
-                    return _to_snapshot_required(existing)
-                next_epoch = existing.owner_epoch + 1
-            elif account_changed or force_owner_epoch_advance:
-                next_epoch = existing.owner_epoch + 1
-            else:
-                next_epoch = existing.owner_epoch
-
             async with sqlite_writer_section():
-                existing.owner_instance_id = instance_id
-                existing.owner_process_epoch = owner_process_epoch
-                existing.owner_epoch = next_epoch
-                existing.lease_expires_at = lease_expires_at
-                existing.state = HttpBridgeSessionState.ACTIVE
+                row = await self._session.execute(
+                    select(HttpBridgeSessionRecord)
+                    .where(
+                        HttpBridgeSessionRecord.session_key_kind == session_key_kind,
+                        HttpBridgeSessionRecord.session_key_hash == session_key_hash,
+                        HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                    )
+                    .with_for_update()
+                )
+                existing = row.scalar_one_or_none()
+                if existing is None:
+                    record = HttpBridgeSessionRecord(
+                        session_key_kind=session_key_kind,
+                        session_key_value=session_key_value,
+                        session_key_hash=session_key_hash,
+                        api_key_scope=api_key_scope,
+                        owner_instance_id=instance_id,
+                        owner_process_epoch=owner_process_epoch,
+                        owner_epoch=1,
+                        lease_expires_at=lease_expires_at,
+                        state=HttpBridgeSessionState.ACTIVE,
+                        account_id=account_id,
+                        model=model,
+                        service_tier=service_tier,
+                        latest_turn_state=latest_turn_state,
+                        latest_response_id=latest_response_id,
+                        last_seen_at=now,
+                        closed_at=None,
+                    )
+                    self._session.add(record)
+                    try:
+                        await self._session.commit()
+                    except IntegrityError:
+                        await self._session.rollback()
+                        if attempt == 0:
+                            continue
+                        raise
+                    await self._session.refresh(record)
+                    return _to_snapshot_required(record)
+
+                state_closed = existing.state == HttpBridgeSessionState.CLOSED
+                owner_absent = existing.owner_instance_id is None
+                account_changed = existing.account_id != account_id
+                owner_changed = existing.owner_instance_id != instance_id
+                if owner_changed:
+                    lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
+                    live_owned_draining = (
+                        existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
+                    )
+                    if live_owned_draining or (
+                        not allow_takeover and not lease_expired and not owner_absent and not state_closed
+                    ):
+                        return _to_snapshot_required(existing)
+                    next_epoch = existing.owner_epoch + 1
+                elif account_changed or force_owner_epoch_advance:
+                    next_epoch = existing.owner_epoch + 1
+                else:
+                    next_epoch = existing.owner_epoch
+
+                observed_owner_instance_id = existing.owner_instance_id
+                observed_owner_process_epoch = existing.owner_process_epoch
+                observed_owner_epoch = existing.owner_epoch
+                values: dict[str, object] = {
+                    "owner_instance_id": instance_id,
+                    "owner_process_epoch": owner_process_epoch,
+                    "owner_epoch": next_epoch,
+                    "lease_expires_at": lease_expires_at,
+                    "state": HttpBridgeSessionState.ACTIVE,
+                    "account_id": account_id,
+                    "model": model,
+                    "service_tier": service_tier,
+                    "last_seen_at": now,
+                    "closed_at": None,
+                }
                 if account_changed:
-                    await self._clear_aliases_for_session(existing.id)
-                existing.account_id = account_id
-                existing.model = model
-                existing.service_tier = service_tier
-                if account_changed:
-                    existing.latest_turn_state = latest_turn_state
-                    existing.latest_response_id = latest_response_id
-                    existing.latest_input_item_count = None
-                    existing.latest_input_full_fingerprint = None
-                    existing.latest_pending_tool_calls_json = None
+                    values.update(
+                        latest_turn_state=latest_turn_state,
+                        latest_response_id=latest_response_id,
+                        latest_input_item_count=None,
+                        latest_input_full_fingerprint=None,
+                        latest_pending_tool_calls_json=None,
+                    )
                 elif owner_changed:
                     if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
+                        values["latest_turn_state"] = latest_turn_state
                     if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
+                        values.update(
+                            latest_response_id=latest_response_id,
+                            latest_input_item_count=None,
+                            latest_input_full_fingerprint=None,
+                            latest_pending_tool_calls_json=None,
+                        )
                 else:
                     if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
+                        values["latest_turn_state"] = latest_turn_state
                     if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
-                existing.last_seen_at = now
-                existing.closed_at = None
+                        values.update(
+                            latest_response_id=latest_response_id,
+                            latest_input_item_count=None,
+                            latest_input_full_fingerprint=None,
+                            latest_pending_tool_calls_json=None,
+                        )
+                result = await self._session.execute(
+                    update(HttpBridgeSessionRecord)
+                    .where(
+                        HttpBridgeSessionRecord.id == existing.id,
+                        HttpBridgeSessionRecord.owner_instance_id == observed_owner_instance_id,
+                        HttpBridgeSessionRecord.owner_process_epoch == observed_owner_process_epoch,
+                        HttpBridgeSessionRecord.owner_epoch == observed_owner_epoch,
+                    )
+                    .values(**values)
+                    .returning(*_SNAPSHOT_COLUMNS)
+                )
+                updated_row = result.one_or_none()
+                if updated_row is None:
+                    await self._session.rollback()
+                    continue
+                if account_changed:
+                    await self._clear_aliases_for_session(existing.id)
                 await self._session.commit()
-            await self._session.refresh(existing)
-            return _to_snapshot_required(existing)
+                return _returned_row_to_snapshot(updated_row)
         raise RuntimeError("Failed to claim durable bridge session after retry")
 
     async def renew_session(
