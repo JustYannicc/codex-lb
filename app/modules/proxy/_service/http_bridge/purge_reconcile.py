@@ -7,6 +7,7 @@ from typing import Any
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_has_admission_waiter,
     _log_http_bridge_event,
+    _service_get_settings,
     _service_time,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -20,15 +21,27 @@ logger = logging.getLogger("app.modules.proxy.service")
 # for it and an in-progress batch counts as bridge activity.
 _PURGE_RECONCILE_CLOSE_TASK_NAME = "http-bridge-purge-reconcile-close"
 
-# A session handed to a request is not yet visible as busy: the request sets
-# ``last_used_at`` at handoff but only increments ``admission_waiter_count``
-# once it reaches submit, and an anchored reuse can await the retry-circuit
-# lookup in between. Idle eviction is protected from that window by its idle
-# TTL; this pass exists to beat that TTL, so it uses a small recency floor
-# instead. Any session this pass legitimately targets has been abandoned for
-# hours (the purge only deletes rows whose activity predates the retention
-# cutoff), so the floor costs nothing while closing the handoff race.
-_PURGE_RECONCILE_MIN_IDLE_SECONDS = 30.0
+
+def _purge_reconcile_min_idle_seconds() -> float:
+    """Idle floor a session must clear before this pass may reconcile it.
+
+    A session handed to a request is not yet visible as busy: the request sets
+    ``last_used_at`` at handoff but only registers an admission waiter once it
+    reaches submit, and an anchored reuse can await durable work (e.g. the
+    pre-created retry-circuit cooldown lookup) in between. Idle eviction is
+    protected from that window by its idle TTL; this pass exists to beat that
+    TTL, so it needs its own floor.
+
+    The floor is the request budget rather than a fixed constant: that budget
+    bounds the entire request, so a handoff whose submit has not happened
+    within it belongs to a request that has already failed — no arbitrary
+    number has to be assumed safe against a slow intermediate lookup. It still
+    releases orphans ahead of the account lease TTL, and costs nothing in
+    practice because the abandoned purge only deletes rows whose activity
+    predates the retention cutoff, so anything this pass legitimately targets
+    has been idle for far longer.
+    """
+    return float(_service_get_settings().proxy_request_budget_seconds)
 
 
 class _HTTPBridgePurgeReconcileMixin:
@@ -173,7 +186,7 @@ def _purge_reconcile_eligible_durable_id(
         return None
     if _http_bridge_session_has_admission_waiter(session):
         return None
-    if _service_time().monotonic() - session.last_used_at < _PURGE_RECONCILE_MIN_IDLE_SECONDS:
+    if _service_time().monotonic() - session.last_used_at < _purge_reconcile_min_idle_seconds():
         # Recently handed to a request that has not reached submit yet.
         return None
     if getattr(session, "unanchored_reservation_id", None) is not None:

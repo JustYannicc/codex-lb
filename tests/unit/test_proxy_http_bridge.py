@@ -26893,7 +26893,7 @@ async def test_reconcile_purged_sessions_spares_a_session_just_handed_to_a_reque
     just_handed.last_used_at = time.monotonic()
     long_idle = _make_bridge_session(key_value="long-idle")
     long_idle.durable_session_id = "dur-long-idle"
-    long_idle.last_used_at = time.monotonic() - (purge_reconcile._PURGE_RECONCILE_MIN_IDLE_SECONDS + 60.0)
+    long_idle.last_used_at = time.monotonic() - (purge_reconcile._purge_reconcile_min_idle_seconds() + 60.0)
     service._http_bridge_sessions[just_handed.key] = just_handed
     service._http_bridge_sessions[long_idle.key] = long_idle
     lookup_sessions = AsyncMock(return_value=[])

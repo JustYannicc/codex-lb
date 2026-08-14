@@ -9,6 +9,7 @@ directly for determinism (no sleeps).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -450,6 +451,42 @@ async def test_stop_flush_is_bounded_when_the_database_stalls(db_setup, monkeypa
         and getattr(task.get_coro(), "__qualname__", "").endswith("_flush_pending_bumps")
     ]
     assert not leaked, "abandoned flush must be cancelled, not left for loop teardown"
+
+
+@pytest.mark.asyncio
+async def test_stop_restores_pending_bumps_when_cancelled_mid_flush(db_setup, monkeypatch) -> None:
+    """CancelledError is a BaseException and would bypass the restore while the
+    finally block still cancels the write. Since stop() has already cleared
+    _task, a retried stop() returns immediately, so a namespace lost here is
+    lost permanently."""
+    namespace = "test_stop_flush_cancelled"
+    poller = CacheInvalidationPoller(SessionLocal)
+    await poller.start()
+    poller.request_bump(namespace)
+
+    stalled = asyncio.Event()
+
+    async def never_finishes(ns: str) -> bool:
+        stalled.set()
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(poller, "bump", never_finishes)
+    monkeypatch.setattr(invalidation_module, "_STOP_FLUSH_TIMEOUT_SECONDS", 0.05)
+
+    stop_task = asyncio.create_task(poller.stop())
+    # The polling task's own flush is what stalls here; stop() cancels it.
+    await asyncio.wait_for(stalled.wait(), timeout=2.0)
+    stop_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(stop_task, timeout=5.0)
+
+    # _flush_pending_bumps clears each marker before awaiting its write, so a
+    # cancelled write must restore it or the namespace is neither written nor
+    # pending — and stop() has already cleared _task, so a retried stop()
+    # returns immediately and would never revisit it.
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
 
 
 @pytest.mark.asyncio

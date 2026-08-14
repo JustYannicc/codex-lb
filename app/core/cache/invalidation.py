@@ -201,6 +201,18 @@ class CacheInvalidationPoller:
                 _STOP_FLUSH_TIMEOUT_SECONDS,
                 len(self._pending_bumps),
             )
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it would otherwise bypass
+            # the restore below while the finally block still cancels the
+            # write — losing the namespace it was mid-write on. stop() has
+            # already cleared _task, so a retried stop() returns immediately
+            # and would never revisit it.
+            self._pending_bumps |= pending
+            logger.warning(
+                "cache_invalidation final bump flush was cancelled with %d pending namespace(s)",
+                len(self._pending_bumps),
+            )
+            raise
         except Exception:
             self._pending_bumps |= pending
             logger.warning(
@@ -349,8 +361,15 @@ class CacheInvalidationPoller:
             # later bump instead of being coalesced into the version already
             # being written.
             self._pending_bumps.discard(namespace)
-            if not await self.bump(namespace):
+            try:
+                if not await self.bump(namespace):
+                    self._pending_bumps.add(namespace)
+            except BaseException:
+                # Includes CancelledError: stop() cancels the polling task, so
+                # without this the namespace whose write was in flight is
+                # neither written nor pending — silently lost.
                 self._pending_bumps.add(namespace)
+                raise
 
     async def _poll_once(self) -> bool:
         """Flush pending bumps and reconcile observed versions once.
