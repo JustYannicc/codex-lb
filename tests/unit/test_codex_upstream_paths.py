@@ -10,7 +10,7 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 
 import app.core.clients.proxy as proxy_module
-from app.core.clients.codex import CodexClient, CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexClient, CodexRequestResult, CodexTransportError, CodexWebSocketResult
 from app.core.clients.files import create_file, finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -38,6 +38,19 @@ class _CodexClient:
     async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
         self.calls.append({"method": method, "url": url, "route": route, **kwargs})
         return self.response
+
+
+class _RouteMetadataCodexClient(_CodexClient):
+    async def request_with_route_metadata(
+        self,
+        method: str,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        **kwargs: Any,
+    ) -> CodexRequestResult:
+        self.calls.append({"method": method, "url": url, "route": route, **kwargs})
+        return CodexRequestResult(response=self.response, route=route, fallback_used=False)
 
 
 class _FailingRouteMetadataCodexClient:
@@ -69,6 +82,58 @@ class _CompactResponse:
 
     def json(self) -> dict[str, str]:
         return {"object": "response.compact", "id": "compact_1"}
+
+
+class _CompactStreamContent:
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"id":"msg_compact_1","type":"message","role":"assistant",'
+            b'"status":"completed","content":[{"type":"output_text","text":"enc_compact_1"}]}}\n\n'
+            b'data: {"type":"response.completed","response":'
+            b'{"object":"response","id":"resp_compact_1","status":"completed","output":[]}}\n\n'
+        )
+
+
+class _CompactStreamResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+    content = _CompactStreamContent()
+
+
+class _BufferedCompactStreamResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = (
+        b'data: {"type":"response.completed","response":{"object":"response","id":"resp_compact_buffered",'
+        b'"status":"completed","service_tier":"default","output":['
+        b'{"id":"msg_history","type":"message","role":"assistant","status":"completed",'
+        b'"content":[{"type":"output_text","text":"historical plaintext"}]},'
+        b'{"id":"cmp_buffered","type":"compaction_summary","encrypted_content":"enc_buffered"}]}}\n\n'
+    )
+
+
+class _CompactTerminalErrorStreamResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = (
+        b'data: {"type":"error","code":"rate_limit_exceeded","message":"quota closed",'
+        b'"param":"previous_response_id"}\n\n'
+    )
+
+
+class _CompactTerminalFailedStreamResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = (
+        b'data: {"type":"response.failed","response":{"status_code":400,'
+        b'"error":{"code":"previous_response_not_found","message":"missing anchor",'
+        b'"type":"invalid_request_error","param":"previous_response_id"}}}\n\n'
+    )
 
 
 class _TranscribeResponse:
@@ -301,7 +366,7 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
 
 @pytest.mark.asyncio
 async def test_compact_responses_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
-    client = _CodexClient(_CompactResponse())
+    client = _CodexClient(_CompactStreamResponse())
     trace = UpstreamProxyRouteTrace()
     payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
 
@@ -316,12 +381,97 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
         route_trace=trace,
     )
 
-    assert response.object == "response.compact"
-    assert response.id == "compact_1"
-    assert client.calls[0]["url"].endswith("/backend-api/codex/responses/compact")
+    assert response.object == "response.compaction"
+    assert response.id == "resp_compact_1"
+    assert response.model_extra == {
+        "output": [
+            {"id": "msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
+        ]
+    }
+    assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
+    assert client.calls[0]["json"]["store"] is False
+    assert client.calls[0]["json"]["stream"] is True
+    assert client.calls[0]["headers"]["Accept"] == "text/event-stream"
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_routed_buffered_sse_keeps_compact_protocol(route: ResolvedUpstreamRoute) -> None:
+    client = _RouteMetadataCodexClient(_BufferedCompactStreamResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    sent_input = client.calls[0]["json"]["input"]
+    assert sent_input[-1] == {"type": "compaction_trigger"}
+    assert sum(1 for item in sent_input if isinstance(item, dict) and item.get("type") == "compaction_trigger") == 1
+    assert response.id == "resp_compact_buffered"
+    assert response.model_extra is not None
+    assert response.model_extra["service_tier"] == "default"
+    assert response.model_extra["output"] == [
+        {"id": "cmp_buffered", "type": "compaction", "encrypted_content": "enc_buffered"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_routed_terminal_sse_error_keeps_openai_envelope(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _RouteMetadataCodexClient(_CompactTerminalFailedStreamResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await compact_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            route=route,
+            codex_client=cast(Any, client),
+        )
+
+    error = exc_info.value.payload["error"]
+    assert error["code"] == "previous_response_not_found"
+    assert error["message"] == "missing anchor"
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_response_id"
+    assert exc_info.value.failure_phase == "upstream"
+    assert exc_info.value.upstream_status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_routed_top_level_sse_error_preserves_fields(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _RouteMetadataCodexClient(_CompactTerminalErrorStreamResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await compact_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            route=route,
+            codex_client=cast(Any, client),
+        )
+
+    error = exc_info.value.payload["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    assert error["message"] == "quota closed"
+    assert error["param"] == "previous_response_id"
 
 
 @pytest.mark.asyncio
