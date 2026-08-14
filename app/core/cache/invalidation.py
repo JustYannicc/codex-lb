@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from inspect import isawaitable
@@ -55,6 +56,9 @@ _NAMESPACE_LOG_LABELS: dict[str, str] = {
 # that blocked a caller's synchronous bump can block this one, so shutdown
 # must never wait on it unbounded.
 _STOP_FLUSH_TIMEOUT_SECONDS = 5.0
+# Bound for owning the cancelled flush's unwind; cancel() only requests
+# cancellation and driver cleanup can itself await.
+_STOP_FLUSH_CANCEL_TIMEOUT_SECONDS = 1.0
 _BUMP_RETRY_ATTEMPTS = 3
 _BUMP_RETRY_BASE_SECONDS = 0.05
 _POLL_FAILURES_WARNING_THRESHOLD = 3
@@ -223,9 +227,17 @@ class CacheInvalidationPoller:
         finally:
             if not flush_task.done():
                 # Do not leave the write running for loop teardown to cancel
-                # silently after stop() has returned.
+                # silently after stop() has returned. cancel() only *requests*
+                # cancellation, so own the unwind with a bounded await rather
+                # than returning while it is still in flight; the callback
+                # covers the case where even that does not finish.
                 flush_task.cancel()
                 flush_task.add_done_callback(_log_abandoned_stop_flush)
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(
+                        asyncio.shield(flush_task),
+                        timeout=_STOP_FLUSH_CANCEL_TIMEOUT_SECONDS,
+                    )
         if self._pending_bumps:
             logger.warning(
                 "cache_invalidation shutdown left %d pending bump(s) unflushed",

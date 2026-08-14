@@ -27056,3 +27056,25 @@ async def test_reconcile_purged_sessions_skips_inflight_and_unclaimed_sessions(
     assert busy.key in service._http_bridge_sessions
     assert unclaimed.key in service._http_bridge_sessions
     lookup_sessions.assert_not_awaited()
+
+
+def test_purge_reconcile_floor_stays_below_the_retention_cutoff() -> None:
+    """The purge emits its bump only when it deletes a row, so a floor at or
+    above the abandoned-row retention cutoff would skip every session that one
+    bump was meant to reconcile — and no later purge re-signals an already
+    deleted row. The floor must therefore stay strictly under the cutoff for
+    any retention value, including aggressively shortened ones."""
+    default_floor = purge_reconcile._purge_reconcile_min_idle_seconds(3600.0)
+    assert default_floor == purge_reconcile._PURGE_RECONCILE_MIN_IDLE_SECONDS
+    assert default_floor < 3600.0
+
+    for retention in (10.0, 30.0, 60.0, 120.0):
+        floor = purge_reconcile._purge_reconcile_min_idle_seconds(retention)
+        assert floor < retention, retention
+
+    # An unreadable cutoff falls back to the static floor rather than disabling
+    # the pass or trusting an unbounded value.
+    assert purge_reconcile._purge_reconcile_min_idle_seconds(None) == (
+        purge_reconcile._PURGE_RECONCILE_MIN_IDLE_SECONDS
+    )
+    assert purge_reconcile._purge_reconcile_min_idle_seconds(0.0) == (purge_reconcile._PURGE_RECONCILE_MIN_IDLE_SECONDS)

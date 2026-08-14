@@ -5,15 +5,16 @@ import logging
 from typing import Any
 
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_request_budget_seconds,
     _http_bridge_session_has_admission_waiter,
     _log_http_bridge_event,
     _service_get_settings,
+    _service_get_settings_cache,
     _service_time,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
 from app.modules.proxy.affinity import _extract_model_class
+from app.modules.sticky_sessions.cleanup_scheduler import _abandoned_bridge_retention_seconds
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -23,25 +24,36 @@ logger = logging.getLogger("app.modules.proxy.service")
 _PURGE_RECONCILE_CLOSE_TASK_NAME = "http-bridge-purge-reconcile-close"
 
 
-def _purge_reconcile_min_idle_seconds() -> float:
+# Secondary guard for the pre-submit window. The PRIMARY guard is the durable
+# liveness check: an anchored reuse renews the session's durable row under the
+# bridge lock before it yields, so a session a request is about to use is
+# found live by ``lookup_sessions`` and skipped. This floor covers only the
+# narrow residue — the row renewal failed, or the leader purged between the
+# renewal and the lookup — by ignoring sessions touched since the reuse path
+# last released the bridge lock.
+#
+# It deliberately does NOT scale with the bridge request budget (7200s by
+# default). That budget exceeds the abandoned-row retention cutoff
+# (``_abandoned_bridge_retention_seconds``, 3600s by default), and the purge
+# emits its bump only when it deletes a row, so a floor above the cutoff would
+# skip every session the single bump was meant to reconcile and never see them
+# again. The floor is therefore clamped below the cutoff: correctness against
+# the pre-submit window comes from the durable check, not from outwaiting the
+# whole request budget.
+_PURGE_RECONCILE_MIN_IDLE_SECONDS = 30.0
+_PURGE_RECONCILE_MAX_IDLE_FLOOR_RATIO = 0.5
+
+
+def _purge_reconcile_min_idle_seconds(retention_seconds: float | None = None) -> float:
     """Idle floor a session must clear before this pass may reconcile it.
 
-    A session handed to a request is not yet visible as busy: the request sets
-    ``last_used_at`` at handoff but only registers an admission waiter once it
-    reaches submit, and an anchored reuse can await durable work (e.g. the
-    pre-created retry-circuit cooldown lookup) in between. Idle eviction is
-    protected from that window by its idle TTL; this pass exists to beat that
-    TTL, so it needs its own floor.
-
-    The floor is the bridge's own request budget rather than a fixed constant:
-    that budget bounds the entire bridge request, so a handoff whose submit has
-    not happened within it belongs to a request that has already failed — no
-    arbitrary number has to be assumed safe against a slow intermediate lookup.
-    It costs nothing in practice because the abandoned purge only deletes rows
-    whose activity predates the retention cutoff, so anything this pass
-    legitimately targets has been idle for far longer.
+    Clamped to a fraction of the abandoned-row retention cutoff so a deployment
+    that shortens retention can never end up with a floor that silently
+    disables the pass.
     """
-    return _http_bridge_request_budget_seconds(_service_get_settings())
+    if retention_seconds is None or retention_seconds <= 0:
+        return _PURGE_RECONCILE_MIN_IDLE_SECONDS
+    return min(_PURGE_RECONCILE_MIN_IDLE_SECONDS, retention_seconds * _PURGE_RECONCILE_MAX_IDLE_FLOOR_RATIO)
 
 
 class _HTTPBridgePurgeReconcileMixin:
@@ -57,14 +69,17 @@ class _HTTPBridgePurgeReconcileMixin:
         pending work, an admission waiter, an in-progress handoff, or an
         unanchored reservation is left to its own lifecycle.
         """
-        candidates = await self._collect_purge_reconcile_candidates()
+        min_idle_seconds = _purge_reconcile_min_idle_seconds(await self._purge_reconcile_retention_seconds())
+        candidates = await self._collect_purge_reconcile_candidates(min_idle_seconds)
         if not candidates:
             return 0
         lookups = await self._durable_bridge.lookup_sessions(
             session_ids=[durable_session_id for _key, _session, durable_session_id in candidates]
         )
         live_session_ids = {lookup.session_id for lookup in lookups}
-        sessions_to_close = await self._detach_purged_http_bridge_sessions(candidates, live_session_ids)
+        sessions_to_close = await self._detach_purged_http_bridge_sessions(
+            candidates, live_session_ids, min_idle_seconds
+        )
         if sessions_to_close:
             # Create and track the settle task with NO await between detaching
             # and tracking it: the sessions are already out of the registry, so
@@ -79,6 +94,19 @@ class _HTTPBridgePurgeReconcileMixin:
             self._background_cleanup_tasks.add(settle_task)
             settle_task.add_done_callback(self._background_cleanup_tasks.discard)
         return len(sessions_to_close)
+
+    async def _purge_reconcile_retention_seconds(self: Any) -> float | None:
+        """Abandoned-row retention cutoff the leader purged against, if readable.
+
+        Used only to clamp the idle floor below it; an unreadable settings row
+        just falls back to the static floor.
+        """
+        try:
+            dashboard_settings = await _service_get_settings_cache().get()
+            return _abandoned_bridge_retention_seconds(dashboard_settings, _service_get_settings())
+        except Exception:
+            logger.debug("Purge reconcile could not read the retention cutoff", exc_info=True)
+            return None
 
     async def _settle_purged_http_bridge_sessions(self: Any, sessions: list[_HTTPBridgeSession]) -> None:
         """Release every orphan's stream lease, then close them.
@@ -117,11 +145,12 @@ class _HTTPBridgePurgeReconcileMixin:
 
     async def _collect_purge_reconcile_candidates(
         self: _HTTPBridgeServiceProtocol,
+        min_idle_seconds: float,
     ) -> list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession, str]]:
         async with self._http_bridge_lock:
             candidates: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession, str]] = []
             for key, session in self._http_bridge_sessions.items():
-                durable_session_id = _purge_reconcile_eligible_durable_id(self, session)
+                durable_session_id = _purge_reconcile_eligible_durable_id(self, session, min_idle_seconds)
                 if durable_session_id is None:
                     continue
                 candidates.append((key, session, durable_session_id))
@@ -131,6 +160,7 @@ class _HTTPBridgePurgeReconcileMixin:
         self: _HTTPBridgeServiceProtocol,
         candidates: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession, str]],
         live_session_ids: set[str],
+        min_idle_seconds: float,
     ) -> list[_HTTPBridgeSession]:
         sessions_to_close: list[_HTTPBridgeSession] = []
         async with self._http_bridge_lock:
@@ -141,7 +171,7 @@ class _HTTPBridgePurgeReconcileMixin:
                 # session may have picked up work, gained an unanchored
                 # reservation, re-claimed a fresh durable row, or been replaced
                 # while the durable lookup ran.
-                if _purge_reconcile_eligible_durable_id(self, session) != durable_session_id:
+                if _purge_reconcile_eligible_durable_id(self, session, min_idle_seconds) != durable_session_id:
                     continue
                 detached = self._detach_http_bridge_session_locked(key, expected_session=session)
                 if detached is None:
@@ -174,6 +204,7 @@ class _HTTPBridgePurgeReconcileMixin:
 def _purge_reconcile_eligible_durable_id(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
+    min_idle_seconds: float,
 ) -> str | None:
     """Return the session's durable id when it is a purge-reconcile candidate.
 
@@ -186,7 +217,7 @@ def _purge_reconcile_eligible_durable_id(
         return None
     if _http_bridge_session_has_admission_waiter(session):
         return None
-    if _service_time().monotonic() - session.last_used_at < _purge_reconcile_min_idle_seconds():
+    if _service_time().monotonic() - session.last_used_at < min_idle_seconds:
         # Recently handed to a request that has not reached submit yet.
         return None
     if getattr(session, "unanchored_reservation_id", None) is not None:
