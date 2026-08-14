@@ -192,6 +192,31 @@ _GH_RETRY_BASE_DELAY_SECONDS = 2.0
 _fallback_token_active = False
 
 
+@dataclass
+class WriteAttemptTracker:
+    attempted: int = 0
+    succeeded: int = 0
+    permission_denied_failures: int = 0
+
+    def record_success(self) -> None:
+        self.attempted += 1
+        self.succeeded += 1
+
+    def record_permission_denied_failure(self) -> None:
+        self.attempted += 1
+        self.permission_denied_failures += 1
+
+
+def _ensure_primary_token_recorded() -> str:
+    primary = os.environ.get("GH_PRIMARY_TOKEN", "").strip()
+    if primary:
+        return primary
+    primary = os.environ.get("GH_TOKEN", "").strip()
+    if primary:
+        os.environ["GH_PRIMARY_TOKEN"] = primary
+    return primary
+
+
 def _activate_fallback_token() -> bool:
     """Switch gh calls to GH_FALLBACK_TOKEN once after a rate-limit failure.
 
@@ -204,6 +229,18 @@ def _activate_fallback_token() -> bool:
         return False
     fallback = os.environ.get("GH_FALLBACK_TOKEN", "").strip()
     if not fallback or fallback == os.environ.get("GH_TOKEN", ""):
+        return False
+    os.environ["GH_TOKEN"] = fallback
+    _fallback_token_active = True
+    return True
+
+
+def _activate_write_fallback_token() -> bool:
+    global _fallback_token_active
+    primary = _ensure_primary_token_recorded()
+    fallback = os.environ.get("GH_FALLBACK_TOKEN", "").strip()
+    current = os.environ.get("GH_TOKEN", "").strip()
+    if not fallback or fallback == primary or fallback == current:
         return False
     os.environ["GH_TOKEN"] = fallback
     _fallback_token_active = True
@@ -264,6 +301,7 @@ def run_gh(
     timeout_seconds: int = 30,
     fallback_retry: bool = True,
 ) -> Any:
+    _ensure_primary_token_recorded()
     command = ["gh", *args]
     input_text = json.dumps(input_json) if input_json is not None else None
     safe_to_retry = _gh_args_safe_to_retry(args)
@@ -1254,13 +1292,31 @@ def gh_api_write(
     tolerate_permission_errors: bool,
     tolerate_missing: bool = False,
     action: str,
+    tracker: WriteAttemptTracker | None = None,
 ) -> str | None:
     try:
         gh_api(path, method=method, input_json=input_json)
+        if tracker is not None:
+            tracker.record_success()
     except GhError as exc:
         if tolerate_missing and is_missing_issue_label(exc):
             return None
+        if is_github_app_write_denial(exc) and _activate_write_fallback_token():
+            print(
+                f"warning: {action}: primary token cannot write this resource; retrying with GH_FALLBACK_TOKEN",
+                file=sys.stderr,
+            )
+            gh_api(path, method=method, input_json=input_json)
+            if tracker is not None:
+                tracker.record_success()
+            print(
+                f"info: {action}: write succeeded with GH_FALLBACK_TOKEN",
+                file=sys.stderr,
+            )
+            return None
         if tolerate_permission_errors and is_github_app_write_denial(exc):
+            if tracker is not None:
+                tracker.record_permission_denied_failure()
             return write_warning(action, exc)
         raise
     return None
@@ -1273,11 +1329,33 @@ def run_gh_write(
     tolerate_permission_errors: bool,
     action: str,
     fallback_retry: bool = True,
+    tracker: WriteAttemptTracker | None = None,
 ) -> str | None:
     try:
         run_gh(args, timeout_seconds=timeout_seconds, fallback_retry=fallback_retry)
+        if tracker is not None:
+            tracker.record_success()
     except GhError as exc:
+        if is_github_app_write_denial(exc) and _activate_write_fallback_token():
+            print(
+                f"warning: {action}: primary token cannot write this resource; retrying with GH_FALLBACK_TOKEN",
+                file=sys.stderr,
+            )
+            run_gh(
+                args,
+                timeout_seconds=timeout_seconds,
+                fallback_retry=fallback_retry,
+            )
+            if tracker is not None:
+                tracker.record_success()
+            print(
+                f"info: {action}: write succeeded with GH_FALLBACK_TOKEN",
+                file=sys.stderr,
+            )
+            return None
         if tolerate_permission_errors and is_github_app_write_denial(exc):
+            if tracker is not None:
+                tracker.record_permission_denied_failure()
             return write_warning(action, exc)
         raise
     return None
@@ -1291,6 +1369,7 @@ def ensure_label(
     description: str,
     apply: bool,
     tolerate_permission_errors: bool = False,
+    tracker: WriteAttemptTracker | None = None,
 ) -> tuple[str, ...]:
     if not apply:
         return ()
@@ -1312,6 +1391,7 @@ def ensure_label(
             },
             tolerate_permission_errors=tolerate_permission_errors,
             action=f"create label {repo}:{label}",
+            tracker=tracker,
         )
         return (warning,) if warning else ()
     except GhError as exc:
@@ -1456,7 +1536,12 @@ def decide_pr(
     )
 
 
-def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool = False) -> tuple[str, ...]:
+def apply_decision(
+    decision: SyncDecision,
+    *,
+    tolerate_permission_errors: bool = False,
+    tracker: WriteAttemptTracker | None = None,
+) -> tuple[str, ...]:
     warnings: list[str] = []
 
     def record(warning: str | None) -> None:
@@ -1471,6 +1556,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 input_json={"labels": [CODEX_OK_LABEL]},
                 tolerate_permission_errors=tolerate_permission_errors,
                 action=f"add {CODEX_OK_LABEL} to {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     elif decision.ok_action == "remove":
@@ -1481,6 +1567,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 tolerate_permission_errors=tolerate_permission_errors,
                 tolerate_missing=True,
                 action=f"remove {CODEX_OK_LABEL} from {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     if decision.needs_work_action == "add":
@@ -1491,6 +1578,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 input_json={"labels": [CODEX_NEEDS_WORK_LABEL]},
                 tolerate_permission_errors=tolerate_permission_errors,
                 action=f"add {CODEX_NEEDS_WORK_LABEL} to {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     elif decision.needs_work_action == "remove":
@@ -1501,6 +1589,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 tolerate_permission_errors=tolerate_permission_errors,
                 tolerate_missing=True,
                 action=f"remove {CODEX_NEEDS_WORK_LABEL} from {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     if decision.needs_rebase_action == "add":
@@ -1511,6 +1600,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 input_json={"labels": [NEEDS_REBASE_LABEL]},
                 tolerate_permission_errors=tolerate_permission_errors,
                 action=f"add {NEEDS_REBASE_LABEL} to {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     elif decision.needs_rebase_action == "remove":
@@ -1521,6 +1611,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 tolerate_permission_errors=tolerate_permission_errors,
                 tolerate_missing=True,
                 action=f"remove {NEEDS_REBASE_LABEL} from {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     for label in decision.legacy_labels:
@@ -1531,6 +1622,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 tolerate_permission_errors=tolerate_permission_errors,
                 tolerate_missing=True,
                 action=f"remove legacy {label} from {decision.repo}#{decision.number}",
+                tracker=tracker,
             )
         )
     return tuple(warnings)
@@ -1541,6 +1633,7 @@ def trigger_codex_review(
     *,
     body: str,
     tolerate_permission_errors: bool = False,
+    tracker: WriteAttemptTracker | None = None,
 ) -> tuple[str, ...]:
     warning = run_gh_write(
         [
@@ -1555,6 +1648,7 @@ def trigger_codex_review(
         tolerate_permission_errors=tolerate_permission_errors,
         action=f"request Codex review on {decision.repo}#{decision.number}",
         fallback_retry=False,
+        tracker=tracker,
     )
     return (warning,) if warning else ()
 
@@ -1563,6 +1657,7 @@ def approve_workflow_runs(
     decision: SyncDecision,
     *,
     tolerate_permission_errors: bool = False,
+    tracker: WriteAttemptTracker | None = None,
 ) -> tuple[str, ...]:
     warnings: list[str] = []
     for run_id in decision.approve_workflow_run_ids:
@@ -1571,6 +1666,7 @@ def approve_workflow_runs(
             method="POST",
             tolerate_permission_errors=tolerate_permission_errors,
             action=f"approve workflow run {run_id} for {decision.repo}#{decision.number}",
+            tracker=tracker,
         )
         if warning:
             warnings.append(warning)
@@ -1656,6 +1752,7 @@ def main(argv: list[str] | None = None) -> int:
     repos = [repo_path(repo) for repo in args.repo]
     allowed_authors = CODEX_REVIEW_AUTHORS | set(args.reviewer_login)
     had_error = False
+    write_tracker = WriteAttemptTracker()
     # Per-sender quota state is shared across every --repo in the run: a usage
     # limit observed in one repository suppresses review requests in the rest.
     # Timelines classified before the backoff exists are retained so evidence
@@ -1674,6 +1771,7 @@ def main(argv: list[str] | None = None) -> int:
                 description="Current PR head has green CI and a clean Codex review",
                 apply=args.apply,
                 tolerate_permission_errors=args.tolerate_write_permission_errors,
+                tracker=write_tracker,
             )
         )
         setup_warnings.extend(
@@ -1684,6 +1782,7 @@ def main(argv: list[str] | None = None) -> int:
                 description="Codex raised issues on the current PR head that still need work",
                 apply=args.apply,
                 tolerate_permission_errors=args.tolerate_write_permission_errors,
+                tracker=write_tracker,
             )
         )
         setup_warnings.extend(
@@ -1694,6 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
                 description="Needs rebase or conflict repair against current main",
                 apply=args.apply,
                 tolerate_permission_errors=args.tolerate_write_permission_errors,
+                tracker=write_tracker,
             )
         )
         for warning in setup_warnings:
@@ -1833,6 +1933,7 @@ def main(argv: list[str] | None = None) -> int:
                         apply_decision(
                             decision,
                             tolerate_permission_errors=args.tolerate_write_permission_errors,
+                            tracker=write_tracker,
                         )
                     )
                     if decision.approve_workflow_run_ids and not args.no_approve_workflow_runs:
@@ -1840,6 +1941,7 @@ def main(argv: list[str] | None = None) -> int:
                             approve_workflow_runs(
                                 decision,
                                 tolerate_permission_errors=args.tolerate_write_permission_errors,
+                                tracker=write_tracker,
                             )
                         )
                     if trigger_codex_review_now and _fallback_token_active:
@@ -1866,6 +1968,7 @@ def main(argv: list[str] | None = None) -> int:
                             decision,
                             body=args.codex_review_command,
                             tolerate_permission_errors=args.tolerate_write_permission_errors,
+                            tracker=write_tracker,
                         )
                         accumulated_warnings.extend(trigger_warnings)
                         review_request_posted = not trigger_warnings
@@ -1902,6 +2005,20 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 had_error = True
                 print(f"{decision.repo}#{decision.number}: {exc}", file=sys.stderr, flush=True)
+
+    if (
+        args.apply
+        and write_tracker.attempted > 0
+        and write_tracker.succeeded == 0
+        and write_tracker.permission_denied_failures == write_tracker.attempted
+    ):
+        had_error = True
+        print(
+            "fatal: all attempted GitHub writes failed with permission errors; "
+            "check GH_TOKEN/GH_FALLBACK_TOKEN or grant the App issues:write",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return 1 if had_error else 0
 

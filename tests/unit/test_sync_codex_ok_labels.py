@@ -515,6 +515,40 @@ def test_apply_decision_tolerates_github_app_write_denial(monkeypatch: pytest.Mo
     assert "Resource not accessible by integration" in warnings[0]
 
 
+def test_apply_decision_retries_write_with_fallback_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    monkeypatch.setenv("GH_TOKEN", "primary-token")
+    monkeypatch.setenv("GH_FALLBACK_TOKEN", "fallback-token")
+
+    calls: list[tuple[str, str]] = []
+    tracker = module.WriteAttemptTracker()
+
+    def fallback_write(path: str, *, method: str = "GET", **_kwargs: Any) -> None:
+        import os
+
+        calls.append((os.environ["GH_TOKEN"], path))
+        if os.environ["GH_TOKEN"] == "primary-token":
+            raise module.GhError("gh: Resource not accessible by integration (HTTP 403)")
+
+    monkeypatch.setattr(module, "gh_api", fallback_write)
+
+    warnings = module.apply_decision(
+        decision(module),
+        tolerate_permission_errors=True,
+        tracker=tracker,
+    )
+
+    assert warnings == ()
+    assert calls == [
+        ("primary-token", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
+        ("fallback-token", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
+    ]
+    assert tracker.attempted == 1
+    assert tracker.succeeded == 1
+    assert tracker.permission_denied_failures == 0
+    assert module._fallback_token_active is True
+
+
 def test_apply_decision_still_fails_on_write_denial_without_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 
@@ -1638,6 +1672,41 @@ def test_main_fails_tolerant_run_when_every_pr_read_fails(
     captured = capsys.readouterr()
     assert result == 1
     assert "all selected PRs failed classification" in captured.err
+
+
+def test_main_fails_tolerant_run_when_all_attempted_writes_hit_permission_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [714])
+    monkeypatch.setattr(
+        module,
+        "decide_pr",
+        lambda _repo, number, **_kwargs: decision(module, number=number),
+    )
+
+    def deny_write(*_args: Any, **_kwargs: Any) -> None:
+        raise module.GhError("gh: Resource not accessible by integration (HTTP 403)")
+
+    monkeypatch.setattr(module, "gh_api", deny_write)
+
+    result = module.main(
+        [
+            "--repo",
+            "Soju06/codex-lb",
+            "--all-open",
+            "--apply",
+            "--tolerate-write-permission-errors",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "write_warning=remove 🤖 codex: ok from Soju06/codex-lb#714" in captured.out
+    assert "fatal: all attempted GitHub writes failed with permission errors" in captured.err
 
 
 def test_main_fails_read_errors_without_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
