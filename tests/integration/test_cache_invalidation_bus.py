@@ -20,6 +20,7 @@ from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.core.cache.invalidation as invalidation_module
 from app.core.cache.invalidation import (
     _NAMESPACE_LOG_LABELS,
     NAMESPACE_ACCOUNT_ROUTING,
@@ -412,6 +413,43 @@ async def test_stop_without_pending_bumps_writes_nothing(db_setup) -> None:
     await poller.stop()
 
     assert poller._pending_bumps == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_flush_is_bounded_when_the_database_stalls(db_setup, monkeypatch) -> None:
+    """A stalled driver must not hold shutdown: the final flush runs under a
+    deadline, keeps the namespace pending, and does not leave the write running
+    for loop teardown to cancel silently."""
+    namespace = "test_stop_flush_stall"
+    poller = CacheInvalidationPoller(SessionLocal)
+    await poller.start()
+    poller.request_bump(namespace)
+
+    stalled = asyncio.Event()
+
+    async def never_finishes(ns: str) -> bool:
+        stalled.set()
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(poller, "bump", never_finishes)
+    monkeypatch.setattr(invalidation_module, "_STOP_FLUSH_TIMEOUT_SECONDS", 0.05)
+
+    await asyncio.wait_for(poller.stop(), timeout=2.0)
+
+    assert stalled.is_set()
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+    await asyncio.sleep(0)
+    current = asyncio.current_task()
+    leaked = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not current
+        and not task.done()
+        and getattr(task.get_coro(), "__qualname__", "").endswith("_flush_pending_bumps")
+    ]
+    assert not leaked, "abandoned flush must be cancelled, not left for loop teardown"
 
 
 @pytest.mark.asyncio

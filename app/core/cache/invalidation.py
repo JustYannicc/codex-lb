@@ -51,10 +51,24 @@ _NAMESPACE_LOG_LABELS: dict[str, str] = {
     "http_bridge_purge": "http_bridge_purge",
 }
 
+# Deadline for the best-effort bump flush in ``stop()``. The same database
+# that blocked a caller's synchronous bump can block this one, so shutdown
+# must never wait on it unbounded.
+_STOP_FLUSH_TIMEOUT_SECONDS = 5.0
 _BUMP_RETRY_ATTEMPTS = 3
 _BUMP_RETRY_BASE_SECONDS = 0.05
 _POLL_FAILURES_WARNING_THRESHOLD = 3
 _POLL_FAILURES_ERROR_THRESHOLD = 10
+
+
+def _log_abandoned_stop_flush(task: asyncio.Task[None]) -> None:
+    """Report the outcome of a final bump flush abandoned at the stop deadline."""
+    if task.cancelled():
+        logger.warning("cache_invalidation abandoned final bump flush was cancelled at the stop deadline")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("cache_invalidation abandoned final bump flush finished with error", exc_info=exc)
 
 
 class CacheInvalidationPoller:
@@ -164,17 +178,42 @@ class CacheInvalidationPoller:
         await self._flush_pending_bumps_on_stop()
 
     async def _flush_pending_bumps_on_stop(self) -> None:
+        """Best-effort final flush, bounded so it can never pin shutdown.
+
+        The same database that blocked the caller's synchronous bump can block
+        this flush, so it runs under a deadline: an unresponsive driver must
+        not hold the process past the shutdown budget. Namespaces that do not
+        land stay pending and are logged.
+        """
         if not self._pending_bumps:
             return
-        pending = sorted(self._pending_bumps)
+        # ``_flush_pending_bumps`` clears each marker before awaiting its write,
+        # so an abandoned flush would otherwise lose the namespace it was
+        # working on. Keep a snapshot and restore whatever did not land.
+        pending = set(self._pending_bumps)
+        flush_task = asyncio.ensure_future(self._flush_pending_bumps())
         try:
-            await self._flush_pending_bumps()
+            await asyncio.wait_for(asyncio.shield(flush_task), timeout=_STOP_FLUSH_TIMEOUT_SECONDS)
+        except TimeoutError:
+            self._pending_bumps |= pending
+            logger.warning(
+                "cache_invalidation final bump flush exceeded %.1fs; abandoning %d pending namespace(s)",
+                _STOP_FLUSH_TIMEOUT_SECONDS,
+                len(self._pending_bumps),
+            )
         except Exception:
+            self._pending_bumps |= pending
             logger.warning(
                 "cache_invalidation final bump flush failed for %d pending namespace(s)",
                 len(pending),
                 exc_info=True,
             )
+        finally:
+            if not flush_task.done():
+                # Do not leave the write running for loop teardown to cancel
+                # silently after stop() has returned.
+                flush_task.cancel()
+                flush_task.add_done_callback(_log_abandoned_stop_flush)
         if self._pending_bumps:
             logger.warning(
                 "cache_invalidation shutdown left %d pending bump(s) unflushed",
