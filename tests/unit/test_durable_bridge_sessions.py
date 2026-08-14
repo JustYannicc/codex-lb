@@ -1538,6 +1538,93 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_concurrent_claims_use_distinct_epochs_and_consistent_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production coordinator fences concurrent claims and stale releases."""
+    seeded = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="concurrent-claim",
+        api_key_id=None,
+        instance_id="instance-seed",
+        owner_process_epoch="process-seed",
+        lease_ttl_seconds=60.0,
+        account_id="account-seed",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="turn-seed",
+        latest_response_id="response-seed",
+        allow_takeover=True,
+    )
+    barrier = asyncio.Barrier(2)
+    claim_calls = 0
+    real_claim = coordinator.claim_live_session
+
+    async def claim(**kwargs):
+        nonlocal claim_calls
+        claim_calls += 1
+        if claim_calls <= 2:
+            await barrier.wait()
+        return await real_claim(**kwargs)
+
+    monkeypatch.setattr(coordinator, "claim_live_session", claim)
+
+    snapshots = await asyncio.gather(
+        claim(
+            session_key_kind="session_header",
+            session_key_value="concurrent-claim",
+            api_key_id=None,
+            instance_id="instance-a",
+            owner_process_epoch="process-instance-a",
+            lease_ttl_seconds=60.0,
+            account_id="account-seed",
+            model="gpt-5.4",
+            service_tier=None,
+            latest_turn_state="turn-a",
+            latest_response_id="response-a",
+            allow_takeover=True,
+        ),
+        claim(
+            session_key_kind="session_header",
+            session_key_value="concurrent-claim",
+            api_key_id=None,
+            instance_id="instance-b",
+            owner_process_epoch="process-instance-b",
+            lease_ttl_seconds=60.0,
+            account_id="account-seed",
+            model="gpt-5.4",
+            service_tier=None,
+            latest_turn_state="turn-b",
+            latest_response_id="response-b",
+            allow_takeover=True,
+        ),
+    )
+
+    stale_release = await coordinator.release_live_session(
+        session_id=seeded.session_id,
+        instance_id="instance-seed",
+        owner_epoch=seeded.owner_epoch,
+        draining=False,
+    )
+    current = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="concurrent-claim",
+        api_key_id=None,
+        turn_state=None,
+        session_header="concurrent-claim",
+        previous_response_id=None,
+    )
+
+    assert len({snapshot.owner_epoch for snapshot in snapshots}) == 2
+    assert stale_release is not None
+    assert stale_release.owner_epoch == max(snapshot.owner_epoch for snapshot in snapshots)
+    assert stale_release.state == "active"
+    assert current is not None
+    assert current.latest_response_id in {snapshot.latest_response_id for snapshot in snapshots}
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_account_change_advances_epoch_to_fence_stale_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
