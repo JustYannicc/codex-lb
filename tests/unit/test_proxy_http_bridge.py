@@ -26870,7 +26870,9 @@ async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
     await asyncio.gather(*service._background_cleanup_tasks)
     assert purged.closed is True
     assert live.closed is False
-    assert lookup_sessions.await_args.kwargs["session_ids"] == ["dur-purged", "dur-live"]
+    await_args = lookup_sessions.await_args
+    assert await_args is not None
+    assert await_args.kwargs["session_ids"] == ["dur-purged", "dur-live"]
     assert any(call.args == (lease,) for call in release_account_lease.await_args_list)
 
 

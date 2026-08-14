@@ -448,6 +448,8 @@ def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
         and (
             task.get_name().startswith("proxy-http_bridge_session_close-")
             or task.get_name().startswith("http-bridge-close-")
+            # Literal (not the purge_reconcile constant) to avoid an import
+            # cycle: purge_reconcile imports this module.
             or task.get_name().startswith("http-bridge-purge-reconcile-close")
         )
     )
