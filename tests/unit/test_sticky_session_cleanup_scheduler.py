@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from types import SimpleNamespace
@@ -428,6 +429,69 @@ async def test_cleanup_once_bumps_http_bridge_purge_only_when_abandoned_rows_del
     assert poller.bump.await_count == len(committed_batches)
     assert all(call.args == (cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE,) for call in poller.bump.await_args_list)
     poller.request_bump.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_signal_abandoned_bridge_purge_completes_write_under_cancellation() -> None:
+    """The callback runs only after its batch is committed, so a shutdown that
+    cancels the scheduler mid-write must not drop the signal for rows that are
+    durably gone. CancelledError is a BaseException and would bypass the
+    failure fallback, so the write is shielded and drained before propagating.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = False
+
+    async def slow_bump(namespace: str) -> bool:
+        nonlocal completed
+        started.set()
+        await release.wait()
+        completed = True
+        return True
+
+    poller = Mock()
+    poller.bump = AsyncMock(side_effect=slow_bump)
+
+    with patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller):
+        signal_task = asyncio.create_task(cleanup_scheduler._signal_abandoned_bridge_purge(4))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        signal_task.cancel()
+        await asyncio.sleep(0)
+        # The shielded write survives the cancellation and is drained.
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await signal_task
+
+    assert completed is True, "shielded bump must complete before cancellation propagates"
+    # It persisted, so no retry is queued.
+    poller.request_bump.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_signal_abandoned_bridge_purge_queues_retry_when_cancelled_write_never_lands() -> None:
+    """If the shielded write cannot land within the drain grace, the bump is
+    queued for retry rather than silently lost."""
+    started = asyncio.Event()
+
+    async def never_finishes(namespace: str) -> bool:
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    poller = Mock()
+    poller.bump = AsyncMock(side_effect=never_finishes)
+
+    with (
+        patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller),
+        patch.object(cleanup_scheduler, "_PURGE_SIGNAL_CANCELLATION_GRACE_SECONDS", 0.05),
+    ):
+        signal_task = asyncio.create_task(cleanup_scheduler._signal_abandoned_bridge_purge(4))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        signal_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await signal_task
+
+    poller.request_bump.assert_called_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,11 @@ _CLEANUP_INTERVAL_SECONDS = 300
 # its mapping dropped (never rebound) so the next request re-resolves fresh.
 _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 
+# Grace for a shielded purge signal to land when shutdown cancels the
+# cleanup scheduler mid-write. ``poller.bump`` retries a few times with
+# sub-second backoff, so this only needs to cover that bounded window.
+_PURGE_SIGNAL_CANCELLATION_GRACE_SECONDS = 5.0
+
 
 _T = TypeVar("_T")
 
@@ -65,19 +70,50 @@ async def _signal_abandoned_bridge_purge(deleted_count: int) -> None:
     otherwise leave those orphans unsignalled until the lease TTL. The bump is
     persisted synchronously and falls back to the poller's retry queue when
     that write fails; a signalling failure never aborts the purge.
+
+    The write is shielded from cancellation. The callback runs only after its
+    batch is already committed, so a graceful shutdown that cancels the
+    cleanup scheduler mid-write would otherwise drop the signal for rows that
+    are durably gone — and ``CancelledError`` is a ``BaseException``, so it
+    would bypass the failure fallback too. On cancellation the shielded write
+    is given a bounded grace to land before the cancellation propagates.
     """
     poller = get_cache_invalidation_poller()
     if poller is None:
         return
+    bump_task: asyncio.Task[bool] = asyncio.ensure_future(poller.bump(NAMESPACE_HTTP_BRIDGE_PURGE))
     try:
-        if not await poller.bump(NAMESPACE_HTTP_BRIDGE_PURGE):
+        persisted = bool(await asyncio.shield(bump_task))
+    except asyncio.CancelledError:
+        persisted = False
+        try:
+            persisted = bool(
+                await asyncio.wait_for(
+                    asyncio.shield(bump_task),
+                    timeout=_PURGE_SIGNAL_CANCELLATION_GRACE_SECONDS,
+                )
+            )
+        except asyncio.CancelledError:
+            # Cancelled again while draining; fall through to the retry queue
+            # and re-raise the original cancellation below.
+            pass
+        except Exception:
+            logger.warning(
+                "Abandoned HTTP bridge purge signal failed while draining deleted_count=%s",
+                deleted_count,
+                exc_info=True,
+            )
+        if not persisted:
             poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
+        raise
     except Exception:
         logger.warning(
             "Failed to signal abandoned HTTP bridge purge deleted_count=%s",
             deleted_count,
             exc_info=True,
         )
+        persisted = False
+    if not persisted:
         poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
 
 

@@ -2,7 +2,7 @@
 
 ### Requirement: Leader purge of abandoned bridge sessions reconciles owner replicas
 
-When the leader's cleanup purges abandoned durable HTTP-bridge session rows, the system MUST propagate an invalidation signal to all replicas over the existing cache-invalidation bus. Because the purge commits its deletions in batches, the signal MUST be emitted for each committed batch rather than once per purge run, and each signal MUST be persisted synchronously with a retry path when that write fails, so a purge that is cancelled or whose process dies mid-run cannot leave an already-committed batch unsignalled. A signalling failure MUST NOT abort the purge. On that signal each replica MUST reconcile its in-memory bridge sessions against the durable table: a quiescent session — one with no pending or queued work, no admission waiter, no handoff in progress, and no unanchored reservation — whose durable row no longer exists MUST be detached from the session registry and closed, releasing any account stream lease it holds. Sessions whose durable rows still exist, and sessions with in-flight work, MUST NOT be affected. The reconcile close MUST NOT write account error health and MUST NOT attempt a durable release for the already-purged row.
+When the leader's cleanup purges abandoned durable HTTP-bridge session rows, the system MUST propagate an invalidation signal to all replicas over the existing cache-invalidation bus. Because the purge commits its deletions in batches, the signal MUST be emitted for each committed batch rather than once per purge run, and each signal MUST be persisted synchronously with a retry path when that write fails, so a purge that is cancelled or whose process dies mid-run cannot leave an already-committed batch unsignalled. A signalling failure MUST NOT abort the purge. The signal write MUST be shielded from cancellation: because it runs only after its batch is already committed, a cancellation arriving mid-write MUST be given a bounded grace for the write to land, and MUST fall back to the retry queue when it does not, before the cancellation propagates. On that signal each replica MUST reconcile its in-memory bridge sessions against the durable table: a quiescent session — one with no pending or queued work, no admission waiter, no handoff in progress, and no unanchored reservation — whose durable row no longer exists MUST be detached from the session registry and closed, releasing any account stream lease it holds. Sessions whose durable rows still exist, and sessions with in-flight work, MUST NOT be affected. The reconcile close MUST NOT write account error health and MUST NOT attempt a durable release for the already-purged row.
 
 #### Scenario: Purged orphan releases its stream lease on the owner replica
 
@@ -34,6 +34,13 @@ When the leader's cleanup purges abandoned durable HTTP-bridge session rows, the
 - **WHEN** each batch commits
 - **THEN** an `http_bridge_purge` signal is emitted for that batch before the purge continues
 - **AND** a run interrupted after a batch commits has already signalled that batch
+
+#### Scenario: Shutdown cancellation does not drop a committed batch's signal
+
+- **GIVEN** the cleanup scheduler is cancelled while a committed batch's signal write is in flight
+- **WHEN** the cancellation is delivered
+- **THEN** the shielded write is drained to completion within the grace before the cancellation propagates
+- **AND** the bump is queued for retry if it still did not land
 
 #### Scenario: A failed signal write falls back to the retry queue
 
