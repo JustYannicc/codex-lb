@@ -156,6 +156,30 @@ class CacheInvalidationPoller:
         except asyncio.CancelledError:
             pass
         self._task = None
+        # Queued bumps live only in memory until a poll cycle flushes them, and
+        # cancelling the poll task above is the last cycle. Without this final
+        # flush a mutation that already committed — and whose synchronous bump
+        # failed over to the retry queue — would never reach peer replicas,
+        # leaving their caches stale until an unrelated later bump.
+        await self._flush_pending_bumps_on_stop()
+
+    async def _flush_pending_bumps_on_stop(self) -> None:
+        if not self._pending_bumps:
+            return
+        pending = sorted(self._pending_bumps)
+        try:
+            await self._flush_pending_bumps()
+        except Exception:
+            logger.warning(
+                "cache_invalidation final bump flush failed for %d pending namespace(s)",
+                len(pending),
+                exc_info=True,
+            )
+        if self._pending_bumps:
+            logger.warning(
+                "cache_invalidation shutdown left %d pending bump(s) unflushed",
+                len(self._pending_bumps),
+            )
 
     def request_bump(self, namespace: str) -> None:
         """Enqueue a coalesced bump flushed at the start of the next poll cycle.

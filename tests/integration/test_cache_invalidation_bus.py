@@ -389,6 +389,48 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_flushes_pending_bumps_so_shutdown_cannot_drop_them(db_setup) -> None:
+    """Queued bumps live only in memory until a poll cycle flushes them, and
+    stop() cancels the last cycle. A mutation that already committed — whose
+    synchronous bump failed over to the retry queue — must still reach peers."""
+    namespace = "test_stop_flush"
+    poller = CacheInvalidationPoller(SessionLocal)
+    await poller.start()
+    poller.request_bump(namespace)
+
+    await poller.stop()
+
+    assert namespace not in poller._pending_bumps
+    assert await _namespace_version(namespace) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_without_pending_bumps_writes_nothing(db_setup) -> None:
+    poller = CacheInvalidationPoller(SessionLocal)
+    await poller.start()
+
+    await poller.stop()
+
+    assert poller._pending_bumps == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_keeps_pending_bump_when_the_final_flush_fails(db_setup) -> None:
+    """A failed final flush must leave the namespace pending (and logged)
+    rather than silently dropping it."""
+    namespace = "test_stop_flush_failure"
+    factory = _FlakySessionFactory(failures=100)
+    poller = CacheInvalidationPoller(factory)
+    await poller.start()
+    poller.request_bump(namespace)
+
+    await poller.stop()
+
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
 async def test_pending_coalesced_bump_flushes_after_recovery(db_setup) -> None:
     namespace = "test_pending_flush"
     # First cycle: bump retries (3 attempts) and the poll read both fail.

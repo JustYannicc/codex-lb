@@ -42,23 +42,31 @@ class _HTTPBridgePurgeReconcileMixin:
         live_session_ids = {lookup.session_id for lookup in lookups}
         sessions_to_close = await self._detach_purged_http_bridge_sessions(candidates, live_session_ids)
         if sessions_to_close:
-            # Release every orphan's stream lease BEFORE closing any of them.
-            # Releasing the cap slot is the point of this pass, while closing
-            # can block on a slow upstream-reader cancel; folding the release
-            # into the serial close loop would hold later sessions' capacity
-            # for as long as earlier readers take to unwind.
-            await self._release_purged_http_bridge_leases(sessions_to_close)
-            # Close in a tracked background task: the reader cancels would
-            # otherwise pin the sole cache-invalidation poller. The sessions
-            # are already detached, so a concurrent bump cannot double-process
-            # them; shutdown drains the tracked task.
-            close_task = asyncio.create_task(
-                self._close_purged_http_bridge_sessions(sessions_to_close),
+            # Create and track the settle task with NO await between detaching
+            # and tracking it: the sessions are already out of the registry, so
+            # a concurrent shutdown would otherwise see an empty registry and
+            # finish its only bridge-cleanup drain before this task exists —
+            # and a cancellation landing in that window would drop the task
+            # entirely, leaking the detached sessions' upstream sockets.
+            settle_task = asyncio.create_task(
+                self._settle_purged_http_bridge_sessions(sessions_to_close),
                 name=_PURGE_RECONCILE_CLOSE_TASK_NAME,
             )
-            self._background_cleanup_tasks.add(close_task)
-            close_task.add_done_callback(self._background_cleanup_tasks.discard)
+            self._background_cleanup_tasks.add(settle_task)
+            settle_task.add_done_callback(self._background_cleanup_tasks.discard)
         return len(sessions_to_close)
+
+    async def _settle_purged_http_bridge_sessions(self: Any, sessions: list[_HTTPBridgeSession]) -> None:
+        """Release every orphan's stream lease, then close them.
+
+        Runs off the caller's stack because closing can block on an upstream
+        reader awaiting cancellation, which would otherwise pin the sole
+        cache-invalidation poller. Leases are returned for ALL sessions first:
+        freeing the cap slot is the point of this pass, so a slow close must
+        not hold later orphans' capacity behind it.
+        """
+        await self._release_purged_http_bridge_leases(sessions)
+        await self._close_purged_http_bridge_sessions(sessions)
 
     async def _release_purged_http_bridge_leases(self: Any, sessions: list[_HTTPBridgeSession]) -> None:
         """Return every detached orphan's account stream lease to the pool.

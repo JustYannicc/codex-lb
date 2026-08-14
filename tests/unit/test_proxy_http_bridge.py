@@ -26952,8 +26952,8 @@ async def test_reconcile_purged_sessions_survives_a_failing_lease_release(
     monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=AsyncMock(return_value=[])))
 
     assert await service.reconcile_purged_http_bridge_sessions() == 2
-    assert released == ["lease-fail-1"]
     await asyncio.gather(*service._background_cleanup_tasks)
+    assert released == ["lease-fail-1"]
 
 
 @pytest.mark.asyncio
