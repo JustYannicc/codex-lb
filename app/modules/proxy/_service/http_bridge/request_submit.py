@@ -3020,12 +3020,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 # Account-scoped uploaded files cannot be replayed on a
                 # different owner. Keep the preferred account mandatory for
                 # both silent recovery and clean-close recovery.
-                require_preferred_reconnect = account_neutral_recovery or request_state.file_required_preferred_account
+                require_preferred_reconnect = request_state.file_required_preferred_account
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
                 if account_neutral_recovery:
-                    request_state.preferred_account_id = session.account.id
+                    request_state.preferred_account_id = None
+                    request_state.excluded_account_ids.add(session.account.id)
                 elif not request_state.file_required_preferred_account:
                     if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
                         request_state.preferred_account_id = session.account.id
