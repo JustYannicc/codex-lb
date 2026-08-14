@@ -15883,7 +15883,10 @@ async def test_stream_responses_visible_upstream_unavailable_with_response_id_do
     assert event["response"]["id"] == "resp_reset_event"
     assert event["response"]["error"]["code"] == "upstream_unavailable"
     assert seen_excluded_account_ids == [set()]
-    assert request_logs.calls == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_a.id
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     record_error.assert_not_awaited()
     record_errors.assert_not_awaited()
     record_success.assert_not_awaited()
