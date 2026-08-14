@@ -10207,7 +10207,7 @@ async def test_compact_responses_normalizes_preexisting_terminal_trigger_without
                     "type": "custom_tool_call",
                     "name": "functions.exec_command",
                     "call_id": "call_compact_tail",
-                    "input": "{\"cmd\":\"pytest\"}",
+                    "input": '{"cmd":"pytest"}',
                 },
                 {
                     "type": "custom_tool_call_output",
@@ -10249,6 +10249,28 @@ async def test_compact_responses_normalizes_preexisting_terminal_trigger_without
             "call_id": "call_compact_tail",
             "output": "failed",
         },
+    ]
+
+
+def test_responses_wire_payload_normalizes_internal_duplicate_compaction_trigger():
+    payload = proxy_module.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+            "store": False,
+        }
+    ).to_payload()
+
+    compact_input = cast(list[dict[str, object]], payload["input"])
+    assert compact_input == [
+        {"role": "user", "content": "hello"},
+        {"type": "compaction_trigger"},
     ]
 
 
@@ -10314,7 +10336,7 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
                     "type": "custom_tool_call",
                     "name": "functions.exec_command",
                     "call_id": "call_compact_tail",
-                    "input": "{\"cmd\":\"pytest\"}",
+                    "input": '{"cmd":"pytest"}',
                 },
                 {
                     "type": "custom_tool_call_output",

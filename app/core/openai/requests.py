@@ -731,7 +731,9 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def to_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding())
+        payload = _strip_unsupported_fields(self.model_dump_for_forwarding())
+        _normalize_compaction_trigger_singleton(payload)
+        return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
         return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
@@ -998,18 +1000,12 @@ def _normalize_compaction_trigger_singleton(payload: MutableJsonObject) -> None:
     if not is_json_list(input_value) or not input_value:
         return
 
-    trigger_items = [
-        item
-        for item in input_value
-        if is_json_mapping(item) and item.get("type") == "compaction_trigger"
-    ]
+    trigger_items = [item for item in input_value if is_json_mapping(item) and item.get("type") == "compaction_trigger"]
     if not trigger_items:
         return
 
     payload["input"] = [
-        item
-        for item in input_value
-        if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")
+        item for item in input_value if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")
     ]
     cast(list[JsonValue], payload["input"]).append({"type": "compaction_trigger"})
 
