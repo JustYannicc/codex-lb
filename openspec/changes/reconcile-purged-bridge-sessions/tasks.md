@@ -1,7 +1,7 @@
 ## 1. Invalidation plumbing
 
 - [x] 1.1 Add `NAMESPACE_HTTP_BRIDGE_PURGE` to `app/core/cache/invalidation.py` (+ log label)
-- [x] 1.2 Cleanup scheduler bumps the namespace after `purge_abandoned_before` deletes > 0 rows
+- [x] 1.2 `purge_abandoned_before` accepts an `on_batch_committed` callback invoked after each committed batch; the cleanup scheduler passes `_signal_abandoned_bridge_purge`, which persists the bump synchronously and falls back to the poller retry queue on failure without aborting the purge
 
 ## 2. Owner-replica reconcile
 

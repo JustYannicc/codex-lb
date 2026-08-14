@@ -54,6 +54,33 @@ def _get_leader_election() -> _LeaderElectionLike:
     return cast(_LeaderElectionLike, module.get_leader_election())
 
 
+async def _signal_abandoned_bridge_purge(deleted_count: int) -> None:
+    """Tell every replica to reconcile after a committed abandoned-purge batch.
+
+    The purge removes durable rows only; the owner replica's in-memory session
+    (and the account stream lease it holds) survives it, so replicas must
+    reconcile to release those orphans (issue #1354). The signal is emitted per
+    committed batch rather than once per purge run: deletions commit inside the
+    repository loop, so a run cancelled or killed after a batch commits would
+    otherwise leave those orphans unsignalled until the lease TTL. The bump is
+    persisted synchronously and falls back to the poller's retry queue when
+    that write fails; a signalling failure never aborts the purge.
+    """
+    poller = get_cache_invalidation_poller()
+    if poller is None:
+        return
+    try:
+        if not await poller.bump(NAMESPACE_HTTP_BRIDGE_PURGE):
+            poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
+    except Exception:
+        logger.warning(
+            "Failed to signal abandoned HTTP bridge purge deleted_count=%s",
+            deleted_count,
+            exc_info=True,
+        )
+        poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
+
+
 def _abandoned_bridge_retention_seconds(
     dashboard_settings: DashboardSettings,
     app_settings: Settings,
@@ -153,21 +180,14 @@ class StickySessionCleanupScheduler:
                             abandoned_cutoff = utcnow() - timedelta(
                                 seconds=_abandoned_bridge_retention_seconds(settings, get_settings())
                             )
-                            abandoned_deleted_count = await bridge_repo.purge_abandoned_before(abandoned_cutoff)
+                            abandoned_deleted_count = await bridge_repo.purge_abandoned_before(
+                                abandoned_cutoff,
+                                on_batch_committed=_signal_abandoned_bridge_purge,
+                            )
                             if abandoned_deleted_count > 0:
                                 logger.info(
                                     "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
                                 )
-                                # The purge only removes durable rows; the owner
-                                # replica's in-memory session (and its account
-                                # stream lease) survives it. Bump the purge
-                                # namespace so every replica reconciles its
-                                # in-memory sessions against the durable table
-                                # and releases orphaned leases (issue #1354).
-                                poller = get_cache_invalidation_poller()
-                                if poller is not None:
-                                    if not await poller.bump(NAMESPACE_HTTP_BRIDGE_PURGE):
-                                        poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
                             retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
                                 time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
                             )

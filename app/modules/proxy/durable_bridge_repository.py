@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -2289,8 +2289,21 @@ class DurableBridgeRepository:
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
 
-    async def purge_abandoned_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
-        """Purge ACTIVE/DRAINING rows whose lease expired and whose activity predates the cutoff."""
+    async def purge_abandoned_before(
+        self,
+        cutoff: datetime,
+        *,
+        batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
+        on_batch_committed: Callable[[int], Awaitable[None]] | None = None,
+    ) -> int:
+        """Purge ACTIVE/DRAINING rows whose lease expired and whose activity predates the cutoff.
+
+        ``on_batch_committed`` is awaited after each batch's commit with that
+        batch's deleted count. Deletions commit per batch, so a caller that
+        only acts on the total return value loses every already-committed
+        batch if this loop is cancelled or dies mid-run; the callback lets the
+        caller signal each durably-deleted batch (issue #1354).
+        """
 
         deleted_count = 0
         while True:
@@ -2335,7 +2348,10 @@ class DurableBridgeRepository:
                     .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
-            deleted_count += len(deleted.scalars().all())
+            batch_deleted_count = len(deleted.scalars().all())
+            deleted_count += batch_deleted_count
+            if on_batch_committed is not None and batch_deleted_count:
+                await on_batch_committed(batch_deleted_count)
 
     async def purge_retry_circuits_before(
         self,

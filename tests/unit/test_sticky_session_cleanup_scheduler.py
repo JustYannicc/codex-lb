@@ -393,32 +393,62 @@ async def test_cleanup_once_bumps_http_bridge_purge_only_when_abandoned_rows_del
         async def __aexit__(self, *args):
             pass
 
-    for deleted_count, expected_bumps in ((3, 1), (0, 0)):
-        bridge_repo = AsyncMock()
-        bridge_repo.purge_closed_before = AsyncMock(return_value=0)
-        bridge_repo.purge_abandoned_before = AsyncMock(return_value=deleted_count)
-        bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
-        bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
-        poller = Mock()
-        poller.bump = AsyncMock(return_value=True)
-        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=True)
+    # The signal is emitted per COMMITTED BATCH, not once per run: deletions
+    # commit inside the repository loop, so a run killed mid-way must still
+    # have signalled the batches that already landed.
+    committed_batches = [2, 3]
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
 
-        with (
-            patch.object(cleanup_scheduler, "get_background_session", FakeSession),
-            patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
-            patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
-            patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
-            patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
-            patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
-            patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller),
-            patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
-        ):
-            await scheduler._cleanup_once()
+    async def purge_abandoned_before(cutoff, *, on_batch_committed=None, **kwargs):
+        assert on_batch_committed is not None, "scheduler must pass a per-batch signal"
+        for batch in committed_batches:
+            await on_batch_committed(batch)
+        return sum(committed_batches)
 
-        assert poller.bump.call_count == expected_bumps, f"deleted_count={deleted_count}"
-        if expected_bumps:
-            poller.bump.assert_awaited_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)
-            poller.request_bump.assert_not_called()
+    bridge_repo.purge_abandoned_before = AsyncMock(side_effect=purge_abandoned_before)
+    poller = Mock()
+    poller.bump = AsyncMock(return_value=True)
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=True)
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+        patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+    ):
+        await scheduler._cleanup_once()
+
+    assert poller.bump.await_count == len(committed_batches)
+    assert all(call.args == (cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE,) for call in poller.bump.await_args_list)
+    poller.request_bump.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_signal_abandoned_bridge_purge_falls_back_and_survives_bump_errors() -> None:
+    """A signalling failure must never abort the purge: a False return and a
+    raising bump both fall back to the poller's retry queue."""
+    poller = Mock()
+    poller.bump = AsyncMock(return_value=False)
+    with patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller):
+        await cleanup_scheduler._signal_abandoned_bridge_purge(2)
+    poller.request_bump.assert_called_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)
+
+    poller = Mock()
+    poller.bump = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: poller):
+        await cleanup_scheduler._signal_abandoned_bridge_purge(5)
+    poller.request_bump.assert_called_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)
+
+    # No poller installed (e.g. outside the lifespan) is a no-op, not a crash.
+    with patch.object(cleanup_scheduler, "get_cache_invalidation_poller", lambda: None):
+        await cleanup_scheduler._signal_abandoned_bridge_purge(1)
 
 
 @pytest.mark.asyncio
@@ -444,7 +474,13 @@ async def test_cleanup_once_retries_http_bridge_purge_bump_when_persist_fails(mo
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
-    bridge_repo.purge_abandoned_before = AsyncMock(return_value=3)
+
+    async def purge_abandoned_before(cutoff, *, on_batch_committed=None, **kwargs):
+        assert on_batch_committed is not None
+        await on_batch_committed(3)
+        return 3
+
+    bridge_repo.purge_abandoned_before = AsyncMock(side_effect=purge_abandoned_before)
     bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
     bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
     ring_service = AsyncMock()

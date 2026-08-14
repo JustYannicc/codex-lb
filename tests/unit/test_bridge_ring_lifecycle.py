@@ -288,6 +288,75 @@ async def test_purge_abandoned_before_removes_expired_rows_and_aliases_keeps_liv
 
 
 @pytest.mark.asyncio
+async def test_purge_abandoned_before_signals_each_committed_batch(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Deletions commit per batch, so the caller's signal must fire per batch.
+
+    A run cancelled or killed after a batch commits would otherwise leave
+    those already-deleted sessions unsignalled, and the owner replicas would
+    hold their orphaned stream leases until the lease TTL (issue #1354).
+    """
+
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claims = [
+            await _claim(repository, instance_id="crashed", session_key_value=f"sid-batch-{index}")
+            for index in range(5)
+        ]
+        long_ago = utcnow() - timedelta(hours=12)
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id.in_([claim.id for claim in claims]))
+            .values(last_seen_at=long_ago, lease_expires_at=utcnow() - timedelta(hours=11))
+        )
+        await session.commit()
+
+        signalled: list[int] = []
+        rows_visible_at_signal: list[int] = []
+
+        async def on_batch_committed(batch_deleted_count: int) -> None:
+            signalled.append(batch_deleted_count)
+            remaining = await session.execute(select(HttpBridgeSessionRecord.id))
+            rows_visible_at_signal.append(len(list(remaining.scalars().all())))
+
+        deleted = await repository.purge_abandoned_before(
+            utcnow() - timedelta(hours=1),
+            batch_size=2,
+            on_batch_committed=on_batch_committed,
+        )
+
+        assert deleted == 5
+        # 5 rows at batch_size=2 commit as 2 + 2 + 1, and each signal fires
+        # only after its own batch is durably gone.
+        assert signalled == [2, 2, 1]
+        assert rows_visible_at_signal == [3, 1, 0]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_purge_abandoned_before_without_callback_still_purges(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="crashed", session_key_value="sid-no-callback")
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(last_seen_at=utcnow() - timedelta(hours=12), lease_expires_at=utcnow() - timedelta(hours=11))
+        )
+        await session.commit()
+
+        assert await repository.purge_abandoned_before(utcnow() - timedelta(hours=1)) == 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_get_sessions_by_ids_chunks_large_id_sets(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
