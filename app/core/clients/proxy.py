@@ -1399,6 +1399,32 @@ def _proxy_response_error_from_compact_sse_terminal(
     )
 
 
+def _proxy_response_error_from_compact_sse_stream_exception(
+    exc: StreamIdleTimeoutError | StreamEventTooLargeError,
+    *,
+    upstream_status_code: int | None,
+) -> ProxyResponseError:
+    if isinstance(exc, StreamIdleTimeoutError):
+        return ProxyResponseError(
+            502,
+            openai_error("stream_idle_timeout", "Upstream stream idle timeout"),
+            failure_phase="upstream",
+            failure_detail="stream_idle_timeout",
+            failure_exception_type=type(exc).__name__,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code="stream_idle_timeout",
+        )
+    return ProxyResponseError(
+        502,
+        openai_error("stream_event_too_large", str(exc)),
+        failure_phase="upstream",
+        failure_detail=str(exc),
+        failure_exception_type=type(exc).__name__,
+        upstream_status_code=upstream_status_code,
+        upstream_error_code="stream_event_too_large",
+    )
+
+
 def _compact_sse_terminal_error_payload(
     payload: Mapping[str, JsonValue],
     event_type: object,
@@ -4000,6 +4026,11 @@ class _CompactCommandTransport:
                         idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
                         max_event_bytes=settings.max_sse_event_bytes,
                     )
+                except (StreamIdleTimeoutError, StreamEventTooLargeError) as exc:
+                    raise _proxy_response_error_from_compact_sse_stream_exception(
+                        exc,
+                        upstream_status_code=status_code,
+                    ) from exc
                 except ProxyResponseError:
                     raise
                 except Exception as exc:
@@ -4106,6 +4137,11 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
                         failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
+                    ) from exc
+                except (StreamIdleTimeoutError, StreamEventTooLargeError) as exc:
+                    raise _proxy_response_error_from_compact_sse_stream_exception(
+                        exc,
+                        upstream_status_code=resp.status,
                     ) from exc
                 except ProxyResponseError:
                     raise

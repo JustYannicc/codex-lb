@@ -10350,6 +10350,112 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
     assert dumped["output"][0]["encrypted_content"] == "enc_summary_2"
 
 
+@pytest.mark.asyncio
+async def test_compact_responses_preserves_stream_idle_timeout_from_direct_sse(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = 123.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    async def fake_compact_response_payload_from_success_response(*args: object, **kwargs: object) -> JsonValue:
+        del args, kwargs
+        raise proxy_module.StreamIdleTimeoutError()
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module,
+        "_compact_response_payload_from_success_response",
+        fake_compact_response_payload_from_success_response,
+    )
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _CompactSession(_compact_sse_response())
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "stream_idle_timeout"
+    assert _proxy_error_message(exc) == "Upstream stream idle timeout"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_preserves_stream_event_too_large_from_routed_sse(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = 123.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    oversized = proxy_module.StreamEventTooLargeError(4097, 1024)
+
+    async def fake_compact_response_payload_from_success_response(*args: object, **kwargs: object) -> JsonValue:
+        del args, kwargs
+        raise oversized
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module,
+        "_compact_response_payload_from_success_response",
+        fake_compact_response_payload_from_success_response,
+    )
+
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_compact",
+        endpoint=ResolvedProxyEndpoint("ep_compact", "http", "proxy.test", 8080),
+    )
+    codex_client = SimpleNamespace(
+        request_with_route_metadata=AsyncMock(
+            return_value=SimpleNamespace(
+                response=_compact_sse_response(),
+                route=route,
+                fallback_used=False,
+            )
+        )
+    )
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, object()),
+            route=route,
+            codex_client=cast(proxy_module.CodexClient, codex_client),
+            allow_direct_egress=False,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "stream_event_too_large"
+    assert _proxy_error_message(exc) == str(oversized)
+
+
 def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
     payload.prompt_cache_key = "thread_123"
