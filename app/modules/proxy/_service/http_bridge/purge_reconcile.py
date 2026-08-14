@@ -134,13 +134,16 @@ class _HTTPBridgePurgeReconcileMixin:
             try:
                 await self._load_balancer.release_account_lease(account_lease)
             except Exception:
+                # Keep the reference: the load balancer still counts this lease,
+                # so clearing it here would deny the close its retry and strand
+                # the slot until the lease TTL.
                 logger.warning(
                     "Failed to release purged HTTP bridge account lease account_id=%s model=%s",
                     session.account.id,
                     session.request_model,
                     exc_info=True,
                 )
-            finally:
+            else:
                 session.account_lease = None
 
     async def _collect_purge_reconcile_candidates(

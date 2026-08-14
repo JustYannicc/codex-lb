@@ -26976,12 +26976,14 @@ async def test_reconcile_purged_sessions_survives_a_failing_lease_release(
 ) -> None:
     """One account's release failing must not strand the other orphans' slots."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    sessions = []
     for index in range(2):
         session = _make_purge_candidate_session(f"purged-fail-{index}", f"dur-fail-{index}")
         session.account_lease = proxy_service.AccountLease(
             f"lease-fail-{index}", "acc-bridge", "stream", time.monotonic()
         )
         service._http_bridge_sessions[session.key] = session
+        sessions.append(session)
 
     released: list[str] = []
 
@@ -26999,6 +27001,11 @@ async def test_reconcile_purged_sessions_survives_a_failing_lease_release(
     assert await service.reconcile_purged_http_bridge_sessions() == 2
     await asyncio.gather(*service._background_cleanup_tasks)
     assert released == ["lease-fail-1"]
+    # The failed release keeps its reference so the close can retry it: the
+    # load balancer still counts that lease, and clearing it would strand the
+    # slot until the lease TTL.
+    failed_session = next(session for session in sessions if session.key.affinity_key == "purged-fail-0")
+    assert failed_session.account_lease is not None
 
 
 @pytest.mark.asyncio

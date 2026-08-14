@@ -45,6 +45,8 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # cleanup scheduler mid-write. ``poller.bump`` retries a few times with
 # sub-second backoff, so this only needs to cover that bounded window.
 _PURGE_SIGNAL_CANCELLATION_GRACE_SECONDS = 5.0
+# Bound for owning the cancelled write's unwind.
+_PURGE_SIGNAL_CANCEL_GRACE_SECONDS = 1.0
 
 
 _T = TypeVar("_T")
@@ -120,6 +122,14 @@ async def _signal_abandoned_bridge_purge(deleted_count: int) -> None:
             # deterministically and log its outcome instead.
             bump_task.cancel()
             bump_task.add_done_callback(_log_abandoned_purge_signal)
+            # cancel() only requests cancellation and driver cleanup can itself
+            # await, so own the unwind briefly instead of returning while the
+            # write is still in flight.
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(
+                    asyncio.shield(bump_task),
+                    timeout=_PURGE_SIGNAL_CANCEL_GRACE_SECONDS,
+                )
         if not persisted:
             poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
         raise
