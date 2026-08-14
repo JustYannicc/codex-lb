@@ -658,6 +658,8 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
     assert "Image Size: 1512x982." in compact_input_json
     assert "Omitted inline image bytes that were already observed before compaction" in compact_input_json
     assert "data:image/png;base64" not in compact_input_json
+    assert compact_input[-1] == {"type": "compaction_trigger"}
+    assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 1
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])

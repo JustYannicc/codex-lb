@@ -5057,7 +5057,14 @@ async def _stream_responses(
                     prompt_cache_key_alias = payload.model_extra.get("promptCacheKey")
                     if isinstance(prompt_cache_key_alias, str) and "prompt_cache_key" not in compact_payload_data:
                         compact_payload_data["prompt_cache_key"] = prompt_cache_key_alias
-                compact_payload_data["input"] = compact_trigger_input
+                # The main /responses route trims the terminal trigger before
+                # compaction so the compact budget and image elision see only
+                # the history to summarize. The upstream /compact contract
+                # still requires exactly one terminal trigger on the wire.
+                compact_payload_data["input"] = [
+                    *compact_trigger_input,
+                    {"type": "compaction_trigger"},
+                ]
                 if payload.previous_response_id is not None:
                     compact_payload_data["previous_response_id"] = payload.previous_response_id
                 if payload.conversation is not None:

@@ -1230,33 +1230,49 @@ def _compact_terminal_required_indices(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    terminal_trigger_indices: set[int] = set()
+    if latest_type == "compaction_trigger":
+        terminal_trigger_indices.add(latest_index)
+        if latest_index == 0:
+            return terminal_trigger_indices, True, False
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+
+    def with_terminal_trigger(indices: set[int]) -> set[int]:
+        return indices | terminal_trigger_indices
+
     if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_mapping is not None and _compact_item_has_elidable_inline_image(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     matching_call_index = _compact_matching_tool_call_index(input_value, latest_index)
     if latest_mapping is not None and _compact_terminal_item_is_side_effect(
         input_value,
         latest_index,
         matching_call_index=matching_call_index,
     ):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_continuity_anchor and matching_call_index is None:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
 
     paired_tail = _compact_reconciled_tool_call_indices(
         input_value,
-        {latest_index},
+        with_terminal_trigger({latest_index}),
         token_counts=token_counts,
         token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     )
     if latest_index in paired_tail:
-        return paired_tail, False, False
-    return set(), False, False
+        return paired_tail, bool(terminal_trigger_indices), False
+    return terminal_trigger_indices, bool(terminal_trigger_indices), False
 
 
 def _compact_item_has_elidable_inline_image(item: JsonValue) -> bool:
