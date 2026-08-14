@@ -42,6 +42,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import purge_reconcile
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
@@ -26874,6 +26875,42 @@ async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
     assert await_args is not None
     assert await_args.kwargs["session_ids"] == ["dur-purged", "dur-live"]
     assert any(call.args == (lease,) for call in release_account_lease.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purged_sessions_spares_a_session_just_handed_to_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session handed to an anchored request is not yet visible as busy: the
+    request sets last_used_at at handoff but only increments
+    admission_waiter_count once it reaches submit, and it can await the
+    retry-circuit lookup in between. Idle eviction is protected from that
+    window by its idle TTL; this pass beats that TTL, so it must apply its own
+    recency floor or it would close the session out from under the request."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    just_handed = _make_bridge_session(key_value="just-handed")
+    just_handed.durable_session_id = "dur-just-handed"
+    just_handed.last_used_at = time.monotonic()
+    long_idle = _make_bridge_session(key_value="long-idle")
+    long_idle.durable_session_id = "dur-long-idle"
+    long_idle.last_used_at = time.monotonic() - (purge_reconcile._PURGE_RECONCILE_MIN_IDLE_SECONDS + 60.0)
+    service._http_bridge_sessions[just_handed.key] = just_handed
+    service._http_bridge_sessions[long_idle.key] = long_idle
+    lookup_sessions = AsyncMock(return_value=[])
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=lookup_sessions))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    closed_count = await service.reconcile_purged_http_bridge_sessions()
+    await asyncio.gather(*service._background_cleanup_tasks)
+
+    assert closed_count == 1
+    assert just_handed.key in service._http_bridge_sessions
+    assert just_handed.closed is False
+    assert long_idle.key not in service._http_bridge_sessions
+    # The freshly-handed session is never even offered to the durable lookup.
+    await_args = lookup_sessions.await_args
+    assert await_args is not None
+    assert await_args.kwargs["session_ids"] == ["dur-long-idle"]
 
 
 @pytest.mark.asyncio

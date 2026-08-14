@@ -7,6 +7,7 @@ from typing import Any
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_has_admission_waiter,
     _log_http_bridge_event,
+    _service_time,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
@@ -18,6 +19,16 @@ logger = logging.getLogger("app.modules.proxy.service")
 # background-cleanup drain and activity snapshot prefixes, so shutdown waits
 # for it and an in-progress batch counts as bridge activity.
 _PURGE_RECONCILE_CLOSE_TASK_NAME = "http-bridge-purge-reconcile-close"
+
+# A session handed to a request is not yet visible as busy: the request sets
+# ``last_used_at`` at handoff but only increments ``admission_waiter_count``
+# once it reaches submit, and an anchored reuse can await the retry-circuit
+# lookup in between. Idle eviction is protected from that window by its idle
+# TTL; this pass exists to beat that TTL, so it uses a small recency floor
+# instead. Any session this pass legitimately targets has been abandoned for
+# hours (the purge only deletes rows whose activity predates the retention
+# cutoff), so the floor costs nothing while closing the handoff race.
+_PURGE_RECONCILE_MIN_IDLE_SECONDS = 30.0
 
 
 class _HTTPBridgePurgeReconcileMixin:
@@ -161,6 +172,9 @@ def _purge_reconcile_eligible_durable_id(
     if session.closed or session.handoff_in_progress:
         return None
     if _http_bridge_session_has_admission_waiter(session):
+        return None
+    if _service_time().monotonic() - session.last_used_at < _PURGE_RECONCILE_MIN_IDLE_SECONDS:
+        # Recently handed to a request that has not reached submit yet.
         return None
     if getattr(session, "unanchored_reservation_id", None) is not None:
         return None
