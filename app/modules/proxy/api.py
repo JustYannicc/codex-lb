@@ -4764,19 +4764,30 @@ async def _source_chat_completion_response(
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
         except asyncio.CancelledError:
+            release_exc: BaseException | None = None
             if reservation is not None:
-                await _release_reservation_deferring_cancellation(reservation)
+                try:
+                    await _release_reservation_deferring_cancellation(reservation)
+                except BaseException as exc:
+                    release_exc = exc
             await _await_cleanup_deferring_cancellation(
                 _log_source_chat_completion(
                     request,
                     source=source,
                     api_key=api_key,
                     model=model,
-                    status="cancelled",
+                    status="error",
                     error_code="client_disconnected",
                     error_message="client disconnected during source stream setup",
                 )
             )
+            if release_exc is not None:
+                logger.warning(
+                    "Failed to release source stream setup reservation after client disconnect source_id=%s model=%s",
+                    source.id,
+                    model,
+                    exc_info=release_exc,
+                )
             raise
         except BaseException:
             if reservation is not None:

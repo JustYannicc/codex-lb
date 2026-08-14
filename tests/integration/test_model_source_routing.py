@@ -1236,6 +1236,89 @@ async def test_source_completion_success_log_finishes_after_cancellation(async_c
 
 
 @pytest.mark.asyncio
+async def test_source_stream_setup_cancellation_logs_visible_error_even_if_release_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.core.openai.chat_requests import ChatCompletionsRequest
+    from app.db.models import ModelSource
+
+    logs: list[dict[str, object]] = []
+    release_attempts: list[object] = []
+
+    async def cancel_during_open(*_args: object, **_kwargs: object) -> object:
+        raise asyncio.CancelledError
+
+    async def fail_release(reservation: object) -> None:
+        release_attempts.append(reservation)
+        raise RuntimeError("sqlite busy")
+
+    async def record_log(*_args: object, **kwargs: object) -> None:
+        logs.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_api, "stream_source_chat_completion", cancel_during_open)
+    monkeypatch.setattr(proxy_api, "_release_reservation_deferring_cancellation", fail_release)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", record_log)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_stream_setup_cancel",
+        name="stream-setup-cancel",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_stream_setup_cancel",
+        key_id="key_stream_setup_cancel",
+        model="stream-setup-cancel",
+    )
+    payload = ChatCompletionsRequest.model_validate(
+        {
+            "model": "stream-setup-cancel",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await proxy_api._source_chat_completion_response(
+            request,
+            payload,
+            source=source,
+            model="stream-setup-cancel",
+            api_key=None,
+            reservation=reservation,
+            rate_limit_headers={},
+        )
+
+    assert release_attempts == [reservation]
+    assert logs == [
+        {
+            "source": source,
+            "api_key": None,
+            "model": "stream-setup-cancel",
+            "status": "error",
+            "error_code": "client_disconnected",
+            "error_message": "client disconnected during source stream setup",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatch: pytest.MonkeyPatch):
     import app.modules.model_sources.forwarding as forwarding_module
     from app.db.models import ModelSource
