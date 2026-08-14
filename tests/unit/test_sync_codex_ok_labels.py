@@ -574,6 +574,7 @@ def test_decide_pr_approves_action_required_workflows_before_clean_review(
     monkeypatch.setattr(module, "find_current_head_codex_review_state", lambda *_args, **_kwargs: ("none", None))
     monkeypatch.setattr(module, "unresolved_codex_finding_thread_urls", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(module, "has_codex_news_after_current_head", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(module, "pr_touches_github_paths", lambda *_args: False)
     monkeypatch.setattr(module, "workflow_runs_requiring_approval", lambda *_args: (123456,))
 
     approval = module.decide_pr(
@@ -590,7 +591,7 @@ def test_decide_pr_approves_action_required_workflows_before_clean_review(
     assert "workflow runs need approval: 123456" in approval.reason
 
 
-def test_decide_pr_approves_action_required_workflows_on_blocked_pr(
+def test_decide_pr_skips_action_required_workflows_on_blocked_pr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = load_sync_module()
@@ -603,7 +604,15 @@ def test_decide_pr_approves_action_required_workflows_on_blocked_pr(
     monkeypatch.setattr(module, "find_current_head_codex_review_state", lambda *_args, **_kwargs: ("none", None))
     monkeypatch.setattr(module, "unresolved_codex_finding_thread_urls", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(module, "has_codex_news_after_current_head", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(module, "workflow_runs_requiring_approval", lambda *_args: (654321,))
+
+    def unexpected_github_path_lookup(*_args: Any) -> bool:
+        raise AssertionError("blocked PRs must not query changed files")
+
+    def unexpected_workflow_approval_lookup(*_args: Any) -> tuple[int, ...]:
+        raise AssertionError("blocked PRs must not query or approve workflow runs")
+
+    monkeypatch.setattr(module, "pr_touches_github_paths", unexpected_github_path_lookup)
+    monkeypatch.setattr(module, "workflow_runs_requiring_approval", unexpected_workflow_approval_lookup)
 
     approval = module.decide_pr(
         "Soju06/codex-lb",
@@ -612,10 +621,100 @@ def test_decide_pr_approves_action_required_workflows_on_blocked_pr(
         ignore_checks=False,
     )
 
-    assert approval.approve_workflow_run_ids == (654321,)
+    assert approval.approve_workflow_run_ids == ()
     assert approval.ok_action == "keep"
     assert not approval.wants_ok_label
     assert "merge state is blocked" in approval.reason
+
+
+def test_decide_pr_skips_action_required_workflows_when_github_paths_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+
+    monkeypatch.setattr(module, "pr_timeline_evidence", lambda *_args: (head_sha, []))
+    monkeypatch.setattr(module, "issue_label_names", lambda *_args: set())
+    monkeypatch.setattr(module, "commit_checks_state", lambda *_args: "failure")
+    monkeypatch.setattr(module, "pr_merge_state", lambda *_args: "CLEAN")
+    monkeypatch.setattr(module, "find_current_head_codex_review_state", lambda *_args, **_kwargs: ("none", None))
+    monkeypatch.setattr(module, "unresolved_codex_finding_thread_urls", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "has_codex_news_after_current_head", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(module, "pr_touches_github_paths", lambda *_args: True)
+
+    def unexpected_workflow_approval_lookup(*_args: Any) -> tuple[int, ...]:
+        raise AssertionError("PRs changing .github/ must not query or approve workflow runs")
+
+    monkeypatch.setattr(module, "workflow_runs_requiring_approval", unexpected_workflow_approval_lookup)
+
+    approval = module.decide_pr(
+        "Soju06/codex-lb",
+        714,
+        allowed_authors={"openai-codex"},
+        ignore_checks=False,
+    )
+
+    assert approval.approve_workflow_run_ids == ()
+    assert "workflow approval skipped because pull request touches .github/" in approval.reason
+
+
+def test_pr_touches_github_paths_detects_current_and_previous_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda *_args: [
+            {"filename": "app/main.py"},
+            {"filename": "docs/ci.md", "previous_filename": ".github/workflows/ci.yml"},
+        ],
+    )
+
+    assert module.pr_touches_github_paths("Soju06/codex-lb", 714) is True
+
+
+def test_pr_touches_github_paths_allows_non_github_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda *_args: [
+            {"filename": "app/main.py"},
+            {"filename": "docs/github-actions.md"},
+        ],
+    )
+
+    assert module.pr_touches_github_paths("Soju06/codex-lb", 714) is False
+
+
+def test_pr_touches_github_paths_fails_closed_at_github_file_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda *_args: [{"filename": f"docs/{index}.md"} for index in range(module.MAX_GITHUB_PR_FILES)],
+    )
+
+    assert module.pr_touches_github_paths("Soju06/codex-lb", 714) is True
+
+
+def test_workflow_runs_requiring_approval_filters_to_selected_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda *_args: [
+            {"id": 1, "status": "action_required", "pull_requests": [{"number": 714}]},
+            {"id": 2, "status": "action_required", "pull_requests": [{"number": 715}]},
+            {"id": 3, "conclusion": "action_required", "pull_requests": [{"number": 714}]},
+            {"id": 4, "status": "action_required", "pull_requests": []},
+        ],
+    )
+
+    assert module.workflow_runs_requiring_approval("Soju06/codex-lb", "a" * 40, 714) == (1, 3)
 
 
 def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:

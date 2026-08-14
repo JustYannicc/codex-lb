@@ -1141,7 +1141,10 @@ def needs_rebase_label_target(merge_state: str, *, has_label: bool) -> bool:
     return has_label
 
 
-def workflow_runs_requiring_approval(repo: str, head_sha: str) -> tuple[int, ...]:
+MAX_GITHUB_PR_FILES = 3000
+
+
+def workflow_runs_requiring_approval(repo: str, head_sha: str, number: int) -> tuple[int, ...]:
     runs = paged_api(f"/repos/{repo}/actions/runs?event=pull_request&head_sha={head_sha}")
     run_ids: list[int] = []
     for run in runs:
@@ -1150,9 +1153,36 @@ def workflow_runs_requiring_approval(repo: str, head_sha: str) -> tuple[int, ...
         run_id = run.get("id")
         if not isinstance(run_id, int):
             continue
+        pull_requests = run.get("pull_requests")
+        if not isinstance(pull_requests, list) or not any(
+            isinstance(pr, dict) and pr.get("number") == number for pr in pull_requests
+        ):
+            continue
         if status == "action_required" or conclusion == "action_required":
             run_ids.append(run_id)
     return tuple(run_ids)
+
+
+def pr_touches_github_paths(repo: str, number: int) -> bool:
+    files = paged_api(f"/repos/{repo}/pulls/{number}/files")
+    if len(files) >= MAX_GITHUB_PR_FILES:
+        return True
+    for file_info in files:
+        for key in ("filename", "previous_filename"):
+            path = file_info.get(key)
+            if isinstance(path, str) and path.startswith(".github/"):
+                return True
+    return False
+
+
+def workflow_approval_block_reason(repo: str, number: int, merge_state: str) -> str | None:
+    """Return why fork workflow approval is unsafe, or None when allowed."""
+
+    if merge_state in UNMERGEABLE_STATES | {"CONFLICTING", "UNKNOWN"}:
+        return f"merge state is {merge_state.lower()}"
+    if pr_touches_github_paths(repo, number):
+        return "pull request touches .github/"
+    return None
 
 
 def unresolved_codex_finding_thread_urls(
@@ -1396,7 +1426,12 @@ def decide_pr(
     if trigger_codex_review:
         reason_parts.append("current-head CI is green and no Codex news exists after head")
 
-    approve_workflow_run_ids = workflow_runs_requiring_approval(repo, head_sha)
+    approve_workflow_run_ids = ()
+    workflow_approval_block_reason_text = workflow_approval_block_reason(repo, number, merge_state)
+    if workflow_approval_block_reason_text is None:
+        approve_workflow_run_ids = workflow_runs_requiring_approval(repo, head_sha, number)
+    elif workflow_approval_block_reason_text == "pull request touches .github/":
+        reason_parts.append("workflow approval skipped because pull request touches .github/")
     if approve_workflow_run_ids:
         reason_parts.append(
             "workflow runs need approval: " + ",".join(str(run_id) for run_id in approve_workflow_run_ids)
