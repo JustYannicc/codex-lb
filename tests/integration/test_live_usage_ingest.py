@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import delete, update
 
 from app.core.crypto import TokenEncryptor
 from app.core.usage import live_hub
@@ -335,6 +335,36 @@ async def test_live_ingestor_coalesces_resolved_account_alias(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_does_not_alias_coalesce_different_chatgpt_identity(db_setup) -> None:
+    del db_setup
+    raw_account_id = "stale-local-slot_49115a1d"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account("acc_live_alias_a", "live-alias-a@example.com", chatgpt_account_id="workspace-alias-a")
+        )
+        await repo.upsert(
+            _make_account("acc_live_alias_b", "live-alias-b@example.com", chatgpt_account_id="workspace-alias-b")
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=30.0)
+    ingestor.start()
+    try:
+        ingestor.publish(_snapshot(), account_id=raw_account_id, chatgpt_account_id="workspace-alias-a")
+        primary_a, secondary_a = await _wait_for_rows("acc_live_alias_a")
+        assert primary_a is not None and secondary_a is not None
+
+        ingestor.publish(_snapshot(), account_id=raw_account_id, chatgpt_account_id="workspace-alias-b")
+        primary_b, secondary_b = await _wait_for_rows("acc_live_alias_b")
+    finally:
+        await ingestor.stop()
+
+    assert primary_b is not None
+    assert primary_b.account_id == "acc_live_alias_b"
+    assert secondary_b is not None
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_drops_conflicting_exact_and_chatgpt_identity(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:
@@ -408,6 +438,60 @@ async def test_live_ingestor_revalidates_moved_chatgpt_identity(db_setup) -> Non
     assert primary_b is not None
     assert primary_b.account_id == "acc_live_move_b"
     assert secondary_b is not None
+
+
+@pytest.mark.asyncio
+async def test_live_ingestor_revalidates_moved_chatgpt_identity_before_alias_coalesce(db_setup) -> None:
+    del db_setup
+    raw_account_id = "moved-local-slot_49115a1d"
+    snapshot = _snapshot()
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account("acc_live_move_same_a", "live-move-same-a@example.com", chatgpt_account_id="workspace-same")
+        )
+        await repo.upsert(_make_account("acc_live_move_same_b", "live-move-same-b@example.com"))
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=30.0)
+    ingestor.start()
+    try:
+        ingestor.publish(snapshot, account_id=raw_account_id, chatgpt_account_id="workspace-same")
+        primary_a, secondary_a = await _wait_for_rows("acc_live_move_same_a")
+        assert primary_a is not None and secondary_a is not None
+
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Account).where(Account.id == "acc_live_move_same_a").values(chatgpt_account_id=None)
+            )
+            await session.execute(
+                update(Account).where(Account.id == "acc_live_move_same_b").values(chatgpt_account_id="workspace-same")
+            )
+            await session.commit()
+
+        ingestor.publish(snapshot, account_id=raw_account_id, chatgpt_account_id="workspace-same")
+        primary_b, secondary_b = await _wait_for_rows("acc_live_move_same_b")
+    finally:
+        await ingestor.stop()
+
+    assert primary_b is not None
+    assert primary_b.account_id == "acc_live_move_same_b"
+    assert secondary_b is not None
+
+
+@pytest.mark.asyncio
+async def test_live_ingestor_revalidates_cached_exact_account_id(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_live_deleted", "live-deleted@example.com"))
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    assert await ingestor._resolve_account_id_by_account_id("acc_live_deleted") == "acc_live_deleted"
+
+    async with SessionLocal() as session:
+        await session.execute(delete(Account).where(Account.id == "acc_live_deleted"))
+        await session.commit()
+
+    assert await ingestor._resolve_account_id_by_account_id("acc_live_deleted") is None
 
 
 @pytest.mark.asyncio

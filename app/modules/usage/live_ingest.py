@@ -68,8 +68,8 @@ class LiveUsageIngestor:
         self._queue: asyncio.Queue[_QueuedSnapshot] = asyncio.Queue(maxsize=max(1, queue_size))
         self._write_min_interval_seconds = write_min_interval_seconds
         self._last_write: dict[str, tuple[tuple[object, ...], float]] = {}
-        self._resolution_cache: dict[str, tuple[str | None, float]] = {}
-        self._resolution_aliases: dict[str, str] = {}
+        self._resolution_cache: dict[str, tuple[str, float]] = {}
+        self._resolution_aliases: dict[str, tuple[str, str | None]] = {}
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
@@ -83,7 +83,12 @@ class LiveUsageIngestor:
         chatgpt_account_id: str | None = None,
     ) -> None:
         item = _QueuedSnapshot(account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot)
-        coalesce_account_id = self._resolution_aliases.get(account_id, account_id)
+        coalesce_account_id = account_id
+        if account_id is not None:
+            alias = self._resolution_aliases.get(account_id)
+            if alias is not None and chatgpt_account_id is None:
+                alias_account_id, _alias_chatgpt_account_id = alias
+                coalesce_account_id = alias_account_id
         if coalesce_account_id is not None and self._should_skip(coalesce_account_id, snapshot):
             return
         try:
@@ -158,7 +163,7 @@ class LiveUsageIngestor:
         if account_id is None:
             return
         if raw_account_id and raw_account_id != account_id:
-            self._resolution_aliases[raw_account_id] = account_id
+            self._resolution_aliases[raw_account_id] = (account_id, item.chatgpt_account_id)
         if self._should_skip(account_id, item.snapshot):
             return
 
@@ -271,7 +276,11 @@ class LiveUsageIngestor:
             return None
         async with get_background_session() as session:
             rows = (
-                (await session.execute(select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)))
+                (
+                    await session.execute(
+                        select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id).limit(2)
+                    )
+                )
                 .scalars()
                 .all()
             )
@@ -285,12 +294,21 @@ class LiveUsageIngestor:
         cached = self._resolution_cache.get(cache_key)
         now = time.monotonic()
         if cached is not None and now - cached[1] < _RESOLUTION_TTL_SECONDS:
-            return cached[0]
+            cached_account_id = cached[0]
+            if await self._account_id_exists(cached_account_id):
+                return cached_account_id
+            self._resolution_cache.pop(cache_key, None)
 
         async with get_background_session() as session:
             resolved = (await session.execute(select(Account.id).where(Account.id == account_id))).scalar_one_or_none()
-        self._resolution_cache[cache_key] = (resolved, now)
+        if resolved is not None:
+            self._resolution_cache[cache_key] = (resolved, now)
         return resolved
+
+    async def _account_id_exists(self, account_id: str) -> bool:
+        async with get_background_session() as session:
+            resolved = (await session.execute(select(Account.id).where(Account.id == account_id))).scalar_one_or_none()
+        return resolved is not None
 
 
 _ingestor: LiveUsageIngestor | None = None
