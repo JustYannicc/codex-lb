@@ -517,8 +517,8 @@ def test_apply_decision_tolerates_github_app_write_denial(monkeypatch: pytest.Mo
 
 def test_apply_decision_retries_write_with_fallback_token(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
-    monkeypatch.setenv("GH_TOKEN", "primary-token")
-    monkeypatch.setenv("GH_FALLBACK_TOKEN", "fallback-token")
+    monkeypatch.setenv("GH_TOKEN", "primary-auth")
+    monkeypatch.setenv("GH_FALLBACK_TOKEN", "fallback-auth")
 
     calls: list[tuple[str, str]] = []
     tracker = module.WriteAttemptTracker()
@@ -527,7 +527,7 @@ def test_apply_decision_retries_write_with_fallback_token(monkeypatch: pytest.Mo
         import os
 
         calls.append((os.environ["GH_TOKEN"], path))
-        if os.environ["GH_TOKEN"] == "primary-token":
+        if os.environ["GH_TOKEN"] == "primary-auth":
             raise module.GhError("gh: Resource not accessible by integration (HTTP 403)")
 
     monkeypatch.setattr(module, "gh_api", fallback_write)
@@ -540,8 +540,8 @@ def test_apply_decision_retries_write_with_fallback_token(monkeypatch: pytest.Mo
 
     assert warnings == ()
     assert calls == [
-        ("primary-token", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
-        ("fallback-token", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
+        ("primary-auth", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
+        ("fallback-auth", "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok"),
     ]
     assert tracker.attempted == 1
     assert tracker.succeeded == 1
