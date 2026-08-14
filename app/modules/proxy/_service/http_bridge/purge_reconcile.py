@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds,
     _http_bridge_session_has_admission_waiter,
     _log_http_bridge_event,
     _service_get_settings,
@@ -32,16 +33,15 @@ def _purge_reconcile_min_idle_seconds() -> float:
     protected from that window by its idle TTL; this pass exists to beat that
     TTL, so it needs its own floor.
 
-    The floor is the request budget rather than a fixed constant: that budget
-    bounds the entire request, so a handoff whose submit has not happened
-    within it belongs to a request that has already failed — no arbitrary
-    number has to be assumed safe against a slow intermediate lookup. It still
-    releases orphans ahead of the account lease TTL, and costs nothing in
-    practice because the abandoned purge only deletes rows whose activity
-    predates the retention cutoff, so anything this pass legitimately targets
-    has been idle for far longer.
+    The floor is the bridge's own request budget rather than a fixed constant:
+    that budget bounds the entire bridge request, so a handoff whose submit has
+    not happened within it belongs to a request that has already failed — no
+    arbitrary number has to be assumed safe against a slow intermediate lookup.
+    It costs nothing in practice because the abandoned purge only deletes rows
+    whose activity predates the retention cutoff, so anything this pass
+    legitimately targets has been idle for far longer.
     """
-    return float(_service_get_settings().proxy_request_budget_seconds)
+    return _http_bridge_request_budget_seconds(_service_get_settings())
 
 
 class _HTTPBridgePurgeReconcileMixin:

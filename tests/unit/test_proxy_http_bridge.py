@@ -26839,6 +26839,20 @@ async def test_http_bridge_eventless_timeout_signal_drains_after_repeated_sessio
     record_errors.assert_awaited_once_with(account, 2)
 
 
+def _make_purge_candidate_session(key_value: str, durable_session_id: str) -> Any:
+    """Bridge session old enough to clear the purge reconcile's idle floor.
+
+    The floor is the bridge request budget, and ``time.monotonic()`` counts
+    from an arbitrary origin (on a freshly booted CI container it can be
+    smaller than the budget), so candidates must be backdated relative to the
+    current clock rather than relying on the factory's fixed default.
+    """
+    session = _make_bridge_session(key_value=key_value)
+    session.durable_session_id = durable_session_id
+    session.last_used_at = time.monotonic() - (purge_reconcile._purge_reconcile_min_idle_seconds() + 60.0)
+    return session
+
+
 @pytest.mark.asyncio
 async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
     monkeypatch: pytest.MonkeyPatch,
@@ -26848,11 +26862,9 @@ async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
     account stream lease; sessions with live rows are untouched."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     lease = proxy_service.AccountLease("lease-purged", "acc-bridge", "stream", time.monotonic())
-    purged = _make_bridge_session(key_value="purged-session")
-    purged.durable_session_id = "dur-purged"
+    purged = _make_purge_candidate_session("purged-session", "dur-purged")
     purged.account_lease = lease
-    live = _make_bridge_session(key_value="live-session")
-    live.durable_session_id = "dur-live"
+    live = _make_purge_candidate_session("live-session", "dur-live")
     service._http_bridge_sessions[purged.key] = purged
     service._http_bridge_sessions[live.key] = live
     release_account_lease = AsyncMock()
@@ -26891,9 +26903,7 @@ async def test_reconcile_purged_sessions_spares_a_session_just_handed_to_a_reque
     just_handed = _make_bridge_session(key_value="just-handed")
     just_handed.durable_session_id = "dur-just-handed"
     just_handed.last_used_at = time.monotonic()
-    long_idle = _make_bridge_session(key_value="long-idle")
-    long_idle.durable_session_id = "dur-long-idle"
-    long_idle.last_used_at = time.monotonic() - (purge_reconcile._purge_reconcile_min_idle_seconds() + 60.0)
+    long_idle = _make_purge_candidate_session("long-idle", "dur-long-idle")
     service._http_bridge_sessions[just_handed.key] = just_handed
     service._http_bridge_sessions[long_idle.key] = long_idle
     lookup_sessions = AsyncMock(return_value=[])
@@ -26924,8 +26934,7 @@ async def test_reconcile_purged_sessions_releases_every_lease_before_any_slow_cl
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     sessions = []
     for index in range(3):
-        session = _make_bridge_session(key_value=f"purged-{index}")
-        session.durable_session_id = f"dur-{index}"
+        session = _make_purge_candidate_session(f"purged-{index}", f"dur-{index}")
         session.account_lease = proxy_service.AccountLease(f"lease-{index}", "acc-bridge", "stream", time.monotonic())
         service._http_bridge_sessions[session.key] = session
         sessions.append(session)
@@ -26968,8 +26977,7 @@ async def test_reconcile_purged_sessions_survives_a_failing_lease_release(
     """One account's release failing must not strand the other orphans' slots."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     for index in range(2):
-        session = _make_bridge_session(key_value=f"purged-fail-{index}")
-        session.durable_session_id = f"dur-fail-{index}"
+        session = _make_purge_candidate_session(f"purged-fail-{index}", f"dur-fail-{index}")
         session.account_lease = proxy_service.AccountLease(
             f"lease-fail-{index}", "acc-bridge", "stream", time.monotonic()
         )
@@ -27001,10 +27009,8 @@ async def test_reconcile_purged_sessions_respects_reservation_taken_during_looku
     durable row) while the durable lookup is awaited must survive the
     under-lock re-validation."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    reserved = _make_bridge_session(key_value="reserved-session")
-    reserved.durable_session_id = "dur-reserved"
-    reclaimed = _make_bridge_session(key_value="reclaimed-session")
-    reclaimed.durable_session_id = "dur-old"
+    reserved = _make_purge_candidate_session("reserved-session", "dur-reserved")
+    reclaimed = _make_purge_candidate_session("reclaimed-session", "dur-old")
     service._http_bridge_sessions[reserved.key] = reserved
     service._http_bridge_sessions[reclaimed.key] = reclaimed
     monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
@@ -27034,9 +27040,9 @@ async def test_reconcile_purged_sessions_skips_inflight_and_unclaimed_sessions(
     when their durable row is missing, and sessions without a durable claim are
     never candidates; with no candidates the durable lookup is skipped."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    busy = _make_bridge_session(key_value="busy-session", queued_request_count=1)
-    busy.durable_session_id = "dur-busy"
-    unclaimed = _make_bridge_session(key_value="unclaimed-session")
+    busy = _make_purge_candidate_session("busy-session", "dur-busy")
+    busy.queued_request_count = 1
+    unclaimed = _make_purge_candidate_session("unclaimed-session", "dur-unclaimed")
     unclaimed.durable_session_id = None
     service._http_bridge_sessions[busy.key] = busy
     service._http_bridge_sessions[unclaimed.key] = unclaimed
