@@ -398,68 +398,6 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_preserves_tool_search_pair_before_ordinary_tail(async_client, monkeypatch):
-    email = "compact-tool-search@example.com"
-    raw_account_id = "acc_compact_tool_search"
-    files = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
-    assert response.status_code == 200
-
-    seen_payloads: list[dict[str, object]] = []
-
-    async def fake_compact(payload, headers, access_token, account_id):
-        del headers, access_token, account_id
-        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
-        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
-
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    tool_call = {
-        "type": "tool_search_call",
-        "call_id": "call-search-tail",
-        "status": "completed",
-        "execution": "client",
-        "arguments": {"query": "codex-lb compaction tool search"},
-    }
-    tool_output = {
-        "type": "tool_search_output",
-        "call_id": "call-search-tail",
-        "output": [{"title": "codex-lb compaction result"}],
-    }
-    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 500_000}
-    latest_request = {"role": "user", "content": "latest request"}
-    payload = {
-        "model": "gpt-5.6-sol",
-        "instructions": "hi",
-        "input": [
-            {"role": "user", "content": "initial request"},
-            {"role": "assistant", "content": "older answer " + "y" * 500_000},
-            tool_call,
-            ordinary_tail,
-            tool_output,
-            latest_request,
-        ],
-    }
-
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
-
-    assert response.status_code == 200
-    assert len(seen_payloads) == 1
-    upstream_input = seen_payloads[0]["input"]
-    assert isinstance(upstream_input, list)
-    assert tool_call in upstream_input
-    assert tool_output in upstream_input
-    assert latest_request in upstream_input
-    assert all(
-        not (
-            isinstance(item, dict)
-            and item.get("role") == "assistant"
-            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
-        )
-        for item in upstream_input
-    )
-
-
-@pytest.mark.asyncio
 async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
     email = "compact-optional-tail@example.com"
     raw_account_id = "acc_compact_optional_tail"
@@ -888,6 +826,68 @@ async def test_proxy_compact_masks_previous_response_not_found(async_client, mon
     assert body["error"]["code"] == "stream_incomplete"
     assert body["error"]["message"] == "Upstream websocket closed before response.completed"
     assert "resp_compact_missing" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_preserves_tool_search_pair_before_ordinary_tail(async_client, monkeypatch):
+    email = "compact-tool-search@example.com"
+    raw_account_id = "acc_compact_tool_search"
+    files = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    tool_call = {
+        "type": "tool_search_call",
+        "call_id": "call-search-tail",
+        "status": "completed",
+        "execution": "client",
+        "arguments": {"query": "codex-lb compaction tool search"},
+    }
+    tool_output = {
+        "type": "tool_search_output",
+        "call_id": "call-search-tail",
+        "output": [{"title": "codex-lb compaction result"}],
+    }
+    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 500_000}
+    latest_request = {"role": "user", "content": "latest request"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "hi",
+        "input": [
+            {"role": "user", "content": "initial request"},
+            {"role": "assistant", "content": "older answer " + "y" * 500_000},
+            tool_call,
+            ordinary_tail,
+            tool_output,
+            latest_request,
+        ],
+    }
+
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    upstream_input = seen_payloads[0]["input"]
+    assert isinstance(upstream_input, list)
+    assert tool_call in upstream_input
+    assert tool_output in upstream_input
+    assert latest_request in upstream_input
+    assert all(
+        not (
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
+        )
+        for item in upstream_input
+    )
 
 
 @pytest.mark.asyncio

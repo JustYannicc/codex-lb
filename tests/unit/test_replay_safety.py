@@ -152,51 +152,6 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
     assert responses_payload_is_account_neutral_fresh_replay(payload) is True
 
 
-def test_account_neutral_fresh_replay_accepts_compaction_context_item() -> None:
-    payload: dict[str, JsonValue] = {
-        "input": [
-            {
-                "type": "compaction",
-                "status": "completed",
-                "encrypted_content": "encrypted-compact-context",
-            },
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "continue"}],
-            },
-        ],
-    }
-
-    assert responses_payload_is_account_neutral_fresh_replay(payload) is True
-
-
-def test_account_neutral_replay_projection_preserves_compaction_without_response_id() -> None:
-    input_items: list[JsonValue] = [
-        {
-            "type": "compaction",
-            "id": "cmp_owner_a",
-            "status": "completed",
-            "encrypted_content": "encrypted-compact-context",
-        },
-        {
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "continue"}],
-        },
-    ]
-
-    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
-
-    assert projection is not None
-    assert projection.input_items[0] == {
-        "type": "compaction",
-        "status": "completed",
-        "encrypted_content": "encrypted-compact-context",
-    }
-    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
-
-
 def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:
     metadata = {"turn_id": "turn_owner_a"}
     input_items: list[JsonValue] = [
@@ -372,27 +327,6 @@ def test_account_neutral_replay_projection_preserves_noncompleted_search_state_t
     assert projection is not None
     assert any(isinstance(item, dict) and item.get("type") == search_item["type"] for item in projection.input_items)
     assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is False
-
-
-def test_account_neutral_fresh_replay_accepts_self_contained_tool_search_pair() -> None:
-    input_items: list[JsonValue] = [
-        {
-            "type": "tool_search_call",
-            "call_id": "call_search",
-            "arguments": {"query": "codex-lb"},
-            "status": "completed",
-        },
-        {
-            "type": "tool_search_output",
-            "call_id": "call_search",
-            "output": "Found codex-lb",
-            "status": "completed",
-        },
-        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
-    ]
-
-    assert responses_input_items_are_self_contained_fresh_replay(input_items) is True
-    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
 
 
 @pytest.mark.parametrize(
@@ -780,6 +714,46 @@ def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
         )
         is expected
     )
+
+
+def test_account_neutral_fresh_replay_accepts_compaction_context_item() -> None:
+    payload: dict[str, JsonValue] = {
+        "input": [
+            {
+                "type": "compaction",
+                "status": "completed",
+                "encrypted_content": "encrypted-compact-context",
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}],
+            },
+        ],
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay(payload) is True
+
+
+def test_account_neutral_fresh_replay_accepts_self_contained_tool_search_pair() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "Found codex-lb",
+            "status": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert responses_input_items_are_self_contained_fresh_replay(input_items) is True
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
 
 
 def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_after_historical_one() -> None:

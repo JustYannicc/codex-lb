@@ -5662,121 +5662,6 @@ async def test_v1_responses_http_bridge_trims_replayed_apply_patch_previous_resp
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_trims_replayed_tool_search_previous_response_prefix(
-    async_client,
-    monkeypatch,
-):
-    _install_bridge_settings(monkeypatch, enabled=True)
-    account_id = await _import_account(
-        async_client,
-        "acc_http_bridge_tool_search_trim",
-        "http-bridge-tool-search-trim@example.com",
-    )
-    account = await _get_account(account_id)
-    fake_upstream = _FakeBridgeUpstreamWebSocket()
-
-    async def fake_select_account_with_budget(
-        self,
-        deadline,
-        *,
-        request_id,
-        kind,
-        request_stage="first_turn",
-        sticky_key,
-        sticky_kind,
-        reallocate_sticky,
-        sticky_max_age_seconds,
-        prefer_earlier_reset_accounts,
-        routing_strategy,
-        model,
-        exclude_account_ids=None,
-        additional_limit_name=None,
-        api_key=None,
-        preferred_account_id=None,
-    ):
-        del preferred_account_id
-        del (
-            self,
-            deadline,
-            request_id,
-            kind,
-            request_stage,
-            sticky_key,
-            sticky_kind,
-            reallocate_sticky,
-            sticky_max_age_seconds,
-            prefer_earlier_reset_accounts,
-            routing_strategy,
-            model,
-            exclude_account_ids,
-            additional_limit_name,
-        )
-        return AccountSelection(account=account, error_message=None, error_code=None)
-
-    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
-        del self, force, timeout_seconds
-        return target
-
-    async def fake_connect_responses_websocket(
-        headers,
-        access_token,
-        account_id_header,
-        *,
-        base_url=None,
-        session=None,
-    ):
-        del headers, access_token, account_id_header, base_url, session
-        return fake_upstream
-
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
-    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
-
-    first = await async_client.post(
-        "/v1/responses",
-        json={
-            "model": "gpt-5.1",
-            "instructions": "Search the tools.",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "find context"}]}],
-            "prompt_cache_key": "http-bridge-tool-search-trim-1",
-        },
-    )
-    assert first.status_code == 200
-    first_body = first.json()
-    assert first_body["id"] == "resp_bridge_1"
-
-    replayed_tool_search_call = {
-        "id": "tsc_replay",
-        "type": "tool_search_call",
-        "status": "completed",
-        "call_id": "call_search_1",
-    }
-    replayed_tool_search_output = {
-        "type": "tool_search_output",
-        "call_id": "call_search_1",
-        "output": [{"title": "context result"}],
-    }
-    next_user_message = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
-    second = await async_client.post(
-        "/v1/responses",
-        json={
-            "model": "gpt-5.1",
-            "instructions": "Search the tools.",
-            "previous_response_id": first_body["id"],
-            "input": [replayed_tool_search_call, replayed_tool_search_output, next_user_message],
-            "prompt_cache_key": "http-bridge-tool-search-trim-1",
-        },
-    )
-    assert second.status_code == 200
-    assert second.json()["id"] == "resp_bridge_2"
-
-    assert len(fake_upstream.sent_text) == 2
-    second_upstream_payload = json.loads(fake_upstream.sent_text[1])
-    assert second_upstream_payload["previous_response_id"] == "resp_bridge_1"
-    assert second_upstream_payload["input"] == [replayed_tool_search_output, next_user_message]
-
-
-@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tools(
     async_client,
     monkeypatch,
@@ -6986,6 +6871,201 @@ async def test_v1_responses_http_bridge_refresh_failure_returns_proxy_error(asyn
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_api_key"
     assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_trims_replayed_tool_search_previous_response_prefix(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_tool_search_trim",
+        "http-bridge-tool-search-trim@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Search the tools.",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "find context"}]}],
+            "prompt_cache_key": "http-bridge-tool-search-trim-1",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["id"] == "resp_bridge_1"
+
+    replayed_tool_search_call = {
+        "id": "tsc_replay",
+        "type": "tool_search_call",
+        "status": "completed",
+        "call_id": "call_search_1",
+    }
+    replayed_tool_search_output = {
+        "type": "tool_search_output",
+        "call_id": "call_search_1",
+        "output": [{"title": "context result"}],
+    }
+    next_user_message = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Search the tools.",
+            "previous_response_id": first_body["id"],
+            "input": [replayed_tool_search_call, replayed_tool_search_output, next_user_message],
+            "prompt_cache_key": "http-bridge-tool-search-trim-1",
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_2"
+
+    assert len(fake_upstream.sent_text) == 2
+    second_upstream_payload = json.loads(fake_upstream.sent_text[1])
+    assert second_upstream_payload["previous_response_id"] == "resp_bridge_1"
+    assert second_upstream_payload["input"] == [replayed_tool_search_output, next_user_message]
+
+
+@pytest.mark.asyncio
+async def test_retry_account_neutral_precreated_request_switches_from_silent_account(app_instance, monkeypatch):
+    from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+
+    service = get_proxy_service_for_app(app_instance)
+    recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("retry-silent-account")
+    first_account = cast(Account, SimpleNamespace(id="acct-silent", status=AccountStatus.ACTIVE, plan_type="plus"))
+    replacement_account = cast(
+        Account,
+        SimpleNamespace(id="acct-replacement", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    replacement_upstream = _RecordingUpstreamWebSocket()
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey(recovery_kind, recovery_key, None),
+        headers={"x-codex-turn-state": "stale-turn-state"},
+        affinity=proxy_module._AffinityPolicy(),
+        request_model="gpt-5.5",
+        account=first_account,
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_lock=anyio.Lock(),
+        pending_requests=deque(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-account-neutral-precreated-retry",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        response_create_gate_acquired=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.5", "input": []}),
+    )
+    session.pending_requests.append(request_state)
+    reconnect_calls: list[dict[str, object]] = []
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        del self, restart_reader
+        reconnect_calls.append(
+            {
+                "require_same_account": require_same_account,
+                "require_preferred_account": require_preferred_account,
+                "preferred_account_id": target_session.account.id,
+                "excluded_account_ids": set(request_state.excluded_account_ids),
+            }
+        )
+        target_session.account = replacement_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert reconnect_calls == [
+        {
+            "require_same_account": False,
+            "require_preferred_account": False,
+            "preferred_account_id": "acct-silent",
+            "excluded_account_ids": {"acct-silent"},
+        }
+    ]
+    assert request_state.preferred_account_id is None
+    assert session.account.id == "acct-replacement"
+    assert replacement_upstream.sent_text == [request_state.request_text]
 
 
 @pytest.mark.asyncio
@@ -13004,86 +13084,6 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert replacement_upstream.sent_text == [retry_request.request_text]
-
-
-@pytest.mark.asyncio
-async def test_retry_account_neutral_precreated_request_switches_from_silent_account(app_instance, monkeypatch):
-    from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
-
-    service = get_proxy_service_for_app(app_instance)
-    recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("retry-silent-account")
-    first_account = cast(Account, SimpleNamespace(id="acct-silent", status=AccountStatus.ACTIVE, plan_type="plus"))
-    replacement_account = cast(
-        Account,
-        SimpleNamespace(id="acct-replacement", status=AccountStatus.ACTIVE, plan_type="plus"),
-    )
-    replacement_upstream = _RecordingUpstreamWebSocket()
-    session = proxy_module._HTTPBridgeSession(
-        key=proxy_module._HTTPBridgeSessionKey(recovery_kind, recovery_key, None),
-        headers={"x-codex-turn-state": "stale-turn-state"},
-        affinity=proxy_module._AffinityPolicy(),
-        request_model="gpt-5.5",
-        account=first_account,
-        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
-        upstream_control=proxy_module._WebSocketUpstreamControl(),
-        pending_lock=anyio.Lock(),
-        pending_requests=deque(),
-        response_create_gate=asyncio.Semaphore(1),
-        queued_request_count=1,
-        last_used_at=time.monotonic(),
-        idle_ttl_seconds=120.0,
-    )
-    request_state = proxy_module._WebSocketRequestState(
-        request_id="req-account-neutral-precreated-retry",
-        model="gpt-5.5",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic(),
-        awaiting_response_created=True,
-        transport="http",
-        response_create_gate_acquired=True,
-        request_text=json.dumps({"type": "response.create", "model": "gpt-5.5", "input": []}),
-    )
-    session.pending_requests.append(request_state)
-    reconnect_calls: list[dict[str, object]] = []
-
-    async def fake_reconnect(
-        self,
-        target_session,
-        *,
-        request_state,
-        restart_reader=False,
-        require_same_account=False,
-        require_preferred_account=False,
-    ):
-        del self, restart_reader
-        reconnect_calls.append(
-            {
-                "require_same_account": require_same_account,
-                "require_preferred_account": require_preferred_account,
-                "preferred_account_id": target_session.account.id,
-                "excluded_account_ids": set(request_state.excluded_account_ids),
-            }
-        )
-        target_session.account = replacement_account
-        target_session.upstream = replacement_upstream
-
-    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
-
-    assert await service._retry_http_bridge_precreated_request(session) is True
-
-    assert reconnect_calls == [
-        {
-            "require_same_account": False,
-            "require_preferred_account": False,
-            "preferred_account_id": "acct-silent",
-            "excluded_account_ids": {"acct-silent"},
-        }
-    ]
-    assert request_state.preferred_account_id is None
-    assert session.account.id == "acct-replacement"
-    assert replacement_upstream.sent_text == [request_state.request_text]
 
 
 @pytest.mark.asyncio
