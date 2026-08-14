@@ -148,7 +148,8 @@ async def test_websocket_security_cleanup_finishes_after_cancellation() -> None:
     await release_started.wait()
     task.cancel()
     release_finished.set()
-    await task
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert request_state.account_response_create_lease is None
     assert request_state.account_response_create_release is None
