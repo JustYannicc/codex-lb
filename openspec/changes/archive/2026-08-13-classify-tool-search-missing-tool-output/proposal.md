@@ -37,6 +37,10 @@ item type is real, only the classifier list is stale.
   there is nothing for the continuity recovery paths to do with it.
 - Add regression coverage for the classifier and for the HTTP-bridge masking
   surface.
+- Treat `tool_search_call` / `tool_search_output` like the other client-side
+  tool pairs when trimming already-stored previous-response replay prefixes, so
+  compaction-preserved tool-search pairs do not get resent in full on top of a
+  `previous_response_id` anchor.
 
 ## Non-goals
 
