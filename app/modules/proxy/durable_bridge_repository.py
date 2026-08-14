@@ -640,9 +640,10 @@ class DurableBridgeRepository:
                     await self._session.refresh(record)
                     return _to_snapshot_required(record)
 
-                state_closed = existing.state == HttpBridgeSessionState.CLOSED
                 owner_absent = existing.owner_instance_id is None
+                state_allows_takeover = existing.state == HttpBridgeSessionState.CLOSED
                 account_changed = existing.account_id != account_id
+                ownerless = existing.owner_instance_id is None
                 owner_changed = existing.owner_instance_id != instance_id
                 if owner_changed:
                     lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
@@ -650,7 +651,7 @@ class DurableBridgeRepository:
                         existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
                     )
                     if live_owned_draining or (
-                        not allow_takeover and not lease_expired and not owner_absent and not state_closed
+                        not allow_takeover and not lease_expired and not ownerless and not state_allows_takeover
                     ):
                         return _to_snapshot_required(existing)
                     next_epoch = existing.owner_epoch + 1
