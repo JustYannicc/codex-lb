@@ -10305,7 +10305,8 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
 
         def post(self, url: str, *, json=None, headers=None, timeout=None):
             self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
-            compact_input = cast(list[dict[str, object]], json["input"])
+            upstream_payload = cast(dict[str, object], json)
+            compact_input = cast(list[dict[str, object]], upstream_payload["input"])
             trigger_count = sum(1 for item in compact_input if item.get("type") == "compaction_trigger")
             if trigger_count > 1:
                 return _DuplicateTriggerResponse(
@@ -10388,7 +10389,8 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
     assert exc.status_code == 400
     assert _proxy_error_code(exc) == "invalid_request_error"
     assert _proxy_error_message(exc) == "Only one 'compaction_trigger' item may be provided"
-    compact_input = cast(list[dict[str, object]], session.calls[0]["json"]["input"])
+    upstream_payload = cast(dict[str, object], session.calls[0]["json"])
+    compact_input = cast(list[dict[str, object]], upstream_payload["input"])
     assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 2
 
 
