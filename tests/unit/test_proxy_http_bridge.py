@@ -26877,6 +26877,86 @@ async def test_reconcile_purged_sessions_closes_missing_rows_and_releases_lease(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_purged_sessions_releases_every_lease_before_any_slow_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Freeing the stream-cap slot is the point of the pass, and closing can
+    block on a slow upstream-reader cancel, so every orphan's lease must be
+    returned before the serial close loop starts — otherwise later sessions'
+    capacity stays held for as long as earlier readers take to unwind."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    sessions = []
+    for index in range(3):
+        session = _make_bridge_session(key_value=f"purged-{index}")
+        session.durable_session_id = f"dur-{index}"
+        session.account_lease = proxy_service.AccountLease(f"lease-{index}", "acc-bridge", "stream", time.monotonic())
+        service._http_bridge_sessions[session.key] = session
+        sessions.append(session)
+
+    released: list[str] = []
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def release_account_lease(lease: Any) -> None:
+        if lease is not None:
+            released.append(lease.lease_id)
+
+    async def slow_close(session: Any, **kwargs: Any) -> None:
+        # First close blocks like an upstream reader awaiting cancellation.
+        close_started.set()
+        await release_close.wait()
+        session.closed = True
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_close_http_bridge_session", slow_close)
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=AsyncMock(return_value=[])))
+
+    closed_count = await service.reconcile_purged_http_bridge_sessions()
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+
+    # All three leases are back in the pool while the first close is still
+    # blocked, and none of the sessions still reference a lease.
+    assert closed_count == 3
+    assert released == ["lease-0", "lease-1", "lease-2"]
+    assert all(session.account_lease is None for session in sessions)
+
+    release_close.set()
+    await asyncio.gather(*service._background_cleanup_tasks)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purged_sessions_survives_a_failing_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One account's release failing must not strand the other orphans' slots."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    for index in range(2):
+        session = _make_bridge_session(key_value=f"purged-fail-{index}")
+        session.durable_session_id = f"dur-fail-{index}"
+        session.account_lease = proxy_service.AccountLease(
+            f"lease-fail-{index}", "acc-bridge", "stream", time.monotonic()
+        )
+        service._http_bridge_sessions[session.key] = session
+
+    released: list[str] = []
+
+    async def release_account_lease(lease: Any) -> None:
+        if lease is None:
+            return
+        if lease.lease_id == "lease-fail-0":
+            raise RuntimeError("pool unavailable")
+        released.append(lease.lease_id)
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(lookup_sessions=AsyncMock(return_value=[])))
+
+    assert await service.reconcile_purged_http_bridge_sessions() == 2
+    assert released == ["lease-fail-1"]
+    await asyncio.gather(*service._background_cleanup_tasks)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_purged_sessions_respects_reservation_taken_during_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

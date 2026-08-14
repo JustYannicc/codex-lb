@@ -42,11 +42,16 @@ class _HTTPBridgePurgeReconcileMixin:
         live_session_ids = {lookup.session_id for lookup in lookups}
         sessions_to_close = await self._detach_purged_http_bridge_sessions(candidates, live_session_ids)
         if sessions_to_close:
-            # Close in a tracked background task: each close may wait on a
-            # slow upstream-reader cancel, and running them inline would pin
-            # the sole cache-invalidation poller for the duration. The
-            # sessions are already detached, so a concurrent bump cannot
-            # double-process them; shutdown drains the tracked task.
+            # Release every orphan's stream lease BEFORE closing any of them.
+            # Releasing the cap slot is the point of this pass, while closing
+            # can block on a slow upstream-reader cancel; folding the release
+            # into the serial close loop would hold later sessions' capacity
+            # for as long as earlier readers take to unwind.
+            await self._release_purged_http_bridge_leases(sessions_to_close)
+            # Close in a tracked background task: the reader cancels would
+            # otherwise pin the sole cache-invalidation poller. The sessions
+            # are already detached, so a concurrent bump cannot double-process
+            # them; shutdown drains the tracked task.
             close_task = asyncio.create_task(
                 self._close_purged_http_bridge_sessions(sessions_to_close),
                 name=_PURGE_RECONCILE_CLOSE_TASK_NAME,
@@ -54,6 +59,29 @@ class _HTTPBridgePurgeReconcileMixin:
             self._background_cleanup_tasks.add(close_task)
             close_task.add_done_callback(self._background_cleanup_tasks.discard)
         return len(sessions_to_close)
+
+    async def _release_purged_http_bridge_leases(self: Any, sessions: list[_HTTPBridgeSession]) -> None:
+        """Return every detached orphan's account stream lease to the pool.
+
+        ``_close_http_bridge_session`` performs the same release, so this is
+        idempotent: clearing ``account_lease`` here makes the later close a
+        no-op for the lease. One session's failure must not strand the rest.
+        """
+        for session in sessions:
+            account_lease = getattr(session, "account_lease", None)
+            if account_lease is None:
+                continue
+            try:
+                await self._load_balancer.release_account_lease(account_lease)
+            except Exception:
+                logger.warning(
+                    "Failed to release purged HTTP bridge account lease account_id=%s model=%s",
+                    session.account.id,
+                    session.request_model,
+                    exc_info=True,
+                )
+            finally:
+                session.account_lease = None
 
     async def _collect_purge_reconcile_candidates(
         self: _HTTPBridgeServiceProtocol,

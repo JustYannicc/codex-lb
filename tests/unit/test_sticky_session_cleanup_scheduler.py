@@ -487,11 +487,20 @@ async def test_signal_abandoned_bridge_purge_queues_retry_when_cancelled_write_n
     ):
         signal_task = asyncio.create_task(cleanup_scheduler._signal_abandoned_bridge_purge(4))
         await asyncio.wait_for(started.wait(), timeout=1.0)
+        bump_coroutines = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not signal_task and task is not asyncio.current_task() and not task.done()
+        ]
         signal_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await signal_task
 
     poller.request_bump.assert_called_once_with(cleanup_scheduler.NAMESPACE_HTTP_BRIDGE_PURGE)
+    # The still-blocked write is ended deterministically instead of being left
+    # running untracked for loop teardown to cancel silently.
+    await asyncio.sleep(0)
+    assert all(task.done() for task in bump_coroutines), "orphaned bump task must not outlive the drain deadline"
 
 
 @pytest.mark.asyncio

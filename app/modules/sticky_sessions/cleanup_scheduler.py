@@ -59,6 +59,16 @@ def _get_leader_election() -> _LeaderElectionLike:
     return cast(_LeaderElectionLike, module.get_leader_election())
 
 
+def _log_abandoned_purge_signal(task: asyncio.Task[bool]) -> None:
+    """Report the outcome of a purge signal abandoned at the drain deadline."""
+    if task.cancelled():
+        logger.warning("Abandoned HTTP bridge purge signal was cancelled at the shutdown drain deadline")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Abandoned HTTP bridge purge signal finished with error", exc_info=exc)
+
+
 async def _signal_abandoned_bridge_purge(deleted_count: int) -> None:
     """Tell every replica to reconcile after a committed abandoned-purge batch.
 
@@ -103,6 +113,13 @@ async def _signal_abandoned_bridge_purge(deleted_count: int) -> None:
                 deleted_count,
                 exc_info=True,
             )
+        if not bump_task.done():
+            # The grace expired with the write still blocked. Shutdown is
+            # about to stop the poller, so leaving the shielded task running
+            # would strand it until loop teardown cancels it silently; end it
+            # deterministically and log its outcome instead.
+            bump_task.cancel()
+            bump_task.add_done_callback(_log_abandoned_purge_signal)
         if not persisted:
             poller.request_bump(NAMESPACE_HTTP_BRIDGE_PURGE)
         raise
