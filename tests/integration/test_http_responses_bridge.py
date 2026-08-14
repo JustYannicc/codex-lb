@@ -722,6 +722,7 @@ class _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket(_FakeBridg
     def __init__(self) -> None:
         super().__init__()
         self.first_request_created = asyncio.Event()
+        self._anchored_followup_failed = False
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -747,6 +748,57 @@ class _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket(_FakeBridg
 
         payload = json.loads(text)
         previous_response_id = payload.get("previous_response_id")
+        if self._anchored_followup_failed:
+            response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        self._anchored_followup_failed = True
         await self._messages.put(
             _FakeUpstreamMessage(
                 "text",
@@ -13443,6 +13495,7 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
         ):
             account_id = await _import_account(
                 admin_client,
@@ -13482,6 +13535,17 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
                 timeout=_TEST_SYNC_TIMEOUT_SECONDS,
             )
 
+            third_response = await third_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "hello-on-anchor-again",
+                    "prompt_cache_key": "previous-response-inflight-mixed",
+                    "previous_response_id": "resp_bridge_prev_anchor",
+                },
+            )
+
             assert not any(not future.done() for future in service._http_bridge_inflight_sessions.values())
 
     assert first_response.status_code == 200
@@ -13490,6 +13554,8 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
     assert second_response.json()["error"]["code"] == "stream_incomplete"
     assert "previous_response_not_found" not in second_response.json()["error"].get("code", "")
     assert "previous_response_not_found" not in second_response.json()["error"].get("message", "")
+    assert third_response.status_code == 200
+    assert third_response.json()["output"][0]["content"][0]["text"] == "OK"
     assert connect_count == 1
 
 
