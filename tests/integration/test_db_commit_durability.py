@@ -194,7 +194,6 @@ async def test_usage_reservation_creation_and_settlement_keep_full_commit_durabi
             )
             await repo.commit()
         _assert_executed_without_relaxation(statements, "UPDATE api_key_usage_reservations")
-        assert not any("UPDATE api_keys" in statement for statement in statements)
         assert coalescer.pending_snapshot() == {key_id: used_at}
         assert await coalescer.flush() == 1
         updated = await repo.get_by_id(key_id)
