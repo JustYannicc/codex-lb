@@ -10185,6 +10185,192 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_normalizes_preexisting_terminal_trigger_without_losing_tool_tail(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {
+                    "type": "custom_tool_call",
+                    "name": "functions.exec_command",
+                    "call_id": "call_compact_tail",
+                    "input": "{\"cmd\":\"pytest\"}",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_compact_tail",
+                    "output": "failed",
+                },
+                {"type": "compaction_trigger"},
+            ],
+        }
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
+        )
+    )
+
+    await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    upstream_payload = cast(dict[str, object], session.calls[0]["json"])
+    compact_input = cast(list[dict[str, object]], upstream_payload["input"])
+    assert compact_input[-1] == {"type": "compaction_trigger"}
+    assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 1
+    assert compact_input[:-1] == [
+        {"role": "user", "content": "hello"},
+        {
+            "type": "custom_tool_call",
+            "name": "functions.exec_command",
+            "call_id": "call_compact_tail",
+            "input": '{"cmd":"pytest"}',
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_compact_tail",
+            "output": "failed",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_without_trigger_canonicalization_hits_upstream_duplicate_trigger_error(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    class _DuplicateTriggerResponse:
+        status = 400
+        reason = "Bad Request"
+
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            return self._payload
+
+    class _DuplicateTriggerSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url: str, *, json=None, headers=None, timeout=None):
+            self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            compact_input = cast(list[dict[str, object]], json["input"])
+            trigger_count = sum(1 for item in compact_input if item.get("type") == "compaction_trigger")
+            if trigger_count > 1:
+                return _DuplicateTriggerResponse(
+                    {
+                        "error": {
+                            "message": "Only one 'compaction_trigger' item may be provided",
+                            "type": "invalid_request_error",
+                            "param": "input",
+                            "code": "invalid_request_error",
+                        }
+                    }
+                )
+            return _JsonCompactResponse(
+                {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
+            )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {
+                    "type": "custom_tool_call",
+                    "name": "functions.exec_command",
+                    "call_id": "call_compact_tail",
+                    "input": "{\"cmd\":\"pytest\"}",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_compact_tail",
+                    "output": "failed",
+                },
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        payload,
+        "to_payload",
+        lambda: {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {
+                    "type": "custom_tool_call",
+                    "name": "functions.exec_command",
+                    "call_id": "call_compact_tail",
+                    "input": '{"cmd":"pytest"}',
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_compact_tail",
+                    "output": "failed",
+                },
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+            "parallel_tool_calls": False,
+        },
+    )
+    session = _DuplicateTriggerSession()
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 400
+    assert _proxy_error_code(exc) == "invalid_request_error"
+    assert _proxy_error_message(exc) == "Only one 'compaction_trigger' item may be provided"
+    compact_input = cast(list[dict[str, object]], session.calls[0]["json"]["input"])
+    assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 2
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

@@ -983,6 +983,7 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)
     _trim_compact_input_for_upstream(payload)
+    _normalize_compaction_trigger_singleton(payload)
     payload.pop("store", None)
     payload.pop("text", None)
     payload.pop("tools", None)
@@ -990,6 +991,27 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("client_metadata", None)
     payload["parallel_tool_calls"] = False
     return payload
+
+
+def _normalize_compaction_trigger_singleton(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value) or not input_value:
+        return
+
+    trigger_items = [
+        item
+        for item in input_value
+        if is_json_mapping(item) and item.get("type") == "compaction_trigger"
+    ]
+    if not trigger_items:
+        return
+
+    payload["input"] = [
+        item
+        for item in input_value
+        if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")
+    ]
+    cast(list[JsonValue], payload["input"]).append({"type": "compaction_trigger"})
 
 
 def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
