@@ -395,7 +395,6 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
         )
         for item in upstream_input
     )
-
 @pytest.mark.asyncio
 async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
     email = "compact-optional-tail@example.com"
