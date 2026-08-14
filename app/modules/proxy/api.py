@@ -1185,7 +1185,7 @@ async def responses_websocket(
 )
 async def v1_responses(
     request: Request,
-    payload: V1ResponsesRequest = Body(...),
+    payload_data: JsonValue = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
@@ -1193,6 +1193,9 @@ async def v1_responses(
     if capability_transport_denial is not None:
         return capability_transport_denial
     try:
+        if is_json_mapping(payload_data):
+            validate_top_level_compaction_trigger_input_shape(payload_data)
+        payload = V1ResponsesRequest.model_validate(payload_data)
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
         enforce_strict_function_tools_format(responses_payload.tools)

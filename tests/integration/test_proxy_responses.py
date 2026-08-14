@@ -2640,6 +2640,34 @@ async def test_v1_responses_compact_invalid_messages_returns_openai_400(async_cl
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_rejects_duplicate_top_level_compaction_trigger(async_client, monkeypatch):
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("malformed top-level compaction_trigger must fail before upstream streaming")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+
+    resp = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.2",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": False,
+        },
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
+    assert body["error"]["param"] == "input"
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_invalid_tool_calls_returns_openai_400(async_client):
     payload = {
         "model": "gpt-5.2",

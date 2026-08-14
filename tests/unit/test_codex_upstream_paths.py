@@ -136,6 +136,21 @@ class _CompactTerminalFailedStreamResponse:
     )
 
 
+class _CompactTerminalFailedStreamWithoutStatusResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, error_type: str, error_code: str) -> None:
+        self.content = (
+            b'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"'
+            + error_code.encode("utf-8")
+            + b'","message":"mapped from error detail","type":"'
+            + error_type.encode("utf-8")
+            + b'"}}}\n\n'
+        )
+
+
 class _TranscribeResponse:
     status_code = 200
     headers = {"content-type": "application/json"}
@@ -448,6 +463,41 @@ async def test_compact_responses_routed_terminal_sse_error_keeps_openai_envelope
     assert error["param"] == "previous_response_id"
     assert exc_info.value.failure_phase == "upstream"
     assert exc_info.value.upstream_status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "error_code", "expected_status"),
+    [
+        ("invalid_request_error", "invalid_request_error", 400),
+        ("authentication_error", "invalid_api_key", 401),
+        ("rate_limit_error", "rate_limit_exceeded", 429),
+    ],
+)
+async def test_compact_responses_terminal_sse_error_infers_status_from_error_detail(
+    route: ResolvedUpstreamRoute,
+    error_type: str,
+    error_code: str,
+    expected_status: int,
+) -> None:
+    client = _RouteMetadataCodexClient(_CompactTerminalFailedStreamWithoutStatusResponse(error_type, error_code))
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await compact_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            route=route,
+            codex_client=cast(Any, client),
+        )
+
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.upstream_status_code == expected_status
+    assert exc_info.value.payload["error"]["type"] == error_type
+    assert exc_info.value.payload["error"]["code"] == error_code
 
 
 @pytest.mark.asyncio

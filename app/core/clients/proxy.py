@@ -1483,7 +1483,32 @@ def _compact_sse_terminal_status_code(payload: Mapping[str, JsonValue]) -> int:
     for value in candidates:
         if isinstance(value, int) and not isinstance(value, bool):
             return value
+    for candidate in (response, payload):
+        if not is_json_mapping(candidate):
+            continue
+        error = parse_error_payload(dict(candidate))
+        if error is None:
+            continue
+        inferred_status = _status_code_from_openai_error(error)
+        if inferred_status is not None:
+            return inferred_status
     return 502
+
+
+def _status_code_from_openai_error(error: OpenAIError) -> int | None:
+    error_type = error.type
+    error_code = error.code
+    if error_type == "authentication_error" or error_code == "invalid_api_key":
+        return 401
+    if error_type == "permission_error" or error_code == "insufficient_permissions":
+        return 403
+    if error_code == "not_found":
+        return 404
+    if error_type == "rate_limit_error" or error_code in {"rate_limit_exceeded", "usage_limit_reached"}:
+        return 429
+    if error_type == "invalid_request_error":
+        return 400
+    return None
 
 
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
