@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -9,6 +10,7 @@ from math import isfinite
 from typing import cast
 
 import aiohttp
+import anyio
 
 from app.core.clients.http import lease_http_session
 from app.core.crypto import TokenEncryptor
@@ -99,6 +101,20 @@ class SourceResponsesStream:
 class SourceUsageHolder:
     usage: SourceUsage | None = None
     timings: SourceTimings | None = None
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish owned upstream cleanup even if the caller is cancelled again."""
+
+    task = asyncio.ensure_future(awaitable)
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
 
 
 async def forward_chat_completion(
@@ -309,10 +325,10 @@ async def _open_source_stream(
             )
         return stack, response
     except (aiohttp.ClientError, TimeoutError) as exc:
-        await stack.aclose()
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise _unreachable_error(exc) from exc
     except BaseException:
-        await stack.aclose()
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise
 
 

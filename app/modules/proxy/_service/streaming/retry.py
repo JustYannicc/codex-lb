@@ -1855,7 +1855,13 @@ class _StreamingRetryMixin:
                                 async for line in inner_stream:
                                     yield line
                             finally:
-                                await inner_stream.aclose()
+                                close_task = asyncio.create_task(
+                                    inner_stream.aclose(),
+                                    name=f"stream-inner-close-{request_id}",
+                                )
+                                _, close_cancellation = await _await_task_deferring_cancellation(close_task)
+                                if close_cancellation is not None:
+                                    raise close_cancellation
                         except (asyncio.CancelledError, GeneratorExit):
                             # A terminal frame may already have been yielded when
                             # downstream cancellation is delivered on the next
