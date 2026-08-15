@@ -8,9 +8,6 @@ mergeable or non-conflict state, and MUST preserve its current value only when
 GitHub reports `UNKNOWN`. It MUST NOT infer a conflict from the pull request
 merely being behind the base branch.
 
-
-**Reason**: The label synchronizer is being retired, and triage uses GitHub's live `mergeable` API field as its source of truth.
-**Migration**: Stop relying on the `needs rebase` label and inspect the live `mergeable` field instead.
 #### Scenario: Confirmed conflict gains the label
 
 - **WHEN** GitHub reports the pull request as `CONFLICTING` or `DIRTY`
@@ -43,9 +40,6 @@ merely being behind the base branch.
 
 The `Codex review labels` workflow MUST execute the label synchronization script from the trusted default branch and MUST prefer a dedicated GitHub App installation token, then a repository-provided write token, before falling back to the default `github.token`.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: GitHub App credentials are configured
 
 - **WHEN** the repository defines the `CODEX_LABEL_SYNC_APP_ID` variable and the `CODEX_LABEL_SYNC_APP_PRIVATE_KEY` secret
@@ -70,9 +64,6 @@ The `Codex review labels` workflow MUST execute the label synchronization script
 
 The Codex label synchronization script MUST distinguish GitHub write-permission denials from classification/read failures.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: GitHub App token cannot mutate a PR resource
 
 - **WHEN** a label, comment, or workflow-run approval write returns `Resource not accessible by integration (HTTP 403)`
@@ -98,9 +89,6 @@ original commit, or body text ties it to the current head, and MUST treat
 stale unresolved Codex inline threads as non-blocking when none of those tie
 them to the current head.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: Resolved inline finding no longer blocks the ok label
 
 - **WHEN** a current-head inline Codex finding comment belongs to a resolved
@@ -171,9 +159,6 @@ workflow, while checks from the authoritative run, checks that cannot be
 attributed to a workflow run, non-Actions status evidence, and failures from
 independent workflows remain blocking evidence.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: Cancelled duplicate leaves a unique failed placeholder
 
 - **GIVEN** an older CI workflow run for the current head was cancelled
@@ -220,9 +205,6 @@ When multiple check runs have the same context name on a pull-request head, the 
 start or creation time. Completion time MUST NOT let an older superseded run
 override a newer rerun that has already started.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: older duplicate run completes after a newer rerun starts
 
 - **GIVEN** two check runs share the same name
@@ -237,9 +219,6 @@ The Codex label synchronization script MUST NOT post a new `@codex review` comme
 
 The script MUST resolve the sender identity in a way that works with GitHub App installation tokens (which cannot call `GET /user`): it prefers the app slug exported by the workflow (`GH_APP_SLUG`, yielding `<slug>[bot]`) and falls back to `GET /user` for PAT-backed runs. Once the run has switched to the fallback token, the app slug no longer describes the active identity: sender resolution MUST ignore it, and review triggers MUST be suppressed with a warning because posted comments would no longer be authored by the resolved sender. The review-request POST itself MUST NOT be silently retried under the fallback token after a rate-limit response: the fallback activates for subsequent calls, but the identity-sensitive comment fails instead of posting under the wrong author. If the sender cannot be resolved, only the review-trigger path is disabled (with a warning per affected decision); label synchronization and workflow-run approvals MUST proceed.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: Recent usage-limit reply latches the backoff
 
 - **GIVEN** the sender's `@codex review` comment was answered by a Codex usage-limit reply within the backoff window
@@ -344,9 +323,6 @@ The script MUST resolve the sender identity in a way that works with GitHub App 
 
 Before performing writes for a classified decision (label changes, legacy label removal, workflow-run approvals, or review triggers), the Codex label synchronization script MUST reclassify the pull request and act on the fresh evidence only. If the head SHA no longer matches the SHA the decision was classified against, the decision MUST be skipped with a warning. If the head is unchanged but the evidence changed (checks, reviews, mergeability), the writes MUST follow the fresh decision, and a review trigger MUST only fire when both the original and the fresh classification want it. The freshly read timeline MUST feed the shared usage-limit backoff so quota replies that arrived after bulk classification suppress the remaining review requests. Reclassification read failures MUST honor `--tolerate-read-errors` (log and skip the decision without failing the run). Decisions without pending writes need not be reclassified.
 
-
-**Reason**: CodeRabbit replaces the auto-posted Codex review label gate, so this requirement governs machinery that is being retired.
-**Migration**: Use current-head CodeRabbit review evidence for the mechanical-review gate; local `codex review --base origin/main` remains an optional extra tool.
 #### Scenario: Stale decision is skipped after a head move
 
 - **GIVEN** a pull request whose head changed between classification and apply
