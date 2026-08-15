@@ -13427,7 +13427,7 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     service = get_proxy_service_for_app(app_instance)
-    upstream = _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket()
+    upstream = _TwoSameAnchorFollowupsPreviousResponseNotFoundUpstreamWebSocket()
     connect_count = 0
 
     async def fake_select_account_with_budget(
@@ -13496,6 +13496,7 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as fourth_client,
         ):
             account_id = await _import_account(
                 admin_client,
@@ -13504,28 +13505,39 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             )
             account = await _get_account(account_id)
 
-            first = asyncio.create_task(
-                first_client.post(
-                    "/v1/responses",
-                    json={
-                        "model": "gpt-5.1",
-                        "instructions": "Return exactly OK.",
-                        "input": "hello",
-                        "prompt_cache_key": "previous-response-inflight-mixed",
-                    },
-                )
+            anchor_response = await first_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "hello-seed",
+                    "prompt_cache_key": "previous-response-anchor-seed",
+                },
             )
-            await _wait_for_event(upstream.first_request_created)
 
-            second = asyncio.create_task(
+            first = asyncio.create_task(
                 second_client.post(
                     "/v1/responses",
                     json={
                         "model": "gpt-5.1",
                         "instructions": "Return exactly OK.",
-                        "input": "hello-again",
-                        "prompt_cache_key": "previous-response-inflight-mixed",
-                        "previous_response_id": "resp_bridge_prev_anchor",
+                        "input": "hello-a",
+                        "prompt_cache_key": "previous-response-inflight-origin",
+                        "previous_response_id": anchor_response.json()["id"],
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_followup_created)
+
+            second = asyncio.create_task(
+                third_client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "hello-b",
+                        "prompt_cache_key": "previous-response-inflight-anchor",
+                        "previous_response_id": anchor_response.json()["id"],
                     },
                 )
             )
@@ -13535,28 +13547,31 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
                 timeout=_TEST_SYNC_TIMEOUT_SECONDS,
             )
 
-            third_response = await third_client.post(
+            third_response = await fourth_client.post(
                 "/v1/responses",
                 json={
                     "model": "gpt-5.1",
                     "instructions": "Return exactly OK.",
                     "input": "hello-on-anchor-again",
-                    "prompt_cache_key": "previous-response-inflight-mixed",
-                    "previous_response_id": "resp_bridge_prev_anchor",
+                    "prompt_cache_key": "previous-response-after-error",
                 },
             )
 
             assert not any(not future.done() for future in service._http_bridge_inflight_sessions.values())
 
-    assert first_response.status_code == 200
-    assert first_response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert anchor_response.status_code == 200
+    assert anchor_response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert first_response.status_code >= 400
+    assert first_response.json()["error"]["code"] == "stream_incomplete"
     assert second_response.status_code >= 400
     assert second_response.json()["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in first_response.json()["error"].get("code", "")
+    assert "previous_response_not_found" not in first_response.json()["error"].get("message", "")
     assert "previous_response_not_found" not in second_response.json()["error"].get("code", "")
     assert "previous_response_not_found" not in second_response.json()["error"].get("message", "")
     assert third_response.status_code == 200
     assert third_response.json()["output"][0]["content"][0]["text"] == "OK"
-    assert connect_count == 1
+    assert connect_count == 2
 
 
 @pytest.mark.asyncio
