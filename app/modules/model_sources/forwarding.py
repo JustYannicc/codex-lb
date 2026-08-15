@@ -117,42 +117,70 @@ async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) ->
                     raise
 
 
+async def _await_result_deferring_cancellation(awaitable: Awaitable[object]) -> bool:
+    """Finish owned cleanup and report whether cancellation arrived mid-flight."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation_deferred = False
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                return cancellation_deferred
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancellation_deferred = True
+
+
 async def forward_chat_completion(
     source: ModelSource,
     payload: dict[str, JsonValue],
     *,
     encryptor: TokenEncryptor | None = None,
 ) -> SourceChatCompletion:
+    stack = AsyncExitStack()
     try:
-        async with lease_http_session() as session:
-            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-            async with session.post(
+        session = await stack.enter_async_context(lease_http_session())
+        timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+        response = await stack.enter_async_context(
+            session.post(
                 _source_url(source, "/chat/completions"),
                 headers=_source_headers(source, encryptor=encryptor),
                 json=payload,
                 timeout=timeout,
-            ) as response:
-                data = await _response_json(response)
-                if response.status >= 400:
-                    raise ModelSourceForwardingError(
-                        status_code=response.status,
-                        payload=_redact_source_error_payload(
-                            _error_payload(data),
-                            source,
-                            encryptor=encryptor,
-                        ),
-                        upstream_status_code=response.status,
-                    )
-                if data is None:
-                    raise _invalid_upstream_response_error(response.status)
-                return SourceChatCompletion(
-                    payload=data,
-                    usage=_usage_from_chat_payload(data),
-                    timings=_timings_from_payload(data),
-                    upstream_status_code=response.status,
-                )
+            )
+        )
+        data = await _response_json(response)
+        if response.status >= 400:
+            raise ModelSourceForwardingError(
+                status_code=response.status,
+                payload=_redact_source_error_payload(
+                    _error_payload(data),
+                    source,
+                    encryptor=encryptor,
+                ),
+                upstream_status_code=response.status,
+            )
+        if data is None:
+            raise _invalid_upstream_response_error(response.status)
+        result = SourceChatCompletion(
+            payload=data,
+            usage=_usage_from_chat_payload(data),
+            timings=_timings_from_payload(data),
+            upstream_status_code=response.status,
+        )
     except (aiohttp.ClientError, TimeoutError) as exc:
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise _unreachable_error(exc) from exc
+    except BaseException:
+        await _await_cleanup_deferring_cancellation(stack.aclose())
+        raise
+
+    cleanup_cancelled = await _await_result_deferring_cancellation(stack.aclose())
+    if cleanup_cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 async def stream_chat_completion(

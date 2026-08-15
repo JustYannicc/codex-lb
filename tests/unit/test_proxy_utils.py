@@ -61,7 +61,7 @@ from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
@@ -15574,6 +15574,73 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_finalizes_generated_terminal_failure_before_downstream_close(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_retry_generated_terminal_close")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    settle_stream_usage = AsyncMock(return_value=True)
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_retry_generated_terminal_close",
+        key_id="key_retry_generated_terminal_close",
+        model="gpt-5.1",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_stream_usage)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_stream_once(*args: object, **kwargs: object):
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        settlement.downstream_visible = True
+        settlement.response_id = "resp_retry_generated_terminal_close"
+        yield (
+            'data: {"type":"response.created","response":{"id":"resp_retry_generated_terminal_close",'
+            '"status":"in_progress","output":[]}}\n\n'
+        )
+        raise streaming_retry_module._TransientStreamError(
+            "upstream_unavailable",
+            {"message": "transport exploded after first event"},
+        )
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_with_retry(
+        payload,
+        {"session_id": "sid-retry-generated-terminal-close"},
+        codex_session_affinity=False,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=reservation,
+        suppress_text_done_events=False,
+        request_transport="http",
+        upstream_stream_transport_override=None,
+    )
+
+    first_chunk = await anext(stream)
+    terminal_chunk = await anext(stream)
+    assert "response.created" in first_chunk
+    assert "response.failed" in terminal_chunk
+    await cast(Any, stream).aclose()
+
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    settle_stream_usage.assert_awaited_once()
     record_success.assert_not_awaited()
 
 

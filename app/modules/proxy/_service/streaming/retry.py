@@ -1934,7 +1934,6 @@ class _StreamingRetryMixin:
                                     account.id,
                                     error_code,
                                 )
-                                yield format_sse_event(event)
                                 settlement.record_success = False
                                 settlement.error_code = error_code
                                 settlement.error_message = error_message
@@ -1943,6 +1942,11 @@ class _StreamingRetryMixin:
                                 else:
                                     settlement.error = tex.error
                                 settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+                                try:
+                                    yield format_sse_event(event)
+                                except (asyncio.CancelledError, GeneratorExit):
+                                    await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                                    raise
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
                                     await proxy._handle_stream_error(

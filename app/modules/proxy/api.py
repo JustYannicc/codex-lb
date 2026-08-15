@@ -5159,7 +5159,14 @@ async def _source_chat_stream_with_settlement(
         await _release_reservation(reservation)
         raise
     else:
-        settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+        settled, settlement_deferred_cancellation = await _await_result_deferring_cancellation(
+            _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+        )
+        if settlement_deferred_cancellation:
+            status = "cancelled"
+            error_code = "client_disconnected"
+            error_message = "client disconnected during source usage settlement"
+            raise asyncio.CancelledError
         if not settled:
             status = "error"
             error_code = "usage_settlement_failed"

@@ -1381,6 +1381,76 @@ async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_forward_chat_completion_cleanup_finishes_after_cancellation(monkeypatch: pytest.MonkeyPatch):
+    import app.modules.model_sources.forwarding as forwarding_module
+    from app.db.models import ModelSource
+
+    cleanup_started = asyncio.Event()
+    allow_cleanup_finish = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class _Response:
+        status = 200
+
+        async def json(self, content_type=None):
+            del content_type
+            return {
+                "id": "chatcmpl_forward_cancelled_cleanup",
+                "usage": {"prompt_tokens": 3, "completion_tokens": 5},
+            }
+
+    class _PostContext:
+        async def __aenter__(self) -> _Response:
+            return _Response()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            del exc_type, exc, tb
+            return False
+
+    class _Session:
+        def post(self, *_args: object, **_kwargs: object) -> _PostContext:
+            return _PostContext()
+
+    class _SessionLease:
+        async def __aenter__(self) -> _Session:
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            del exc_type, exc, tb
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            cleanup_finished.set()
+            return False
+
+    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+
+    source = ModelSource(
+        id="src_forward_cancelled_cleanup",
+        name="forward-cancelled-cleanup",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+
+    task = asyncio.create_task(
+        forwarding_module.forward_chat_completion(
+            source,
+            {"model": "forward-cancelled-cleanup", "messages": [{"role": "user", "content": "hello"}]},
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    task.cancel()
+    allow_cleanup_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_finished.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_downstream_disconnect_closes_source_stream(async_client, monkeypatch):
     from starlette.requests import Request
 
@@ -1523,6 +1593,94 @@ async def test_source_stream_disconnect_logs_cancelled_not_error(async_client, d
         assert aggregate.error_count == 0
         assert aggregate.cancelled_count == 1
         assert aggregate.top_error is None
+
+
+@pytest.mark.asyncio
+async def test_source_stream_settlement_cancellation_logs_cancelled_not_success(monkeypatch: pytest.MonkeyPatch):
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsage, SourceUsageHolder
+
+    settle_started = asyncio.Event()
+    allow_settle_finish = asyncio.Event()
+    released: list[object] = []
+    logs: list[dict[str, object]] = []
+
+    async def settle(*_args: object, **_kwargs: object) -> bool:
+        settle_started.set()
+        await allow_settle_finish.wait()
+        return True
+
+    async def record_release(reservation: object) -> None:
+        released.append(reservation)
+
+    async def record_log(*_args: object, **kwargs: object) -> None:
+        logs.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_api, "_settle_source_reservation", settle)
+    monkeypatch.setattr(proxy_api, "_release_reservation", record_release)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", record_log)
+
+    async def source_stream() -> AsyncIterator[bytes]:
+        yield b"data: partial\n\n"
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/chat/completions",
+            "raw_path": b"/v1/chat/completions",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 0),
+            "server": ("testserver", 80),
+        }
+    )
+    source = ModelSource(
+        id="src_stream_settlement_cancel",
+        name="stream-settlement-cancel",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_stream_settlement_cancel",
+        key_id="key_stream_settlement_cancel",
+        model="stream-settlement-cancel",
+    )
+    usage_holder = SourceUsageHolder(usage=SourceUsage(input_tokens=3, output_tokens=5))
+
+    async def consume_stream() -> None:
+        async for _chunk in proxy_api._source_chat_stream_with_settlement(
+            source_stream(),
+            usage_holder=usage_holder,
+            request=request,
+            source=source,
+            api_key=None,
+            model="stream-settlement-cancel",
+            reservation=reservation,
+        ):
+            pass
+
+    task = asyncio.create_task(consume_stream())
+    await asyncio.wait_for(settle_started.wait(), timeout=1)
+    task.cancel()
+    allow_settle_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert released == []
+    assert logs[-1]["status"] == "cancelled"
+    assert logs[-1]["error_code"] == "client_disconnected"
+    assert logs[-1]["error_message"] == "client disconnected during source usage settlement"
+    assert logs[-1]["usage"] == usage_holder.usage
 
 
 @pytest.mark.asyncio
