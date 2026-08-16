@@ -1469,14 +1469,15 @@ async def test_close_session_never_reclaims_the_shared_in_memory_sqlite_connecti
         "sqlite+aiosqlite:///:memory:",
         "sqlite+aiosqlite://",
         "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared&uri=true",
-        "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared",
+        "sqlite+aiosqlite:///file::memory:?cache=shared&uri=true",
     ],
 )
 def test_session_teardown_bound_skips_every_in_memory_sqlite_url_form(url_text: str) -> None:
     """Every in-memory SQLite URL form must keep the unbounded teardown: the
     SQLite URI forms carry ``mode=memory`` in the parsed URL's query, not in
     ``url.database``, and a shared in-memory database reclaimed by invalidation
-    would be destroyed for the whole process."""
+    would be destroyed for the whole process. URI forms count only with
+    ``uri=true`` — that is what makes the dialect pass the string as a URI."""
 
     class _FakeDialect:
         name = "sqlite"
@@ -1498,12 +1499,16 @@ def test_session_teardown_bound_skips_every_in_memory_sqlite_url_form(url_text: 
     [
         "sqlite+aiosqlite:////data/store.db",
         "sqlite+aiosqlite:///file:/data/store.db?uri=true",
+        # Without ``uri=true`` the dialect never enables SQLite URI mode: this
+        # connects to a file literally named ``file:shared`` and must keep the
+        # bounded teardown despite carrying ``mode=memory`` in the query.
+        "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared",
     ],
 )
 def test_session_teardown_bound_applies_to_file_backed_sqlite_url_forms(url_text: str) -> None:
-    """File-backed SQLite (plain path or ``file:`` URI without
-    ``mode=memory``) is exactly the wedge-prone single-writer case and must
-    stay bounded."""
+    """File-backed SQLite (plain path, ``file:`` URI without ``mode=memory``,
+    or a ``mode=memory`` query without ``uri=true``) is exactly the
+    wedge-prone single-writer case and must stay bounded."""
 
     class _FakeDialect:
         name = "sqlite"

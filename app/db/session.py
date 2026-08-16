@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Proto
 import anyio
 from anyio import to_thread
 from sqlalchemy import event, text
+from sqlalchemy import util as sqlalchemy_util
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -396,6 +397,33 @@ async def _shielded_bounded(awaitable: Awaitable[object], timeout: float) -> asy
     return task
 
 
+def _sqlite_uri_mode_active(url: Any) -> bool:
+    """Whether the pysqlite/aiosqlite dialect will connect in URI mode.
+
+    Mirrors the dialect's ``create_connect_args``: URI mode is enabled only
+    when the URL query carries a ``uri`` value that coerces to true.
+    """
+    query = getattr(url, "query", None)
+    if query is None:
+        return False
+    try:
+        value = query.get("uri")
+    except Exception:
+        return False
+    values = value if isinstance(value, (tuple, list)) else (value,)
+    for item in values:
+        if item is None:
+            continue
+        try:
+            if sqlalchemy_util.asbool(str(item)):
+                return True
+        except Exception:
+            # An unrecognized value would fail at connect time anyway;
+            # classify conservatively as file-backed (bounded).
+            continue
+    return False
+
+
 def _session_teardown_bound_seconds(session: AsyncSession) -> float | None:
     """Teardown deadline for this session, or None for the unbounded path.
 
@@ -417,20 +445,34 @@ def _session_teardown_bound_seconds(session: AsyncSession) -> float | None:
     url = getattr(bind, "url", None)
     if url is not None:
         database = getattr(url, "database", None)
-        if not database or ":memory:" in str(database) or "mode=memory" in str(database):
+        if not database:
             return None
-        # SQLite URI forms (``sqlite:///file:name?mode=memory&cache=shared``)
-        # carry ``mode=memory`` in the parsed URL's query, not in
-        # ``url.database`` — those are in-memory databases too.
-        query = getattr(url, "query", None)
-        if query is not None:
-            try:
-                mode = query.get("mode")
-            except Exception:
-                mode = None
-            modes = mode if isinstance(mode, (tuple, list)) else (mode,)
-            if any(str(value).lower() == "memory" for value in modes if value is not None):
+        database_text = str(database)
+        if database_text == ":memory:":
+            return None
+        # SQLite URI forms (``sqlite:///file:name?mode=memory&cache=shared&uri=true``)
+        # are in-memory only when the pysqlite/aiosqlite dialect actually
+        # passes the database string to the driver as a URI, which it does
+        # only when the URL query carries a truthy ``uri`` — and SQLite itself
+        # parses a filename as a URI only when it starts with ``file:``.
+        # Without ``uri=true``, ``file:name?mode=memory`` is a *file-backed*
+        # database whose filename literally contains those characters, so it
+        # must keep the bounded teardown.
+        if _sqlite_uri_mode_active(url) and database_text.startswith("file:"):
+            # ``mode=memory`` normally rides the parsed URL's query; it only
+            # appears inside ``url.database`` when the URL escaped the query
+            # into the database portion.
+            if ":memory:" in database_text or "mode=memory" in database_text:
                 return None
+            query = getattr(url, "query", None)
+            if query is not None:
+                try:
+                    mode = query.get("mode")
+                except Exception:
+                    mode = None
+                modes = mode if isinstance(mode, (tuple, list)) else (mode,)
+                if any(str(value).lower() == "memory" for value in modes if value is not None):
+                    return None
     return _SQLITE_TEARDOWN_TIMEOUT_SECONDS
 
 
