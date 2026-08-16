@@ -49,6 +49,7 @@ The merged summaries MAY be served from a process-local cache keyed by the reque
 - **GIVEN** cached summaries that include an account
 - **WHEN** that account is deleted, or a duplicate-identity consolidation removes it
 - **THEN** the cache MUST be cleared so the next read reflects the new attribution
+- **AND** a summary computation already in flight when the invalidation happens MUST NOT re-populate the cache with its pre-invalidation result
 
 ### Requirement: A background fold job advances the account usage rollup safely
 

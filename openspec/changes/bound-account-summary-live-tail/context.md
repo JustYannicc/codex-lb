@@ -26,6 +26,18 @@ is computed over every row. 2h ≈ 900x the all-history worst case, with room
 for replica clock skew, paused VMs, and event-loop stalls far beyond
 anything observed.
 
+Operational bound made explicit by this change: writer-replica wall clocks
+(the `utcnow()` used by `add_log`) must stay within one fold lag of the fold
+leader's clock, and no insert transaction may stay open that long. This
+requirement is not new — it existed at 24h and only its margin changed. All
+replicas share one database and one NTP discipline; a clock trailing by two
+hours implies TLS/OAuth breakage long before rollup drift, and the DB pool
+recycles connections far below the lag. The residual exposure (a 2–24h
+trailing clock that the old lag absorbed) is accepted; deployments that
+cannot bound clock skew should not shorten further. A hard fence (stamping
+`requested_at` from the database clock) would cost the write path's
+no-refresh optimization and is left as a follow-up if ever needed.
+
 Post-insert mutators are fenced independently of the lag:
 
 - `update_model_for_request` selects only rows strictly above the lifetime
@@ -33,6 +45,18 @@ Post-insert mutators are fenced independently of the lag:
 - Account deletion and duplicate-identity consolidation reassign request
   logs under the fold-state lock and mirror folded sums
   (`merge_rollups_into`, time-rollup mirrors).
+
+## Cache invalidation race (generation fence)
+
+A summary fill that is between its two statements when deletion or
+consolidation commits could otherwise store its pre-commit result *after*
+the lifecycle clear, serving stale attribution for a full TTL. Fills capture
+a generation counter before their first await; `_clear_...` bumps it and
+stores are discarded on mismatch. The clear runs synchronously right after
+the lifecycle commit (no await between them), so on the single event loop
+every store either precedes the commit (wiped by the clear) or observes the
+bumped generation. Regression:
+`test_summary_cache_fill_discarded_when_invalidated_mid_flight`.
 
 ## Read-path cost of the 24h tail
 

@@ -77,9 +77,18 @@ class AccountRequestUsageSummary:
 _SUMMARY_CACHE_TTL_SECONDS = 30.0
 _SUMMARY_CACHE_MAX_ENTRIES = 64
 _request_usage_summary_cache: dict[tuple[str, ...] | None, tuple[dict[str, AccountRequestUsageSummary], float]] = {}
+# Invalidation generation: a fill that was already computing when a clear
+# happened must not re-populate the cache with its pre-clear result. Fills
+# capture the generation before their first await and stores are discarded
+# on mismatch. Deletion/consolidation clear synchronously right after their
+# commit (no await in between), so every store either precedes the commit
+# (its stale data is wiped by the clear) or observes the bumped generation.
+_summary_cache_generation = 0
 
 
 def _clear_request_usage_summary_cache() -> None:
+    global _summary_cache_generation
+    _summary_cache_generation += 1
     _request_usage_summary_cache.clear()
 
 
@@ -100,7 +109,10 @@ def _store_request_usage_summaries(
     key: tuple[str, ...] | None,
     summaries: dict[str, AccountRequestUsageSummary],
     ttl_seconds: float,
+    generation: int,
 ) -> None:
+    if generation != _summary_cache_generation:
+        return
     if len(_request_usage_summary_cache) >= _SUMMARY_CACHE_MAX_ENTRIES:
         oldest = min(
             _request_usage_summary_cache,
@@ -169,6 +181,7 @@ class AccountsRepository:
     ) -> dict[str, AccountRequestUsageSummary]:
         ttl_seconds = _SUMMARY_CACHE_TTL_SECONDS
         cache_key = tuple(sorted(account_ids)) if account_ids is not None else None
+        generation = _summary_cache_generation
         if ttl_seconds > 0:
             cached = _cached_request_usage_summaries(cache_key)
             if cached is not None:
@@ -217,7 +230,7 @@ class AccountsRepository:
                 total_cost_usd=round(float(total_cost_usd), 6),
             )
         if ttl_seconds > 0:
-            _store_request_usage_summaries(cache_key, summaries, ttl_seconds)
+            _store_request_usage_summaries(cache_key, summaries, ttl_seconds, generation)
             return dict(summaries)
         return summaries
 

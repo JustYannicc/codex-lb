@@ -573,3 +573,38 @@ async def test_summary_cache_cleared_on_identity_consolidation(db_setup, monkeyp
     after = await _summaries()
     assert "acc_cc__copy" not in after
     assert after["acc_cc"].request_count == 2
+
+
+@pytest.mark.asyncio
+async def test_summary_cache_fill_discarded_when_invalidated_mid_flight(db_setup, monkeypatch):
+    """A fill already computing when deletion/consolidation clears the cache
+    must not re-populate it with its pre-clear result (generation fence)."""
+    import app.modules.accounts.repository as accounts_repository_module
+
+    monkeypatch.setattr(accounts_repository_module, "_SUMMARY_CACHE_TTL_SECONDS", 30.0)
+    accounts_repository_module._clear_request_usage_summary_cache()
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_racefill", "racefill@example.com"))
+        await _add_log(
+            logs_repo, account_id="acc_racefill", request_id="req_rf", requested_at=now - timedelta(minutes=5)
+        )
+
+    real_read_state = accounts_repository_module.AccountUsageRollupRepository.read_state
+
+    async def _read_state_with_racing_clear(self, account_ids=None):
+        result = await real_read_state(self, account_ids)
+        # Simulate a consolidation/deletion committing and clearing while
+        # this fill is still between its two statements.
+        accounts_repository_module._clear_request_usage_summary_cache()
+        return result
+
+    monkeypatch.setattr(
+        accounts_repository_module.AccountUsageRollupRepository, "read_state", _read_state_with_racing_clear
+    )
+    first = await _summaries()
+    assert first["acc_racefill"].request_count == 1
+    # The interleaved clear must have won: nothing was cached.
+    assert accounts_repository_module._request_usage_summary_cache == {}
