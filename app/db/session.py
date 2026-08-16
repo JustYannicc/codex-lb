@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import sqlite3
@@ -416,8 +417,20 @@ def _session_teardown_bound_seconds(session: AsyncSession) -> float | None:
     url = getattr(bind, "url", None)
     if url is not None:
         database = getattr(url, "database", None)
-        if not database or ":memory:" in str(database):
+        if not database or ":memory:" in str(database) or "mode=memory" in str(database):
             return None
+        # SQLite URI forms (``sqlite:///file:name?mode=memory&cache=shared``)
+        # carry ``mode=memory`` in the parsed URL's query, not in
+        # ``url.database`` — those are in-memory databases too.
+        query = getattr(url, "query", None)
+        if query is not None:
+            try:
+                mode = query.get("mode")
+            except Exception:
+                mode = None
+            modes = mode if isinstance(mode, (tuple, list)) else (mode,)
+            if any(str(value).lower() == "memory" for value in modes if value is not None):
+                return None
     return _SQLITE_TEARDOWN_TIMEOUT_SECONDS
 
 
@@ -504,6 +517,13 @@ async def _reclaim_wedged_sqlite_session(
         session.info[_SQLITE_TEARDOWN_WEDGED_INFO_KEY] = True
     except Exception:
         logger.exception("Failed to fence a wedged SQLite session during teardown reclaim")
+    # Own the abandoned teardown before this coroutine's first await: if
+    # close_db runs concurrently with the reclaim, it must already see the
+    # pending task in the registry instead of returning while the rollback is
+    # still pending. The completion callbacks are attached only after the
+    # connection is invalidated below, so the deferred bookkeeping close can
+    # never touch a live connection.
+    _wedged_teardown_cleanup_tasks.add(abandoned)
     for connection in connections:
         logger.warning(
             "sqlite_wedged_teardown phase=%s bound_seconds=%.1f %s — interrupting and invalidating the "
@@ -516,10 +536,19 @@ async def _reclaim_wedged_sqlite_session(
             driver = connection.connection.driver_connection
             if driver is not None:
                 # aiosqlite's ``interrupt`` runs sqlite3_interrupt inline on
-                # this task — it never enters the (wedged) worker queue.
-                await driver.interrupt()
+                # this task — it never enters the (wedged) worker queue. In
+                # the pinned aiosqlite (0.22.x) it is a coroutine function;
+                # await the result only when it is awaitable so a driver that
+                # makes ``interrupt`` synchronous keeps working.
+                result = driver.interrupt()
+                if inspect.isawaitable(result):
+                    await result
         except Exception:
-            logger.debug("Interrupting a wedged SQLite connection failed", exc_info=True)
+            logger.warning(
+                "Interrupting a wedged SQLite connection failed — the invalidation below still "
+                "reclaims the writer slot, but the stuck statement may run to completion first",
+                exc_info=True,
+            )
         try:
             connection.invalidate()
         except Exception:
@@ -532,13 +561,12 @@ async def _reclaim_wedged_sqlite_session(
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
             phase,
         )
-    # Own the abandoned teardown until completion: close_db drains the
-    # registry, so shutdown waits for (or boundedly abandons) the reclaimed
-    # rollback/close instead of returning while it is still pending. The
-    # discard callback is registered first so that when the task completes
-    # during the drain, deregistration happens before _finish_abandoned_teardown
-    # registers the follow-up bookkeeping close.
-    _wedged_teardown_cleanup_tasks.add(abandoned)
+    # The abandoned teardown is owned until completion (registered above, so
+    # close_db drains it and shutdown waits for — or boundedly abandons — the
+    # reclaimed rollback/close instead of returning while it is still
+    # pending). The discard callback is registered first so that when the task
+    # completes during the drain, deregistration happens before
+    # _finish_abandoned_teardown registers the follow-up bookkeeping close.
     abandoned.add_done_callback(_wedged_teardown_cleanup_tasks.discard)
     abandoned.add_done_callback(lambda task: _finish_abandoned_teardown(session, task, phase=phase))
 

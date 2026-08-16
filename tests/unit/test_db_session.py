@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy import event as sa_event
 from sqlalchemy import text as sa_text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -1257,9 +1258,14 @@ async def test_close_session_reclaims_a_wedged_sqlite_rollback_so_other_writers_
             await release_wedge.wait()
             await original_rollback()
 
-        async def _spying_interrupt() -> None:
+        # Delegate without changing the installed driver's shape: the reclaim
+        # awaits ``interrupt()``'s result only when it is awaitable, so the
+        # spy hands back exactly what the real aiosqlite method returns and
+        # the production awaitable-handling is exercised against the installed
+        # contract (a coroutine in the pinned aiosqlite) instead of a stand-in.
+        def _spying_interrupt() -> object:
             interrupted.set()
-            return await original_interrupt()
+            return original_interrupt()
 
         driver.rollback = _wedged_rollback
         driver.interrupt = _spying_interrupt
@@ -1370,8 +1376,13 @@ async def test_close_session_bounds_a_wedged_sqlite_close_without_a_transaction(
     class _FakeDialect:
         name = "sqlite"
 
+    class _FakeUrl:
+        database = "/tmp/wedged-close.db"
+        query: dict[str, str] = {}
+
     class _FakeBind:
         dialect = _FakeDialect()
+        url = _FakeUrl()
 
     class _FakeSyncSession:
         def get_transaction(self) -> None:
@@ -1448,6 +1459,111 @@ async def test_close_session_never_reclaims_the_shared_in_memory_sqlite_connecti
         verify = factory()
         (await verify.execute(sa_text("SELECT count(*) FROM accounts"))).scalar_one()
         await session_module.close_session(verify)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "url_text",
+    [
+        "sqlite+aiosqlite:///:memory:",
+        "sqlite+aiosqlite://",
+        "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared&uri=true",
+        "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared",
+    ],
+)
+def test_session_teardown_bound_skips_every_in_memory_sqlite_url_form(url_text: str) -> None:
+    """Every in-memory SQLite URL form must keep the unbounded teardown: the
+    SQLite URI forms carry ``mode=memory`` in the parsed URL's query, not in
+    ``url.database``, and a shared in-memory database reclaimed by invalidation
+    would be destroyed for the whole process."""
+
+    class _FakeDialect:
+        name = "sqlite"
+
+    class _FakeBind:
+        dialect = _FakeDialect()
+        url = make_url(url_text)
+
+    class _FakeSession:
+        def get_bind(self) -> _FakeBind:
+            return _FakeBind()
+
+    fake = _FakeSession()
+    assert session_module._session_teardown_bound_seconds(cast(session_module.AsyncSession, fake)) is None
+
+
+@pytest.mark.parametrize(
+    "url_text",
+    [
+        "sqlite+aiosqlite:////data/store.db",
+        "sqlite+aiosqlite:///file:/data/store.db?uri=true",
+    ],
+)
+def test_session_teardown_bound_applies_to_file_backed_sqlite_url_forms(url_text: str) -> None:
+    """File-backed SQLite (plain path or ``file:`` URI without
+    ``mode=memory``) is exactly the wedge-prone single-writer case and must
+    stay bounded."""
+
+    class _FakeDialect:
+        name = "sqlite"
+
+    class _FakeBind:
+        dialect = _FakeDialect()
+        url = make_url(url_text)
+
+    class _FakeSession:
+        def get_bind(self) -> _FakeBind:
+            return _FakeBind()
+
+    fake = _FakeSession()
+    assert (
+        session_module._session_teardown_bound_seconds(cast(session_module.AsyncSession, fake))
+        == session_module._SQLITE_TEARDOWN_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_reclaim_interrupts_the_real_aiosqlite_driver_without_a_spy(tmp_path, caplog) -> None:
+    """The reclaim invokes the driver's real ``interrupt()`` and awaits the
+    result only when it is awaitable. Exercise the production path against the
+    installed aiosqlite with no stand-in, so a driver signature change
+    surfaces as a failure here instead of being swallowed by the reclaim's
+    broad except (the failure is logged, and asserted absent)."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'interrupt-contract.db'}",
+        poolclass=NullPool,
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        await session.execute(sa_text("DELETE FROM accounts"))
+        held = session_module._session_sync_connections(session)
+        assert held, "the open write transaction must expose its sync connection"
+
+        async def _already_finished_teardown() -> None:
+            return None
+
+        abandoned = asyncio.ensure_future(_already_finished_teardown())
+        with caplog.at_level(logging.DEBUG, logger=session_module.__name__):
+            await session_module._reclaim_wedged_sqlite_session(session, abandoned, held, phase="rollback")
+
+        assert not any(
+            "Interrupting a wedged SQLite connection failed" in record.getMessage() for record in caplog.records
+        ), "the installed aiosqlite interrupt() contract must be handled without error"
+        assert held[0].invalidated, "the reclaim must still invalidate the connection"
+
+        # Drain the bookkeeping the reclaim registered so no task outlives
+        # the test (mirrors the close_db drain).
+        for _ in range(100):
+            pending = tuple(session_module._wedged_teardown_cleanup_tasks)
+            if not pending:
+                break
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
+            await asyncio.sleep(0)
+        assert not session_module._wedged_teardown_cleanup_tasks
     finally:
         await engine.dispose()
 
