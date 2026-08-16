@@ -232,6 +232,98 @@ async def test_h11_fallback_serves_h2c_offer_and_hides_upgrade_headers() -> None
     assert "connection" not in payload["header_names"]
 
 
+async def test_websocket_handshake_with_repeated_connection_fields_switches_protocols() -> None:
+    """Combined-field classification must not regress (or hide) WebSocket handoffs."""
+    handshake = (
+        b"GET /ws HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: keep-alive\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n"
+        b"\r\n"
+    )
+    protocol, transport = _make_protocol(UpgradeTolerantHttpToolsProtocol)
+
+    protocol.data_received(handshake)
+
+    async with asyncio.timeout(5.0):
+        while b"\r\n\r\n" not in transport.buffer:
+            await asyncio.sleep(0.01)
+    assert bytes(transport.buffer).startswith(b"HTTP/1.1 101 Switching Protocols"), bytes(transport.buffer)
+    # The connection was handed off to the WebSocket protocol.
+    assert transport.protocol is not None
+
+
+async def test_live_v1_responses_route_serves_split_h2c_offer(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #1757's exact product path: split-written h2c POST to /v1/responses.
+
+    The request must traverse the parser into the application instead of the
+    stock transport-layer ``400 Invalid HTTP request received.``. With an
+    empty account pool the route deterministically answers a JSON
+    ``no_accounts`` 503 — reaching that error proves the request body was
+    delivered and parsed (the balancer logs the requested model), which is
+    exactly what the wedged stock parser prevented.
+    """
+    import app.main as main_module
+
+    async def _noop_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    config = uvicorn.Config(
+        app=main_module.create_app(),
+        host="127.0.0.1",
+        port=0,
+        http=_load_http_protocol_class(),
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        async with asyncio.timeout(10.0):
+            while not server.started:
+                await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+
+        body = json.dumps({"model": "gpt-5.2", "input": "hello", "stream": False}).encode()
+        head = (
+            b"POST /v1/responses HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Authorization: Bearer sk-bogus\r\n"
+            b"Connection: Upgrade, HTTP2-Settings\r\n"
+            b"Upgrade: h2c\r\n"
+            b"HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"\r\n"
+        )
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(head)
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        writer.write(body)
+        await writer.drain()
+        async with asyncio.timeout(10.0):
+            status_line = await reader.readline()
+            raw_headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                int(line.split(b":", 1)[1])
+                for line in raw_headers.lower().splitlines()
+                if line.startswith(b"content-length:")
+            )
+            payload = json.loads(await reader.readexactly(content_length))
+        assert status_line == b"HTTP/1.1 503 Service Unavailable\r\n", status_line
+        assert payload["error"]["code"] == "no_accounts", payload
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        server.should_exit = True
+        async with asyncio.timeout(15.0):
+            await serve_task
+
+
 async def test_stock_httptools_protocol_still_breaks_on_h2c_offers() -> None:
     """Canary pinning the upstream defect this module works around.
 

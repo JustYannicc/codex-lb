@@ -30,7 +30,7 @@ from __future__ import annotations
 import httptools
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
-from app.core.http_protocol import offers_ignorable_upgrade, without_upgrade_headers
+from app.core.http_protocol import combined_upgrade_offer, offers_ignorable_upgrade, without_upgrade_headers
 
 
 class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
@@ -42,6 +42,14 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
         parser = self.parser
         assert parser is not None
         return parser
+
+    def _should_upgrade(self) -> bool:
+        # Combine repeated Connection fields (RFC 9110 section 5.3) so a
+        # trailing ``Connection: keep-alive`` field cannot hide a WebSocket
+        # handshake from the protocol switch (the stock ``_get_upgrade`` keeps
+        # only the last field's tokens). Also used by the stock parser
+        # callbacks to defer body handling until the handoff.
+        return combined_upgrade_offer(self.headers) == b"websocket" and self._should_upgrade_to_ws()
 
     def _paused_on_ignorable_upgrade(self) -> bool:
         return self._active_parser().should_upgrade() and offers_ignorable_upgrade(self.headers)

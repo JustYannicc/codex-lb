@@ -83,10 +83,20 @@ class UpgradeTolerantH11Protocol(H11Protocol):
     """
 
     def _should_upgrade(self) -> bool:
-        if offers_ignorable_upgrade(self.headers):
-            self.headers[:] = without_upgrade_headers(self.headers)
+        # Reimplements the stock decision on top of combined Connection fields
+        # (RFC 9110 section 5.3): the stock ``_get_upgrade`` keeps only the
+        # last field's tokens, so ``Connection: Upgrade`` followed by
+        # ``Connection: keep-alive`` would hide the offer entirely.
+        upgrade = combined_upgrade_offer(self.headers)
+        if upgrade is None:
             return False
-        return super()._should_upgrade()
+        if upgrade == b"websocket":
+            if self._should_upgrade_to_ws():
+                return True
+            self._unsupported_upgrade_warning()
+            return False
+        self.headers[:] = without_upgrade_headers(self.headers)
+        return False
 
 
 def load_http_protocol_class() -> type[asyncio.Protocol]:
