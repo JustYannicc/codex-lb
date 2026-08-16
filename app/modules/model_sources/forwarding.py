@@ -194,10 +194,15 @@ async def stream_chat_completion(
     stack, response = await _open_source_stream(source, "/chat/completions", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
-        async with stack:
+        try:
             async for chunk in response.content.iter_chunked(4096):
                 usage_parser.feed(chunk)
                 yield chunk
+        finally:
+            # A plain ``async with stack`` unwinds unshielded: repeated
+            # cancellation delivery can interrupt ``__aexit__`` mid-unwind and
+            # leak the pooled HTTP session lease.
+            await _await_cleanup_deferring_cancellation(stack.aclose())
 
     return SourceChatStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
 
@@ -304,10 +309,15 @@ async def stream_responses(
     stack, response = await _open_source_stream(source, "/responses", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
-        async with stack:
+        try:
             async for chunk in response.content.iter_chunked(4096):
                 usage_parser.feed(chunk)
                 yield chunk
+        finally:
+            # A plain ``async with stack`` unwinds unshielded: repeated
+            # cancellation delivery can interrupt ``__aexit__`` mid-unwind and
+            # leak the pooled HTTP session lease.
+            await _await_cleanup_deferring_cancellation(stack.aclose())
 
     return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
 

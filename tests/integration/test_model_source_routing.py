@@ -1588,6 +1588,82 @@ async def test_buffered_stream_cancellation_logs_disconnect_even_if_release_fail
 
 
 @pytest.mark.asyncio
+async def test_source_stream_body_teardown_survives_repeated_cancellation(monkeypatch: pytest.MonkeyPatch):
+    from contextlib import AsyncExitStack
+
+    import app.modules.model_sources.forwarding as forwarding_module
+    from app.db.models import ModelSource
+
+    stream_blocked = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    class _SlowLease:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            release_started.set()
+            await allow_release.wait()
+            release_finished.set()
+            return False
+
+    stack = AsyncExitStack()
+    await stack.enter_async_context(_SlowLease())
+
+    class _FakeContent:
+        def iter_chunked(self, _size: int) -> AsyncIterator[bytes]:
+            async def gen() -> AsyncIterator[bytes]:
+                yield b"data: chunk\n\n"
+                stream_blocked.set()
+                await asyncio.Event().wait()
+
+            return gen()
+
+    class _FakeResponse:
+        status = 200
+        content = _FakeContent()
+
+    async def fake_open(*_args: object, **_kwargs: object) -> object:
+        return stack, _FakeResponse()
+
+    monkeypatch.setattr(forwarding_module, "_open_source_stream", fake_open)
+
+    source = ModelSource(
+        id="src_body_teardown_repeated_cancel",
+        name="body-teardown-repeated-cancel",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    stream = await forwarding_module.stream_chat_completion(source, {"model": "body-teardown"})
+
+    async def consume() -> None:
+        async for _chunk in stream.body:
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(stream_blocked.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    # Second cancellation delivery while the exit stack is unwinding: teardown
+    # must still return the pooled HTTP lease.
+    task.cancel()
+    await asyncio.sleep(0)
+    allow_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert release_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatch: pytest.MonkeyPatch):
     import app.modules.model_sources.forwarding as forwarding_module
     from app.db.models import ModelSource

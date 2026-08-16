@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import Any, AsyncGenerator, AsyncIterator, Mapping, TypeVar, cast
 
 import aiohttp
+import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
@@ -95,13 +96,17 @@ async def _await_task_deferring_cancellation(
     """Finish critical cleanup while preserving the caller's cancellation."""
 
     cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            return await asyncio.shield(task), cancellation
-        except asyncio.CancelledError as exc:
-            if task.cancelled():
-                raise
-            cancellation = cancellation or exc
+    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
+    # into every ``await``, which would otherwise busy-spin this loop until the
+    # owned task completes.
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                return await asyncio.shield(task), cancellation
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = cancellation or exc
 
 
 def _facade() -> Any:
