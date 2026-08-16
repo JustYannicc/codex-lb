@@ -18,6 +18,17 @@ fail together).
   in a bounded in-process failure handoff.
 - Settle each task exactly once (a settled-task registry gates recording) so
   the callback and any external sweep cannot double-report.
+- Make the ingestor lifecycle instance-scoped: the app lifespan holds the
+  instance `start_live_usage_ingestor()` returned and passes it to
+  `stop_live_usage_ingestor(instance)`; stop only clears the module global
+  and publisher registration when that instance still owns them. Two live
+  lifespans in one process (a portal-loop `TestClient` nested inside an app
+  already running on the suite's session loop) previously orphaned the outer
+  ingestor: the nested startup overwrote the module global — the orphan's
+  only strong root — leaving an unreferenced cycle whose consumer task the
+  cyclic GC destroyed mid-await (`cannot reuse already awaited coroutine`),
+  and the nested shutdown cleared the global so the outer shutdown stopped
+  nothing.
 - Keep ingestion behavior unchanged: enqueueing, coalescing, throttling,
   shutdown ordering, and the fire-and-forget contract are untouched.
 - Test infrastructure (out of spec scope): an autouse fence stops leaked
@@ -40,6 +51,8 @@ fail together).
 ## Impact
 
 `app/modules/usage/live_ingest.py` (task enrollment, done-callback
-settlement, bounded failure record), `tests/conftest.py` (leak fence), and
-`tests/unit/test_live_ingest_leak_fence.py` (regression coverage). No API,
+settlement, bounded failure record, instance-scoped stop), `app/main.py`
+(lifespan holds and stops its own ingestor instance), `tests/conftest.py`
+(leak fence), `tests/unit/test_live_ingest_leak_fence.py` and
+`tests/integration/test_live_usage_ingest.py` (regression coverage). No API,
 schema, setting, or dashboard change.

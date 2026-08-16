@@ -490,7 +490,10 @@ async def lifespan(app: FastAPI):
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     telemetry_scheduler = build_telemetry_scheduler()
-    start_live_usage_ingestor()
+    # Hold the instance: this lifespan owns it (and keeps it strongly rooted)
+    # even if a nested lifespan on another loop replaces the module-global
+    # singleton in the meantime; shutdown below stops exactly this instance.
+    live_usage_ingestor = start_live_usage_ingestor()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await api_key_last_used_flush_scheduler.start()
@@ -715,7 +718,7 @@ async def lifespan(app: FastAPI):
         # touch is never parked in a pending map with no remaining flusher.
         await api_key_last_used_flush_scheduler.stop()
         await usage_scheduler.stop()
-        await stop_live_usage_ingestor()
+        await stop_live_usage_ingestor(live_usage_ingestor)
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
         await data_retention_scheduler.stop()

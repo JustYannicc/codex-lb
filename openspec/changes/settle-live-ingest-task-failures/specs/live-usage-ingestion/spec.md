@@ -36,3 +36,21 @@ affect the serving path.
   drained
 - **THEN** the failure record retains at most its fixed capacity of entries
 - **AND** every failure is still logged
+
+### Requirement: Ingestor lifecycle is instance-scoped
+
+Each application lifespan MUST hold the ingestor instance its startup created
+and stop exactly that instance at shutdown. Stopping an instance MUST clear
+the process-wide singleton registration and the publisher hook only when the
+stopped instance still owns them. When several lifespans are live in one
+process, no lifespan's startup or shutdown may orphan another lifespan's
+running ingestor or leave it without a stop path.
+
+#### Scenario: Nested lifespan cannot orphan the outer ingestor
+
+- **GIVEN** an app whose lifespan started ingestor A
+- **WHEN** a nested lifespan starts ingestor B (taking over the singleton and
+  publisher) and later stops it
+- **THEN** ingestor A keeps running, strongly rooted by its own lifespan
+- **AND** the outer lifespan's shutdown stops ingestor A and its tasks even
+  though the singleton no longer points at A

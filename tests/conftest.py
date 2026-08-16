@@ -431,6 +431,16 @@ async def _reap_leaked_live_usage_ingestor() -> None:
     ingestor-owned tasks (consumer and trailing invalidation) the stop path no
     longer tracks — a stop that was itself cancelled between clearing the
     global and awaiting the tasks.
+
+    Only tasks bound to the loop this coroutine runs on are cancelled and
+    awaited. A leaked singleton can hold tasks that belong to a different
+    loop entirely — integration tests run ``TestClient`` portals whose loop
+    is a private per-portal loop that is already closed by teardown time.
+    Cancelling such a task raises ``RuntimeError('Event loop is closed')``
+    from ``call_soon`` and awaiting it raises the cross-loop RuntimeError;
+    neither can ever reap it. Those tasks are inert (a closed loop never
+    steps again), so they are enrolled for exception accounting and left
+    alone.
     """
     from app.core.usage.live_hub import register_live_usage_publisher
     from app.modules.usage import live_ingest
@@ -445,13 +455,18 @@ async def _reap_leaked_live_usage_ingestor() -> None:
                 leaked.append(task)
         ingestor._consumer = None
         ingestor._trailing_invalidation = None
-    for task in _pending_live_ingest_tasks(asyncio.get_running_loop()):
+    loop = asyncio.get_running_loop()
+    for task in _pending_live_ingest_tasks(loop):
         if task not in leaked:
             leaked.append(task)
+    reapable: list[asyncio.Task[None]] = []
     for task in leaked:
         live_ingest._owned_tasks.add(task)
+        if task.get_loop() is loop:
+            reapable.append(task)
+    for task in reapable:
         task.cancel()
-    for task in leaked:
+    for task in reapable:
         try:
             await task
         except (Exception, asyncio.CancelledError):

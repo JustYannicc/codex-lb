@@ -282,6 +282,18 @@ _ingestor: LiveUsageIngestor | None = None
 
 
 def start_live_usage_ingestor() -> LiveUsageIngestor | None:
+    """Create, start, and register a fresh ingestor as the current singleton.
+
+    The caller (the app lifespan) MUST hold the returned instance and pass it
+    back to ``stop_live_usage_ingestor`` at shutdown. Two lifespans can be
+    live in one process (the test suite nests a portal-loop ``TestClient``
+    inside an app already running on the session loop); each owns its own
+    instance, and the module global only tracks whichever registered last. A
+    started ingestor whose only strong root is the module global would become
+    an unreferenced reference cycle (task -> coroutine frame -> ingestor ->
+    queue -> getter future -> task) the moment a nested startup overwrites the
+    global, and the cyclic GC would then destroy its consumer task mid-await.
+    """
     global _ingestor
     settings = get_settings()
     if not getattr(settings, "live_usage_ingestion_enabled", True):
@@ -297,10 +309,20 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
     return ingestor
 
 
-async def stop_live_usage_ingestor() -> None:
+async def stop_live_usage_ingestor(ingestor: LiveUsageIngestor | None = None) -> None:
+    """Stop ``ingestor``, or the current singleton when omitted.
+
+    The module global and the publisher registration are cleared only when
+    the stopped instance still owns them, so a lifespan shutting down cannot
+    orphan or unregister a nested lifespan's newer instance — and a nested
+    lifespan's shutdown cannot leave the outer instance dangling with no
+    stop path (the leak behind issue #1755's cross-test poisoning).
+    """
     global _ingestor
-    ingestor = _ingestor
-    _ingestor = None
-    register_live_usage_publisher(None)
+    if ingestor is None:
+        ingestor = _ingestor
+    if ingestor is None or _ingestor is ingestor:
+        _ingestor = None
+        register_live_usage_publisher(None)
     if ingestor is not None:
         await ingestor.stop()
