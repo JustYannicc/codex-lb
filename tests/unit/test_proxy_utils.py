@@ -45743,3 +45743,109 @@ async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatc
 
     assert exc_info.value.status_code == 400
     assert "image_download_failed" in json.dumps(exc_info.value.payload)
+
+
+_COMPACT_REPLAY_NEUTRAL_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+    {"role": "user", "content": "please compact"},
+]
+
+
+def _compact_replay_request(**overrides: object) -> ResponsesCompactRequest:
+    source: dict[str, object] = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _COMPACT_REPLAY_NEUTRAL_INPUT,
+        "previous_response_id": "resp_anchor",
+    }
+    source.update(overrides)
+    return ResponsesCompactRequest.model_validate(source)
+
+
+def test_compact_account_neutral_replay_payload_accepts_verified_full_resend() -> None:
+    replay = proxy_compact_service._compact_account_neutral_replay_payload(_compact_replay_request())
+    assert replay is not None
+    assert getattr(replay, "previous_response_id", None) is None
+    assert replay.input == _COMPACT_REPLAY_NEUTRAL_INPUT
+    assert "previous_response_id" not in replay.to_payload()
+
+
+def test_compact_account_neutral_replay_payload_requires_previous_response_anchor() -> None:
+    payload = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": _COMPACT_REPLAY_NEUTRAL_INPUT}
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_single_item_and_string_inputs() -> None:
+    single_item = _compact_replay_request(input=[{"role": "user", "content": "hello"}])
+    assert proxy_compact_service._compact_account_neutral_replay_payload(single_item) is None
+    string_input = _compact_replay_request(input="hello there")
+    assert proxy_compact_service._compact_account_neutral_replay_payload(string_input) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_server_assigned_item_ids() -> None:
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {
+                "type": "message",
+                "id": "msg_server_assigned",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi there"}],
+            },
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_encrypted_compaction_state() -> None:
+    payload = _compact_replay_request(
+        input=[
+            {"type": "compaction", "encrypted_content": "enc_owner_scoped"},
+            *_COMPACT_REPLAY_NEUTRAL_INPUT,
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_history_without_retained_output() -> None:
+    # Two fresh user turns may be a delta the owner resolves through the
+    # anchor; without retained assistant output the full resend is unproven.
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "first delta turn"},
+            {"role": "user", "content": "second delta turn"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_history_without_fresh_followup() -> None:
+    # A transcript that ends on assistant output has no new client input after
+    # the retained output, so the retained-prior-output proof fails closed.
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_wire_trimmed_history() -> None:
+    # An oversized history is trimmed on the wire to a head, marker, and tail;
+    # replaying that shortened transcript would compact an incomplete
+    # conversation, so the wire input must stay item-for-item identical.
+    oversized = "x" * 600_000
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": oversized}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
