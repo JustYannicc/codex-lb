@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
@@ -125,6 +125,8 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
+    _HTTPBridgeResponseCreateAttempt,
+    _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -425,17 +427,78 @@ def _http_bridge_inflight_creation_count(service: Any) -> int:
     )
 
 
+def _http_bridge_session_generation_count(service: Any) -> int:
+    return len(service._http_bridge_sessions) + len(service._http_bridge_detached_sessions)
+
+
+def _http_bridge_capacity_generation_count(service: Any) -> int:
+    return _http_bridge_session_generation_count(service) + _http_bridge_inflight_creation_count(service)
+
+
+def _http_bridge_capacity_after_planned_closes(
+    service: Any,
+    sessions_to_close_before_create: Sequence["_HTTPBridgeSession"],
+) -> int:
+    return _http_bridge_capacity_generation_count(service) - len(sessions_to_close_before_create)
+
+
+def _plan_http_bridge_lru_capacity_closes(
+    service: Any,
+    *,
+    max_sessions: int,
+    model_transition_parent_key: "_HTTPBridgeSessionKey | None",
+    sessions_to_close_before_create: list["_HTTPBridgeSession"],
+) -> None:
+    while (
+        _http_bridge_capacity_after_planned_closes(service, sessions_to_close_before_create) >= max_sessions
+        and service._http_bridge_sessions
+    ):
+        evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
+        for candidate_key, candidate_session in service._http_bridge_sessions.items():
+            if candidate_key == model_transition_parent_key:
+                continue
+            if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
+                continue
+            pending_count = service._http_bridge_pending_count_nowait(
+                candidate_session,
+                context="capacity_evict_scan",
+            )
+            if pending_count is None or pending_count:
+                continue
+            evictable_sessions.append((candidate_key, candidate_session))
+        if not evictable_sessions:
+            break
+        lru_key, lru_session = min(evictable_sessions, key=lambda item: _http_bridge_eviction_priority(item[1]))
+        _log_http_bridge_event(
+            "evict_lru",
+            lru_key,
+            account_id=lru_session.account.id,
+            model=lru_session.request_model,
+            cache_key_family=lru_key.affinity_kind,
+            model_class=_extract_model_class(lru_session.request_model) if lru_session.request_model else None,
+        )
+        detached = service._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
+        if detached is not None:
+            sessions_to_close_before_create.append(detached)
+
+
 def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     inflight_cleanup = _cleanup_http_bridge_inflight_sessions_nowait(service)
     live_sessions = 0
     pending_or_queued_requests = 0
     pending_unknown_sessions = 0
 
-    for session in list(service._http_bridge_sessions.values()):
-        if session.closed and not _http_bridge_session_has_admission_waiter(session):
-            continue
+    # A canonical key names only the newest generation. Detached predecessors
+    # remain live work and must still block restart until their requests settle.
+    for session in [
+        *service._http_bridge_sessions.values(),
+        *service._http_bridge_detached_sessions.values(),
+    ]:
         if not session.closed:
             live_sessions += 1
+        # `closed` fences new admission; it does not prove that a detached
+        # request has finished queue/pending settlement. Drain must observe
+        # that work even after the generation stops counting as a live socket.
         pending_count = _http_bridge_pending_count_nowait(session, context="drain_status")
         if pending_count is None:
             pending_unknown_sessions += 1
@@ -753,6 +816,52 @@ def _http_bridge_eventless_precreated_deadline(
     )
 
 
+def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
+    request_states: Sequence[_WebSocketRequestState],
+) -> _HTTPBridgeRetryCircuitAttemptSelection:
+    eligible_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    recorded_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    settled_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    attempt_seen = False
+    for request_state in request_states:
+        attempt = getattr(request_state, "response_create_attempt", None)
+        if attempt is None:
+            continue
+        attempt_seen = True
+        if attempt.retry_circuit_failure_recorded:
+            recorded_attempts.append(attempt)
+            continue
+        if attempt.disarmed or attempt.response_observed:
+            settled_attempts.append(attempt)
+            continue
+        if (
+            request_state.transport != _REQUEST_TRANSPORT_HTTP
+            or request_state.skip_request_log
+            or request_state.response_id is not None
+            or request_state.latency_response_created_ms is not None
+            or request_state.response_event_count != 0
+            or request_state.downstream_visible
+        ):
+            continue
+        eligible_attempts.append(attempt)
+
+    for kind, attempts in (
+        ("eligible", eligible_attempts),
+        ("recorded", recorded_attempts),
+        ("settled", settled_attempts),
+    ):
+        unique_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+        for attempt in attempts:
+            if not any(candidate is attempt for candidate in unique_attempts):
+                unique_attempts.append(attempt)
+        if unique_attempts:
+            return _HTTPBridgeRetryCircuitAttemptSelection(
+                kind=kind,
+                attempts=tuple(unique_attempts),
+            )
+    return _HTTPBridgeRetryCircuitAttemptSelection(kind="ineligible" if attempt_seen else "absent")
+
+
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
     """Keep a closed bridge registered while an unsent request owns its handoff."""
     return session is not None and bool(getattr(session, "admission_waiter_count", 0))
@@ -857,7 +966,7 @@ async def _settle_failed_http_bridge_creation(
         return superseded
 
 
-async def _close_http_bridge_session(
+async def _close_http_bridge_session_resources(
     service: Any,
     session: "_HTTPBridgeSession",
     *,
@@ -930,6 +1039,59 @@ async def _close_http_bridge_session(
     )
 
 
+async def _close_http_bridge_session(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    turn_state_lock_held: bool = False,
+    release_durable_session: bool = True,
+) -> None:
+    # Direct close callers can be cancelled just like the bounded background
+    # wrapper. Keep the resource owner alive until its reader, socket, and
+    # leases are actually finalized; only then may detached-capacity tracking
+    # disappear. Otherwise cancellation can turn a live predecessor into an
+    # unowned generation that neither shutdown nor capacity accounting sees.
+    def resource_close_task() -> asyncio.Task[None]:
+        existing = session.resource_close_task
+        if existing is not None and (
+            not existing.done() or (not existing.cancelled() and existing.exception() is None)
+        ):
+            return existing
+        created = asyncio.create_task(
+            _close_http_bridge_session_resources(
+                service,
+                session,
+                turn_state_lock_held=turn_state_lock_held,
+                release_durable_session=release_durable_session,
+            ),
+            name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
+        )
+        session.resource_close_task = created
+        return created
+
+    # Close callers can race (reader retirement, account invalidation, and
+    # shutdown). Install one resource owner under the registry lock so leases
+    # and pending settlement are finalized exactly once.
+    if turn_state_lock_held:
+        close_task = resource_close_task()
+    else:
+        async with service._http_bridge_lock:
+            close_task = resource_close_task()
+    _, cancellation = await _await_task_deferring_cancellation(close_task)
+    # Detached generations remain capacity owners until resource closure ends.
+    # Finalize that ownership here so direct error-recovery closes and bounded
+    # background closes cannot drift into different lifecycles.
+    if turn_state_lock_held:
+        if service._http_bridge_detached_sessions.get(id(session)) is session:
+            service._http_bridge_detached_sessions.pop(id(session), None)
+    else:
+        async with service._http_bridge_lock:
+            if service._http_bridge_detached_sessions.get(id(session)) is session:
+                service._http_bridge_detached_sessions.pop(id(session), None)
+    if cancellation is not None:
+        raise cancellation
+
+
 async def _close_http_bridge_session_bounded(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -938,6 +1100,7 @@ async def _close_http_bridge_session_bounded(
 ) -> None:
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
+
     close_task = asyncio.create_task(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
@@ -1120,8 +1283,17 @@ def _http_bridge_parallel_fork_key(
     request_scope_id: str,
     allow_model_fork: bool = True,
     same_model_required: bool = False,
+    force_canonical_replacement: bool = False,
 ) -> "_HTTPBridgeSessionKey | None":
     """Give incompatible or concurrent requests an independent websocket lane."""
+
+    if force_canonical_replacement:
+        if session is not None:
+            # A restart must replace the canonical session-header lane. Forking
+            # would leave the old owner reusable after the restart moved affinity.
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+        return None
 
     reason: str | None = None
     if (
@@ -1268,7 +1440,11 @@ async def _refresh_reused_http_bridge_session_with_handoff(
 
 
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:
-    return session.upstream_control.retire_after_drain and _http_bridge_session_has_visible_requests(session)
+    # A reserved handoff is not queued yet, but it owns the lane just as a
+    # visible request does and must be allowed to submit before retirement.
+    return session.upstream_control.retire_after_drain and (
+        _http_bridge_session_has_visible_requests(session) or session.unanchored_reservation_id is not None
+    )
 
 
 def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bool:
@@ -1979,8 +2155,14 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
     """Fail-safe cleanup for reservations published before request submission."""
 
     async with service._http_bridge_lock:
-        for session in service._http_bridge_sessions.values():
+        for session in (*service._http_bridge_sessions.values(), *service._http_bridge_detached_sessions.values()):
             _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+        # Nested stream finalizers can clear their marker before this fail-safe
+        # sweep runs. Reconsider every detached generation so marker ordering
+        # cannot leave a fully drained predecessor owning a socket and cap slot.
+        detached_sessions = tuple(service._http_bridge_detached_sessions.values())
+    for session in detached_sessions:
+        await service._retire_http_bridge_after_drain_if_ready(session)
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:
@@ -2649,6 +2831,15 @@ def _http_bridge_should_attempt_soft_affinity_reroute(
     }
 
 
+def _persistent_http_bridge_affinity(affinity: _AffinityPolicy) -> _AffinityPolicy:
+    if not affinity.abandon_unavailable_legacy_owner:
+        return affinity
+    # Restart authority is proof attached to one canonical request body, not a
+    # property of the longer-lived process session. Never let a reused bridge
+    # grant a later ordinary request permission to retire hard ownership.
+    return replace(affinity, abandon_unavailable_legacy_owner=False)
+
+
 def _http_bridge_is_context_overflow_error(exc: ProxyResponseError) -> bool:
     payload = exc.payload
     if not isinstance(payload, dict):
@@ -2921,6 +3112,8 @@ for _helper_name in (
     "_http_bridge_requires_cluster_registration",
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
+    "_http_bridge_capacity_after_planned_closes",
+    "_plan_http_bridge_lru_capacity_closes",
     "_build_http_bridge_prewarm_text",
     "_http_bridge_prewarm_enabled",
     "_record_http_bridge_prewarm_outcome",

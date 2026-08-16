@@ -17,9 +17,15 @@ from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.core.config.settings import get_settings
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    extract_input_file_ids,
+    responses_request_contains_goal_continuation_context,
+)
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
@@ -37,9 +43,11 @@ class _AffinitySelectionKwargs(TypedDict):
     reallocate_sticky: bool
     sticky_source: _CodexSessionSource | None
     legacy_sticky_key: str | None
+    legacy_continuity_source: _CodexSessionSource | None
     sticky_seed_key: str | None
     sticky_seed_kind: StickySessionKind | None
     spill_bare_session_on_account_cap: bool
+    abandon_unavailable_legacy_owner: bool
     require_unambiguous_account: bool
     sticky_max_age_seconds: int | None
 
@@ -52,6 +60,9 @@ class _AffinityPolicy:
     # Source capability only. Shared selection still revokes spillover for a
     # required owner or any stage that may carry account-local state.
     spill_on_account_cap: bool = False
+    # An explicit, self-contained Codex goal restart may retire only a raw
+    # compatibility owner whose durable account status is unavailable.
+    abandon_unavailable_legacy_owner: bool = False
     max_age_seconds: int | None = None
     codex_session_source: _CodexSessionSource | None = None
     # A thread row is soft locality, but old replicas may have persisted the
@@ -59,6 +70,10 @@ class _AffinityPolicy:
     # compatibility lookup explicit instead of trying to reconstruct it from
     # the new opaque thread key.
     legacy_codex_session_key: str | None = None
+    # Interpretation used when consulting that raw key. Process-session text
+    # is session_header even on a thread-scoped request; a thread-only raw
+    # key stays thread_header so a session_header tombstone cannot hide it.
+    legacy_continuity_source: _CodexSessionSource | None = None
     # A previously unseen thread should inherit the healthy process preference
     # once, then persist its own bounded row. This is never ownership: a
     # missing process default may be initialized once by insert-if-absent, but
@@ -99,9 +114,13 @@ class _AffinityPolicy:
             "reallocate_sticky": self.reallocate_sticky,
             "sticky_source": self.codex_session_source,
             "legacy_sticky_key": self.legacy_selection_key,
+            "legacy_continuity_source": (
+                None if self.legacy_selection_key is None else (self.legacy_continuity_source or "session_header")
+            ),
             "sticky_seed_key": self.seed_selection_key,
             "sticky_seed_kind": self.seed_selection_kind,
             "spill_bare_session_on_account_cap": self.spill_on_account_cap,
+            "abandon_unavailable_legacy_owner": self.abandon_unavailable_legacy_owner,
             "require_unambiguous_account": self.require_unambiguous_account,
             "sticky_max_age_seconds": self.max_age_seconds,
         }
@@ -131,7 +150,7 @@ class _AffinityPolicy:
         _CodexSessionSource | None,
         str | None,
     ]:
-        if sticky_source != "session_header":
+        if sticky_source not in {"session_header", "thread_header"}:
             return (
                 sticky_key,
                 sticky_kind,
@@ -140,10 +159,11 @@ class _AffinityPolicy:
                 sticky_source,
                 legacy_sticky_key,
             )
-        # A resolved response/file/bridge owner bypasses the new soft row, but
-        # the raw compatibility row still has to be checked for conflicting
-        # legacy hard ownership. Selection receives no writable sticky key, so
-        # a raw miss cannot manufacture or rebind a mapping. The caller also
+        # A resolved response/file/bridge owner bypasses the current-Codex
+        # soft row (process-session or thread PROMPT_CACHE). The raw
+        # compatibility row still has to be checked for conflicting legacy
+        # hard ownership. Selection receives no writable sticky key, so a
+        # raw miss cannot manufacture or rebind a mapping. The caller also
         # deliberately omits any broader process seed in this exact-owner path.
         return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
 
@@ -422,6 +442,7 @@ def _thread_codex_session_affinity(
         max_age_seconds=max_age_seconds,
         codex_session_source="thread_header",
         legacy_codex_session_key=legacy_key,
+        legacy_continuity_source=("session_header" if identity.process_session is not None else "thread_header"),
         seed_selection_key=(
             _codex_session_selection_key(identity.process_session) if identity.process_session is not None else None
         ),
@@ -448,6 +469,25 @@ def _request_allows_bare_session_cap_spillover(
         or (isinstance(conversation, str) and bool(conversation.strip()))
         or extract_input_file_ids(payload.input)
     )
+
+
+def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesRequest) -> bool:
+    # Intent and safety are separate proofs. The internal goal marker says the
+    # client deliberately restarted, while the replay classifier proves that
+    # this particular body carries no account-scoped state. Never collapse this
+    # into a marker-only or missing-previous-response shortcut.
+    if not responses_request_contains_goal_continuation_context(payload):
+        return False
+    # Classify the same canonical body that subscription egress would send.
+    # Raw model dumps retain accepted compatibility-only controls, which are
+    # not account state and must not make equivalent request forms disagree.
+    replay_payload = dict(payload.to_replay_safety_payload())
+    # ``type=response.create`` belongs to the direct-WebSocket envelope, not
+    # the HTTP Responses body. Remove only that exact discriminator after
+    # canonicalization; unknown envelope values remain fail-closed below.
+    if replay_payload.get("type") == "response.create":
+        replay_payload.pop("type")
+    return responses_payload_is_account_neutral_fresh_replay(replay_payload)
 
 
 def _affinity_with_payload_continuity(
@@ -704,4 +744,17 @@ def _sticky_key_for_responses_request(
         )
     else:
         policy = _AffinityPolicy()
+    if (
+        # The raw row this escape hatch retires is the process-session key.
+        # Current Codex also sends thread-id, so locality source is often
+        # thread_header; that must not hide the process-session exception.
+        # An explicit turn-state header stays hard even with the same marker.
+        policy.codex_session_source in {"session_header", "thread_header"}
+        and (
+            policy.codex_session_source == "session_header"
+            or _codex_backend_identity(headers).process_session is not None
+        )
+        and _request_allows_unavailable_legacy_owner_abandonment(payload)
+    ):
+        policy = replace(policy, abandon_unavailable_legacy_owner=True)
     return _affinity_with_payload_continuity(policy, payload)

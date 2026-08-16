@@ -939,7 +939,7 @@ class ProxyService(
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
         self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
-        self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
+        self._initialize_http_bridge_session_registry()
         _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)
         self._http_bridge_account_timeout_failures, self._http_bridge_account_timeout_lock = {}, asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
@@ -1084,6 +1084,7 @@ class ProxyService(
                     reallocate_sticky=affinity.reallocate_sticky,
                     sticky_source=affinity.codex_session_source,
                     legacy_sticky_key=affinity.legacy_selection_key,
+                    legacy_continuity_source=affinity.legacy_continuity_source,
                     sticky_seed_key=affinity.seed_selection_key,
                     sticky_seed_kind=affinity.seed_selection_kind,
                     sticky_max_age_seconds=affinity.max_age_seconds,
@@ -1302,25 +1303,19 @@ class ProxyService(
             pending_request_ages_seconds: list[float] | None = None
             should_retire_stuck_session = False
             stale_pending_requests_to_fail: list[_WebSocketRequestState] = []
+            retry_circuit_attempt_selection = None
             if bridge_session is not None:
                 now = time.monotonic()
-                async with bridge_session.pending_lock:
-                    pending_states = list(bridge_session.pending_requests)
-                    pending_count = len(pending_states)
-                    queued_count = bridge_session.queued_request_count
+                stale_gate_snapshot = await self._snapshot_http_bridge_stale_gate_state(bridge_session, now=now)
+                pending_states = stale_gate_snapshot.pending_states
+                pending_count = len(pending_states)
+                queued_count = stale_gate_snapshot.queued_count
+                threshold_seconds = stale_gate_snapshot.threshold_seconds
+                stale_pending_requests_to_fail = stale_gate_snapshot.stale_request_states
+                should_retire_stuck_session = stale_gate_snapshot.should_retire
+                retry_circuit_attempt_selection = stale_gate_snapshot.retry_circuit_attempt_selection
                 pending_request_ids = [state.request_log_id or state.request_id for state in pending_states]
                 pending_request_ages_seconds = [max(0.0, now - state.started_at) for state in pending_states]
-                threshold_seconds = float(
-                    getattr(get_settings(), "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-                )
-                stale_pending_requests_to_fail, should_retire_stuck_session = (
-                    self._classify_http_bridge_stale_gate_holders(
-                        pending_states,
-                        now=now,
-                        threshold_seconds=threshold_seconds,
-                        session_closed=bridge_session.closed,
-                    )
-                )
                 if not should_retire_stuck_session and any(
                     max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
                 ):
@@ -1368,6 +1363,7 @@ class ProxyService(
                     bridge_session,
                     stale_pending_requests_to_fail,
                     detail="response_create_gate_timeout_stuck_pending",
+                    retry_circuit_attempt_selection=retry_circuit_attempt_selection,
                 )
             elif bridge_session is not None and should_retire_stuck_session:
                 _record_http_bridge_stuck_retire(
@@ -1377,6 +1373,7 @@ class ProxyService(
                 await self._retire_stale_pending_http_bridge_session(
                     bridge_session,
                     detail="response_create_gate_timeout_stuck_pending",
+                    retry_circuit_attempt_selection=retry_circuit_attempt_selection,
                 )
             raise _http_bridge_startup_wait_timeout_error(
                 "http_bridge_response_create_gate",
@@ -1412,11 +1409,7 @@ class ProxyService(
         request_state.account_response_create_release = None
         await self._load_balancer.release_account_lease(lease)
 
-    async def _select_account_with_budget_compatible(
-        self,
-        deadline: float,
-        **kwargs: object,
-    ) -> AccountSelection:
+    async def _select_account_with_budget_compatible(self, deadline: float, **kwargs: object) -> AccountSelection:
         affinity_policy = kwargs.pop("affinity_policy", None)
         if isinstance(affinity_policy, _AffinityPolicy):
             # Expand once at the compatibility edge so transport callers cannot drift.
@@ -1706,9 +1699,11 @@ class ProxyService(
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        legacy_continuity_source: _CodexSessionSource | None = None,
         sticky_seed_key: str | None = None,
         sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
+        abandon_unavailable_legacy_owner: bool = False,
         require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
@@ -1865,10 +1860,12 @@ class ProxyService(
                         sticky_max_age_seconds=preferred_sticky_inputs[3],
                         sticky_source=preferred_sticky_inputs[4],
                         legacy_sticky_key=preferred_sticky_inputs[5],
+                        legacy_continuity_source=legacy_continuity_source,
                         # Exact ownership chooses the account; a first-ever thread
                         # still seeds atomically without overwriting a process default.
                         sticky_seed_key=sticky_seed_key,
                         sticky_seed_kind=sticky_seed_kind,
+                        abandon_unavailable_legacy_owner=abandon_unavailable_legacy_owner,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
@@ -1926,6 +1923,7 @@ class ProxyService(
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
+                    legacy_continuity_source=legacy_continuity_source,
                     sticky_seed_key=sticky_seed_key,
                     sticky_seed_kind=sticky_seed_kind,
                     spill_bare_session_on_account_cap=_AffinityPolicy.cap_spillover_allowed(
@@ -1933,6 +1931,7 @@ class ProxyService(
                         preferred_account_id,
                         request_stage,
                     ),
+                    abandon_unavailable_legacy_owner=abandon_unavailable_legacy_owner,
                     require_unambiguous_account=require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,

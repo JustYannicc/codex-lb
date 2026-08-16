@@ -29,7 +29,11 @@ from app.core.balancer.logic import (
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
+from app.modules.proxy.affinity import (
+    _AffinityPolicy,
+    _codex_backend_identity,
+    _codex_session_selection_key,
+)
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -222,6 +226,7 @@ class _StubStickySessionsRepository:
         # abandoned so run_sticky_selection_path can bypass the
         # ambiguous-owner check for them.
         self.abandoned_keys: set[str] = set()
+        self.scoped_abandoned_account_ids_by_key: dict[str, str] = {}
         self.deleted: list[tuple[str, StickySessionKind | None]] = []
         self.upserts: list[tuple[str, str, StickySessionKind | None]] = []
         self.insert_if_absent_calls: list[tuple[str, str, StickySessionKind]] = []
@@ -233,6 +238,13 @@ class _StubStickySessionsRepository:
 
     async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         key = cast(str, args[0])
+        scoped_abandoned_account_id = self.scoped_abandoned_account_ids_by_key.get(key)
+        if scoped_abandoned_account_id is not None:
+            return StickyOwnerLookup(
+                account_id=None,
+                continuity_abandoned=True,
+                abandoned_account_id=scoped_abandoned_account_id,
+            )
         if key in self.abandoned_keys:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
         if self.account_ids_by_key is not None:
@@ -349,6 +361,56 @@ class _FailingUpsertStickySessionsRepository(_StubStickySessionsRepository):
     async def upsert(self, *args: Any, **kwargs: Any) -> Any:
         del args, kwargs
         raise RuntimeError("sticky persistence unavailable")
+
+
+class _RetiringStaleOwnerStickySessionsRepository(_StubStickySessionsRepository):
+    def __init__(self, *, raw_key: str, owner_account_id: str) -> None:
+        super().__init__()
+        self.account_ids_by_key = {raw_key: owner_account_id}
+        self.tombstones: list[tuple[str, str]] = []
+
+    async def abandon_legacy_session_header_owner_if_unavailable(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+    ) -> bool:
+        assert kind == StickySessionKind.CODEX_SESSION
+        assert self.account_ids_by_key is not None
+        if self.account_ids_by_key.get(key) != expected_account_id:
+            return False
+        # The account objects supplied to selection intentionally remain stale
+        # and ACTIVE after this authoritative repository decision.
+        self.scoped_abandoned_account_ids_by_key[key] = expected_account_id
+        self.tombstones.append((key, expected_account_id))
+        return True
+
+    async def upsert(self, *args: Any, **kwargs: Any) -> None:
+        sticky_key = cast(str, args[0])
+        account_id = cast(str, args[1])
+        assert self.account_ids_by_key is not None
+        self.account_ids_by_key[sticky_key] = account_id
+        self.upserts.append((sticky_key, account_id, kwargs.get("kind")))
+
+
+class _LosingRetirementRaceStickySessionsRepository(_RetiringStaleOwnerStickySessionsRepository):
+    async def abandon_legacy_session_header_owner_if_unavailable(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+    ) -> bool:
+        assert kind == StickySessionKind.CODEX_SESSION
+        assert self.account_ids_by_key is not None
+        assert self.account_ids_by_key.get(key) == expected_account_id
+        # Another selector wins the source-scoped retirement CAS. The losing
+        # selector's authoritative reread must carry this retained owner into
+        # its stale-snapshot exclusion set.
+        self.scoped_abandoned_account_ids_by_key[key] = expected_account_id
+        self.tombstones.append((key, expected_account_id))
+        return False
 
 
 @asynccontextmanager
@@ -2966,6 +3028,106 @@ async def test_first_codex_thread_initializes_process_preference_once_for_later_
 
 
 @pytest.mark.asyncio
+async def test_required_file_owner_does_not_rewrite_existing_thread_row() -> None:
+    balancer, thread_owner, file_owner, sticky_repo = _make_cap_spillover_balancer("file-pin-thread")
+    assert file_owner is not None
+    process_session = "file-pin-process"
+    thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "file-pin-thread"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo.account_ids_by_key = {thread_key: thread_owner.id}
+    preferred = _AffinityPolicy.preferred_owner_sticky_inputs(
+        thread_key,
+        StickySessionKind.PROMPT_CACHE,
+        False,
+        300,
+        "thread_header",
+        process_session,
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=preferred[0],
+        sticky_kind=preferred[1],
+        reallocate_sticky=preferred[2],
+        sticky_max_age_seconds=preferred[3],
+        sticky_source=preferred[4],
+        legacy_sticky_key=preferred[5],
+        required_account_id=file_owner.id,
+        required_account_is_ownership_constraint=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == file_owner.id
+    assert sticky_repo.account_ids_by_key == {thread_key: thread_owner.id}
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_required_file_owner_seeds_process_preference_for_later_sibling() -> None:
+    balancer, thread_owner, file_owner, sticky_repo = _make_cap_spillover_balancer("file-pin-seed")
+    assert file_owner is not None
+    process_session = "file-pin-seed-process"
+    process_key = _codex_session_selection_key(process_session)
+    first_thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "file-pin-first"}
+    ).thread_selection_key
+    sibling_thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "file-pin-sibling"}
+    ).thread_selection_key
+    assert first_thread_key is not None
+    assert sibling_thread_key is not None
+    sticky_repo.account_ids_by_key = {}
+    preferred = _AffinityPolicy.preferred_owner_sticky_inputs(
+        first_thread_key,
+        StickySessionKind.PROMPT_CACHE,
+        False,
+        300,
+        "thread_header",
+        process_session,
+    )
+
+    first = await balancer.select_account(
+        sticky_key=preferred[0],
+        sticky_kind=preferred[1],
+        reallocate_sticky=preferred[2],
+        sticky_max_age_seconds=preferred[3],
+        sticky_source=preferred[4],
+        legacy_sticky_key=preferred[5],
+        sticky_seed_key=process_key,
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        required_account_id=file_owner.id,
+        required_account_is_ownership_constraint=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert first.account is not None
+    assert first.account.id == file_owner.id
+    assert first_thread_key not in (sticky_repo.account_ids_by_key or {})
+    assert sticky_repo.account_ids_by_key == {process_key: file_owner.id}
+
+    sibling = await balancer.select_account(
+        sticky_key=sibling_thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key=process_session,
+        sticky_seed_key=process_key,
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert sibling.account is not None
+    assert sibling.account.id == file_owner.id
+    assert sticky_repo.account_ids_by_key[process_key] == file_owner.id
+    await balancer.release_account_lease(first.lease)
+    await balancer.release_account_lease(sibling.lease)
+
+
+@pytest.mark.asyncio
 async def test_legacy_raw_process_owner_wins_over_thread_locality() -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-legacy-owner")
     assert alternate is not None
@@ -3021,6 +3183,208 @@ async def test_legacy_raw_owner_conflict_blocks_resolved_preferred_owner() -> No
 
 
 @pytest.mark.asyncio
+async def test_goal_restart_does_not_repin_retired_owner_from_stale_selection_snapshot() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    stale_owner = _make_account("goal-restart-stale-snapshot-owner")
+    replacement = _make_account("goal-restart-stale-snapshot-replacement")
+    raw_session = "goal-restart-stale-snapshot"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo = _RetiringStaleOwnerStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=stale_owner.id,
+    )
+    # Keep both account objects ACTIVE to model inputs loaded before the
+    # repository's guarded retirement observes the owner's unavailable row.
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([stale_owner, replacement]),
+            _StubUsageRepository(
+                {
+                    stale_owner.id: _usage_row(301, stale_owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(302, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        routing_strategy="single_account",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, stale_owner.id)]
+    assert sticky_repo.account_ids_by_key == {
+        raw_session: stale_owner.id,
+        selection_key: replacement.id,
+    }
+    assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_with_thread_header_retires_unavailable_legacy_owner() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    stale_owner = _make_account("goal-restart-thread-header-owner")
+    replacement = _make_account("goal-restart-thread-header-replacement")
+    raw_session = "goal-restart-thread-header-session"
+    thread_key = _codex_backend_identity(
+        {"session-id": raw_session, "thread-id": "goal-restart-thread"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo = _RetiringStaleOwnerStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=stale_owner.id,
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([stale_owner, replacement]),
+            _StubUsageRepository(
+                {
+                    stale_owner.id: _usage_row(311, stale_owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(312, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        sticky_max_age_seconds=300,
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        routing_strategy="single_account",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, stale_owner.id)]
+    assert sticky_repo.account_ids_by_key == {
+        raw_session: stale_owner.id,
+        thread_key: replacement.id,
+    }
+    assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_cas_loser_does_not_repin_concurrently_retired_owner() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    stale_owner = _make_account("goal-restart-cas-loser-owner")
+    replacement = _make_account("goal-restart-cas-loser-replacement")
+    raw_session = "goal-restart-cas-loser"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo = _LosingRetirementRaceStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=stale_owner.id,
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([stale_owner, replacement]),
+            _StubUsageRepository(
+                {
+                    stale_owner.id: _usage_row(305, stale_owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(306, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        routing_strategy="single_account",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, stale_owner.id)]
+    assert sticky_repo.account_ids_by_key == {
+        raw_session: stale_owner.id,
+        selection_key: replacement.id,
+    }
+    assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_mutation_authority_precedes_model_eligibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    owner = _make_account("goal-restart-model-ineligible-owner")
+    replacement = _make_account("goal-restart-model-eligible-replacement")
+    raw_session = "goal-restart-model-authority"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo = _RetiringStaleOwnerStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=owner.id,
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([owner, replacement]),
+            _StubUsageRepository(
+                {
+                    owner.id: _usage_row(303, owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(304, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    monkeypatch.setattr(load_balancer_module, "_mapped_model_has_registry_entry", lambda _model: True)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, _model, **_kwargs: [account for account in accounts if account.id == replacement.id],
+    )
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model_with_catalog_evidence",
+        lambda accounts, _model, **_kwargs: load_balancer_module._ModelAccountFilterResult(
+            accounts=[account for account in accounts if account.id == replacement.id],
+            general_model_account_ids=frozenset({replacement.id}),
+        ),
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        model="gpt-model-authority",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, owner.id)]
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_bare_session_mapping_does_not_prove_ambiguous_conversation_owner() -> None:
     balancer, owner, _, sticky_repo = _make_cap_spillover_balancer("conversation-ambiguous")
     raw_session = "conversation-session"
@@ -3028,6 +3392,31 @@ async def test_bare_session_mapping_does_not_prove_ambiguous_conversation_owner(
 
     selected = await balancer.select_account(
         sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_scoped_restart_marker_does_not_prove_ambiguous_conversation_owner() -> None:
+    balancer, retired_owner, replacement, sticky_repo = _make_cap_spillover_balancer("conversation-scoped-restart")
+    assert replacement is not None
+    raw_session = "conversation-scoped-restart-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo.account_ids_by_key = {
+        raw_session: retired_owner.id,
+        selection_key: replacement.id,
+    }
+    sticky_repo.scoped_abandoned_account_ids_by_key[raw_session] = retired_owner.id
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
         sticky_kind=StickySessionKind.CODEX_SESSION,
         sticky_source="session_header",
         legacy_sticky_key=raw_session,
