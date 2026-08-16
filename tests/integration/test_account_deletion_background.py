@@ -3,6 +3,8 @@ idempotency, and supersede semantics for both delete_history variants."""
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import timedelta
 
 import pytest
@@ -193,6 +195,35 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
     for export_path in ("export", "export/auth", "export/opencode-auth"):
         export = await async_client.post(f"/api/accounts/acc_bg_mark/{export_path}")
         assert export.status_code == 404, export_path
+
+
+def _fake_id_token(payload: dict) -> str:
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"header.{encoded}.signature"
+
+
+@pytest.mark.asyncio
+async def test_begin_delete_preserves_seat_identity_before_token_wipe(db_setup):
+    """Legacy rows carry their seat identity only inside the id-token claims;
+    targeted reauthentication (a supersede path) verifies the seat against
+    chatgpt_user_id or those claims, so the wipe must backfill the non-secret
+    identity first."""
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = _make_account("acc_bg_seat", "acc_bg_seat@example.com")
+        assert account.chatgpt_user_id is None
+        account.id_token_encrypted = encryptor.encrypt(_fake_id_token({"sub": "user-legacy-seat"}))
+        await AccountsRepository(session).upsert(account)
+
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_seat")
+
+    row = await _account_row("acc_bg_seat")
+    assert row is not None
+    # The ciphertext is wiped (no usable credentials remain on the row)...
+    assert encryptor.decrypt(row.id_token_encrypted) == ""
+    # ...but the seat identity survives in the non-secret column.
+    assert row.chatgpt_user_id == "user-legacy-seat"
 
 
 @pytest.mark.asyncio

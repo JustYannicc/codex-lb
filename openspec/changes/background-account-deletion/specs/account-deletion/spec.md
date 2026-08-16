@@ -17,9 +17,13 @@ untouched), and an overwrite of the stored access/refresh/id token
 ciphertext with empty-credential ciphertext so that NO reader of the
 surviving row — including a pre-upgrade replica during a rolling deploy,
 whose export endpoints do not know the marker — can produce usable
-credentials during the drain window. The response contract remains
-`{"status": "deleted"}` with 200 for an existing account and 404 otherwise;
-row purge is asynchronous.
+credentials during the drain window. Because targeted reauthentication (a
+supersede path) verifies the seat against `chatgpt_user_id` or, on legacy
+rows where it was never backfilled, the stored id-token claims, the fast
+path MUST preserve the non-secret seat identity before the wipe by
+backfilling `chatgpt_user_id` from those claims when it is absent. The
+response contract remains `{"status": "deleted"}` with 200 for an existing
+account and 404 otherwise; row purge is asynchronous.
 
 Accounts carrying the pending-deletion marker MUST be excluded from account
 listings (`GET /api/accounts` and every listing-derived read) and MUST be
@@ -57,6 +61,16 @@ which clears the marker — may change a marked account's state.
 - **THEN** the response is 404 and no token material is returned
 - **AND** the row's stored token ciphertext decrypts to empty credentials
   (nothing usable remains for readers that do not know the marker)
+
+#### Scenario: Seat identity survives the token wipe for reauth supersede
+
+- **GIVEN** a legacy account whose `chatgpt_user_id` is unset (seat identity
+  lives only in the stored id-token claims)
+- **WHEN** `DELETE /api/accounts/{id}` marks the account and wipes the token
+  ciphertext
+- **THEN** `chatgpt_user_id` is backfilled from the id-token claims in the
+  same transaction, so a targeted reauthentication can still verify the
+  seat and supersede the deletion
 
 #### Scenario: Deleted account leaves API-key listings immediately
 

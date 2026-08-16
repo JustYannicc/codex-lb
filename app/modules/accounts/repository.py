@@ -12,6 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import extract_id_token_claims, resolve_seat_identity
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -860,7 +861,13 @@ class AccountsRepository:
         credentials from it. A credential replacement (the only supersede
         path) writes fresh ciphertext, and token rotation is CAS-guarded on
         the pre-wipe refresh ciphertext, so a stale in-flight rotation
-        misses rather than resurrecting the old material.
+        misses rather than resurrecting the old material. Before the wipe,
+        the non-secret seat identity is preserved: legacy rows whose
+        ``chatgpt_user_id`` was never backfilled carry it only inside the
+        id-token claims, and targeted reauthentication — the promised
+        supersede path — verifies the seat against exactly those two
+        sources, so ``chatgpt_user_id`` is backfilled from the claims when
+        absent.
 
         API-key account assignments are removed here as well (the FK cascade
         used to do this when the synchronous delete removed the row), so key
@@ -873,26 +880,43 @@ class AccountsRepository:
         wins — matching the synchronous behavior, where a second DELETE after
         the first completed found nothing left to escalate).
         """
-        wiped_token = TokenEncryptor().encrypt("")
+        encryptor = TokenEncryptor()
+        wiped_token = encryptor.encrypt("")
         async with sqlite_writer_section():
+            seat_stmt = select(Account.chatgpt_user_id, Account.id_token_encrypted).where(Account.id == account_id)
+            if self._dialect_name() == "postgresql":
+                # Hold the row through the mark so the derived seat identity
+                # cannot go stale between this read and the update below.
+                seat_stmt = seat_stmt.with_for_update(key_share=True)
+            seat_row = (await self._session.execute(seat_stmt)).first()
+            if seat_row is None:
+                await self._session.rollback()
+                return False
+            seat_user_id: str | None = seat_row[0]
+            if seat_user_id is None:
+                try:
+                    claims = extract_id_token_claims(encryptor.decrypt(seat_row[1]))
+                    seat_user_id = resolve_seat_identity(claims, claims.auth)
+                except Exception:
+                    seat_user_id = None
+            values: dict[str, Any] = {
+                "status": AccountStatus.DEACTIVATED,
+                "deactivation_reason": ACCOUNT_PENDING_DELETION_REASON,
+                "reset_at": None,
+                "blocked_at": None,
+                "access_token_encrypted": wiped_token,
+                "refresh_token_encrypted": wiped_token,
+                "id_token_encrypted": wiped_token,
+                "delete_requested_at": func.coalesce(Account.delete_requested_at, utcnow()),
+                "delete_history_requested": case(
+                    (Account.delete_requested_at.is_(None), delete_history),
+                    else_=Account.delete_history_requested,
+                ),
+            }
+            if seat_user_id is not None:
+                values["chatgpt_user_id"] = seat_user_id
             result = await self._session.execute(
-                update(Account)
-                .where(Account.id == account_id)
-                .values(
-                    status=AccountStatus.DEACTIVATED,
-                    deactivation_reason=ACCOUNT_PENDING_DELETION_REASON,
-                    reset_at=None,
-                    blocked_at=None,
-                    access_token_encrypted=wiped_token,
-                    refresh_token_encrypted=wiped_token,
-                    id_token_encrypted=wiped_token,
-                    delete_requested_at=func.coalesce(Account.delete_requested_at, utcnow()),
-                    delete_history_requested=case(
-                        (Account.delete_requested_at.is_(None), delete_history),
-                        else_=Account.delete_history_requested,
-                    ),
-                )
-                .returning(Account.id)
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
             updated_id = result.scalar_one_or_none()
             if updated_id is not None:

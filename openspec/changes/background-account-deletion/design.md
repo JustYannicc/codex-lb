@@ -72,7 +72,12 @@ The wipe is what keeps the rolling upgrade honest: a pre-upgrade replica's
 export endpoints read the row without knowing the marker, and must not be
 able to hand out usable credentials during the drain window. Token rotation
 is CAS-guarded on the pre-wipe refresh ciphertext (a stale rotation misses),
-and every supersede path writes complete fresh ciphertext.
+and every supersede path writes complete fresh ciphertext. The wipe must
+not break the reauth supersede path itself: targeted reauthentication
+verifies the seat against `chatgpt_user_id` or — on legacy rows where it
+was never backfilled — the stored id-token claims, so `begin_delete`
+backfills `chatgpt_user_id` from those claims (non-secret identity) in the
+same transaction before destroying them.
 
 ### D2: The account row is the queue (no new table)
 

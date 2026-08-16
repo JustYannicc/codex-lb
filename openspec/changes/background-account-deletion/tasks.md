@@ -24,7 +24,9 @@
       window, matching the synchronous delete's contract.
 - [x] 2.5 Wipe the stored token ciphertext in `begin_delete` so readers that
       do not know the marker (pre-upgrade replicas during a rolling deploy)
-      cannot export usable credentials mid-drain.
+      cannot export usable credentials mid-drain; backfill the non-secret
+      seat identity (`chatgpt_user_id`) from the id-token claims first so
+      targeted reauthentication can still verify and supersede.
 - [x] 2.6 Remove the account's API-key assignments in `begin_delete` (the
       projection the synchronous FK cascade produced): key listings and
       pooled-usage reads exclude the account immediately, scope flag intact.
