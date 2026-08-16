@@ -295,3 +295,17 @@ token ciphertext, so old export/read paths that do not know the marker can
 only produce empty credentials until finalization removes the row (old
 replicas may transiently show the account in listings during the mixed
 window; it is unroutable via the terminal status either way).
+
+One mixed-window caveat follows directly from "old replica = old delete": a
+repeat DELETE routed to a pre-upgrade replica while the row is still marked
+runs the legacy synchronous delete with its caller-provided
+`delete_history` variant, which can differ from the frozen first-request
+choice (either direction). The legacy delete is still a complete,
+fold-locked, mirror-correct deletion — only the history-policy choice
+diverges, only inside the deploy window, and only when the operator issues
+contradictory repeat requests inside it. Fencing was rejected: new code
+cannot retrofit a fence into binaries that predate the marker columns, a
+database trigger is disproportionate machinery for the window, and a
+"defer background marks until the fleet is upgraded" gate would add a
+permanent setting for a transient condition (single-replica deployments —
+the production topology — have no mixed window at all).

@@ -231,7 +231,15 @@ orphaned-deleted dimension MUST preserve the account's full folded history.
 All drain progress MUST live in the database so a worker restart resumes an
 interrupted deletion with no separate recovery step. Repeat DELETE requests
 for a marked account MUST succeed idempotently and MUST NOT change the
-frozen `delete_history` choice (first request wins). A credential
+frozen `delete_history` choice (first request wins). The first-request-wins
+invariant is scoped to replicas running this revision: during a rolling
+deploy, a repeat DELETE routed to a pre-upgrade replica performs the legacy
+synchronous delete with its caller-provided variant (exactly the pre-change
+behavior — a complete, mirror-correct deletion whose variant choice may
+differ from the frozen one). This window is bounded by the deploy itself,
+requires the operator to issue contradictory repeat requests inside it, and
+is accepted: new code cannot fence binaries that predate the marker, and a
+deployment gate would add permanent configuration for a transient window. A credential
 replacement (re-import or reauthentication landing on the marked row) MUST
 clear the marker and supersede the deletion: every drain chunk and the
 finalization transaction MUST re-check the marker under the account row lock
