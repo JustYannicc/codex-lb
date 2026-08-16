@@ -1296,11 +1296,9 @@ class _CompactMixin:
                         account is None
                         and previous_response_preferred_account_id is not None
                         and preferred_account_id == previous_response_preferred_account_id
-                        and turn_state_owner_account_id is None
-                        and rewritten_file_account_id is None
                     ):
                         # Narrowed alias: the structural gate above proves the
-                        # pin is exactly the previous-response owner.
+                        # selection pin names the previous-response owner.
                         unavailable_owner_account_id = previous_response_preferred_account_id
                         # The pinned previous-response owner cannot be selected.
                         # A full resend that is provably account-neutral on the
@@ -1309,9 +1307,19 @@ class _CompactMixin:
                         # account instead of wedging the session until the
                         # owner's quota window resets — the same selection-time
                         # escape normal turns already have. Turn-state and file
-                        # pins never reach this branch and stay owner-bound.
+                        # pins keep the request owner-bound (the first blocked
+                        # reason below), but their selection failure still
+                        # records the fail-closed outcome on the common path.
                         recovery_blocked_reason: str | None = None
-                        if previous_response_lookup_session_id is not None:
+                        if turn_state_owner_account_id is not None or rewritten_file_account_id is not None:
+                            # The previous-response owner is also pinned by a
+                            # turn-state or input-file owner. Those pins are
+                            # account ownership this recovery must never move,
+                            # so the request stays owner-bound regardless of
+                            # the owner's quota state — but the unavailable
+                            # owner still fails closed and must be recorded.
+                            recovery_blocked_reason = "additional_owner_pins"
+                        elif previous_response_lookup_session_id is not None:
                             # A session/turn-state identity on the request can
                             # bind live or durable HTTP-bridge continuity rows
                             # that still name the lost owner. Without the

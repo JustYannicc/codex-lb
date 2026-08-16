@@ -156,6 +156,14 @@ the remaining eligible accounts with fallback enabled.
 - **THEN** the request fails closed with the existing continuity or selection error
 - **AND** account-neutral fresh-replay recovery does not activate
 
+#### Scenario: Additional owner pins record the fail-closed outcome
+
+- **GIVEN** a compact request whose `previous_response_id` owner is also resolved by a turn-state or input-file pin naming the same account
+- **WHEN** the pinned owner cannot be selected
+- **THEN** the request fails closed with the existing selection error
+- **AND** account-neutral fresh-replay recovery does not activate
+- **AND** the continuity fail-closed counter records the compact-surface outcome
+
 #### Scenario: Unresolvable previous-response owner remains fail-closed
 
 - **GIVEN** a compact request whose `previous_response_id` owner cannot be resolved from any record

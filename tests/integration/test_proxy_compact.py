@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 from datetime import timedelta, timezone
 from typing import cast
 from unittest.mock import AsyncMock
@@ -1998,3 +1999,46 @@ async def test_proxy_compact_pinned_owner_policy_skip_stays_owner_bound_despite_
 
     assert response.status_code >= 400
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_with_additional_turn_state_pin_records_fail_closed(
+    async_client, monkeypatch, caplog
+):
+    """A previous-response pin accompanied by a turn-state pin on the same
+    owner stays owner-bound (recovery never activates for additional owner
+    pins), but the unavailable owner must still record the compact
+    continuity_fail_closed outcome on the common pinned-selection failure
+    path instead of skipping the recording branch entirely."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-multipin-owner@example.com", raw_account_id="acc_multipin_owner"
+    )
+    await _import_account(async_client, email="compact-multipin-alt@example.com", raw_account_id="acc_multipin_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    async def fake_turn_state_owner(self, *, turn_state, api_key, fail_on_missing=True):
+        del self, turn_state, api_key, fail_on_missing
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_compact_turn_state_owner", fake_turn_state_owner)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/responses/compact",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": _NEUTRAL_FULL_RESEND_INPUT,
+                "previous_response_id": "resp_multipin_anchor",
+            },
+            headers={"x-codex-turn-state": "ts-multipin-owner-bound"},
+        )
+
+    assert response.status_code >= 400
+    assert calls == []
+    assert "blocked_reason=additional_owner_pins" in caplog.text
+    assert "continuity_fail_closed surface=compact reason=owner_account_unavailable" in caplog.text

@@ -16,8 +16,9 @@
   `without_http_bridge_session_affinity_headers`, and reselect with fallback enabled.
 - [x] 3. Keep every other case fail-closed and record `continuity_fail_closed` (surface
   `compact`, reason `owner_account_unavailable`) when the pinned selection failure is
-  surfaced: session identity on the request, session-ownership affinity, non-quota owner
-  loss, and unverifiable histories.
+  surfaced: additional turn-state/input-file owner pins on the same owner, session identity
+  on the request, session-ownership affinity, non-quota owner loss, and unverifiable
+  histories.
 - [x] 4. Add unit tests for the verification helper (eligible full resend; missing anchor;
   single-item and string inputs; server-assigned ids; encrypted compaction state; delta
   histories without retained output; transcripts without fresh follow-up input; wire-trimmed
