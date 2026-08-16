@@ -1013,6 +1013,23 @@ class AccountsRepository:
             # after this transaction, resurrecting the account's folded rows
             # the mirrors below just moved or removed.
             await lock_fold_state(self._session)
+            if self._dialect_name() == "postgresql":
+                # Upgrade the account row to a full FOR UPDATE lock BEFORE the
+                # raw sweeps. FOR UPDATE conflicts with the KEY SHARE taken by
+                # concurrent request-log FK inserts, so every in-flight
+                # stream's log row either commits before this point (and the
+                # sweeps below see it) or its insert blocks until this
+                # transaction commits and then fails its FK against the
+                # deleted row — the same outcome a post-delete insert always
+                # had. Without the upgrade, an insert could commit between
+                # the sweep and the account-row delete: the FK's ON DELETE
+                # SET NULL would leave a live (deleted_at IS NULL) orphan on
+                # the soft path, or surviving raw history under
+                # delete_history. Lock order (identity -> fold -> row
+                # exclusive) matches the historical transaction, where the
+                # final DELETE acquired this same exclusive lock after the
+                # fold lock.
+                await self._session.execute(select(Account.id).where(Account.id == account_id).with_for_update())
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))

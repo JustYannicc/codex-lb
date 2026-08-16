@@ -40,8 +40,11 @@ make the account selectable mid-drain. Only a credential replacement —
 which clears the marker — may change a marked account's state.
 
 Marked accounts MUST be rejected by API-key account-assignment validation
-and excluded from API-key pooled-usage projections, so an assignment
-created or updated after the DELETE cannot re-surface the account in key
+and excluded from API-key pooled-usage projections, and assignment
+insertion MUST re-check the marker atomically with the write (a conditional
+insert; on PostgreSQL additionally serialized against the delete mark by a
+`FOR SHARE` lock on the account rows), so an assignment created or updated
+after — or racing — the DELETE cannot re-surface the account in key
 listings before finalization.
 
 #### Scenario: Delete responds without draining rows
@@ -108,7 +111,13 @@ transaction) without holding the fold-state lock, and MUST then finalize in
 ONE fold-state-locked transaction that detaches or deletes residual raw rows
 (including request-log rows settled mid-drain by in-flight streams), runs
 the folded-bucket lifecycle mirrors, and removes the sticky, lifetime-rollup,
-and account rows together. The soft variant MUST detach raw rows
+and account rows together. Finalization MUST serialize against in-flight
+raw-row inserts (on PostgreSQL by upgrading the account row to a full lock
+that conflicts with the FK's `KEY SHARE` before the residual sweep), so a
+log row committed by an in-flight stream is either swept by finalization or
+its insert fails against the already-deleted account — finalization may
+leave behind neither a live orphan row (soft variant) nor surviving raw
+history (`delete_history` variant). The soft variant MUST detach raw rows
 (`account_id=NULL, deleted_at` set); the `delete_history` variant MUST
 delete them. The worker MUST start a drain promptly after a delete request
 on the leader replica and within one worker interval otherwise. A deletion
@@ -132,6 +141,15 @@ account.
 - **WHEN** the worker completes the drain and finalization
 - **THEN** the account's raw request-log rows are deleted and its folded
   time-axis buckets are removed
+
+#### Scenario: In-flight log insert cannot escape finalization
+
+- **GIVEN** a marked account whose drain is complete and an in-flight stream
+  holding an uncommitted request-log insert for it
+- **WHEN** finalization runs
+- **THEN** finalization waits for the insert to commit and sweeps the late
+  row (or the insert fails against the deleted account), leaving no live
+  orphan and no surviving history
 
 #### Scenario: A long drain does not starve other marked accounts
 

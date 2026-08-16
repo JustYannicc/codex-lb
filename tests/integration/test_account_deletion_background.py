@@ -610,6 +610,94 @@ async def test_legacy_replica_replacement_before_finalize_is_abandoned(db_setup)
 
 
 @pytest.mark.asyncio
+async def test_finalization_serializes_against_inflight_log_insert(db_setup):
+    """PostgreSQL: an in-flight stream's request-log insert holds the FK KEY
+    SHARE on the account row; finalization's FOR UPDATE row upgrade must wait
+    for it, so the late row is swept instead of surviving as a live orphan
+    via ON DELETE SET NULL."""
+    import asyncio
+
+    async with SessionLocal() as probe:
+        if probe.get_bind().dialect.name != "postgresql":
+            pytest.skip("FK KEY SHARE / FOR UPDATE interleaving is PostgreSQL-specific")
+
+    await _seed_account("acc_bg_inflight", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_inflight")
+    assert await _run_one_detach_chunk("acc_bg_inflight", batch_size=10) == 1
+
+    async with SessionLocal() as inflight:
+        # In-flight stream: the insert takes (and holds) FK KEY SHARE on the
+        # account row until commit.
+        inflight.add(
+            RequestLog(
+                account_id="acc_bg_inflight",
+                request_id="req_acc_bg_inflight_late",
+                requested_at=utcnow(),
+                model="gpt-5.1-codex",
+                status="success",
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+            )
+        )
+        await inflight.flush()
+
+        pass_task = asyncio.create_task(run_account_deletion_pass(batch_size=10))
+        # Finalization must block on the row upgrade while the insert is open.
+        done, _ = await asyncio.wait({pass_task}, timeout=1.0)
+        commit_first = not done
+        await inflight.commit()
+        outcomes = await pass_task
+
+    assert commit_first, "finalization finished while an uncommitted FK insert held KEY SHARE"
+    assert outcomes == {"acc_bg_inflight": "finalized"}
+    assert await _account_row("acc_bg_inflight") is None
+    logs = await _log_rows("acc_bg_inflight")
+    assert len(logs) == 2
+    # The late row was swept by the residual sweep, not orphaned live.
+    assert all(row.account_id is None and row.deleted_at is not None for row in logs)
+
+
+@pytest.mark.asyncio
+async def test_assignment_insert_rechecks_marker_atomically(db_setup):
+    """replace_account_assignments must skip marked accounts even when an
+    earlier validation (different transaction) still believed they existed."""
+    from app.db.models import ApiKey, ApiKeyAccountAssignment
+    from app.modules.api_keys.repository import ApiKeysRepository
+
+    await _seed_account("acc_bg_atomic", log_count=0)
+    async with SessionLocal() as session:
+        session.add(
+            ApiKey(
+                id="key_bg_atomic",
+                name="atomic-recheck-key",
+                key_hash="hash_bg_atomic",
+                key_prefix="sk-atomic",
+                account_assignment_scope_enabled=True,
+            )
+        )
+        await session.commit()
+
+    # DELETE lands after validation would have passed.
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_atomic")
+
+    async with SessionLocal() as session:
+        await ApiKeysRepository(session).replace_account_assignments("key_bg_atomic", ["acc_bg_atomic"])
+
+    async with SessionLocal() as session:
+        assigned = (
+            await session.execute(
+                select(func.count())
+                .select_from(ApiKeyAccountAssignment)
+                .where(ApiKeyAccountAssignment.api_key_id == "key_bg_atomic")
+            )
+        ).scalar_one()
+    assert assigned == 0
+
+
+@pytest.mark.asyncio
 async def test_marked_account_cannot_be_assigned_to_api_key(async_client, db_setup):
     await _seed_account("acc_bg_assign", log_count=1)
 

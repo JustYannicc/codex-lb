@@ -39,6 +39,12 @@
 - [x] 2.9 Reject marked accounts in API-key assignment validation
       (`ApiKeysRepository.list_accounts_by_ids`) so post-DELETE key updates
       cannot recreate assignments for the account.
+- [x] 2.10 Atomic marker re-check in `replace_account_assignments`
+      (conditional INSERT…SELECT, `FOR SHARE` on PostgreSQL) so validation
+      that raced the DELETE cannot recreate an assignment.
+- [x] 2.11 Finalization upgrades the account row to `FOR UPDATE` before the
+      residual sweeps (PostgreSQL) so in-flight FK inserts are either swept
+      or fail post-delete — no live orphans, no surviving history.
 
 ## 3. Background worker
 

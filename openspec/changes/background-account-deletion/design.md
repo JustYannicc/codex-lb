@@ -87,8 +87,13 @@ or undecryptable material on a marked row means a replacement happened, and
 the worker clears the marker itself (under the row lock) instead of
 draining further or finalizing. API-key assignment validation
 (`ApiKeysRepository.list_accounts_by_ids`) likewise rejects marked
-accounts, so a key create/update racing the DELETE cannot recreate an
-assignment that would re-surface the account in key listings.
+accounts, and `replace_account_assignments` inserts through a conditional
+`INSERT … SELECT … WHERE delete_requested_at IS NULL` (with `FOR SHARE` on
+PostgreSQL, which conflicts with `begin_delete`'s row update) — so a key
+create/update whose validation raced the DELETE cannot recreate an
+assignment that would re-surface the account in key listings: either the
+insert commits first and `begin_delete`'s assignment cleanup removes it, or
+the marker is visible to the insert and the account is skipped.
 
 ### D2: The account row is the queue (no new table)
 
@@ -147,6 +152,19 @@ writer section serializes writers. Lock order (identity → fold) matches
 consolidation, so no new deadlock ordering is introduced. Residual rows also
 cover stragglers: a stream that started before the mark settles its
 request-log row at stream end, possibly after every chunk ran.
+
+After the fold lock, finalization upgrades the account row to a full
+`FOR UPDATE` lock (PostgreSQL) before the residual sweeps. `FOR UPDATE`
+conflicts with the `KEY SHARE` a request-log FK insert takes, so an
+in-flight stream's insert either commits before the sweep (and is swept) or
+blocks until the transaction commits and then fails its FK against the
+deleted row — the same outcome a post-delete insert always had. Without the
+upgrade, an insert could commit between the sweep and the account-row
+delete, where `ON DELETE SET NULL` would leave a live (`deleted_at IS
+NULL`) orphan on the soft path or surviving raw history under
+`delete_history`. The lock order (identity → fold → row exclusive) matches
+the historical transaction, whose final `DELETE` acquired the same
+exclusive lock after the fold lock.
 
 ### D5: Supersede-by-replacement, first-request-wins idempotency
 

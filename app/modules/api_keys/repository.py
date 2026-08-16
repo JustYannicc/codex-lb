@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, or_, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -442,8 +442,27 @@ class ApiKeysRepository:
 
     async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
         await self._session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.api_key_id == key_id))
-        for account_id in account_ids:
-            self._session.add(ApiKeyAccountAssignment(api_key_id=key_id, account_id=account_id))
+        if account_ids:
+            # Re-check the pending-deletion marker atomically with the
+            # insert: validation ran in an earlier transaction, and an
+            # account DELETE can commit in between — the marked row still
+            # exists (background drain), so a plain FK insert would succeed
+            # and resurrect an assignment begin_delete just removed. The
+            # FOR SHARE lock (PostgreSQL) conflicts with begin_delete's row
+            # update, so either this insert commits first (and begin_delete's
+            # assignment cleanup removes it) or the marker is visible here
+            # and the account is skipped. SQLite serializes writers, so the
+            # marker predicate alone is race-free there.
+            assignment_source = (
+                select(literal(key_id), Account.id)
+                .where(Account.id.in_(account_ids))
+                .where(Account.delete_requested_at.is_(None))
+            )
+            if self._session.get_bind().dialect.name == "postgresql":
+                assignment_source = assignment_source.with_for_update(read=True)
+            await self._session.execute(
+                insert(ApiKeyAccountAssignment).from_select(["api_key_id", "account_id"], assignment_source)
+            )
         if commit:
             await self._session.commit()
         parent = await self._session.get(ApiKey, key_id)
