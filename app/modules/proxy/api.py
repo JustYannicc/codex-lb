@@ -4822,8 +4822,12 @@ async def _source_chat_completion_response(
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
     except asyncio.CancelledError:
+        release_exc: BaseException | None = None
         if reservation is not None:
-            await _release_reservation_deferring_cancellation(reservation)
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
         await _await_cleanup_deferring_cancellation(
             _log_source_chat_completion(
                 request,
@@ -4835,6 +4839,13 @@ async def _source_chat_completion_response(
                 error_message="client disconnected during source request setup",
             )
         )
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release source request setup reservation after client disconnect source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
         raise
     except BaseException:
         if reservation is not None:
@@ -4964,14 +4975,16 @@ async def _buffered_limited_source_chat_stream_response(
         # CancelledError is a BaseException, so without this branch the
         # reservation would stay charged until stale-reservation cleanup.
         close_exc: BaseException | None = None
+        release_exc: BaseException | None = None
         try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
+        except BaseException as exc:
+            close_exc = exc
+        if reservation is not None:
             try:
-                await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
-            except BaseException as exc:
-                close_exc = exc
-        finally:
-            if reservation is not None:
                 await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
         await _await_cleanup_deferring_cancellation(
             _log_source_chat_completion(
                 request,
@@ -4985,6 +4998,13 @@ async def _buffered_limited_source_chat_stream_response(
                 error_message="client disconnected during source stream buffering",
             )
         )
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release buffered source stream reservation after client disconnect source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
         if close_exc is not None:
             raise close_exc
         raise cancel_exc
