@@ -4763,7 +4763,7 @@ async def _source_chat_completion_response(
                     source=source,
                     api_key=api_key,
                     model=model,
-                    status="error",
+                    status="cancelled",
                     error_code="client_disconnected",
                     error_message="client disconnected during source stream setup",
                 )

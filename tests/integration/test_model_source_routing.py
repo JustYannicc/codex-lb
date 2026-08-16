@@ -1427,7 +1427,7 @@ async def test_source_stream_setup_cancellation_logs_visible_error_even_if_relea
             "source": source,
             "api_key": None,
             "model": "stream-setup-cancel",
-            "status": "error",
+            "status": "cancelled",
             "error_code": "client_disconnected",
             "error_message": "client disconnected during source stream setup",
         }
