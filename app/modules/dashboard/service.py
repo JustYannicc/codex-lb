@@ -39,6 +39,18 @@ from app.modules.usage.depletion_service import (
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
+# Newest-first per-account row bound for the projections history fetch
+# (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
+# snapshot ingestion appends usage rows per proxied request, so one busy
+# account's 7-day secondary window can hold tens of thousands of rows while
+# the consumers only read the recent tail: the EWMA depletion/burn rates
+# (alpha 0.4 — a sample's contribution decays by 0.6^n within a few dozen
+# newer samples) and the weekly-pace smoothing mean (<= 240 minutes). 4320
+# rows cover the 6-hour recent-burn window at a 5-second sample cadence —
+# 12x headroom over the default 60-second usage refresh — so capping changes
+# no consumer-visible value; sparse accounts stay under the cap entirely.
+_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP = 4320
+
 
 def _parse_weekly_pace_working_days(value: str) -> set[int]:
     try:
@@ -280,12 +292,24 @@ async def _load_projection_histories(
                 sec_since = acct_since
 
     all_pri_rows = (
-        await repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since, cutoffs=pri_cutoffs)
+        await repo.bulk_usage_history_since(
+            pri_fetch_ids,
+            "primary",
+            pri_since,
+            cutoffs=pri_cutoffs,
+            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
+        )
         if pri_fetch_ids
         else {}
     )
     all_sec_rows = (
-        await repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since, cutoffs=sec_cutoffs)
+        await repo.bulk_usage_history_since(
+            sec_fetch_ids,
+            "secondary",
+            sec_since,
+            cutoffs=sec_cutoffs,
+            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
+        )
         if sec_fetch_ids
         else {}
     )
