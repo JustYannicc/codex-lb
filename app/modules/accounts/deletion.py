@@ -67,7 +67,7 @@ from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountsRepository, credentials_replaced_since_wipe
 from app.modules.proxy.account_cache import get_account_selection_cache, propagate_account_routing_change
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
@@ -205,12 +205,29 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
     replacement blocks until the chunk commits, then the next chunk observes
     the cleared marker and stops. On SQLite the writer section already
     serializes this transaction against every other writer.
+
+    A replacement handled by a pre-upgrade replica (rolling deploy) writes
+    fresh credentials but cannot clear marker columns its ORM does not know;
+    fresh non-wiped ciphertext on a marked row is therefore itself the
+    supersede signal — the marker is cleared here, under the same lock.
     """
-    stmt = select(Account.delete_requested_at, Account.delete_history_requested).where(Account.id == account_id)
+    stmt = select(
+        Account.delete_requested_at,
+        Account.delete_history_requested,
+        Account.refresh_token_encrypted,
+    ).where(Account.id == account_id)
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(key_share=True)
     row = (await session.execute(stmt)).first()
     if row is None or row[0] is None:
+        return None
+    if credentials_replaced_since_wipe(row[2]):
+        await session.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(delete_requested_at=None, delete_history_requested=False)
+        )
+        await session.commit()
         return None
     return bool(row[1])
 

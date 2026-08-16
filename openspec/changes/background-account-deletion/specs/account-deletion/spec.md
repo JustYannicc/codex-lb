@@ -39,6 +39,11 @@ selected before it) must not replace the terminal `DEACTIVATED` state and
 make the account selectable mid-drain. Only a credential replacement —
 which clears the marker — may change a marked account's state.
 
+Marked accounts MUST be rejected by API-key account-assignment validation
+and excluded from API-key pooled-usage projections, so an assignment
+created or updated after the DELETE cannot re-surface the account in key
+listings before finalization.
+
 #### Scenario: Delete responds without draining rows
 
 - **GIVEN** an account with raw request-log and usage-history rows
@@ -79,6 +84,13 @@ which clears the marker — may change a marked account's state.
 - **THEN** the key's listed assigned-account ids no longer contain the
   account and its pooled-usage projection excludes it
 - **AND** the key's assignment-scope flag remains enabled
+
+#### Scenario: Marked account cannot be assigned to an API key
+
+- **GIVEN** an account marked for background deletion
+- **WHEN** an API-key create or update names the account in its assigned
+  account ids
+- **THEN** the request is rejected as referencing an unknown account
 
 #### Scenario: Stale settlement cannot resurrect a marked account
 
@@ -165,6 +177,13 @@ finalization transaction MUST re-check the marker under the account row lock
 rows, so no chunk commits row work after a replacement committed and a
 superseded account is never finalized (rows already drained stay detached).
 
+A credential replacement handled by a pre-upgrade replica during a rolling
+deploy writes fresh credentials but cannot clear marker columns unknown to
+its ORM. The worker MUST therefore treat non-wiped (or undecryptable)
+credential ciphertext on a marked row as a credential replacement: it MUST
+clear the marker itself under the account row lock and abandon the deletion
+without mutating any further rows.
+
 #### Scenario: Restart resumes a partial drain
 
 - **GIVEN** a marked account whose drain was interrupted after some chunks
@@ -183,3 +202,11 @@ superseded account is never finalized (rows already drained stay detached).
 - **WHEN** a credential replacement lands on the row and clears the marker
 - **THEN** the worker abandons the deletion without removing the account row
 - **AND** rows detached before the replacement remain detached
+
+#### Scenario: Legacy-replica replacement supersedes without clearing the marker
+
+- **GIVEN** a marked account mid-drain whose credentials were replaced by a
+  pre-upgrade replica (fresh ciphertext, marker still set)
+- **WHEN** the worker's next chunk or finalization re-checks the row
+- **THEN** the worker clears the marker, abandons the deletion, and the
+  fresh credentials survive

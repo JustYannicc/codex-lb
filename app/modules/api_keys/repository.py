@@ -183,6 +183,11 @@ class ApiKeysRepository:
             select(Account)
             .options(load_only(Account.id, Account.plan_type, Account.status))
             .where(Account.id.in_(account_ids))
+            # An account marked for background deletion is already deleted
+            # from the operator's point of view: assignment validation must
+            # reject it (the synchronous delete removed the row outright) and
+            # pooled-usage projections must not count it while its rows drain.
+            .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
 

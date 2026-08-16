@@ -33,6 +33,12 @@
 - [x] 2.7 Fence ordinary status writers (`update_status`,
       `update_status_if_current`) on `delete_requested_at IS NULL` so stale
       in-flight settlements cannot resurrect a marked account.
+- [x] 2.8 Treat non-wiped credential ciphertext on a marked row as a
+      supersede (replacement by a pre-upgrade replica that cannot clear the
+      marker): chunks and finalization clear the marker and abandon.
+- [x] 2.9 Reject marked accounts in API-key assignment validation
+      (`ApiKeysRepository.list_accounts_by_ids`) so post-DELETE key updates
+      cannot recreate assignments for the account.
 
 ## 3. Background worker
 

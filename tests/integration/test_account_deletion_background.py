@@ -547,6 +547,88 @@ async def test_credential_replacement_supersedes_pending_deletion(db_setup):
     assert await _attached_log_count("acc_bg_super") == 2
 
 
+async def _legacy_replace_credentials(account_id: str, encryptor: TokenEncryptor) -> None:
+    """Mimic a credential replacement by a pre-upgrade replica: fresh
+    ciphertext and status, but the marker columns its ORM does not know stay
+    untouched."""
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(
+                access_token_encrypted=encryptor.encrypt("fresh-access"),
+                refresh_token_encrypted=encryptor.encrypt("fresh-refresh"),
+                id_token_encrypted=encryptor.encrypt("fresh-id"),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_legacy_replica_replacement_supersedes_mid_drain(db_setup):
+    """A replacement handled by a pre-upgrade replica cannot clear the marker;
+    fresh (non-wiped) ciphertext on a marked row must itself supersede."""
+    encryptor = TokenEncryptor()
+    await _seed_account("acc_bg_legacy", log_count=3)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_legacy")
+    assert await _run_one_detach_chunk("acc_bg_legacy", batch_size=2) == 2
+
+    await _legacy_replace_credentials("acc_bg_legacy", encryptor)
+
+    outcomes = await run_account_deletion_pass(batch_size=2)
+    assert outcomes == {"acc_bg_legacy": "superseded"}
+    row = await _account_row("acc_bg_legacy")
+    assert row is not None
+    # The worker cleared the marker itself and preserved the fresh material.
+    assert row.delete_requested_at is None
+    assert encryptor.decrypt(row.refresh_token_encrypted) == "fresh-refresh"
+    # Rows detached before the replacement stay detached; the rest survive.
+    assert await _attached_log_count("acc_bg_legacy") == 1
+    # The account is no longer rescanned on later passes.
+    assert await run_account_deletion_pass(batch_size=2) == {}
+
+
+@pytest.mark.asyncio
+async def test_legacy_replica_replacement_before_finalize_is_abandoned(db_setup):
+    encryptor = TokenEncryptor()
+    await _seed_account("acc_bg_legacy_fin", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_legacy_fin")
+    assert await _run_one_detach_chunk("acc_bg_legacy_fin", batch_size=10) == 1
+
+    await _legacy_replace_credentials("acc_bg_legacy_fin", encryptor)
+
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).delete("acc_bg_legacy_fin", only_pending=True) is False
+    row = await _account_row("acc_bg_legacy_fin")
+    assert row is not None
+    assert row.delete_requested_at is None
+    assert encryptor.decrypt(row.refresh_token_encrypted) == "fresh-refresh"
+
+
+@pytest.mark.asyncio
+async def test_marked_account_cannot_be_assigned_to_api_key(async_client, db_setup):
+    await _seed_account("acc_bg_assign", log_count=1)
+
+    delete = await async_client.delete("/api/accounts/acc_bg_assign")
+    assert delete.status_code == 200
+
+    # A key update racing (or following) the DELETE must not recreate an
+    # assignment that would re-surface the deleted account in key listings.
+    create = await async_client.post("/api/api-keys/", json={"name": "post-delete-key"})
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    update_resp = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": ["acc_bg_assign"]},
+    )
+    assert update_resp.status_code == 400
+    assert update_resp.json()["error"]["code"] == "invalid_api_key_payload"
+
+
 @pytest.mark.asyncio
 async def test_supersede_between_drain_and_finalize_is_abandoned(db_setup):
     await _seed_account("acc_bg_race", log_count=2)

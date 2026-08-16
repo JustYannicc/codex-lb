@@ -79,6 +79,17 @@ was never backfilled — the stored id-token claims, so `begin_delete`
 backfills `chatgpt_user_id` from those claims (non-secret identity) in the
 same transaction before destroying them.
 
+The wipe doubles as the supersede signal for pre-upgrade replicas: a
+replacement handled by old code writes fresh ciphertext but cannot clear
+marker columns its ORM does not know. Every marker re-check (chunk and
+finalization) therefore also inspects the refresh ciphertext — non-wiped
+or undecryptable material on a marked row means a replacement happened, and
+the worker clears the marker itself (under the row lock) instead of
+draining further or finalizing. API-key assignment validation
+(`ApiKeysRepository.list_accounts_by_ids`) likewise rejects marked
+accounts, so a key create/update racing the DELETE cannot recreate an
+assignment that would re-surface the account in key listings.
+
 ### D2: The account row is the queue (no new table)
 
 The marker columns make the `accounts` row its own durable work item: the
