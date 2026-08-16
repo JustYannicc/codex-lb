@@ -45849,3 +45849,25 @@ def test_compact_account_neutral_replay_payload_rejects_wire_trimmed_history() -
         ]
     )
     assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_accepts_canonical_lite_full_resend() -> None:
+    # A Responses-Lite history opens with the additional_tools bundle and its
+    # canonical developer instruction; the shared projection must recognize
+    # that developer message so the Lite surface stays recoverable.
+    payload = _compact_replay_request(
+        input=[
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "function", "name": "exec", "parameters": {"type": "object"}}],
+            },
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "instructions"}]},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    replay = proxy_compact_service._compact_account_neutral_replay_payload(payload)
+    assert replay is not None
+    assert getattr(replay, "previous_response_id", None) is None

@@ -70,6 +70,7 @@ from app.modules.proxy.load_balancer import (
     effective_account_concurrency_caps,
 )
 from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -538,9 +539,22 @@ def _compact_replay_history_retains_prior_output(input_items: list[JsonValue]) -
     # cannot be proven and stays owner-bound.
     if last_assistant_index is None or last_assistant_index == 0:
         return False
-    return responses_input_suffix_retains_prior_output(
+    # The projection is an identity transform for input that already passed
+    # the account-neutral fresh-replay gate (no server-assigned ids, no
+    # reasoning or omitted bookkeeping types survive that gate), but it is the
+    # shared authority for recognizing the canonical Responses-Lite developer
+    # instruction behind an ``additional_tools`` bundle — without that index
+    # the suffix walk would reject every Lite full resend.
+    projection = project_responses_input_for_account_neutral_fresh_replay(
         input_items,
         stored_count=last_assistant_index,
+    )
+    if projection is None:
+        return False
+    return responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
     )
 
 
@@ -1316,6 +1330,18 @@ class _CompactMixin:
                             # nothing here and the recovery reselection flows
                             # through that same existing sticky handling.
                             recovery_blocked_reason = "session_affinity"
+                        elif (
+                            not owner_quota_failover_eligible
+                            and selection.error_code == "preferred_account_unavailable"
+                        ):
+                            # The selector skipped the owner before evaluating
+                            # its availability (API-key assignment scope,
+                            # single-account routing, or an in-request
+                            # exclusion that was not a pre-visible quota
+                            # failover). Policy-caused loss must not become
+                            # replay-eligible just because the owner's
+                            # persisted status happens to be quota-exhausted.
+                            recovery_blocked_reason = "owner_skipped_by_policy"
                         elif not (
                             owner_quota_failover_eligible
                             or (

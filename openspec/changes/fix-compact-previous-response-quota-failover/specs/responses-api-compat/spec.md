@@ -14,10 +14,13 @@ Recovery MUST activate only for quota-caused owner loss. At selection time, befo
 was ever used for the request, the owner's persisted account status MUST be rate-limited or
 quota-exhausted; an owner unselectable for any other reason (re-authentication required,
 deactivated, paused, local capacity caps on an active account, or a failed status lookup)
-stays owner-bound. Mid-request, only a pre-visible quota or rate-limit failure of the pinned
-owner that permits failover makes recovery eligible; post-selection authentication, refresh,
-transport, timeout, and transient exclusions of the pinned owner keep their existing
-owner-bound handling.
+stays owner-bound. An owner the selector skipped for routing policy — API-key assignment
+scope, single-account routing, or a prior in-request exclusion — MUST stay owner-bound
+regardless of its persisted quota status, because policy, not quota, caused that selection
+loss. Mid-request, only a pre-visible quota or rate-limit failure of the pinned owner that
+permits failover makes recovery eligible; post-selection authentication, refresh, transport,
+timeout, and transient exclusions of the pinned owner keep their existing owner-bound
+handling.
 
 Recovery MUST NOT activate when the request carries a session identity (a turn-state or
 session header) that can bind live or durable HTTP-bridge continuity, or when the resolved
@@ -86,6 +89,22 @@ the remaining eligible accounts with fallback enabled.
 - **WHEN** reselection cannot return the now-excluded owner
 - **THEN** the proxy surfaces the owner's authentication failure
 - **AND** account-neutral fresh-replay recovery does not activate and no part of the payload is sent to another account
+
+#### Scenario: Policy-skipped owner stays owner-bound despite quota status
+
+- **GIVEN** a previous-response-pinned compact request whose owner account is excluded by API-key assignment scope or single-account routing
+- **AND** that owner's persisted status is coincidentally rate-limited or quota-exhausted
+- **WHEN** pinned account selection skips the owner
+- **THEN** the request fails with the existing selection error
+- **AND** account-neutral fresh-replay recovery does not activate
+
+#### Scenario: Responses-Lite full resend behind a canonical tool bundle is recoverable
+
+- **GIVEN** a quota-excluded previous-response-pinned compact request whose `input` opens with a canonical `additional_tools` bundle and its immediately following developer instruction
+- **AND** the remaining transcript retains prior assistant output ahead of fresh client input and passes the account-neutral fresh-replay rules
+- **WHEN** pinned account selection cannot return the owner
+- **THEN** the shared canonical-Lite prefix handling recognizes the developer instruction
+- **AND** the recovery replays the anchor-free payload on another eligible account
 
 #### Scenario: Non-quota owner loss at selection time stays owner-bound
 

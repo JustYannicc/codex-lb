@@ -1956,3 +1956,45 @@ async def test_proxy_compact_pinned_owner_non_quota_loss_stays_owner_bound(async
 
     assert response.status_code >= 400
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_policy_skip_stays_owner_bound_despite_quota_status(async_client, monkeypatch):
+    """An owner the selector skips for routing policy (API-key assignment
+    scope) must stay owner-bound even when its persisted status happens to be
+    quota-exhausted: policy, not quota, caused the selection loss."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-policy-owner@example.com", raw_account_id="acc_policy_owner"
+    )
+    alt_account_id = await _import_account(
+        async_client, email="compact-policy-alt@example.com", raw_account_id="acc_policy_alt"
+    )
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    settings_resp = await async_client.put(
+        "/api/settings",
+        json={"totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings_resp.status_code == 200
+    _key_id, key = await _create_api_key(
+        name="compact-policy-scope-key",
+        assigned_account_ids=[alt_account_id],
+    )
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_policy_anchor",
+        },
+        headers={"authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
