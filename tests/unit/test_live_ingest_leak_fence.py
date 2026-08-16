@@ -47,3 +47,51 @@ async def test_fence_reclaims_leaked_consumer_at_test_boundary() -> None:
     assert _pending_ingestor_tasks() == []
     assert live_ingest._ingestor is None
     assert live_hub._publisher is None
+
+
+async def test_reap_consumes_and_reports_already_failed_consumer() -> None:
+    # A leaked consumer can already be dead with an exception by the time the
+    # fence runs (#1755 observed RuntimeError('cannot reuse already awaited
+    # coroutine')). The reap must retrieve that exception — so it neither
+    # crashes the fence mid-cleanup nor resurfaces later as an unobserved-task
+    # loop exception in an unrelated test — and report it for attribution.
+    from tests import conftest as suite_conftest
+
+    async def _boom() -> None:
+        raise RuntimeError("cannot reuse already awaited coroutine")
+
+    task = asyncio.create_task(_boom(), name="live-usage-ingestor")
+    await asyncio.sleep(0)
+    assert task.done()
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=1, write_min_interval_seconds=0.0)
+    ingestor._consumer = task
+    live_ingest._ingestor = ingestor
+    live_hub.register_live_usage_publisher(ingestor.publish)
+
+    failures = await suite_conftest._reap_leaked_live_usage_ingestor()
+
+    assert failures == ["'live-usage-ingestor' died with RuntimeError('cannot reuse already awaited coroutine')"]
+    assert live_ingest._ingestor is None
+    assert live_hub._publisher is None
+    assert _pending_ingestor_tasks() == []
+
+
+async def test_reap_sweeps_orphaned_consumer_not_tracked_by_singleton() -> None:
+    # A stop that is itself cancelled between clearing the module global and
+    # awaiting the consumer leaves a pending task no singleton tracks; the
+    # reap's name-based sweep must still cancel and await it.
+    from tests import conftest as suite_conftest
+
+    async def _pending_forever() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_pending_forever(), name="live-usage-ingestor")
+    await asyncio.sleep(0)
+    assert live_ingest._ingestor is None
+
+    failures = await suite_conftest._reap_leaked_live_usage_ingestor()
+
+    assert failures == []
+    assert task.cancelled()
+    assert _pending_ingestor_tasks() == []
