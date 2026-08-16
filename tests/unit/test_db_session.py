@@ -1450,3 +1450,94 @@ async def test_close_session_never_reclaims_the_shared_in_memory_sqlite_connecti
         await session_module.close_session(verify)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_close(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A rollback reclaimed as wedged can still be pending when close_db runs.
+    The abandoned task is registered in the teardown registry immediately, so
+    close_db must wait for it — and for the bookkeeping close it schedules only
+    after any one-time snapshot — instead of returning while the event loop
+    still has pending teardown tasks."""
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.5)
+    db_path = tmp_path / "close-db-drain.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    release_wedge = asyncio.Event()
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        await session.execute(sa_text("DELETE FROM accounts"))
+
+        held = session_module._session_sync_connections(session)
+        assert held
+        driver = held[0].connection.driver_connection
+        assert driver is not None
+        original_rollback = driver.rollback
+
+        async def _wedged_rollback() -> None:
+            await release_wedge.wait()
+            await original_rollback()
+
+        driver.rollback = _wedged_rollback
+
+        with caplog.at_level(logging.INFO, logger=session_module.__name__):
+            await asyncio.wait_for(session_module.close_session(session), timeout=5.0)
+            abandoned_pending = [task for task in session_module._wedged_teardown_cleanup_tasks if not task.done()]
+            # RED pre-fix: the reclaim only registered the deferred bookkeeping
+            # close (which does not exist yet), never the abandoned rollback.
+            assert abandoned_pending, "the reclaimed rollback must be registered while still pending"
+
+            async def _release_soon() -> None:
+                await asyncio.sleep(0.05)
+                release_wedge.set()
+
+            releaser = asyncio.ensure_future(_release_soon())
+            await asyncio.wait_for(session_module.close_db(), timeout=5.0)
+            # RED pre-fix: close_db saw an empty registry and returned
+            # immediately, before the wedge was even released.
+            assert release_wedge.is_set(), "close_db must drain the pending reclaimed rollback"
+            assert all(task.done() for task in abandoned_pending), (
+                "close_db must wait for the abandoned rollback itself"
+            )
+            assert not session_module._wedged_teardown_cleanup_tasks, (
+                "close_db must also drain the bookkeeping close scheduled after its first snapshot"
+            )
+            await releaser
+
+        assert any("finished late" in record.getMessage() for record in caplog.records)
+    finally:
+        release_wedge.set()
+        await asyncio.sleep(0.05)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) -> None:
+    """A teardown that stays wedged despite the reclaim (the interrupt is
+    best-effort) must not wedge shutdown too: the registry drain is explicitly
+    bounded and abandons whatever remains after the deadline."""
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.05)
+    never = asyncio.Event()
+    stuck: asyncio.Task[bool] = asyncio.ensure_future(never.wait())
+    session_module._wedged_teardown_cleanup_tasks.add(stuck)
+    try:
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            await asyncio.wait_for(session_module.close_db(), timeout=2.0)
+        assert any("still-pending wedged-teardown" in record.getMessage() for record in caplog.records), (
+            "the bounded drain must report what it abandoned"
+        )
+        assert stuck in session_module._wedged_teardown_cleanup_tasks
+    finally:
+        session_module._wedged_teardown_cleanup_tasks.discard(stuck)
+        never.set()
+        await stuck

@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
 import anyio
 from anyio import to_thread
@@ -68,10 +68,13 @@ _SQLITE_TEARDOWN_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS / 6
 # session must never be driven by another coroutine again (the abandoned
 # greenlet may still resume), and the deferred cleanup takes over.
 _SQLITE_TEARDOWN_WEDGED_INFO_KEY = "sqlite_teardown_wedged"
-# Deferred bookkeeping closes of wedged sessions, owned until completion so
-# shutdown (close_db) drains them instead of abandoning pending tasks. Each
-# task is bounded by _SQLITE_TEARDOWN_TIMEOUT_SECONDS.
-_wedged_teardown_cleanup_tasks: set[asyncio.Task[None]] = set()
+# Abandoned wedged teardown tasks and the deferred bookkeeping closes they
+# schedule on late completion, owned until completion so shutdown (close_db)
+# drains them instead of closing the event loop over pending tasks. The
+# bookkeeping closes are bounded by _SQLITE_TEARDOWN_TIMEOUT_SECONDS; an
+# abandoned teardown may outlive its reclaim (the interrupt is best-effort),
+# so the close_db drain is explicitly bounded as a whole.
+_wedged_teardown_cleanup_tasks: set[asyncio.Task[Any]] = set()
 
 # PostgreSQL pool checkout timeout and connection recycle window. Fixed
 # application constants (issue #1340): recycle keeps pooled connections
@@ -529,6 +532,14 @@ async def _reclaim_wedged_sqlite_session(
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
             phase,
         )
+    # Own the abandoned teardown until completion: close_db drains the
+    # registry, so shutdown waits for (or boundedly abandons) the reclaimed
+    # rollback/close instead of returning while it is still pending. The
+    # discard callback is registered first so that when the task completes
+    # during the drain, deregistration happens before _finish_abandoned_teardown
+    # registers the follow-up bookkeeping close.
+    _wedged_teardown_cleanup_tasks.add(abandoned)
+    abandoned.add_done_callback(_wedged_teardown_cleanup_tasks.discard)
     abandoned.add_done_callback(lambda task: _finish_abandoned_teardown(session, task, phase=phase))
 
 
@@ -862,9 +873,29 @@ async def init_db() -> None:
 
 async def close_db() -> None:
     if _wedged_teardown_cleanup_tasks:
-        # Deferred bookkeeping closes of wedged SQLite sessions; each is
-        # bounded by _SQLITE_TEARDOWN_TIMEOUT_SECONDS, so this drain is too.
-        await asyncio.gather(*tuple(_wedged_teardown_cleanup_tasks), return_exceptions=True)
+        # Abandoned wedged teardowns plus their deferred bookkeeping closes.
+        # Drain until the registry is stable — an abandoned teardown that
+        # completes during the drain schedules its bookkeeping close only
+        # after any one-time snapshot — and bound the whole drain so a
+        # teardown still wedged despite the reclaim (the interrupt is
+        # best-effort) cannot wedge shutdown too: one deadline covers the
+        # abandoned teardown and the bounded close it chains.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2 * _SQLITE_TEARDOWN_TIMEOUT_SECONDS
+        while _wedged_teardown_cleanup_tasks:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "close_db abandoned %d still-pending wedged-teardown task(s) after the bounded "
+                    "drain; their connections were already reclaimed (issue #1682)",
+                    len(_wedged_teardown_cleanup_tasks),
+                )
+                break
+            await asyncio.wait(tuple(_wedged_teardown_cleanup_tasks), timeout=remaining)
+            # Completion callbacks (deregistration and scheduling of the
+            # deferred bookkeeping close) run via call_soon; yield once so
+            # the registry reflects them before the next stability check.
+            await asyncio.sleep(0)
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
