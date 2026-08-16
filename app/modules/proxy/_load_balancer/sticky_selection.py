@@ -336,12 +336,15 @@ async def run_sticky_selection_path(
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
     sticky_refresh_skip_deadline: datetime | None = None
-    # A thread row whose process seed is still missing must keep its retention
-    # write: that write doubles as the seed-initialization carrier (see the
-    # ``initialize_seed_key`` argument at the persist site below), and
-    # suppressing it would let sibling threads select divergent owners until
-    # the skip window closes.
-    seed_initialization_pending = sticky_source == "thread_header" and sticky_seed_account_id is None
+    # A thread row whose process seed exists but is still unowned must keep
+    # its retention write: that write doubles as the seed-initialization
+    # carrier (see the ``initialize_seed_key`` argument at the persist site
+    # below), and suppressing it would let sibling threads select divergent
+    # owners until the skip window closes. Thread-only affinity without a
+    # seed key has nothing to initialize and stays skippable.
+    seed_initialization_pending = (
+        sticky_source == "thread_header" and sticky_seed_key is not None and sticky_seed_account_id is None
+    )
     # A source-qualified marker can be observed before this call or after a
     # retirement CAS miss. In both cases its retained owner is authoritative
     # exclusion evidence even though it is no longer affinity ownership for

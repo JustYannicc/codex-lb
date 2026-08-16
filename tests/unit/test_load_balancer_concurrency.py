@@ -4639,3 +4639,31 @@ async def test_fresh_same_owner_retention_skips_refresh_write_on_probe_admission
     assert probing_runtime.last_selected_at is not None
     assert probing_runtime.last_selected_at > 0.0
     await skip_balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_only_retention_without_seed_key_skips_refresh_write() -> None:
+    """Thread-only affinity (no process seed key at all) has nothing to
+    initialize, so a fresh same-owner retention skips its refresh write."""
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-skip-no-seedkey")
+    assert alternate is not None
+    thread_key = _codex_backend_identity({"thread-id": "thread-only-skip"}).thread_selection_key
+    assert thread_key is not None
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    sticky_repo.refresh_skip_deadlines_by_key[thread_key] = datetime.now(tz=timezone.utc).replace(
+        tzinfo=None
+    ) + timedelta(seconds=10)
+
+    selected = await balancer.select_account(
+        sticky_key=thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    assert sticky_repo.upserts == []
+    assert sticky_repo.seeded_upserts == []
+    assert sticky_repo.deleted == []
