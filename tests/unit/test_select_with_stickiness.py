@@ -16,6 +16,7 @@ import pytest
 
 from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount, RoutingStrategy
 from app.db.models import Account, AccountStatus, StickySessionKind
+from app.modules.proxy._load_balancer.sticky_selection import _STICKY_EXISTING_UNSET
 from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
@@ -77,6 +78,8 @@ async def _invoke_stickiness(
     relative_availability_power: float = 2.0,
     relative_availability_top_k: int = 5,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    sticky_refresh_skippable: bool = False,
+    sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -107,6 +110,8 @@ async def _invoke_stickiness(
         relative_availability_top_k=relative_availability_top_k,
         sticky_repo=sticky_repo,
         routing_costs_by_account_id=routing_costs_by_account_id,
+        sticky_refresh_skippable=sticky_refresh_skippable,
+        sticky_existing_account_id=sticky_existing_account_id,
     )
     if outcome.mutation is not None:
         await lb._persist_sticky_mutation(
@@ -1084,4 +1089,134 @@ async def test_burn_first_reallocation_only_when_burn_first_is_selectable():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+# ---------------------------------------------------------------------------
+# Same-owner refresh skip: hot (key, kind) rows must not be rewritten on every
+# request when the lookup already observed a fresh row.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_pinned_retention_skips_upsert():
+    """A healthy pinned owner within the refresh-skip window routes to the
+    pinned account without any sticky write."""
+    acc_a = _active("a", used_percent=10.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        sticky_refresh_skippable=True,
+        sticky_existing_account_id="a",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.upsert.assert_not_called()
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_false_pinned_retention_still_refreshes():
+    """Without the freshness observation the pinned retention keeps its
+    write-through updated_at refresh."""
+    acc_a = _active("a", used_percent=10.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        sticky_refresh_skippable=False,
+        sticky_existing_account_id="a",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_never_suppresses_reallocation_write():
+    """Budget-pressure rebind to a different owner must persist immediately
+    even when the old row was observed fresh."""
+    acc_a = _active("a", used_percent=96.0)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        sticky_refresh_skippable=True,
+        sticky_existing_account_id="a",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_never_suppresses_departed_owner_rebind():
+    """A pinned owner that left the pool is still rebound with an immediate
+    write even when the old row was observed fresh."""
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_b],
+        "key1",
+        repo,
+        sticky_refresh_skippable=True,
+        sticky_existing_account_id="a",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_grace_period_retention_skips_upsert():
+    """The grace-period pinned retention also honors the skip window."""
+    now = time.time()
+    pinned = _rate_limited("a", reset_at=now + 10)
+    acc_b = _active("b", used_percent=50.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [pinned, acc_b],
+        "key1",
+        repo,
+        sticky_refresh_skippable=True,
+        sticky_existing_account_id="a",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refresh_skippable_reset_when_existing_owner_not_prefetched():
+    """The freshness observation belongs to the caller-provided lookup; an
+    internal owner lookup must fall back to write-through refresh."""
+    acc_a = _active("a", used_percent=10.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a],
+        "key1",
+        repo,
+        sticky_refresh_skippable=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
     repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)

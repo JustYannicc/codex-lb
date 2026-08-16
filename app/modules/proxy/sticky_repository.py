@@ -28,6 +28,17 @@ _DELETE_ENTRIES_CHUNK_SIZE = 250
 _ContinuitySource = Literal["session_header", "thread_header", "turn_state"]
 _SESSION_HEADER_ABANDONMENT_SCOPE = "session_header"
 
+# A same-owner TTL refresh upsert only rewrites ``updated_at``. On hot
+# (key, kind) rows, concurrent requests serialize on that row lock, so the
+# selection path skips the rewrite entirely while the row is younger than
+# this window. The window is bounded to at most 1% of the mapping TTL (so
+# expiry moves by at most 1% of the window it protects) and to a small
+# absolute ceiling; a rebind to a different owner or a row carrying any
+# abandonment marker is never skippable because those writes change state
+# beyond freshness.
+_REFRESH_SKIP_TTL_FRACTION = 0.01
+_REFRESH_SKIP_MAX_SECONDS = 15.0
+
 # Only the Live-call ownership namespace is reserved. Other LF-prefixed keys
 # (e.g. the pre-existing "\ncodex-lb-affinity-v1" selection affinities) remain
 # ordinary operator-manageable sessions.
@@ -58,6 +69,13 @@ class StickyOwnerLookup:
     # was retired. Global stale-hard tombstones leave this unset because their
     # established recovery path may legitimately reselect a recovered owner.
     abandoned_account_id: str | None = None
+    # True only when the row was observed in this lookup with a fresh
+    # ``updated_at`` (within the refresh-skip window derived from
+    # ``max_age_seconds``) and no abandonment marker, so a same-owner TTL
+    # refresh upsert would be a pure ``updated_at`` rewrite. Consumers must
+    # compare with ``is True`` (test doubles may auto-vivify attributes) and
+    # must never skip a write that changes the owner account.
+    refresh_can_be_skipped: bool = False
 
 
 def _continuity_is_abandoned_for_source(
@@ -90,6 +108,7 @@ def _owner_lookup_from_row(
     row: StickySession,
     *,
     continuity_source: _ContinuitySource | None,
+    refresh_can_be_skipped: bool = False,
 ) -> StickyOwnerLookup:
     if _continuity_is_abandoned_for_source(
         row.continuity_abandoned_at,
@@ -105,7 +124,31 @@ def _owner_lookup_from_row(
                 continuity_source,
             ),
         )
-    return StickyOwnerLookup(account_id=row.account_id, continuity_abandoned=False)
+    return StickyOwnerLookup(
+        account_id=row.account_id,
+        continuity_abandoned=False,
+        refresh_can_be_skipped=refresh_can_be_skipped,
+    )
+
+
+def _same_owner_refresh_can_be_skipped(
+    row: StickySession,
+    *,
+    observed_updated_at: datetime,
+    now: datetime,
+    max_age_seconds: int,
+) -> bool:
+    """Whether a same-owner upsert of this row would be a pure freshness rewrite.
+
+    Any abandonment marker disqualifies the skip: an upsert re-establishes
+    ownership by clearing both marker columns, so that write is semantic even
+    when the owner account is unchanged.
+    """
+
+    if row.continuity_abandoned_at is not None or row.continuity_abandonment_scope is not None:
+        return False
+    skip_window_seconds = min(_REFRESH_SKIP_MAX_SECONDS, max_age_seconds * _REFRESH_SKIP_TTL_FRACTION)
+    return (now - observed_updated_at).total_seconds() <= skip_window_seconds
 
 
 class StickySessionsRepository:
@@ -150,10 +193,20 @@ class StickySessionsRepository:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
         if max_age_seconds is None:
             return _owner_lookup_from_row(row, continuity_source=continuity_source)
-        cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+        now = utcnow()
+        cutoff = now - timedelta(seconds=max_age_seconds)
         observed_updated_at = to_utc_naive(row.updated_at)
         if observed_updated_at >= cutoff:
-            return _owner_lookup_from_row(row, continuity_source=continuity_source)
+            return _owner_lookup_from_row(
+                row,
+                continuity_source=continuity_source,
+                refresh_can_be_skipped=_same_owner_refresh_can_be_skipped(
+                    row,
+                    observed_updated_at=observed_updated_at,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                ),
+            )
 
         # Release the read snapshot before attempting a SQLite write upgrade.
         # The DELETE remains safe because every value observed above participates

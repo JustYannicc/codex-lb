@@ -194,6 +194,7 @@ class StickySelectionOwner(Protocol):
         ignore_standard_quota: bool,
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
+        sticky_refresh_skippable: bool = False,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -327,6 +328,7 @@ async def run_sticky_selection_path(
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
+    sticky_refresh_skippable = False
     # A source-qualified marker can be observed before this call or after a
     # retirement CAS miss. In both cases its retained owner is authoritative
     # exclusion evidence even though it is no longer affinity ownership for
@@ -357,6 +359,10 @@ async def run_sticky_selection_path(
                 # always has, rather than silently bypassing the ambiguous
                 # owner check below.
                 sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
+                # ``is True`` for the same test-double reason as above. The
+                # flag is only ever an optimization hint: False always falls
+                # back to today's write-on-every-request refresh behavior.
+                sticky_refresh_skippable = sticky_owner_lookup.refresh_can_be_skipped is True
                 sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
                 if sticky_owner_lookup.continuity_abandoned is True and isinstance(
                     sticky_abandoned_account_id,
@@ -370,6 +376,9 @@ async def run_sticky_selection_path(
                 # turn-state ownership.
                 sticky_existing_account_id = legacy_existing_account_id
                 sticky_continuity_abandoned = False
+                # The freshness observation belongs to the namespaced row,
+                # not the raw legacy owner that now shadows it.
+                sticky_refresh_skippable = False
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
@@ -643,6 +652,7 @@ async def run_sticky_selection_path(
                         routing_costs_by_account_id=effective_routing_costs,
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
+                        sticky_refresh_skippable=sticky_refresh_skippable,
                     )
                     result = sticky_outcome.selection
                     if (
@@ -1111,6 +1121,7 @@ async def _select_with_stickiness(
     ignore_standard_quota: bool = False,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
+    sticky_refresh_skippable: bool = False,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1150,6 +1161,10 @@ async def _select_with_stickiness(
             kind=sticky_kind,
             max_age_seconds=sticky_max_age_seconds,
         )
+        # The skippable flag is only valid for the lookup that produced the
+        # caller's ``sticky_existing_account_id``; this fresh lookup did not
+        # observe row freshness, so fall back to write-through refresh.
+        sticky_refresh_skippable = False
     else:
         existing = sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None
     # When the pinned account is temporarily unavailable (rate-limited,
@@ -1190,6 +1205,15 @@ async def _select_with_stickiness(
     if existing:
         pinned = next((state for state in states if state.account_id == existing), None)
         if pinned is not None:
+            # Retaining the pinned owner persists only to advance
+            # ``updated_at`` on TTL-based kinds. When this request's lookup
+            # already observed the row inside the repository's refresh-skip
+            # window, skip that write: concurrent requests on a hot session
+            # otherwise serialize on the same row's upsert lock. Rebinds and
+            # deletes never consult this value and always write immediately.
+            pinned_refresh_account_id = (
+                pinned.account_id if sticky_max_age_seconds is not None and not sticky_refresh_skippable else None
+            )
             # Proactively rebind session affinity for any sticky kind
             # once the pinned account is already above the configured
             # budget threshold. That preserves continuity below the
@@ -1251,7 +1275,7 @@ async def _select_with_stickiness(
                 if pinned_result.account is not None:
                     return finish_selection(
                         pinned_result,
-                        persist_account_id=pinned.account_id if sticky_max_age_seconds is not None else None,
+                        persist_account_id=pinned_refresh_account_id,
                     )
             else:
                 # Reallocate only when a burn-first target exists and can
@@ -1305,7 +1329,7 @@ async def _select_with_stickiness(
                         if pinned_result.account is not None:
                             return finish_selection(
                                 pinned_result,
-                                persist_account_id=(pinned.account_id if sticky_max_age_seconds is not None else None),
+                                persist_account_id=pinned_refresh_account_id,
                             )
                 reallocate_sticky = True
             # Grace period: if the pinned account is rate-limited with a
@@ -1332,7 +1356,7 @@ async def _select_with_stickiness(
                 if grace_result.account is not None:
                     return finish_selection(
                         grace_result,
-                        persist_account_id=pinned.account_id if sticky_max_age_seconds is not None else None,
+                        persist_account_id=pinned_refresh_account_id,
                     )
             if reallocate_sticky:
                 pending_mutation = _StickyMutation(account_id=None)
