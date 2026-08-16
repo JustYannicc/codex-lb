@@ -143,6 +143,17 @@ def _disable_request_log_count_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_account_usage_summary_cache(monkeypatch):
+    """Zero the account request-usage summary cache TTL so listing summaries
+    stay exact within a test. The TTL is a fixed constant in production;
+    cache-behavior tests patch it back to a positive value."""
+    import app.modules.accounts.repository as accounts_repository_module
+
+    accounts_repository_module._clear_request_usage_summary_cache()
+    monkeypatch.setattr(accounts_repository_module, "_SUMMARY_CACHE_TTL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
     import app.main as main_module
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,6 +66,50 @@ class AccountRequestUsageSummary:
     total_cost_usd: float
 
 
+# The account-listing request-usage summary dedupes and re-aggregates the
+# un-folded raw tail on every dashboard accounts load, and the displayed
+# lifetime totals tolerate short staleness. Cache the merged summaries per
+# account-id signature for a small fixed TTL, mirroring the request-log
+# COUNT cache (issue #1340 / PRINCIPLES.md P2); the test suite patches the
+# TTL to 0 so summaries stay exact within a test. Account deletion and
+# duplicate-identity consolidation clear the cache because they re-attribute
+# usage rather than merely append to it.
+_SUMMARY_CACHE_TTL_SECONDS = 30.0
+_SUMMARY_CACHE_MAX_ENTRIES = 64
+_request_usage_summary_cache: dict[tuple[str, ...] | None, tuple[dict[str, AccountRequestUsageSummary], float]] = {}
+
+
+def _clear_request_usage_summary_cache() -> None:
+    _request_usage_summary_cache.clear()
+
+
+def _cached_request_usage_summaries(
+    key: tuple[str, ...] | None,
+) -> dict[str, AccountRequestUsageSummary] | None:
+    entry = _request_usage_summary_cache.get(key)
+    if entry is None:
+        return None
+    summaries, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _request_usage_summary_cache.pop(key, None)
+        return None
+    return summaries
+
+
+def _store_request_usage_summaries(
+    key: tuple[str, ...] | None,
+    summaries: dict[str, AccountRequestUsageSummary],
+    ttl_seconds: float,
+) -> None:
+    if len(_request_usage_summary_cache) >= _SUMMARY_CACHE_MAX_ENTRIES:
+        oldest = min(
+            _request_usage_summary_cache,
+            key=lambda existing: _request_usage_summary_cache[existing][1],
+        )
+        _request_usage_summary_cache.pop(oldest, None)
+    _request_usage_summary_cache[key] = (summaries, time.monotonic() + ttl_seconds)
+
+
 class AccountIdentityConflictError(Exception):
     def __init__(self, email: str) -> None:
         self.email = email
@@ -122,6 +167,12 @@ class AccountsRepository:
         self,
         account_ids: list[str] | None = None,
     ) -> dict[str, AccountRequestUsageSummary]:
+        ttl_seconds = _SUMMARY_CACHE_TTL_SECONDS
+        cache_key = tuple(sorted(account_ids)) if account_ids is not None else None
+        if ttl_seconds > 0:
+            cached = _cached_request_usage_summaries(cache_key)
+            if cached is not None:
+                return dict(cached)
         rollup_repo = AccountUsageRollupRepository(self._session)
         folded, watermark = await rollup_repo.read_state(account_ids)
 
@@ -165,6 +216,9 @@ class AccountsRepository:
                 cached_input_tokens=cached_total,
                 total_cost_usd=round(float(total_cost_usd), 6),
             )
+        if ttl_seconds > 0:
+            _store_request_usage_summaries(cache_key, summaries, ttl_seconds)
+            return dict(summaries)
         return summaries
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
@@ -274,6 +328,10 @@ class AccountsRepository:
                 await self._session.commit()
                 if usage_cache_dirty:
                     _clear_bulk_history_since_sqlite_cache()
+                    # Consolidation re-attributes request logs and rollup sums
+                    # to the canonical account; cached listing summaries would
+                    # keep reporting the deleted duplicates until TTL expiry.
+                    _clear_request_usage_summary_cache()
                     # Duplicate reconciliation deletes Account rows, cascading
                     # any account_proxy_bindings they owned. The route cache is
                     # keyed by deterministic account id, so stale duplicate-id
@@ -852,6 +910,10 @@ class AccountsRepository:
             await self._session.commit()
             if deleted_id is not None:
                 _clear_bulk_history_since_sqlite_cache()
+                # Deletion drops the account's rollup row and detaches or
+                # deletes its request logs; cached listing summaries would
+                # keep reporting the account until TTL expiry.
+                _clear_request_usage_summary_cache()
             return deleted_id is not None
 
     async def rotate_tokens(
