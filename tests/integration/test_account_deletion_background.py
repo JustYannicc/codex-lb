@@ -592,6 +592,39 @@ async def test_legacy_replica_replacement_supersedes_mid_drain(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_legacy_replacement_with_empty_refresh_token_supersedes(db_setup):
+    """A legal replacement may carry an empty refresh token while providing
+    fresh access/id material; a refresh-only wipe check would mistake it for
+    the original wipe and finalize the freshly replaced account."""
+    encryptor = TokenEncryptor()
+    await _seed_account("acc_bg_legacy_er", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_legacy_er")
+    assert await _run_one_detach_chunk("acc_bg_legacy_er", batch_size=10) == 1
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == "acc_bg_legacy_er")
+            .values(
+                access_token_encrypted=encryptor.encrypt("fresh-access"),
+                refresh_token_encrypted=encryptor.encrypt(""),
+                id_token_encrypted=encryptor.encrypt("fresh-id"),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+        await session.commit()
+
+    outcomes = await run_account_deletion_pass(batch_size=10)
+    assert outcomes == {"acc_bg_legacy_er": "superseded"}
+    row = await _account_row("acc_bg_legacy_er")
+    assert row is not None
+    assert row.delete_requested_at is None
+    assert encryptor.decrypt(row.access_token_encrypted) == "fresh-access"
+
+
+@pytest.mark.asyncio
 async def test_legacy_replica_replacement_before_finalize_is_abandoned(db_setup):
     encryptor = TokenEncryptor()
     await _seed_account("acc_bg_legacy_fin", log_count=1)

@@ -58,8 +58,12 @@ _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 ACCOUNT_PENDING_DELETION_REASON = "pending_deletion"
 
 
-def credentials_replaced_since_wipe(refresh_token_encrypted: bytes) -> bool:
-    """True when a marked account's refresh ciphertext is no longer the
+def credentials_replaced_since_wipe(
+    access_token_encrypted: bytes,
+    refresh_token_encrypted: bytes,
+    id_token_encrypted: bytes,
+) -> bool:
+    """True when a marked account's token ciphertext is no longer the
     empty-credential wipe stamped by :meth:`AccountsRepository.begin_delete`.
 
     New-code credential replacements clear the pending-deletion marker in the
@@ -67,14 +71,21 @@ def credentials_replaced_since_wipe(refresh_token_encrypted: bytes) -> bool:
     during a rolling deploy writes fresh ciphertext without knowing the
     marker columns. Fresh (non-wiped) credentials on a still-marked row are
     therefore themselves the supersede signal; the caller must clear the
-    marker and abandon the deletion. Undecryptable material also counts as
+    marker and abandon the deletion. ALL THREE token fields are inspected: a
+    legal replacement may carry an empty refresh token while providing fresh
+    access/id material, and mistaking it for the wipe would finalize a
+    freshly replaced account. Undecryptable material also counts as
     replaced — never finalize a row whose credentials we cannot attribute to
     our own wipe.
     """
-    try:
-        return TokenEncryptor().decrypt(refresh_token_encrypted) != ""
-    except Exception:
-        return True
+    encryptor = TokenEncryptor()
+    for ciphertext in (access_token_encrypted, refresh_token_encrypted, id_token_encrypted):
+        try:
+            if encryptor.decrypt(ciphertext) != "":
+                return True
+        except Exception:
+            return True
+    return False
 
 
 _UNSET = object()
@@ -970,7 +981,9 @@ class AccountsRepository:
                     else (
                         locked_account.delete_requested_at,
                         locked_account.delete_history_requested,
+                        locked_account.access_token_encrypted,
                         locked_account.refresh_token_encrypted,
+                        locked_account.id_token_encrypted,
                     )
                 )
             else:
@@ -979,7 +992,9 @@ class AccountsRepository:
                         select(
                             Account.delete_requested_at,
                             Account.delete_history_requested,
+                            Account.access_token_encrypted,
                             Account.refresh_token_encrypted,
+                            Account.id_token_encrypted,
                         ).where(Account.id == account_id)
                     )
                 ).first()
@@ -994,7 +1009,7 @@ class AccountsRepository:
                 if pending_state is None or pending_state[0] is None:
                     await self._session.rollback()
                     return False
-                if credentials_replaced_since_wipe(pending_state[2]):
+                if credentials_replaced_since_wipe(pending_state[2], pending_state[3], pending_state[4]):
                     # A pre-upgrade replica replaced the credentials without
                     # being able to clear marker columns its ORM does not
                     # know. That replacement supersedes the deletion: clear

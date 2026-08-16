@@ -82,18 +82,23 @@ same transaction before destroying them.
 The wipe doubles as the supersede signal for pre-upgrade replicas: a
 replacement handled by old code writes fresh ciphertext but cannot clear
 marker columns its ORM does not know. Every marker re-check (chunk and
-finalization) therefore also inspects the refresh ciphertext — non-wiped
-or undecryptable material on a marked row means a replacement happened, and
-the worker clears the marker itself (under the row lock) instead of
-draining further or finalizing. API-key assignment validation
+finalization) therefore also inspects ALL THREE token ciphertexts —
+non-wiped or undecryptable material in any field of a marked row means a
+replacement happened (a legal replacement may carry an empty refresh token
+while providing fresh access/id material, so a refresh-only check would
+finalize a freshly replaced account), and the worker clears the marker
+itself (under the row lock) instead of draining further or finalizing. API-key assignment validation
 (`ApiKeysRepository.list_accounts_by_ids`) likewise rejects marked
-accounts, and `replace_account_assignments` inserts through a conditional
-`INSERT … SELECT … WHERE delete_requested_at IS NULL` (with `FOR SHARE` on
-PostgreSQL, which conflicts with `begin_delete`'s row update) — so a key
-create/update whose validation raced the DELETE cannot recreate an
-assignment that would re-surface the account in key listings: either the
-insert commits first and `begin_delete`'s assignment cleanup removes it, or
-the marker is visible to the insert and the account is skipped.
+accounts, and `replace_account_assignments` locks the target account rows (`FOR SHARE`
+on PostgreSQL, which conflicts with `begin_delete`'s row update) BEFORE
+touching any assignment row — the same account-then-assignment order
+`begin_delete` uses, so the race serializes instead of deadlocking — and
+then inserts through a conditional `INSERT … SELECT … WHERE
+delete_requested_at IS NULL`. A key create/update whose validation raced
+the DELETE therefore cannot recreate an assignment that would re-surface
+the account in key listings: either it commits first and `begin_delete`'s
+assignment cleanup removes its rows, or the marker is visible to the
+insert and the account is skipped.
 
 ### D2: The account row is the queue (no new table)
 

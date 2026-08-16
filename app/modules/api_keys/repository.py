@@ -441,25 +441,30 @@ class ApiKeysRepository:
         return await self.get_limits_by_key(key_id)
 
     async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+        # Re-check the pending-deletion marker atomically with the write:
+        # validation ran in an earlier transaction, and an account DELETE can
+        # commit in between — the marked row still exists (background drain),
+        # so a plain FK insert would succeed and resurrect an assignment
+        # begin_delete just removed. The FOR SHARE lock (PostgreSQL)
+        # conflicts with begin_delete's row update, so either this
+        # transaction commits first (and begin_delete's assignment cleanup
+        # removes its rows) or the marker is visible below and the account is
+        # skipped. The account locks are taken BEFORE the assignment-row
+        # delete to match begin_delete's order (account row, then assignment
+        # rows) — taking them after would form a lock cycle with a
+        # concurrent begin_delete and deadlock. SQLite serializes writers,
+        # so the marker predicate alone is race-free there.
+        if account_ids and self._session.get_bind().dialect.name == "postgresql":
+            await self._session.execute(
+                select(Account.id).where(Account.id.in_(account_ids)).with_for_update(read=True)
+            )
         await self._session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.api_key_id == key_id))
         if account_ids:
-            # Re-check the pending-deletion marker atomically with the
-            # insert: validation ran in an earlier transaction, and an
-            # account DELETE can commit in between — the marked row still
-            # exists (background drain), so a plain FK insert would succeed
-            # and resurrect an assignment begin_delete just removed. The
-            # FOR SHARE lock (PostgreSQL) conflicts with begin_delete's row
-            # update, so either this insert commits first (and begin_delete's
-            # assignment cleanup removes it) or the marker is visible here
-            # and the account is skipped. SQLite serializes writers, so the
-            # marker predicate alone is race-free there.
             assignment_source = (
                 select(literal(key_id), Account.id)
                 .where(Account.id.in_(account_ids))
                 .where(Account.delete_requested_at.is_(None))
             )
-            if self._session.get_bind().dialect.name == "postgresql":
-                assignment_source = assignment_source.with_for_update(read=True)
             await self._session.execute(
                 insert(ApiKeyAccountAssignment).from_select(["api_key_id", "account_id"], assignment_source)
             )

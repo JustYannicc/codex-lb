@@ -214,14 +214,16 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
     stmt = select(
         Account.delete_requested_at,
         Account.delete_history_requested,
+        Account.access_token_encrypted,
         Account.refresh_token_encrypted,
+        Account.id_token_encrypted,
     ).where(Account.id == account_id)
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(key_share=True)
     row = (await session.execute(stmt)).first()
     if row is None or row[0] is None:
         return None
-    if credentials_replaced_since_wipe(row[2]):
+    if credentials_replaced_since_wipe(row[2], row[3], row[4]):
         await session.execute(
             update(Account)
             .where(Account.id == account_id)

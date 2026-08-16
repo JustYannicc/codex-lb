@@ -43,9 +43,11 @@ Marked accounts MUST be rejected by API-key account-assignment validation
 and excluded from API-key pooled-usage projections, and assignment
 insertion MUST re-check the marker atomically with the write (a conditional
 insert; on PostgreSQL additionally serialized against the delete mark by a
-`FOR SHARE` lock on the account rows), so an assignment created or updated
-after — or racing — the DELETE cannot re-surface the account in key
-listings before finalization.
+`FOR SHARE` lock on the account rows, acquired BEFORE any assignment-row
+mutation so the lock order matches the delete path's account-then-assignment
+order and the race serializes instead of deadlocking), so an assignment
+created or updated after — or racing — the DELETE cannot re-surface the
+account in key listings before finalization.
 
 #### Scenario: Delete responds without draining rows
 
@@ -198,9 +200,11 @@ superseded account is never finalized (rows already drained stay detached).
 A credential replacement handled by a pre-upgrade replica during a rolling
 deploy writes fresh credentials but cannot clear marker columns unknown to
 its ORM. The worker MUST therefore treat non-wiped (or undecryptable)
-credential ciphertext on a marked row as a credential replacement: it MUST
-clear the marker itself under the account row lock and abandon the deletion
-without mutating any further rows.
+ciphertext in ANY of the access/refresh/id token fields of a marked row as
+a credential replacement (a legal replacement may carry an empty refresh
+token while providing fresh access/id material): it MUST clear the marker
+itself under the account row lock and abandon the deletion without mutating
+any further rows.
 
 #### Scenario: Restart resumes a partial drain
 
