@@ -24,13 +24,45 @@ _QUEUE_SIZE = 512
 _WRITE_MIN_INTERVAL_SECONDS = 5.0
 _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS = 5.0
 
-# Weak ownership registry of every task any ingestor instance creates
-# (consumer and trailing cache invalidation). Weak references never extend a
-# task's lifetime; the registry exists so an owner that loses track of a task
-# (a stop cancelled mid-await) still leaves an auditable handle for the test
-# suite's leak fence to cancel pending tasks and consume exceptions from dead
-# ones before they cross a test boundary (issue #1755).
+# Ownership accounting for every task any ingestor instance creates (consumer
+# and trailing cache invalidation), so a task an owner lost track of (a stop
+# cancelled mid-await) can never end in a silently dropped exception:
+#
+# - `_owned_tasks` holds weak references (they never extend task lifetime) so
+#   the test suite's leak fence can cancel pending tasks and settle completed
+#   ones that some reference chain kept alive across a test boundary.
+# - `_record_owned_task_result` runs as each task's done callback: it
+#   retrieves the exception (so the loop's unobserved-task warning can never
+#   fire at garbage-collection time), logs it, and records it in the bounded
+#   `_owned_task_failures` strong handoff for the fence to drain (#1755).
+#
+# `_settled_owned_tasks` (also weak) marks tasks whose result was already
+# recorded, so the done callback and the fence's sweep of completed tasks
+# settle each task exactly once even when both observe it.
 _owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
+_settled_owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
+_owned_task_failures: list[tuple[str, BaseException]] = []
+_MAX_OWNED_TASK_FAILURES = 16
+
+
+def _record_owned_task_result(task: asyncio.Task[None]) -> None:
+    if task in _settled_owned_tasks:
+        return
+    _settled_owned_tasks.add(task)
+    _owned_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    logger.error("Live usage ingestor task %r died unexpectedly", task.get_name(), exc_info=exc)
+    if len(_owned_task_failures) < _MAX_OWNED_TASK_FAILURES:
+        _owned_task_failures.append((task.get_name(), exc))
+
+
+def _enroll_owned_task(task: asyncio.Task[None]) -> None:
+    _owned_tasks.add(task)
+    task.add_done_callback(_record_owned_task_result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +137,7 @@ class LiveUsageIngestor:
     def start(self) -> None:
         if self._consumer is None or self._consumer.done():
             self._consumer = asyncio.create_task(self._run(), name="live-usage-ingestor")
-            _owned_tasks.add(self._consumer)
+            _enroll_owned_task(self._consumer)
 
     async def stop(self) -> None:
         consumer = self._consumer
@@ -227,7 +259,7 @@ class LiveUsageIngestor:
                 self._trailing_invalidate(remaining),
                 name="live-usage-trailing-invalidation",
             )
-            _owned_tasks.add(self._trailing_invalidation)
+            _enroll_owned_task(self._trailing_invalidation)
 
     async def _trailing_invalidate(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)

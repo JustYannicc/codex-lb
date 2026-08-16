@@ -455,34 +455,32 @@ async def _reap_leaked_live_usage_ingestor() -> None:
         try:
             await task
         except (Exception, asyncio.CancelledError):
-            # Reported by _consume_dead_live_ingest_task_failures.
+            # Settled and reported by _drain_live_ingest_task_failures.
             continue
 
 
-def _consume_dead_live_ingest_task_failures() -> list[str]:
-    """Retrieve exceptions from dead ingestor-owned tasks, loop-free.
+def _drain_live_ingest_task_failures() -> list[str]:
+    """Collect failures from dead ingestor-owned tasks, loop-free.
 
     ``asyncio.all_tasks`` only returns unfinished tasks, so a leaked task that
     already died with an exception is invisible to the pending sweep; its
-    unretrieved exception would fire the loop exception handler when the task
-    object is garbage-collected inside a LATER test (test_proxy_utils'
-    startup-probe assertions capture exactly that). Walk the ingestor's weak
-    ownership registry instead: ``Task.exception()`` both returns the failure
-    for attribution at the test that leaked it and marks it retrieved so no
-    unobserved-task warning can fire later.
+    unretrieved exception would otherwise fire the loop exception handler when
+    the task object is garbage-collected inside a LATER test (test_proxy_utils'
+    startup-probe assertions capture exactly that). live_ingest's done
+    callback normally settles each task the moment it completes (retrieving
+    the exception into the strong ``_owned_task_failures`` handoff); the sweep
+    over the weak registry here additionally settles tasks whose callback is
+    still queued because the task finished in the loop's final iteration.
+    Settlement is gated by live_ingest's settled-task registry, so each task
+    is reported exactly once even when both paths observe it.
     """
     from app.modules.usage import live_ingest
 
-    failures: list[str] = []
     for task in list(live_ingest._owned_tasks):
-        if not task.done():
-            continue
-        live_ingest._owned_tasks.discard(task)
-        if task.cancelled():
-            continue
-        exc = task.exception()
-        if exc is not None:
-            failures.append(f"{task.get_name()!r} died with {exc!r}")
+        if task.done():
+            live_ingest._record_owned_task_result(task)
+    failures = [f"{name!r} died with {exc!r}" for name, exc in live_ingest._owned_task_failures]
+    live_ingest._owned_task_failures.clear()
     return failures
 
 
@@ -526,7 +524,7 @@ def _stop_leaked_live_usage_ingestor():
     )
     if needs_reap and loop_usable and loop is not None:
         loop.run_until_complete(_reap_leaked_live_usage_ingestor())
-    failures = _consume_dead_live_ingest_task_failures()
+    failures = _drain_live_ingest_task_failures()
     if failures:
         pytest.fail(
             "test leaked a live-usage ingestor whose task(s) already failed: " + "; ".join(failures),

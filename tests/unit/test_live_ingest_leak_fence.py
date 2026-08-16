@@ -9,7 +9,7 @@ cancelled before its shutdown path reaches ``stop_live_usage_ingestor()``
 otel lifespan-drain test and test_proxy_utils' startup-probe loop-exception
 assertions.
 
-The two tests below are ORDER-DEPENDENT by design (pytest runs them in
+The first two tests are ORDER-DEPENDENT by design (pytest runs them in
 definition order): the first reproduces the leak by starting the ingestor
 singleton exactly like the app lifespan does and deliberately never stopping
 it; the second asserts the autouse ``_stop_leaked_live_usage_ingestor`` fence
@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+
+import pytest
 
 from app.core.usage import live_hub
 from app.modules.usage import live_ingest
@@ -50,35 +52,35 @@ async def test_fence_reclaims_leaked_consumer_at_test_boundary() -> None:
     assert live_hub._publisher is None
 
 
-async def test_reap_consumes_and_reports_already_failed_consumer() -> None:
+async def test_reap_settles_and_reports_already_failed_consumer(monkeypatch: pytest.MonkeyPatch) -> None:
     # A leaked consumer can already be dead with an exception by the time the
     # fence runs (#1755 observed RuntimeError('cannot reuse already awaited
     # coroutine')). The fence must retrieve that exception — so it neither
     # crashes mid-cleanup nor resurfaces later as an unobserved-task loop
-    # exception in an unrelated test — and report it for attribution.
+    # exception in an unrelated test — and report it exactly once even though
+    # both the done callback and the fence sweep observe the dead task.
     from tests import conftest as suite_conftest
 
-    async def _boom() -> None:
+    async def _boom(self: live_ingest.LiveUsageIngestor) -> None:
         raise RuntimeError("cannot reuse already awaited coroutine")
 
-    task = asyncio.create_task(_boom(), name="live-usage-ingestor")
-    await asyncio.sleep(0)
-    assert task.done()
-
+    monkeypatch.setattr(live_ingest.LiveUsageIngestor, "_run", _boom)
     ingestor = live_ingest.LiveUsageIngestor(queue_size=1, write_min_interval_seconds=0.0)
-    ingestor._consumer = task
+    ingestor.start()
     live_ingest._ingestor = ingestor
     live_hub.register_live_usage_publisher(ingestor.publish)
+    await asyncio.sleep(0)
+    assert ingestor._consumer is not None and ingestor._consumer.done()
 
     await suite_conftest._reap_leaked_live_usage_ingestor()
-    failures = suite_conftest._consume_dead_live_ingest_task_failures()
+    failures = suite_conftest._drain_live_ingest_task_failures()
 
     assert failures == ["'live-usage-ingestor' died with RuntimeError('cannot reuse already awaited coroutine')"]
     assert live_ingest._ingestor is None
     assert live_hub._publisher is None
     assert _pending_ingestor_tasks() == []
-    # Retrieval is idempotent: a second pass reports nothing.
-    assert suite_conftest._consume_dead_live_ingest_task_failures() == []
+    # Settlement is exactly-once: a second pass reports nothing.
+    assert suite_conftest._drain_live_ingest_task_failures() == []
 
 
 async def test_reap_sweeps_orphaned_tasks_not_tracked_by_singleton() -> None:
@@ -100,36 +102,65 @@ async def test_reap_sweeps_orphaned_tasks_not_tracked_by_singleton() -> None:
 
     assert consumer.cancelled()
     assert trailing.cancelled()
-    assert suite_conftest._consume_dead_live_ingest_task_failures() == []
+    assert suite_conftest._drain_live_ingest_task_failures() == []
     assert suite_conftest._pending_live_ingest_tasks(asyncio.get_running_loop()) == []
 
 
-async def test_dead_detached_owned_task_exception_is_consumed_without_the_loop() -> None:
+async def test_dead_detached_owned_task_failure_is_recorded_and_drained_loop_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # An ingestor-owned task can die with an exception after the singleton and
     # its task fields are already cleared. asyncio.all_tasks() only returns
-    # unfinished tasks, so the pending sweep cannot see it — the weak
-    # ownership registry in live_ingest must still surface (and retrieve) the
-    # failure, and must do so without running the event loop.
+    # unfinished tasks, so the pending sweep cannot see it — the done callback
+    # installed at task creation must have already retrieved the exception
+    # into the strong failure handoff, which the fence drains without running
+    # the event loop.
     from tests import conftest as suite_conftest
 
-    async def _boom() -> None:
+    async def _boom(self: live_ingest.LiveUsageIngestor) -> None:
         raise RuntimeError("late detached failure")
 
-    task = asyncio.create_task(_boom(), name="live-usage-trailing-invalidation")
-    live_ingest._owned_tasks.add(task)
+    monkeypatch.setattr(live_ingest.LiveUsageIngestor, "_run", _boom)
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=1, write_min_interval_seconds=0.0)
+    ingestor.start()
     await asyncio.sleep(0)
-    assert task.done()
+    await asyncio.sleep(0)  # let the done callback run
+    ingestor._consumer = None  # fully detach: no owner, no pending task
+    del ingestor
     assert live_ingest._ingestor is None
     assert live_hub._publisher is None
     assert suite_conftest._pending_live_ingest_tasks(asyncio.get_running_loop()) == []
 
-    failures = suite_conftest._consume_dead_live_ingest_task_failures()
+    failures = suite_conftest._drain_live_ingest_task_failures()
 
-    assert failures == ["'live-usage-trailing-invalidation' died with RuntimeError('late detached failure')"]
-    assert suite_conftest._consume_dead_live_ingest_task_failures() == []
+    assert failures == ["'live-usage-ingestor' died with RuntimeError('late detached failure')"]
+    assert suite_conftest._drain_live_ingest_task_failures() == []
 
 
-async def test_ingestor_registers_its_tasks_in_the_ownership_registry() -> None:
+async def test_drain_settles_dead_task_whose_done_callback_has_not_run() -> None:
+    # A task that finishes in the loop's final iteration can still have its
+    # done callback queued when the sync fence runs; the drain's sweep over
+    # the weak ownership registry must settle it directly, and the callback
+    # running later must not report it a second time.
+    from tests import conftest as suite_conftest
+
+    async def _boom() -> None:
+        raise RuntimeError("callback still queued")
+
+    task = asyncio.create_task(_boom(), name="live-usage-trailing-invalidation")
+    live_ingest._owned_tasks.add(task)  # enrolled, but callback never attached
+    await asyncio.sleep(0)
+    assert task.done()
+
+    failures = suite_conftest._drain_live_ingest_task_failures()
+    assert failures == ["'live-usage-trailing-invalidation' died with RuntimeError('callback still queued')"]
+
+    # The (simulated late) callback observes an already-settled task.
+    live_ingest._record_owned_task_result(task)
+    assert suite_conftest._drain_live_ingest_task_failures() == []
+
+
+async def test_ingestor_enrolls_both_task_types_in_the_ownership_registry() -> None:
     # The registry only protects tests if production task creation actually
     # enrolls both task types.
     ingestor = live_ingest.LiveUsageIngestor(queue_size=1, write_min_interval_seconds=0.0)
