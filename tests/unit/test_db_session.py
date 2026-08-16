@@ -738,7 +738,7 @@ async def test_init_background_db_derives_postgres_pool_size_from_main_pool() ->
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
         assert isinstance(pool, NullPool)
     else:
-        assert cast(Any, pool).size() == 15
+        assert cast(Any, pool).size() == 25
 
     if session_module._background_engine is not None:
         await session_module._background_engine.dispose()
