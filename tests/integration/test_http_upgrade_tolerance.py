@@ -278,6 +278,40 @@ async def test_websocket_handshake_with_repeated_connection_fields_switches_prot
     assert transport.protocol is not None
 
 
+async def test_websocket_handshake_with_multiple_upgrade_tokens_reaches_the_websocket_stack() -> None:
+    """``Upgrade: websocket, h2c`` must be classified as a WebSocket handshake.
+
+    The ``Upgrade`` field is a comma-separated protocol list (RFC 9110
+    section 7.8) and the server may pick any offered protocol it supports.
+    Matching the raw field value against ``websocket`` would misclassify the
+    handshake as an ignorable offer and answer it *as the application* over
+    plain HTTP/1.1 (with the WebSocket headers stripped from the scope). The
+    handshake verdict belongs to the WebSocket stack: uvicorn's default
+    ``websockets`` implementation currently rejects multi-token ``Upgrade``
+    values with 426, other implementations may complete the 101.
+    """
+    handshake = (
+        b"GET /ws HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Upgrade: websocket, h2c\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n"
+        b"\r\n"
+    )
+    protocol, transport = _make_protocol(UpgradeTolerantHttpToolsProtocol)
+
+    protocol.data_received(handshake)
+
+    async with asyncio.timeout(5.0):
+        while b"\r\n\r\n" not in transport.buffer:
+            await asyncio.sleep(0.01)
+    status_line = bytes(transport.buffer).split(b"\r\n", 1)[0]
+    assert status_line in (b"HTTP/1.1 101 Switching Protocols", b"HTTP/1.1 426 Upgrade Required"), status_line
+    # The connection was handed off to the WebSocket protocol, not the app.
+    assert transport.protocol is not None
+
+
 async def test_live_v1_responses_route_serves_split_h2c_offer(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #1757's exact product path: split-written h2c POST to /v1/responses.
 

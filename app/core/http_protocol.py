@@ -29,24 +29,31 @@ UPGRADE_HOP_BY_HOP_HEADERS = frozenset({b"upgrade", b"http2-settings"})
 
 
 def combined_upgrade_offer(headers: list[tuple[bytes, bytes]]) -> bytes | None:
-    """Return the offered ``Upgrade`` token, honoring repeated ``Connection`` fields.
+    """Return the accepted ``Upgrade`` token, honoring repeated/list-valued fields.
 
     Unlike uvicorn's ``_get_upgrade`` — which keeps only the tokens of the
-    *last* ``Connection`` field, so ``Connection: Upgrade`` followed by
-    ``Connection: keep-alive`` hides the offer — repeated fields are combined
-    per RFC 9110 section 5.3. Header names must already be lowercased (both
-    uvicorn implementations store them that way).
+    *last* ``Connection`` field (so ``Connection: Upgrade`` followed by
+    ``Connection: keep-alive`` hides the offer) and the last ``Upgrade``
+    field's raw value (so ``Upgrade: websocket, h2c`` matches nothing) —
+    repeated fields are combined per RFC 9110 section 5.3 and the ``Upgrade``
+    protocol list is tokenized per section 7.8. ``websocket`` is returned
+    whenever it is among the offered protocols (the server may pick any
+    offered protocol it supports); otherwise the client's first preference is
+    returned. Header names must already be lowercased (both uvicorn
+    implementations store them that way).
     """
     connection_tokens: list[bytes] = []
-    upgrade: bytes | None = None
+    upgrade_tokens: list[bytes] = []
     for name, value in headers:
         if name == b"connection":
             connection_tokens.extend(token.lower().strip() for token in value.split(b","))
         elif name == b"upgrade":
-            upgrade = value.lower()
-    if b"upgrade" in connection_tokens:
-        return upgrade
-    return None
+            upgrade_tokens.extend(token for token in (token.lower().strip() for token in value.split(b",")) if token)
+    if b"upgrade" not in connection_tokens or not upgrade_tokens:
+        return None
+    if b"websocket" in upgrade_tokens:
+        return b"websocket"
+    return upgrade_tokens[0]
 
 
 def offers_ignorable_upgrade(headers: list[tuple[bytes, bytes]]) -> bool:
