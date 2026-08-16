@@ -35,7 +35,7 @@ seconds while healthy pool siblings idle (issue #1754).
 
 # Capabilities
 
-### Modified Capabilities
+## Modified Capabilities
 
 - `responses-api-compat`: HTTP bridge abrupt eventless upstream drops must
   stay account-neutral for per-drop health writes while repeated drops still
