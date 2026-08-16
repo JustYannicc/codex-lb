@@ -44,6 +44,18 @@ client input, using the shared retained-prior-output rule anchored at the last a
 message. Histories those gates cannot prove — including delta-shaped inputs without retained
 assistant output and transcripts without fresh follow-up input — stay owner-bound.
 
+This transcript-shape rule is the evidence ceiling of this scope: completeness relative to the
+anchored conversation is not provable from the payload alone, and the durable prefix metadata
+that could prove it is deliberately not consulted here (per the maintainer rescope of the
+original change, which excluded durable-bridge plumbing from this recovery). A delta resend
+that itself carries a completed assistant exchange ahead of the fresh input is therefore
+indistinguishable from a full resend and MAY be recovered as the client's authoritative local
+history — the same trust the shared account-neutral fresh-replay rules already grant a normal
+turn that abandons an unavailable owner. Clients that resend partial histories under a
+previous-response anchor accept summarization over that partial history when the owner is
+quota-lost; the alternative surface is the current hard failure until the owner's quota
+window resets.
+
 For an eligible recovery, the proxy MUST remove `previous_response_id` from the upstream
 compact payload, strip downstream session/turn affinity aliases from the upstream-bound
 headers, exclude the unavailable owner account from the remaining attempts, and reselect among

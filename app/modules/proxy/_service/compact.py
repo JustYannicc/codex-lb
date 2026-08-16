@@ -515,6 +515,16 @@ def _compact_replay_history_retains_prior_output(input_items: list[JsonValue]) -
     The split is anchored at the last assistant message so the shared suffix
     walk proves exactly that segment; anything it cannot prove stays
     owner-bound.
+
+    This is the evidence ceiling of the #1490 rescope: completeness relative to
+    the anchored conversation is not provable from the payload alone, and the
+    durable prefix metadata that could prove it is deliberately not consulted
+    here. A delta resend that itself carries a completed assistant exchange
+    ahead of the fresh input is indistinguishable from a full resend and is
+    recovered as the client's authoritative local history — the same trust the
+    shared account-neutral fresh-replay rules already grant a normal turn that
+    abandons an unavailable owner. The rejected shapes below are the ones the
+    transcript walk can actually refute.
     """
 
     last_assistant_index: int | None = None
