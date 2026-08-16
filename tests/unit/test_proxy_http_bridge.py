@@ -26882,6 +26882,122 @@ async def test_http_bridge_non_clean_close_frame_before_response_still_penalizes
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_synthetic_1006_close_stays_account_neutral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aiohttp reports an abnormal socket loss as CLOSED with the synthesized
+    reserved code 1006 (never sent in an actual close frame): it is the same
+    frame-less eventless drop and must stay account-neutral (issue #1754)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-1006-drop",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="bridge-1006-drop",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1006)),
+            close=AsyncMock(),
+        ),
+    )
+    fail_pending = AsyncMock(return_value=True)
+    retire = AsyncMock()
+    drop_signals: list[dict[str, object]] = []
+
+    async def record_signal(
+        target_service: object,
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> None:
+        drop_signals.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_record_http_bridge_account_timeout_signal",
+        record_signal,
+    )
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["penalize_account"] is False
+    assert drop_signals == [{"detail": "eventless_transport_drop"}]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_abrupt_drop_after_buffered_reasoning_prelude_still_penalizes_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A buffered reasoning prelude is deliberately excluded from
+    response_event_count, but it is application-layer output: a following
+    frame-less drop is not eventless and keeps the account penalty."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reasoning-prelude-drop",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    request_state.upstream_model_output_seen = True
+    assert request_state.response_event_count == 0
+    session = _make_bridge_session(
+        key_value="bridge-reasoning-prelude-drop",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="error", error="upstream reset")),
+            close=AsyncMock(),
+        ),
+    )
+    fail_pending = AsyncMock(return_value=True)
+    retire = AsyncMock()
+    drop_signals: list[dict[str, object]] = []
+
+    async def record_signal(
+        target_service: object,
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> None:
+        drop_signals.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_record_http_bridge_account_timeout_signal",
+        record_signal,
+    )
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["penalize_account"] is True
+    assert drop_signals == []
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_protocol_invalid_binary_frame_still_penalizes_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

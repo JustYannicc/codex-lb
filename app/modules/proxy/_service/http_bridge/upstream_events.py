@@ -1502,6 +1502,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
                     )
+                    # Buffered reasoning preludes are suppressed from
+                    # response_event_count on purpose, but they are still
+                    # application-layer output: a drop after one is not an
+                    # eventless drop for account-health purposes.
+                    upstream_output_observed = any(
+                        getattr(request_state, "upstream_model_output_seen", False)
+                        for request_state in session.pending_requests
+                    )
                     reader_failure_retry_circuit_attempt_selection = (
                         _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                             tuple(session.pending_requests)
@@ -1537,6 +1545,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 account_neutral_transport_drop = (
                     message.kind in ("close", "error")
                     and not account_neutral
+                    and not upstream_output_observed
                     and _is_account_neutral_transport_drop(
                         message.close_code, response_events_seen=response_events_seen
                     )

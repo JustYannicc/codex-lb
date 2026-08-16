@@ -13,19 +13,23 @@ seconds while healthy pool siblings idle (issue #1754).
 # What Changes
 
 - Classify an abrupt upstream websocket ending — a terminal close or receive
-  error with no close frame, no established account-neutral transport
-  classification, and zero response events — as account-neutral in the HTTP
-  bridge reader failure path: no `record_error` health write for the
-  individual drop.
-- Keep the existing penalty when any close frame arrived (including
-  non-clean codes such as 1008/1011), when response events were already
-  streamed, or when a non-terminal protocol-invalid frame (for example a
-  binary message) triggered the failure, and keep all established
+  error with no upstream-authored close frame (the synthetic abnormal-closure
+  code 1006 counts as frame-less), no established account-neutral transport
+  classification, and no observed application-layer output — as
+  account-neutral in the HTTP bridge reader failure path: no `record_error`
+  health write for the individual drop.
+- Keep the existing penalty when an upstream-authored close frame arrived
+  (including non-clean codes such as 1008/1011), when application-layer
+  output was already observed (streamed response events or a buffered
+  reasoning prelude), or when a non-terminal protocol-invalid frame (for
+  example a binary message) triggered the failure, and keep all established
   account-neutral transport codes on their existing contract.
-- Feed account-neutral eventless drops into the existing windowed eventless
-  account drain signal so repeated drops on the same account still drain it
-  (same threshold/window as repeated eventless upstream timeouts), keeping
-  genuine account faults visible.
+- Feed account-neutral eventless drops that settle their pending requests as
+  failures into the existing windowed eventless account drain signal so
+  repeated drops on the same account still drain it (same threshold/window
+  as repeated eventless upstream timeouts), keeping genuine account faults
+  visible. Drops recovered by the bounded pre-created replay keep their
+  existing behavior.
 - The per-bridge retry circuit continues to record the failure at bridge
   scope, unchanged.
 

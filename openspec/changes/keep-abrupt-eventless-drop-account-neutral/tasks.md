@@ -19,7 +19,11 @@
   penalizes.
 - [x] 2.5 Assert a non-terminal protocol-invalid binary frame still penalizes
   and records no drop signal.
-- [x] 2.6 Helper unit coverage for `_is_account_neutral_transport_drop`.
+- [x] 2.6 Assert the synthetic abnormal-closure code 1006 counts as
+  frame-less and stays account-neutral.
+- [x] 2.7 Assert a drop after a buffered reasoning prelude (output observed,
+  zero response events) still penalizes.
+- [x] 2.8 Helper unit coverage for `_is_account_neutral_transport_drop`.
 
 ## 3. Validation
 

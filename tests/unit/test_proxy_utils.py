@@ -39947,6 +39947,10 @@ def test_account_neutral_transport_drop_requires_no_close_frame_and_no_response_
     assert proxy_service._is_account_neutral_transport_drop(1000, response_events_seen=0) is False
     assert proxy_service._is_account_neutral_transport_drop(1008, response_events_seen=0) is False
     assert proxy_service._is_account_neutral_transport_drop(1011, response_events_seen=0) is False
+    # RFC 6455 reserves 1006: it never travels in an actual close frame, so a
+    # synthesized abnormal-closure code counts as frame-less.
+    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=0) is True
+    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=1) is False
 
 
 @pytest.mark.asyncio

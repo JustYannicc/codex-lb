@@ -492,9 +492,14 @@ def _is_account_neutral_transport_drop(
     pool siblings idle (issue #1754). Any close frame — even a non-clean one —
     is upstream-authored evidence and keeps the existing penalty semantics, as
     does a drop after response events started streaming.
+
+    Close code 1006 (abnormal closure) is reserved by RFC 6455 and can never
+    appear in an actual close frame: adapters synthesize it locally when the
+    socket dies without one (aiohttp stores 1006 on ``close_code`` for an
+    abnormal CLOSED), so it counts as frame-less here.
     """
 
-    return close_code is None and response_events_seen == 0
+    return close_code in (None, 1006) and response_events_seen == 0
 
 
 def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:
