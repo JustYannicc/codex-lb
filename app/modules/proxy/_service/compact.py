@@ -571,8 +571,14 @@ def _compact_account_neutral_replay_payload(
     conversation/prompt handles, or hosted/MCP state can reach the replacement
     account.
 
-    Neutrality is checked on the serialized upstream-bound payload, never on
-    the request model, and the serialized history must additionally be a
+    Neutrality is checked on the serialized upstream-bound payload
+    (``to_payload``), never on the request model, matching how the HTTP bridge
+    replay paths apply the shared gate to pre-transport serializations. The
+    compact transport applies two further mutations after this serialization —
+    the Responses-Lite ``reasoning.context`` control and inline image
+    fetching — both proxy-injected, account-agnostic, and applied identically
+    to the owner send and the replay send, so they are not part of the client
+    payload being proven. The serialized history must additionally be a
     complete resend. ``to_payload`` can still drop history on the wire: it
     strips poisoned local-compact fallback messages together with their
     trailing encrypted compaction item, and it trims oversized inputs down to a

@@ -30,8 +30,14 @@ continuity-rebind machinery, so anything that would need rebinding stays owner-b
 Prompt-cache and sticky-thread locality keys are advisory cache locality that ordinary sticky
 selection already falls back from and do not block recovery.
 
-Local verification MUST run against the exact upstream-bound compact payload without
-`previous_response_id`, after every wire transformation the compact serializer applies. It
+Local verification MUST run against the exact serialized upstream-bound compact payload
+without `previous_response_id`, after every transformation the compact serializer applies.
+Transport-stage mutations that follow that serialization are outside the client payload being
+proven and MUST be limited to proxy-injected, account-agnostic controls that are applied
+identically to the owner send and the replay send (the Responses-Lite
+`reasoning.context` control and inline image fetching); they carry no client or account
+state, so the shared account-neutral rules — which the HTTP bridge replay paths likewise
+apply to pre-transport serializations — retain their meaning. It
 MUST require that serialized `input` to be a list of more than one item that is item-for-item
 identical to the validated request `input`, so that no request whose wire history is dropped
 or trimmed — including single-item collapse and oversized-input trim markers — is ever
