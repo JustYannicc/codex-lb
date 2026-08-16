@@ -4560,3 +4560,82 @@ async def test_api_key_fair_share_concurrent_sticky_selections_cannot_overshoot_
     # The commit re-check kept heavy at exactly its share across both paths.
     heavy_total = sum((runtime.stream_key_inflight or {}).get("heavy", 0) for runtime in balancer._runtime.values())
     assert heavy_total == 2
+
+
+@pytest.mark.asyncio
+async def test_fresh_same_owner_retention_skips_refresh_write_on_probe_admission() -> None:
+    """The recovery-probe admission path honors the refresh-skip deadline the
+    same way the non-probe persist site does: a fresh same-owner retention of
+    a due-probing pinned owner issues no sticky write."""
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-skip-healthy")
+    probing = _make_account("acc-probe-skip-probing")
+    key = "probe-skip-session"
+
+    def _build(sticky_repo: _StubStickySessionsRepository) -> LoadBalancer:
+        accounts_repo = _StubAccountsRepository([healthy, probing])
+        usage_repo = _StubUsageRepository(
+            primary={
+                healthy.id: _usage_row_with_percent(
+                    150,
+                    healthy.id,
+                    used_percent=30.0,
+                    reset_at=now_epoch + 300,
+                ),
+                probing.id: _usage_row_with_percent(
+                    151,
+                    probing.id,
+                    used_percent=10.0,
+                    reset_at=now_epoch + 300,
+                ),
+            },
+            secondary={},
+        )
+        balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+        balancer._runtime[probing.id] = RuntimeState(
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=0.0,
+            version=17,
+        )
+        return balancer
+
+    # Control: without a freshness observation the probe admission persists
+    # the retention write, proving this scenario exercises the probe branch.
+    control_repo = _StubStickySessionsRepository()
+    control_repo.account_ids_by_key = {key: probing.id}
+    control_balancer = _build(control_repo)
+    control = await control_balancer.select_account(
+        sticky_key=key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert control.account is not None
+    assert control.account.id == probing.id
+    assert control_repo.upserts == [(key, probing.id, StickySessionKind.PROMPT_CACHE)]
+    await control_balancer.release_account_lease(control.lease)
+
+    skip_repo = _StubStickySessionsRepository()
+    skip_repo.account_ids_by_key = {key: probing.id}
+    skip_repo.refresh_skip_deadlines_by_key[key] = datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=10
+    )
+    skip_balancer = _build(skip_repo)
+    selected = await skip_balancer.select_account(
+        sticky_key=key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert skip_repo.upserts == []
+    assert skip_repo.deleted == []
+    # The probe reservation itself still committed: runtime advanced.
+    probing_runtime = skip_balancer._runtime[probing.id]
+    assert probing_runtime.version > 17
+    assert probing_runtime.last_selected_at is not None
+    assert probing_runtime.last_selected_at > 0.0
+    await skip_balancer.release_account_lease(selected.lease)

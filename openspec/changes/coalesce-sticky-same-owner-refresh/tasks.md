@@ -18,8 +18,11 @@
       re-resolves the owner itself, and when the process seed is still missing
       (seed initialization piggybacks on the retention write)
 - [x] 2.2 Revalidate the deadline at the persist site (`_sticky_refresh_write_skippable`)
-      and only then omit the same-owner refresh statement; rebinds, deletes,
-      restores, and seed-initializing writes keep writing immediately
+      and only then omit the same-owner refresh statement — on both the non-probe
+      persist path and the recovery-probe admission path (whose compensating
+      restores are skipped symmetrically when nothing was written); rebinds,
+      deletes, restores of actually-written rows, and seed-initializing writes
+      keep writing immediately
 
 ## 3. Verification
 
@@ -30,7 +33,9 @@
       deadlines
 - [x] 3.2 Balancer-level tests: fresh same-owner retention issues no write when the
       seed exists, a fresh thread row with a missing seed still writes and initializes
-      the seed, an expired deadline writes through
+      the seed, an expired deadline writes through, and a fresh retention of a
+      due-probing pinned owner skips the write on the probe admission path while
+      the probe reservation still commits
 - [x] 3.3 Integration tests: deadline conditions against the real repository (fresh
       row, TTL-scaled window, marker disqualification, future timestamp, no-TTL
       lookup), concurrent upserts on one `(key, kind)` keep RETURNING/self-write and

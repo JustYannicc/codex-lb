@@ -938,25 +938,35 @@ async def run_sticky_selection_path(
             assert sticky_kind is not None
             sticky_mutation = sticky_outcome.mutation
             assert sticky_mutation is not None
-            try:
-                async with owner._repo_factory() as repos:
-                    # A recovery-probe reservation is still reversible until
-                    # the runtime CAS below succeeds. Persist its thread row so
-                    # existing rollback machinery can restore it, but do not
-                    # publish an immutable process seed that cannot be safely
-                    # deleted after a concurrent sibling observes it.
-                    await _persist_sticky_mutation(
-                        sticky_repo=repos.sticky_sessions,
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        mutation=sticky_mutation,
-                    )
-            except BaseException:
-                await owner.release_account_lease(selected_lease)
-                selected_lease = None
-                async with owner._runtime_lock:
-                    owner._release_due_probe_reservation_locked(probe_reservation)
-                raise
+            # A pure same-owner freshness rewrite may be omitted here exactly
+            # as on the non-probe path below (the row already holds this
+            # owner, so the rollback restores become no-ops and are skipped
+            # symmetrically). The probe path deliberately never initializes a
+            # seed, so only the deadline gates the skip.
+            probe_refresh_write_skipped = _sticky_refresh_write_skippable(
+                sticky_mutation,
+                initialize_seed_key=None,
+            )
+            if not probe_refresh_write_skipped:
+                try:
+                    async with owner._repo_factory() as repos:
+                        # A recovery-probe reservation is still reversible until
+                        # the runtime CAS below succeeds. Persist its thread row so
+                        # existing rollback machinery can restore it, but do not
+                        # publish an immutable process seed that cannot be safely
+                        # deleted after a concurrent sibling observes it.
+                        await _persist_sticky_mutation(
+                            sticky_repo=repos.sticky_sessions,
+                            sticky_key=sticky_key,
+                            sticky_kind=sticky_kind,
+                            mutation=sticky_mutation,
+                        )
+                except BaseException:
+                    await owner.release_account_lease(selected_lease)
+                    selected_lease = None
+                    async with owner._runtime_lock:
+                        owner._release_due_probe_reservation_locked(probe_reservation)
+                    raise
             try:
                 async with owner._runtime_lock:
                     assert probe_reservation is not None
@@ -974,14 +984,15 @@ async def run_sticky_selection_path(
                 selected_lease = None
                 async with owner._runtime_lock:
                     owner._release_due_probe_reservation_locked(probe_reservation)
-                async with owner._repo_factory() as repos:
-                    await _restore_sticky_mutation(
-                        sticky_repo=repos.sticky_sessions,
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        expected_account_id=sticky_mutation.account_id,
-                        sticky_existing_account_id=sticky_existing_account_id,
-                    )
+                if not probe_refresh_write_skipped:
+                    async with owner._repo_factory() as repos:
+                        await _restore_sticky_mutation(
+                            sticky_repo=repos.sticky_sessions,
+                            sticky_key=sticky_key,
+                            sticky_kind=sticky_kind,
+                            expected_account_id=sticky_mutation.account_id,
+                            sticky_existing_account_id=sticky_existing_account_id,
+                        )
                 raise
             if not reservation_committed:
                 # Runtime health changed while account-state persistence
@@ -991,14 +1002,15 @@ async def run_sticky_selection_path(
                 # runtime snapshot.
                 await owner.release_account_lease(selected_lease)
                 selected_lease = None
-                async with owner._repo_factory() as repos:
-                    await _restore_sticky_mutation(
-                        sticky_repo=repos.sticky_sessions,
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        expected_account_id=sticky_mutation.account_id,
-                        sticky_existing_account_id=sticky_existing_account_id,
-                    )
+                if not probe_refresh_write_skipped:
+                    async with owner._repo_factory() as repos:
+                        await _restore_sticky_mutation(
+                            sticky_repo=repos.sticky_sessions,
+                            sticky_key=sticky_key,
+                            sticky_kind=sticky_kind,
+                            expected_account_id=sticky_mutation.account_id,
+                            sticky_existing_account_id=sticky_existing_account_id,
+                        )
                 selected_snapshot = None
                 error_message = None
                 selected_states = []
