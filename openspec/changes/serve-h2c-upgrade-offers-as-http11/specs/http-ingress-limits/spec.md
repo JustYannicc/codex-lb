@@ -45,6 +45,12 @@ protocol switch.
 - **THEN** a subsequent plain HTTP/1.1 request on the same connection is
   served normally
 
+#### Scenario: Pipelined offers in one segment do not exhaust the server
+
+- **WHEN** a single TCP segment pipelines many upgrade-offering requests
+- **THEN** every request is served as plain HTTP/1.1 without the per-offer
+  replay growing the call stack or aborting the connection
+
 #### Scenario: WebSocket upgrades still switch protocols
 
 - **WHEN** a client requests a WebSocket upgrade (`Upgrade: websocket`)

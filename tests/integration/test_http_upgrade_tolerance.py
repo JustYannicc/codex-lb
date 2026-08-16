@@ -87,7 +87,7 @@ class _FakeTransport(asyncio.Transport):
         self.closed = False
         self.protocol: asyncio.BaseProtocol | None = None
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes | bytearray | memoryview) -> None:
         self.buffer.extend(data)
 
     def is_closing(self) -> bool:
@@ -213,6 +213,28 @@ async def test_h2c_offer_with_repeated_connection_fields_is_served_as_http11() -
     assert "http2-settings" not in payload["header_names"]
     # The unrelated keep-alive token survives the sanitization.
     assert "connection" in payload["header_names"]
+
+
+async def test_pipelined_h2c_offers_in_one_segment_do_not_exhaust_the_stack() -> None:
+    """Many pipelined upgrade offers in one segment must not recurse per offer.
+
+    Each declined offer replays the remaining bytes through a fresh parser.
+    Done recursively that was one stack frame per pipelined request, so a
+    single ~66KB segment of minimal h2c GETs (well under asyncio's 256KiB
+    per-read buffer) raised RecursionError out of ``data_received``, aborting
+    the connection — and pinned an O(depth x segment) pile of byte copies
+    while unwinding. The replay must be iterative.
+    """
+    request = b"GET /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+    count = 2000  # ~148KB, double the depth that overflows the default 1000-frame stack
+    protocol, transport = _make_protocol(UpgradeTolerantHttpToolsProtocol)
+
+    protocol.data_received(request * count)  # raised RecursionError when replay was recursive
+
+    async with asyncio.timeout(30.0):
+        while transport.buffer.count(b"HTTP/1.1 200 OK") < count:
+            await asyncio.sleep(0.05)
+    assert not transport.closed
 
 
 async def test_h11_fallback_serves_h2c_offer_and_hides_upgrade_headers() -> None:

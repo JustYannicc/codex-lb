@@ -83,22 +83,32 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
         # HttpParserUpgrade exception itself.
         self._unset_keepalive_if_required()
 
-        try:
-            self._active_parser().feed_data(data)
-        except httptools.HttpParserError:
-            msg = "Invalid HTTP request received."
-            self.logger.warning(msg)
-            self.send_400_response(msg)
-        except httptools.HttpParserUpgrade as exc:
-            if self._should_upgrade():
-                self.handle_websocket_upgrade()
-            elif offers_ignorable_upgrade(self.headers):
-                self._continue_as_plain_http(data, exc)
-            else:
-                self._unsupported_upgrade_warning()
+        # Replay declined offers iteratively, not recursively: a single
+        # segment can pipeline many upgrade-offering requests (one replay
+        # each), so recursion depth would be attacker-controlled — ~66KB of
+        # minimal h2c GETs already exceeds Python's default 1000-frame limit,
+        # and the RecursionError would escape into the event loop and abort
+        # the connection. Each replay strips at least one declined offer from
+        # ``data``, so the loop terminates.
+        while True:
+            try:
+                self._active_parser().feed_data(data)
+            except httptools.HttpParserError:
+                msg = "Invalid HTTP request received."
+                self.logger.warning(msg)
+                self.send_400_response(msg)
+            except httptools.HttpParserUpgrade as exc:
+                if self._should_upgrade():
+                    self.handle_websocket_upgrade()
+                elif offers_ignorable_upgrade(self.headers):
+                    data = self._continue_as_plain_http(data, exc)
+                    continue
+                else:
+                    self._unsupported_upgrade_warning()
+            return
 
-    def _continue_as_plain_http(self, data: bytes, exc: httptools.HttpParserUpgrade) -> None:
-        """Decline the offered protocol switch and serve the request as HTTP/1.1."""
+    def _continue_as_plain_http(self, data: bytes, exc: httptools.HttpParserUpgrade) -> bytes:
+        """Decline the offered protocol switch; return the bytes to re-feed as HTTP/1.1."""
         self.logger.debug(
             "Ignoring unsupported upgrade offer; serving the request as plain HTTP/1.1.",
         )
@@ -112,12 +122,13 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
             self.parser.set_dangerous_leniencies(lenient_data_after_close=True)
         except AttributeError:  # pragma: no cover - httptools < 0.6.3
             pass
-        # Recurse with the rebuilt request. The sanitized head no longer
-        # carries upgrade headers, so this parse cannot raise
-        # HttpParserUpgrade again; malformed leftover bytes keep the stock 400
+        # The sanitized head no longer carries upgrade headers, so re-feeding
+        # it cannot pause the fresh parser on the same offer (a *pipelined*
+        # follow-up offer pauses again and takes another loop iteration in
+        # data_received); malformed leftover bytes keep the stock 400
         # handling. Later segments of a split request feed the fresh parser
         # through the normal data_received path.
-        self.data_received(head + data[offset:])
+        return head + data[offset:]
 
     def _sanitized_request_head(self) -> bytes:
         """Rebuild the parsed request head without the declined upgrade offer.

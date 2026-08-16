@@ -10,6 +10,10 @@
 - [x] 1.3 Classify upgrade offers by combining repeated `Connection` fields
       (RFC 9110 §5.3) so a second `Connection: keep-alive` field cannot hide
       the offer and reproduce the body loss.
+- [x] 1.4 Replay declined offers iteratively (loop in `data_received`) rather
+      than recursively, so a segment pipelining many upgrade-offering requests
+      cannot drive attacker-controlled recursion depth (RecursionError
+      escaping into the event loop) or pin per-frame byte copies.
 
 ## 2. Validation
 
@@ -20,5 +24,8 @@
 - [x] 2.2 Add a live-server regression over real sockets using the production
       protocol wiring, including a real WebSocket upgrade that must keep
       completing, plus a canary pinning the stock uvicorn defect.
-- [x] 2.3 Run focused tests, lint, type checks, and strict OpenSpec
+- [x] 2.3 Add a regression pipelining 2000 h2c offers in one segment: all are
+      served and the connection survives (raised RecursionError when the
+      replay was recursive).
+- [x] 2.4 Run focused tests, lint, type checks, and strict OpenSpec
       validation.

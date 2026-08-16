@@ -275,7 +275,7 @@ def test_load_http_protocol_class_falls_back_to_h11_without_httptools(
 
     real_import = builtins.__import__
 
-    def fail_httptools_import(name: str, *args: object, **kwargs: object) -> object:
+    def fail_httptools_import(name: str, *args: Any, **kwargs: Any) -> object:
         if name in {"httptools", "app.core.http_protocol_httptools"}:
             raise ImportError(name)
         return real_import(name, *args, **kwargs)
