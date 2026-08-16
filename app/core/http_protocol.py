@@ -1,145 +1,100 @@
-"""Uvicorn HTTP protocol that tolerates opportunistic non-WebSocket upgrade offers.
+"""Uvicorn HTTP protocol selection tolerant of opportunistic upgrade offers.
 
-Uvicorn's ``auto`` HTTP implementation picks the ``httptools`` parser whenever
-the ``httptools`` package is importable (it is, transitively via
-``fastapi[standard]``). That parser treats *any* HTTP/1.1 request carrying
-``Connection: Upgrade`` as a protocol switch: httptools raises
-``HttpParserUpgrade`` at the end of the headers, never delivers the body, and
-uvicorn only handles the WebSocket case. For every other ``Upgrade`` offer —
-most notably the cleartext HTTP/2 (``h2c``) offer JetBrains/Ktor clients attach
-to ordinary Responses API POSTs — uvicorn logs "Unsupported upgrade request."
-and stops feeding the parser. Two failure shapes follow:
+JetBrains/Ktor clients attach cleartext HTTP/2 upgrade headers
+(``Connection: Upgrade, HTTP2-Settings`` + ``Upgrade: h2c`` +
+``HTTP2-Settings``) to ordinary HTTP/1.1 Responses API POSTs. RFC 9110
+section 7.8 lets a server ignore such an offer and answer over HTTP/1.1 —
+upstream OpenAI endpoints do exactly that — but uvicorn's stock protocol
+implementations either wedge on the offer (httptools) or leak the declined
+offer's hop-by-hop headers into the ASGI scope (h11). See
+https://github.com/Soju06/codex-lb/issues/1757 and the module docstring of
+``app.core.http_protocol_httptools`` for the full failure analysis.
 
-- body coalesced with the headers: the body is silently dropped, so the
-  application sees an empty body (422 from request validation);
-- headers and body written as separate segments (Ktor's write pattern): the
-  next bytes hit the wedged parser, ``HttpParserError`` follows, and the client
-  receives ``400 Bad Request / Invalid HTTP request received.``
-
-RFC 9110 section 7.8 lets a server ignore an upgrade offer and answer over
-HTTP/1.1 — upstream OpenAI endpoints do exactly that. This subclass neutralizes
-non-WebSocket upgrade offers: the request head is replayed through a fresh
-parser with the declined offer's hop-by-hop headers removed, and the request is
-served as plain HTTP/1.1. Legitimate WebSocket upgrades keep the stock path.
-
-See https://github.com/Soju06/codex-lb/issues/1757.
+This module exposes :func:`load_http_protocol_class`, which returns the
+tolerant httptools subclass when httptools is importable (matching uvicorn's
+``auto`` preference) and an h11 subclass with the same header hygiene
+otherwise.
 """
 
 from __future__ import annotations
 
-import httptools
-from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
+import asyncio
+
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 # Hop-by-hop headers that only exist to carry the declined protocol switch.
 # ``HTTP2-Settings`` is defined exclusively for the h2c upgrade (RFC 9113
 # section 3.1) and MUST NOT be forwarded once the offer is declined.
-_UPGRADE_HOP_BY_HOP_HEADERS = frozenset({b"upgrade", b"http2-settings"})
+UPGRADE_HOP_BY_HOP_HEADERS = frozenset({b"upgrade", b"http2-settings"})
 
 
-class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
-    """httptools protocol that serves non-WebSocket upgrade offers as HTTP/1.1."""
+def combined_upgrade_offer(headers: list[tuple[bytes, bytes]]) -> bytes | None:
+    """Return the offered ``Upgrade`` token, honoring repeated ``Connection`` fields.
 
-    def _active_parser(self) -> httptools.HttpRequestParser:
-        # The base class only clears ``self.parser`` in connection_lost, after
-        # which no parser callback or data_received can run.
-        parser = self.parser
-        assert parser is not None
-        return parser
+    Unlike uvicorn's ``_get_upgrade`` — which keeps only the tokens of the
+    *last* ``Connection`` field, so ``Connection: Upgrade`` followed by
+    ``Connection: keep-alive`` hides the offer — repeated fields are combined
+    per RFC 9110 section 5.3. Header names must already be lowercased (both
+    uvicorn implementations store them that way).
+    """
+    connection_tokens: list[bytes] = []
+    upgrade: bytes | None = None
+    for name, value in headers:
+        if name == b"connection":
+            connection_tokens.extend(token.lower().strip() for token in value.split(b","))
+        elif name == b"upgrade":
+            upgrade = value.lower()
+    if b"upgrade" in connection_tokens:
+        return upgrade
+    return None
 
-    def _offers_ignorable_upgrade(self) -> bool:
-        """True when the current request offers a non-WebSocket protocol switch."""
-        upgrade = self._get_upgrade()
-        return upgrade is not None and upgrade != b"websocket"
 
-    def _paused_on_ignorable_upgrade(self) -> bool:
-        return self._active_parser().should_upgrade() and self._offers_ignorable_upgrade()
+def offers_ignorable_upgrade(headers: list[tuple[bytes, bytes]]) -> bool:
+    """True when the request offers a non-WebSocket protocol switch (e.g. h2c)."""
+    upgrade = combined_upgrade_offer(headers)
+    return upgrade is not None and upgrade != b"websocket"
 
-    # -- Parser callbacks --------------------------------------------------
-    # For an upgrade-offering request httptools fires on_headers_complete and
-    # on_message_complete *before* feed_data raises HttpParserUpgrade, and it
-    # never delivers the body. The stock callbacks would therefore start the
-    # ASGI cycle with an empty-but-complete body. Defer instead: data_received
-    # replays the sanitized request through a fresh parser, and these callbacks
-    # then run with ``should_upgrade()`` false.
 
-    def on_headers_complete(self) -> None:
-        if self._paused_on_ignorable_upgrade():
-            return
-        super().on_headers_complete()
-
-    def on_body(self, body: bytes) -> None:
-        if self._paused_on_ignorable_upgrade():
-            return
-        super().on_body(body)
-
-    def on_message_complete(self) -> None:
-        if self._paused_on_ignorable_upgrade():
-            return
-        super().on_message_complete()
-
-    def data_received(self, data: bytes) -> None:
-        # Mirrors HttpToolsProtocol.data_received; the upgrade branch cannot be
-        # intercepted from outside because the stock method swallows the
-        # HttpParserUpgrade exception itself.
-        self._unset_keepalive_if_required()
-
-        try:
-            self._active_parser().feed_data(data)
-        except httptools.HttpParserError:
-            msg = "Invalid HTTP request received."
-            self.logger.warning(msg)
-            self.send_400_response(msg)
-        except httptools.HttpParserUpgrade as exc:
-            if self._should_upgrade():
-                self.handle_websocket_upgrade()
-            elif self._offers_ignorable_upgrade():
-                self._continue_as_plain_http(data, exc)
-            else:
-                self._unsupported_upgrade_warning()
-
-    def _continue_as_plain_http(self, data: bytes, exc: httptools.HttpParserUpgrade) -> None:
-        """Decline the offered protocol switch and serve the request as HTTP/1.1."""
-        self.logger.debug(
-            "Ignoring unsupported upgrade offer %r; serving the request as plain HTTP/1.1.",
-            self._get_upgrade(),
-        )
-        # httptools pauses at the end of the headers; the exception argument is
-        # the offset of the first unparsed byte in this segment (the body when
-        # it arrived coalesced with the headers).
-        offset = exc.args[0] if exc.args else len(data)
-        head = self._sanitized_request_head()
-        self.parser = httptools.HttpRequestParser(self)
-        try:
-            self.parser.set_dangerous_leniencies(lenient_data_after_close=True)
-        except AttributeError:  # pragma: no cover - httptools < 0.6.3
-            pass
-        # Recurse with the rebuilt request. The sanitized head no longer
-        # carries upgrade headers, so this parse cannot raise
-        # HttpParserUpgrade again; malformed leftover bytes keep the stock 400
-        # handling. Later segments of a split request feed the fresh parser
-        # through the normal data_received path.
-        self.data_received(head + data[offset:])
-
-    def _sanitized_request_head(self) -> bytes:
-        """Rebuild the parsed request head without the declined upgrade offer.
-
-        ``self.url`` and ``self.headers`` were accumulated by the parser
-        callbacks of the aborted parse (header names already lowercased), so
-        the head is complete even when the client split it across segments.
-        """
-        parser = self._active_parser()
-        method = parser.get_method()
-        http_version = parser.get_http_version().encode("ascii")
-        lines = [b"%s %s HTTP/%s\r\n" % (method, self.url, http_version)]
-        for name, value in self.headers:
-            if name in _UPGRADE_HOP_BY_HOP_HEADERS:
+def without_upgrade_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    """Drop the declined offer's hop-by-hop headers and ``Connection`` tokens."""
+    sanitized: list[tuple[bytes, bytes]] = []
+    for name, value in headers:
+        if name in UPGRADE_HOP_BY_HOP_HEADERS:
+            continue
+        if name == b"connection":
+            tokens = [token.strip() for token in value.split(b",")]
+            kept = [token for token in tokens if token and token.lower() not in UPGRADE_HOP_BY_HOP_HEADERS]
+            if not kept:
                 continue
-            if name == b"connection":
-                tokens = [token.strip() for token in value.split(b",")]
-                kept = [token for token in tokens if token and token.lower() not in _UPGRADE_HOP_BY_HOP_HEADERS]
-                if not kept:
-                    continue
-                value = b", ".join(kept)
-            lines.append(b"%s: %s\r\n" % (name, value))
-        lines.append(b"\r\n")
-        return b"".join(lines)
+            value = b", ".join(kept)
+        sanitized.append((name, value))
+    return sanitized
+
+
+class UpgradeTolerantH11Protocol(H11Protocol):
+    """h11 protocol that hides declined non-WebSocket upgrade offers from the app.
+
+    The stock h11 implementation already serves such requests as plain
+    HTTP/1.1 with the full body, but it exposes the declined offer's
+    hop-by-hop headers in the ASGI scope and logs a spurious
+    "Unsupported upgrade request." warning. ``_should_upgrade`` is the seam:
+    it runs right after ``self.headers`` (the same list object referenced by
+    ``scope["headers"]``) is populated, so sanitizing in place here is enough.
+    """
+
+    def _should_upgrade(self) -> bool:
+        if offers_ignorable_upgrade(self.headers):
+            self.headers[:] = without_upgrade_headers(self.headers)
+            return False
+        return super()._should_upgrade()
+
+
+def load_http_protocol_class() -> type[asyncio.Protocol]:
+    """Return the HTTP protocol implementation for ``uvicorn.Config(http=...)``."""
+    try:
+        from app.core.http_protocol_httptools import UpgradeTolerantHttpToolsProtocol
+    except ImportError:
+        # httptools is an optional (transitive) dependency; uvicorn's "auto"
+        # selection would fall back to h11 as well.
+        return UpgradeTolerantH11Protocol
+    return UpgradeTolerantHttpToolsProtocol

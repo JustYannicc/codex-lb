@@ -253,7 +253,7 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
 
     cli._run_server("app.main:app", host="127.0.0.1", port=2455)
 
-    from app.core.http_protocol import UpgradeTolerantHttpToolsProtocol
+    from app.core.http_protocol_httptools import UpgradeTolerantHttpToolsProtocol
 
     assert captured["config_args"] == ("app.main:app",)
     assert captured["config_kwargs"] == {
@@ -268,20 +268,22 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
     assert captured["ran"] is True
 
 
-def test_load_http_protocol_class_falls_back_to_auto_without_httptools(
+def test_load_http_protocol_class_falls_back_to_h11_without_httptools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.core.http_protocol import UpgradeTolerantH11Protocol
+
     real_import = builtins.__import__
 
     def fail_httptools_import(name: str, *args: object, **kwargs: object) -> object:
-        if name == "httptools" or name.startswith("app.core.http_protocol"):
+        if name in {"httptools", "app.core.http_protocol_httptools"}:
             raise ImportError(name)
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.delitem(sys.modules, "app.core.http_protocol", raising=False)
+    monkeypatch.delitem(sys.modules, "app.core.http_protocol_httptools", raising=False)
     monkeypatch.setattr(builtins, "__import__", fail_httptools_import)
 
-    assert cli._load_http_protocol_class() == "auto"
+    assert cli._load_http_protocol_class() is UpgradeTolerantH11Protocol
 
 
 def test_run_server_pins_one_worker_despite_ambient_web_concurrency(

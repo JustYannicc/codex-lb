@@ -36,6 +36,8 @@ offer and answer over HTTP/1.1, which is what upstream OpenAI endpoints do.
 
 ## Impact
 
-`app/cli.py` server bootstrap and a new `app/core/http_protocol.py` uvicorn
-protocol subclass, plus transport-level regression coverage. No dashboard,
-API, schema, or configuration change.
+`app/cli.py` server bootstrap and new `app/core/http_protocol.py` /
+`app/core/http_protocol_httptools.py` uvicorn protocol subclasses (the h11
+variant covers the httptools-less fallback with the same header hygiene), plus
+transport-level regression coverage. No dashboard, API, schema, or
+configuration change.

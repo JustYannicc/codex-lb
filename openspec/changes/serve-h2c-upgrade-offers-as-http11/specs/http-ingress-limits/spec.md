@@ -30,6 +30,14 @@ protocol switch.
 - **THEN** the application receives the complete request body
 - **AND** the server does not answer `400 Bad Request` at the protocol layer
 
+#### Scenario: Repeated Connection fields do not hide the offer
+
+- **WHEN** the h2c offer arrives with `Connection: Upgrade, HTTP2-Settings`
+  followed by a second `Connection: keep-alive` field
+- **THEN** the application receives the complete request body
+- **AND** the surviving `Connection` tokens (such as `keep-alive`) are
+  preserved while the upgrade tokens are removed
+
 #### Scenario: Connection stays usable after a declined offer
 
 - **WHEN** a request with a declined h2c offer completes on a keep-alive

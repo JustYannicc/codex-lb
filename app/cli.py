@@ -126,14 +126,9 @@ def _load_graceful_drain_server():
 
 
 def _load_http_protocol_class() -> Any:
-    try:
-        from app.core.http_protocol import UpgradeTolerantHttpToolsProtocol
-    except ImportError:
-        # Without httptools uvicorn's "auto" selection falls back to the
-        # pure-Python h11 implementation, which already serves non-WebSocket
-        # upgrade offers (h2c) as plain HTTP/1.1.
-        return "auto"
-    return UpgradeTolerantHttpToolsProtocol
+    from app.core.http_protocol import load_http_protocol_class
+
+    return load_http_protocol_class()
 
 
 def _load_shutdown_drain_timeout_seconds() -> int:

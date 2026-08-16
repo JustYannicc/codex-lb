@@ -29,7 +29,8 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from uvicorn.server import ServerState
 
 from app.cli import _load_http_protocol_class
-from app.core.http_protocol import UpgradeTolerantHttpToolsProtocol
+from app.core.http_protocol import UpgradeTolerantH11Protocol
+from app.core.http_protocol_httptools import UpgradeTolerantHttpToolsProtocol
 
 pytestmark = pytest.mark.integration
 
@@ -115,7 +116,7 @@ class _FakeTransport(asyncio.Transport):
         return default
 
 
-def _make_protocol(protocol_class: type[HttpToolsProtocol]) -> tuple[HttpToolsProtocol, _FakeTransport]:
+def _make_protocol(protocol_class: type[Any]) -> tuple[Any, _FakeTransport]:
     config = uvicorn.Config(app=_echo_app, lifespan="off")
     config.load()
     protocol = protocol_class(config=config, server_state=ServerState(), app_state={})
@@ -178,6 +179,57 @@ async def test_h2c_offer_keeps_connection_reusable_for_next_request() -> None:
     raw_response = await _wait_for_response(transport)
     assert raw_response.startswith(b"HTTP/1.1 200 OK"), raw_response
     assert _parse_json_body(raw_response)["echo"] == "hi"
+
+
+async def test_h2c_offer_with_repeated_connection_fields_is_served_as_http11() -> None:
+    """Repeated ``Connection`` fields must be combined when classifying the offer.
+
+    uvicorn's ``_get_upgrade`` keeps only the tokens of the last ``Connection``
+    field, so ``Connection: Upgrade`` followed by ``Connection: keep-alive``
+    would hide the offer and reproduce the original body loss.
+    """
+    head = (
+        b"POST /echo HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Connection: Upgrade, HTTP2-Settings\r\n"
+        b"Upgrade: h2c\r\n"
+        b"HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n"
+        b"Connection: keep-alive\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(_BODY)).encode() + b"\r\n"
+        b"\r\n"
+    )
+    protocol, transport = _make_protocol(UpgradeTolerantHttpToolsProtocol)
+
+    protocol.data_received(head)
+    await asyncio.sleep(0.01)
+    protocol.data_received(_BODY)
+
+    raw_response = await _wait_for_response(transport)
+    assert raw_response.startswith(b"HTTP/1.1 200 OK"), raw_response
+    payload = _parse_json_body(raw_response)
+    assert payload["echo"] == _BODY.decode()
+    assert "upgrade" not in payload["header_names"]
+    assert "http2-settings" not in payload["header_names"]
+    # The unrelated keep-alive token survives the sanitization.
+    assert "connection" in payload["header_names"]
+
+
+async def test_h11_fallback_serves_h2c_offer_and_hides_upgrade_headers() -> None:
+    """The httptools-less fallback keeps the body and the header hygiene."""
+    protocol, transport = _make_protocol(UpgradeTolerantH11Protocol)
+
+    protocol.data_received(_H2C_HEAD)
+    await asyncio.sleep(0.01)
+    protocol.data_received(_BODY)
+
+    raw_response = await _wait_for_response(transport)
+    assert raw_response.startswith(b"HTTP/1.1 200 OK"), raw_response
+    payload = _parse_json_body(raw_response)
+    assert payload["echo"] == _BODY.decode()
+    assert "upgrade" not in payload["header_names"]
+    assert "http2-settings" not in payload["header_names"]
+    assert "connection" not in payload["header_names"]
 
 
 async def test_stock_httptools_protocol_still_breaks_on_h2c_offers() -> None:

@@ -4,8 +4,12 @@
       protocol: replay the request head without the declined offer's
       hop-by-hop headers and serve the request as plain HTTP/1.1.
 - [x] 1.2 Wire the tolerant protocol into the server bootstrap, falling back
-      to uvicorn's `auto` selection (h11 already behaves correctly) when
-      httptools is unavailable.
+      to an h11 subclass with the same header hygiene when httptools is
+      unavailable (stock h11 already delivers the body but exposes the
+      declined offer's headers).
+- [x] 1.3 Classify upgrade offers by combining repeated `Connection` fields
+      (RFC 9110 §5.3) so a second `Connection: keep-alive` field cannot hide
+      the offer and reproduce the body loss.
 
 ## 2. Validation
 
