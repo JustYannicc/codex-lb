@@ -139,10 +139,26 @@ The letter of the history-rewrite discipline in `usage_time_rollup.py`
 mirror or skip **in the same transaction**") is relaxed for this one path:
 mid-drain, folded buckets may still attribute to an account whose raw rows a
 chunk already detached. That intermediate state never double- or
-under-counts a read (folded side serves below-watermark, raw tail above) and
-is bounded by drain duration; the end state is byte-identical to the
-synchronous path. The module docstring of `deletion.py` documents this as
-the single sanctioned exception, converged by finalization.
+under-counts a read (folded side serves below-watermark, raw tail above;
+the watermark folds each raw row exactly once, and already-folded rows are
+never re-read), and on the deletion path it is bounded by drain duration:
+the end state is byte-identical to the synchronous path, with the module
+docstring of `deletion.py` documenting this as the single sanctioned
+exception, converged by finalization.
+
+When a supersede lands after a partial drain, finalization never runs and
+the divergence for rows drained before the supersede is the PERMANENT,
+intended end state: folded buckets keep attributing that traffic to the
+revived account (it is the account's true pre-delete history — nothing is
+added or inflated), while the raw rows stay detached (soft) or deleted
+(`delete_history`), exactly as the "rows already drained stay detached"
+trade-off promises. Reads stay consistent for the same reason as mid-drain:
+below-watermark reads are folded-only, drained rows below the watermark are
+never re-folded, and drained rows above the watermark fold once under the
+orphaned dimension. Reconciling instead (running the lifecycle mirrors at
+supersede time) was rejected: it would drag the fold lock and per-row delta
+mirroring into every credential-replacement path to "fix" attribution that
+is already historically correct.
 
 ### D4: Finalization reuses `AccountsRepository.delete()` with a marker guard
 
@@ -239,8 +255,13 @@ re-import) once the API returns. The spec states row purge is asynchronous.
   too); the account side is removed by the mirrors, and API-key folded sums
   keeping settled traffic is the documented behavior for folded history.
 - **Supersede after partial drain**: a re-import that lands mid-drain keeps
-  the account but its already-detached rows stay detached. Documented; the
-  operator asked for deletion first.
+  the account but its already-detached rows stay detached (and
+  already-deleted rows stay deleted), while folded buckets keep attributing
+  the pre-supersede-drained traffic to the revived account — permanently,
+  since finalization's mirrors never run. This is historically correct
+  attribution (the folded numbers pre-existed the delete), never double- or
+  under-counts a read (see D3), and is the documented consequence of the
+  operator asking for deletion first.
 - **Alembic head races**: the revision sits on the current single head;
   parallel PRs adding revisions require the usual head merge.
 

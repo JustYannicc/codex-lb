@@ -197,6 +197,14 @@ finalization transaction MUST re-check the marker under the account row lock
 rows, so no chunk commits row work after a replacement committed and a
 superseded account is never finalized (rows already drained stay detached).
 
+After a supersede that followed a partial drain, rows drained before the
+replacement keep their drained end state (detached under the soft variant,
+deleted under `delete_history`), and folded rollups keep attributing the
+pre-supersede-drained traffic to the revived account: it is the account's
+true pre-delete history, and reads MUST NOT double- or under-count as a
+result (below-watermark reads are folded-only; drained rows above the
+watermark fold exactly once, under the orphaned dimension).
+
 A credential replacement handled by a pre-upgrade replica during a rolling
 deploy writes fresh credentials but cannot clear marker columns unknown to
 its ORM. The worker MUST therefore treat non-wiped (or undecryptable)

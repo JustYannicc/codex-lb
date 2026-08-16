@@ -751,6 +751,46 @@ async def test_marked_account_cannot_be_assigned_to_api_key(async_client, db_set
 
 
 @pytest.mark.asyncio
+async def test_supersede_after_partial_drain_preserves_folded_attribution(db_setup):
+    """Rows drained before a supersede stay drained, and folded rollups keep
+    attributing that traffic to the revived account — with no double count
+    from later folds (drained below-watermark rows are never re-folded)."""
+    now = utcnow()
+    account_dimension = to_dimension("acc_bg_sfold")
+    await _seed_account("acc_bg_sfold", log_count=2, requested_at=now - timedelta(days=5))
+
+    # Fold the two rows under the account dimension first.
+    await run_fold_pass(now=now - timedelta(days=3))
+    await run_hourly_fold_pass(now=now - timedelta(days=3))
+    folded_before = sum(row.request_count for row in await _hourly_rows_for_dimension(account_dimension))
+    assert folded_before == 2
+
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_sfold")
+    # One chunk detaches both already-folded rows.
+    assert await _run_one_detach_chunk("acc_bg_sfold", batch_size=10) == 2
+
+    # Re-import supersedes before finalization ever runs.
+    async with SessionLocal() as session:
+        saved = await AccountsRepository(session).upsert(
+            _make_account("acc_bg_sfold", "acc_bg_sfold@example.com"), merge_by_email=True
+        )
+        assert saved.id == "acc_bg_sfold"
+    assert await run_account_deletion_pass(batch_size=10) == {}
+
+    # Folded attribution is the permanent end state: unchanged by later
+    # folds (no loss, no double count), while raw rows stay detached.
+    await run_fold_pass(now=now)
+    await run_hourly_fold_pass(now=now)
+    folded_after = sum(row.request_count for row in await _hourly_rows_for_dimension(account_dimension))
+    assert folded_after == folded_before
+    assert await _lifetime_rollup("acc_bg_sfold") is not None
+    logs = await _log_rows("acc_bg_sfold")
+    assert len(logs) == 2
+    assert all(row.account_id is None and row.deleted_at is not None for row in logs)
+
+
+@pytest.mark.asyncio
 async def test_supersede_between_drain_and_finalize_is_abandoned(db_setup):
     await _seed_account("acc_bg_race", log_count=2)
     async with SessionLocal() as session:
