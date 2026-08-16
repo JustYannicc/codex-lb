@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 import sqlite3
@@ -252,16 +253,35 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
 
     cli._run_server("app.main:app", host="127.0.0.1", port=2455)
 
+    from app.core.http_protocol import UpgradeTolerantHttpToolsProtocol
+
     assert captured["config_args"] == ("app.main:app",)
     assert captured["config_kwargs"] == {
         "host": "127.0.0.1",
         "port": 2455,
         "workers": 1,
+        "http": UpgradeTolerantHttpToolsProtocol,
         "timeout_graceful_shutdown": 17,
     }
     assert captured["drain_timeout_seconds"] == 17
     assert captured["loaded"] is True
     assert captured["ran"] is True
+
+
+def test_load_http_protocol_class_falls_back_to_auto_without_httptools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fail_httptools_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "httptools" or name.startswith("app.core.http_protocol"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "app.core.http_protocol", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fail_httptools_import)
+
+    assert cli._load_http_protocol_class() == "auto"
 
 
 def test_run_server_pins_one_worker_despite_ambient_web_concurrency(
