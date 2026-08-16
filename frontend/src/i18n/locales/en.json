@@ -1161,7 +1161,7 @@
   "settings.routing.paceSmoothing.label": "Pace gap average",
   "settings.routing.paceSmoothing.description": "Smooth the displayed weekly pace gap over recent quota samples.",
   "settings.routing.limitWarmup.label": "Limit warm-up",
-  "settings.routing.limitWarmup.description": "After an opted-in account's exhausted quota window resets, send one small probe request to confirm the account is usable before real traffic returns. Probes use the model and prompt below and consume a small amount of quota.",
+  "settings.routing.limitWarmup.description": "When an opted-in account's quota window is confirmed to have newly reset, send one small probe request to verify the account responds. Probes are real requests using the model and prompt below and consume a small amount of quota.",
   "settings.routing.limitWarmup.ariaLabel": "Enable limit warm-up",
   "settings.routing.limitWarmup.modelAria": "Warm-up model",
   "settings.routing.limitWarmup.cooldownAria": "Warm-up cooldown",

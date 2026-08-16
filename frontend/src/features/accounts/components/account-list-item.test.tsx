@@ -253,7 +253,14 @@ describe("AccountListItem", () => {
 
     render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
 
-    expect(screen.getByTitle(/Active is the account's displayed status/i)).toBeInTheDocument();
+    // The hint lives on the focusable row (accessible description for
+    // keyboard/screen-reader users) and on the badge for pointer hover.
+    const hints = screen.getAllByTitle(/Active is the account's displayed status/i);
+    expect(hints.length).toBeGreaterThan(0);
+    expect(screen.getByRole("button")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/Active is the account's displayed status/i),
+    );
   });
 
   it("omits the eligibility hint for non-active statuses", () => {
@@ -262,6 +269,7 @@ describe("AccountListItem", () => {
     render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
 
     expect(screen.queryByTitle(/Active is the account's displayed status/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button")).not.toHaveAttribute("title");
   });
 
   it("hides the reset-credit badge when badge display is disabled", () => {

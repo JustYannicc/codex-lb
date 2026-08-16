@@ -1161,7 +1161,7 @@
   "settings.routing.paceSmoothing.label": "节奏差距平均",
   "settings.routing.paceSmoothing.description": "用最近的配额样本平滑显示的周节奏差距。",
   "settings.routing.limitWarmup.label": "额度预热",
-  "settings.routing.limitWarmup.description": "已选择加入的账户在耗尽的配额窗口重置后，发送一条小型探测请求，在真实流量返回前确认账户可用。探测使用下方的模型与提示词，并会消耗少量配额。",
+  "settings.routing.limitWarmup.description": "当已选择加入的账户的配额窗口被确认刚刚重置时，发送一条小型探测请求以验证账户可正常响应。探测是使用下方模型与提示词的真实请求，会消耗少量配额。",
   "settings.routing.limitWarmup.ariaLabel": "启用额度预热",
   "settings.routing.limitWarmup.modelAria": "预热模型",
   "settings.routing.limitWarmup.cooldownAria": "预热冷却时间",

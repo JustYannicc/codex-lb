@@ -80,10 +80,15 @@ export function AccountListItem({
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
+  const statusEligibilityHint = status === "active" ? t("accounts.listItem.statusActiveHint") : undefined;
 
   return (
     <button
       type="button"
+      // Native title on the focusable row doubles as the accessible
+      // description, so keyboard and screen-reader users get the
+      // status-vs-eligibility hint without hovering the badge.
+      title={statusEligibilityHint}
       onClick={() => onSelect(account.accountId)}
       className={cn(
         "relative min-w-0 w-full rounded-lg px-3 py-2.5 text-left transition-colors",
@@ -119,10 +124,7 @@ export function AccountListItem({
             aria-label={t("accounts.actions.trustedAccess")}
           />
         ) : null}
-        <StatusBadge
-          status={status}
-          title={status === "active" ? t("accounts.listItem.statusActiveHint") : undefined}
-        />
+        <StatusBadge status={status} title={statusEligibilityHint} />
       </div>
       <div
         className={cn(

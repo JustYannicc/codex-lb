@@ -45,8 +45,8 @@ When enabled and several accounts are otherwise eligible, selection is restricte
 
 ### Limit warm-up
 
-Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account after its exhausted quota window is confirmed to have reset, so the account is proven usable before real traffic returns. It consumes a small amount of quota and respects a per-account cooldown. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
+Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
 ---
 
-*Spec: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing)*
+*Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

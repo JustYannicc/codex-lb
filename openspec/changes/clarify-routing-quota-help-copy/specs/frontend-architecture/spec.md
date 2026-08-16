@@ -38,7 +38,8 @@ equivalent percent remaining for a valid threshold value.
 The routing settings SHALL describe `Prefer earlier reset` as preferring
 otherwise-eligible accounts whose selected quota window resets sooner, and
 SHALL describe limit warm-up as sending one small probe request that consumes
-a small amount of quota after an opted-in account's exhausted window resets.
+a small amount of quota when an opted-in account's quota window is confirmed
+to have newly reset.
 
 #### Scenario: Prefer earlier reset help copy
 
@@ -49,8 +50,8 @@ a small amount of quota after an opted-in account's exhausted window resets.
 #### Scenario: Limit warm-up help copy
 
 - **WHEN** the routing settings section renders
-- **THEN** the limit warm-up description says a probe is sent after an opted-in account's exhausted quota window resets
-- **AND** it states that probes consume a small amount of quota
+- **THEN** the limit warm-up description says a probe is sent when an opted-in account's quota window is confirmed to have newly reset
+- **AND** it states that probes are real requests and consume a small amount of quota
 
 ### Requirement: Active status is presented as displayed status, not per-request eligibility
 
@@ -61,5 +62,6 @@ the displayed status does not guarantee per-request eligibility.
 
 - **GIVEN** an account whose status is `active`
 - **WHEN** its accounts-list entry renders
-- **THEN** the status badge carries a hint that individual requests can still skip the account
+- **THEN** the focusable account row and the status badge carry a hint that individual requests can still skip the account
+- **AND** the row hint is exposed as the row's accessible description for keyboard and screen-reader users
 - **AND** non-active statuses do not carry that hint

@@ -1155,7 +1155,7 @@
   "settings.routing.httpDownstream.policies.smart": "Session-aware",
   "settings.routing.limitWarmup.ariaLabel": "Limit warm-up 활성화",
   "settings.routing.limitWarmup.cooldownAria": "Warm-up cooldown",
-  "settings.routing.limitWarmup.description": "opt-in한 Account의 소진된 quota window가 reset되면, 실제 traffic이 돌아오기 전에 작은 probe 요청 1건을 보내 Account가 사용 가능한지 확인합니다. probe는 아래 model·prompt를 사용하며 소량의 quota를 소모합니다.",
+  "settings.routing.limitWarmup.description": "opt-in한 Account의 quota window가 새로 reset된 것이 확인되면, 작은 probe 요청 1건을 보내 Account가 응답하는지 확인합니다. probe는 아래 model·prompt를 사용하는 실제 요청이며 소량의 quota를 소모합니다.",
   "settings.routing.limitWarmup.label": "Limit warm-up",
   "settings.routing.limitWarmup.modelAria": "Warm-up model",
   "settings.routing.limitWarmup.promptAria": "Warm-up prompt",
