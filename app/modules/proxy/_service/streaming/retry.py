@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 from dataclasses import replace
-from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncGenerator, AsyncIterator, Mapping, TypeVar, cast
 
 import aiohttp
 
@@ -603,35 +603,45 @@ class _StreamingRetryMixin:
             settlement: _StreamSettlement,
             can_try_other_account: bool,
             tool_call_dedupe: _WebSocketUpstreamControl,
-        ) -> AsyncIterator[str]:
+        ) -> AsyncGenerator[str, None]:
             nonlocal last_transient_exc
             transient_retries = 0
 
-            async def _iter_stream_once() -> AsyncIterator[str]:
+            async def _iter_stream_once() -> AsyncGenerator[str, None]:
+                inner_stream = proxy._stream_once(
+                    account,
+                    payload,
+                    headers,
+                    request_id,
+                    False,
+                    request_started_at=start,
+                    allow_transient_retry=True,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    settlement=settlement,
+                    suppress_text_done_events=suppress_text_done_events,
+                    upstream_stream_transport=upstream_stream_transport,
+                    request_transport=request_transport,
+                    concurrency_caps=concurrency_caps,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
+                    conversation_id=conversation_id,
+                    client_ip=client_ip,
+                    tool_call_dedupe=tool_call_dedupe,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                )
                 try:
-                    async for line in proxy._stream_once(
-                        account,
-                        payload,
-                        headers,
-                        request_id,
-                        False,
-                        request_started_at=start,
-                        allow_transient_retry=True,
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        settlement=settlement,
-                        suppress_text_done_events=suppress_text_done_events,
-                        upstream_stream_transport=upstream_stream_transport,
-                        request_transport=request_transport,
-                        concurrency_caps=concurrency_caps,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
-                        conversation_id=conversation_id,
-                        client_ip=client_ip,
-                        tool_call_dedupe=tool_call_dedupe,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                    ):
-                        yield line
+                    try:
+                        async for line in inner_stream:
+                            yield line
+                    finally:
+                        close_task = asyncio.create_task(
+                            inner_stream.aclose(),
+                            name=f"stream-post-refresh-inner-close-{request_id}",
+                        )
+                        _, close_cancellation = await _await_task_deferring_cancellation(close_task)
+                        if close_cancellation is not None:
+                            raise close_cancellation
                 except ProxyResponseError as exc:
                     if is_confirmed_pre_dispatch_transport_error(exc):
                         # Keep dispatch provenance intact for the outer account
@@ -667,8 +677,28 @@ class _StreamingRetryMixin:
                     _facade()._remaining_budget_seconds(deadline)
                 )
                 try:
-                    async for line in _iter_stream_once():
-                        yield line
+                    attempt_stream = _iter_stream_once()
+                    try:
+                        try:
+                            async for line in attempt_stream:
+                                yield line
+                        finally:
+                            close_task = asyncio.create_task(
+                                attempt_stream.aclose(),
+                                name=f"stream-post-refresh-close-{request_id}",
+                            )
+                            _, close_cancellation = await _await_task_deferring_cancellation(close_task)
+                            if close_cancellation is not None:
+                                raise close_cancellation
+                    except (asyncio.CancelledError, GeneratorExit):
+                        # A terminal frame may already have been yielded when
+                        # downstream cancellation is delivered on the next
+                        # generator resume. Finalize that terminal usage and
+                        # health result before propagating cancellation so the
+                        # reservation is not released as abandoned.
+                        if settlement.status in {"success", "error"} and not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                        raise
                     network_recovery.log_recovered()
                     return
                 except _TerminalStreamError:
@@ -2540,13 +2570,27 @@ class _StreamingRetryMixin:
                                 and account.id != file_preferred_account_id
                                 and attempt < max_attempts - 1
                             )
-                            async for line in _stream_post_refresh_with_capacity_recovery(
+                            post_refresh_stream = _stream_post_refresh_with_capacity_recovery(
                                 account,
                                 settlement=settlement,
                                 can_try_other_account=can_try_other_account,
                                 tool_call_dedupe=tool_call_dedupe,
-                            ):
-                                yield line
+                            )
+                            try:
+                                async for line in post_refresh_stream:
+                                    yield line
+                            finally:
+                                # Closing this generator runs its internal
+                                # cancellation-safe close/terminal finalization;
+                                # without an owned aclose() the child would stay
+                                # suspended after a downstream disconnect.
+                                close_task = asyncio.create_task(
+                                    post_refresh_stream.aclose(),
+                                    name=f"stream-post-refresh-outer-close-{request_id}",
+                                )
+                                _, close_cancellation = await _await_task_deferring_cancellation(close_task)
+                                if close_cancellation is not None:
+                                    raise close_cancellation
                         except ProxyResponseError as retry_exc:
                             if _facade()._is_proxy_budget_exhausted_error(retry_exc):
                                 await _settle_process_network_budget_exhaustion(account, settlement)
