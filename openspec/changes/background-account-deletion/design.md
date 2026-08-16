@@ -21,8 +21,9 @@ HTTP client timeout on the DELETE call.
 
 - DELETE API returns in milliseconds; the account is immediately invisible to
   listings and unroutable.
-- Bulk row work proceeds in bounded background transactions (5k rows each) so
-  the fold, the pool, and vacuum are never blocked for minutes.
+- Bulk row work proceeds in bounded background transactions (1k rows each,
+  batch selection pinned to account-leading indexes) so the fold, the pool,
+  and vacuum are never blocked for minutes.
 - Same end state as the synchronous delete for both `delete_history`
   variants, including the folded-bucket lifecycle mirrors and the
   "rollup row deleted with the account row" invariant.
@@ -234,17 +235,39 @@ NULL`), which is empty in the steady state — so a tick with nothing to do
 costs one tiny index probe. `delete_account` wakes the local worker after
 commit: on the leader (the single-replica common case) draining starts
 immediately; a follower's wake is a no-op and the leader's tick picks the
-request up within 30 s. Batch size 5k: measured ~1.2 s/10k `usage_history`
-deletes and ~23 s/10k `request_logs` detaches put 5k comfortably under a few
-seconds per transaction on the worst table.
+request up within 30 s. Batch size 1k: measured ~1.2 s/10k `usage_history`
+deletes and ~23 s/10k `request_logs` detaches (18 indexes, non-HOT updates)
+bound the worst table at ~2.3 s per transaction — and every chunk holds the
+account row lock (`FOR NO KEY UPDATE`) for its full duration, so a supersede
+or fenced settlement waits for at most one chunk. Between row-touching
+rounds the pass sleeps a fraction of the round's own duration (capped), so
+a multi-hundred-chunk drain leaves the 2-vCPU database headroom instead of
+running chunk transactions back-to-back.
+
+Chunk batch selection is planner-pinned to the account-leading indexes
+(`idx_usage_account_time`, `ix_additional_usage_distinct_labels`,
+`idx_logs_account_kind_deleted_latest` — the last one covering, so the
+request-log batch is an index-only scan): the batch subquery selects with an
+`account_id >= :id AND account_id <= :id` range (equivalent rows, but the
+range keeps `account_id` out of the constant-equivalence class and thus in
+the sort pathkeys) ordered by the target index's exact column order, making
+that index the only sort-free plan. A plain `account_id = :id LIMIT n` shape
+was verified on the production planner to run as a LIMIT-terminated Seq
+Scan for exactly the large accounts this change targets — with an unbounded
+dead-prefix re-scan mid-drain and a guaranteed full heap scan for every
+empty probe once per-account statistics go stale. With the pinned shape,
+chunk scan work is bounded by the account's own remaining rows and a
+drained-table probe is a single index descent. Within one pass, a table
+observed empty is not re-probed on later rounds (rows settling mid-drain
+are converged by finalization's residual sweep anyway).
 
 A deletion pass round-robins: each round advances every pending account by
 at most one NONEMPTY chunk transaction (a round stops at the first chunk
 that touched rows, not the first batch-size-full one, so small tables cannot
 stack several row-touching transactions into one round) and the pending set
 is re-scanned between rounds. A multi-minute drain (the measured 133k-row
-account is ~27 chunks) therefore cannot starve another marked account, and a
-DELETE that lands mid-pass is picked up by the next round's re-scan rather
+account is ~133 chunks) therefore cannot starve another marked account, and
+a DELETE that lands mid-pass is picked up by the next round's re-scan rather
 than waiting for the whole pass to finish.
 
 ### D7: API contract unchanged (`{"status": "deleted"}`)

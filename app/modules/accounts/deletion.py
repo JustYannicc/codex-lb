@@ -58,7 +58,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import Select, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.api_key_cache import get_api_key_cache
@@ -93,11 +93,19 @@ logger = logging.getLogger(__name__)
 # draining immediately and the tick only covers follower-received requests
 # and restart resume.
 DELETION_INTERVAL_SECONDS = 30
-# Rows per chunk transaction. Bounded so no chunk holds a long transaction:
-# measured production deletes ran ~1.2s/10k usage_history rows and ~23s/10k
-# request_logs detaches (18 indexes, non-HOT updates), so 5k keeps every
-# transaction comfortably short on both tables.
-DELETE_BATCH_SIZE = 5_000
+# Rows per chunk transaction. Every chunk holds the account row lock
+# (``FOR NO KEY UPDATE``) for its full duration, so a supersede
+# (``replace_reauthorized``) or a fenced settlement write can wait for at most
+# one chunk. Measured production rates: ~1.2s/10k usage_history deletes and
+# ~23s/10k request_logs detaches (18 indexes, non-HOT updates) — 1k bounds the
+# worst table at ~2.3s per transaction (5k would have been ~11.5s there).
+DELETE_BATCH_SIZE = 1_000
+# Between consecutive row-touching rounds the pass sleeps a fraction of the
+# round's own duration (capped), so a multi-hundred-chunk drain leaves the
+# 2-vCPU database headroom for foreground traffic instead of running chunk
+# transactions back-to-back.
+INTER_ROUND_PAUSE_RATIO = 0.25
+INTER_ROUND_PAUSE_CAP_SECONDS = 2.0
 
 _T = TypeVar("_T")
 
@@ -126,18 +134,31 @@ async def run_account_deletion_pass(*, batch_size: int = DELETE_BATCH_SIZE) -> d
     next tick).
     """
     outcomes: dict[str, str] = {}
+    # Tables observed empty for an account earlier in THIS pass are not
+    # re-probed on later rounds: a drained table stays drained for the rest of
+    # the drain (rows that land afterwards — e.g. a stream settling a log row
+    # mid-drain — are swept by finalization's residual pass), and re-probing
+    # would cost one account-row-locking transaction per table per round.
+    drained: dict[str, set[str]] = {}
+    loop = asyncio.get_running_loop()
     while True:
         runnable = [
             account_id for account_id in await _pending_deletion_ids() if outcomes.get(account_id) in (None, "draining")
         ]
         if not runnable:
             break
+        round_started = loop.time()
         for account_id in runnable:
             try:
-                outcomes[account_id] = await _advance_account(account_id, batch_size=batch_size)
+                outcomes[account_id] = await _advance_account(
+                    account_id, batch_size=batch_size, drained=drained.setdefault(account_id, set())
+                )
             except Exception:
                 logger.exception("Background account deletion failed account_id=%s", account_id)
                 outcomes[account_id] = "error"
+        if any(outcomes.get(account_id) == "draining" for account_id in runnable):
+            elapsed = loop.time() - round_started
+            await asyncio.sleep(min(INTER_ROUND_PAUSE_CAP_SECONDS, elapsed * INTER_ROUND_PAUSE_RATIO))
     # ``draining`` cannot survive the loop: an account leaves the runnable
     # set only through a terminal outcome or by vanishing from the pending
     # scan (its marker was cleared — a supersede that raced the scan).
@@ -159,7 +180,7 @@ async def _pending_deletion_ids() -> list[str]:
         return list(rows.scalars().all())
 
 
-async def _advance_account(account_id: str, *, batch_size: int) -> str:
+async def _advance_account(account_id: str, *, batch_size: int, drained: set[str] | None = None) -> str:
     """One bounded round of work for one account.
 
     Runs the drain tables in order (usage snapshots first — not
@@ -167,18 +188,30 @@ async def _advance_account(account_id: str, *, batch_size: int) -> str:
     NONEMPTY chunk so the caller can round-robin other pending accounts —
     each round commits at most one row-touching transaction per account:
     ``draining`` means more work may remain. Only tables whose chunk came up
-    empty are known drained; when every table is, finalize.
+    empty are known drained; when every table is, finalize. ``drained``
+    (caller-owned, per pass) records those tables so later rounds skip their
+    probes instead of re-running one locking transaction per table per round.
     """
-    for chunk_fn in (_usage_history_chunk, _additional_usage_history_chunk, _request_logs_chunk):
+    if drained is None:
+        drained = set()
+    for label, chunk_fn in (
+        ("usage_history", _usage_history_chunk),
+        ("additional_usage_history", _additional_usage_history_chunk),
+        ("request_logs", _request_logs_chunk),
+    ):
+        if label in drained:
+            continue
         affected = await _run_chunk(chunk_fn, account_id, batch_size=batch_size)
         if affected is None:
             return "superseded"
-        if affected and chunk_fn is _usage_history_chunk:
+        if not affected:
+            drained.add(label)
+            continue
+        if label == "usage_history":
             # Same hygiene as retention pruning: bulk usage-history reads are
             # cached on SQLite and must not serve the drained account.
             _clear_bulk_history_since_sqlite_cache()
-        if affected:
-            return "draining"
+        return "draining"
     # Finalization: residual rows (streams that settled a log row mid-drain),
     # folded-bucket mirrors, sticky/rollup rows, and the account row itself —
     # one fold-state-locked transaction, identical in shape to the historical
@@ -290,8 +323,84 @@ async def _pending_state(session: AsyncSession, account_id: str) -> tuple[bool, 
     return bool(row[1]), drift_repaired
 
 
+# Chunk batch shape — why a RANGE predicate plus an index-matching ORDER BY
+# instead of plain ``account_id = :id LIMIT n``:
+#
+# With an equality predicate the PostgreSQL planner folds ``account_id`` into
+# a constant, drops it from the sort pathkeys, and — whenever the per-account
+# row estimate is large (exactly the accounts this drain exists for) — plans
+# the LIMIT subquery as an early-terminating Seq Scan (or a scan of an
+# unrelated time index with a filter), betting on uniformly interleaved
+# matches. That bet loses precisely mid-drain: detached/deleted rows no
+# longer match, so each chunk re-scans a growing dead prefix, and once the
+# table is drained but statistics are stale, every empty probe is a FULL heap
+# scan (0 matches → no early termination). Verified against the production
+# planner (606,970-row account): Seq Scans on all three tables.
+#
+# ``account_id >= :id AND account_id <= :id`` selects the same rows but keeps
+# ``account_id`` out of the constant-equivalence class, so it survives as the
+# leading ORDER BY pathkey; the ORDER BY then lists the target index's exact
+# column order, making that account-leading index the only sort-free plan:
+#
+#   usage_history            → idx_usage_account_time (account_id, recorded_at)
+#   additional_usage_history → ix_additional_usage_distinct_labels
+#                              (account_id, quota_key, limit_name, metered_feature)
+#   request_logs             → idx_logs_account_kind_deleted_latest
+#                              (account_id, request_kind, deleted_at,
+#                               requested_at, id) — covering: Index Only Scan
+#
+# Verified on the production planner: all three plan as index (or index-only)
+# scans with the account range as the Index Cond, and a drained-table probe
+# costs one index descent (~8 cost units) instead of a heap scan. Chunk scan
+# work is therefore bounded by the account's own remaining rows regardless of
+# statistics staleness, and detached rows leave the scanned key range
+# immediately. Row order is irrelevant to correctness (every row is drained);
+# the ORDER BY exists purely to pin the plan.
+
+
+def _usage_history_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+    return (
+        select(UsageHistory.id)
+        .where(UsageHistory.account_id >= account_id, UsageHistory.account_id <= account_id)
+        .order_by(UsageHistory.account_id, UsageHistory.recorded_at)
+        .limit(batch_size)
+    )
+
+
+def _additional_usage_history_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+    return (
+        select(AdditionalUsageHistory.id)
+        .where(
+            AdditionalUsageHistory.account_id >= account_id,
+            AdditionalUsageHistory.account_id <= account_id,
+        )
+        .order_by(
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.quota_key,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.metered_feature,
+        )
+        .limit(batch_size)
+    )
+
+
+def _request_logs_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+    return (
+        select(RequestLog.id)
+        .where(RequestLog.account_id >= account_id, RequestLog.account_id <= account_id)
+        .order_by(
+            RequestLog.account_id,
+            RequestLog.request_kind,
+            RequestLog.deleted_at,
+            RequestLog.requested_at,
+            RequestLog.id,
+        )
+        .limit(batch_size)
+    )
+
+
 async def _usage_history_chunk(session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int) -> int:
-    batch = select(UsageHistory.id).where(UsageHistory.account_id == account_id).limit(batch_size).scalar_subquery()
+    batch = _usage_history_batch(account_id, batch_size).scalar_subquery()
     result = await session.execute(delete(UsageHistory).where(UsageHistory.id.in_(batch)).returning(UsageHistory.id))
     return len(result.scalars().all())
 
@@ -299,12 +408,7 @@ async def _usage_history_chunk(session: AsyncSession, account_id: str, *, delete
 async def _additional_usage_history_chunk(
     session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int
 ) -> int:
-    batch = (
-        select(AdditionalUsageHistory.id)
-        .where(AdditionalUsageHistory.account_id == account_id)
-        .limit(batch_size)
-        .scalar_subquery()
-    )
+    batch = _additional_usage_history_batch(account_id, batch_size).scalar_subquery()
     result = await session.execute(
         delete(AdditionalUsageHistory).where(AdditionalUsageHistory.id.in_(batch)).returning(AdditionalUsageHistory.id)
     )
@@ -317,7 +421,7 @@ async def _request_logs_chunk(session: AsyncSession, account_id: str, *, delete_
     Deliberately NOT fold-state-locked and NOT mirrored: see the module
     docstring for why interleaved fold slices converge at finalization.
     """
-    batch = select(RequestLog.id).where(RequestLog.account_id == account_id).limit(batch_size).scalar_subquery()
+    batch = _request_logs_batch(account_id, batch_size).scalar_subquery()
     if delete_history:
         result = await session.execute(delete(RequestLog).where(RequestLog.id.in_(batch)).returning(RequestLog.id))
     else:

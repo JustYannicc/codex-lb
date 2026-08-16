@@ -63,11 +63,18 @@
 ## 3. Background worker
 
 - [x] 3.1 `app/modules/accounts/deletion.py`: chunked drain
-      (usage_history, additional_usage_history, request_logs; 5k rows per
+      (usage_history, additional_usage_history, request_logs; 1k rows per
       transaction, marker re-check under the account row lock per chunk, no
       fold-state lock) for both variants; round-robin at most one nonempty
       chunk per pending account per round with a pending re-scan between
       rounds.
+- [x] 3.1a Pin chunk batch selection to the account-leading indexes
+      (`account_id` range predicate + index-order ORDER BY →
+      `idx_usage_account_time`, `ix_additional_usage_distinct_labels`,
+      covering `idx_logs_account_kind_deleted_latest`), verified against the
+      production planner; skip re-probing tables observed empty within a
+      pass; pause between row-touching rounds proportionally to round
+      duration.
 - [x] 3.2 Finalization via `AccountsRepository.delete(only_pending=True)`:
       historical transaction shape (identity lock → fold-state lock →
       residual rows → mirrors → sticky/rollup/account) plus marker guard and

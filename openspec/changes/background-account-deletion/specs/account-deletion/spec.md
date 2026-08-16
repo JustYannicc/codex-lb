@@ -169,7 +169,18 @@ pass MUST round-robin across pending accounts — at most one nonempty chunk
 transaction per account per round — and re-scan for newly marked accounts
 between rounds, so one account's long drain cannot delay another marked
 account's drain start by more than one chunk transaction per pending
-account.
+account. Chunk batch selection MUST be served by an account-leading index
+on every drain table (on PostgreSQL: `idx_usage_account_time`,
+`ix_additional_usage_distinct_labels`, and the covering
+`idx_logs_account_kind_deleted_latest`), so per-chunk scan work is bounded
+by the account's own remaining rows: it MUST NOT degrade to sequential
+scans when per-account statistics are large or stale mid-drain, and a probe
+of an already-drained table MUST terminate on the index without scanning
+the heap. Within one pass, the worker MUST NOT re-probe a drain table it
+already observed empty for an account (rows that land after that
+observation are swept by finalization's residual pass), and it MUST pause
+between consecutive row-touching rounds in proportion to the round's
+duration so a long drain does not run chunk transactions back-to-back.
 
 #### Scenario: Chunked drain reaches the synchronous end state (soft)
 
@@ -201,6 +212,24 @@ account.
 - **WHEN** another account is marked for deletion (before or during the pass)
 - **THEN** the second account's drain starts within one chunk round and both
   accounts finalize
+
+#### Scenario: Chunk selection stays on the account index
+
+- **GIVEN** a marked account whose per-account row estimate is large (or
+  stale after a partial drain)
+- **WHEN** a drain chunk selects its batch on PostgreSQL
+- **THEN** the batch subquery is planned as a scan of the account-leading
+  index on each drain table (index-only for `request_logs`), not a
+  sequential scan, and an empty probe terminates on the index
+
+#### Scenario: Drained tables are not re-probed within a pass
+
+- **GIVEN** a marked account whose usage tables drained while its request
+  logs still span further chunks
+- **WHEN** subsequent rounds of the same pass advance the account
+- **THEN** the drained tables' chunk transactions do not run again and
+  finalization still sweeps any rows that landed after the empty
+  observation
 
 ### Requirement: Interleaved fold slices never resurrect a deleted account's folded rows
 

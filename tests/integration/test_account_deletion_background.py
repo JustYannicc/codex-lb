@@ -8,7 +8,7 @@ import json
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -484,13 +484,13 @@ async def test_pass_picks_up_account_marked_mid_pass(db_setup, monkeypatch):
     original_advance = deletion._advance_account
     marked_second = False
 
-    async def advance_and_mark(account_id, *, batch_size):
+    async def advance_and_mark(account_id, *, batch_size, drained=None):
         nonlocal marked_second
         if not marked_second:
             marked_second = True
             async with SessionLocal() as session:
                 assert await AccountsRepository(session).begin_delete("acc_bg_mid_b")
-        return await original_advance(account_id, batch_size=batch_size)
+        return await original_advance(account_id, batch_size=batch_size, drained=drained)
 
     monkeypatch.setattr(deletion, "_advance_account", advance_and_mark)
 
@@ -907,3 +907,124 @@ async def test_supersede_between_drain_and_finalize_is_abandoned(db_setup):
     async with SessionLocal() as session:
         assert await AccountsRepository(session).delete("acc_bg_race", only_pending=True) is False
     assert await _account_row("acc_bg_race") is not None
+
+
+def _batch_pinning_cases() -> tuple[tuple[object, object, str], ...]:
+    from app.db.models import AdditionalUsageHistory
+    from app.modules.accounts import deletion
+
+    return (
+        (deletion._usage_history_batch, UsageHistory.__table__, "idx_usage_account_time"),
+        (
+            deletion._additional_usage_history_batch,
+            AdditionalUsageHistory.__table__,
+            "ix_additional_usage_distinct_labels",
+        ),
+        (deletion._request_logs_batch, RequestLog.__table__, "idx_logs_account_kind_deleted_latest"),
+    )
+
+
+def test_chunk_batch_statements_pin_account_leading_index_order():
+    """The chunk batch shape is what keeps the planner off sequential scans.
+
+    An ``account_id = :id LIMIT n`` subquery plans as a LIMIT-terminated Seq
+    Scan on the production planner for exactly the large accounts the drain
+    targets (equality folds account_id out of the sort pathkeys). The batch
+    builders must keep (a) the range predicate pair (never plain equality)
+    and (b) an ORDER BY that lists the target account-leading index's exact
+    column order, so that index is the only sort-free plan.
+    """
+    from sqlalchemy.dialects import postgresql as postgresql_dialect
+
+    for batch_fn, table, index_name in _batch_pinning_cases():
+        index = next(idx for idx in table.indexes if idx.name == index_name)
+        sql = str(batch_fn("acc_bg_pin", 50).compile(dialect=postgresql_dialect.dialect()))
+        expected_order = ", ".join(f"{table.name}.{column.name}" for column in index.expressions)
+        assert f"ORDER BY {expected_order}" in sql, sql
+        assert f"{table.name}.account_id >= " in sql, sql
+        assert f"{table.name}.account_id <= " in sql, sql
+        assert f"{table.name}.account_id = " not in sql, sql
+
+
+@pytest.mark.asyncio
+async def test_chunk_batch_query_plan_uses_account_leading_indexes_postgresql(db_setup):
+    """The batch ORDER BY must be served by the pinned index, not a sort.
+
+    Sequential/bitmap scans and (incremental) sorts are disabled so the
+    planner has to surface an ordered index path for the batch shape; the
+    only index that can provide the ORDER BY after the leading account_id
+    range is the pinned account-leading index. A drained (or missing)
+    account's probe must terminate on the same index instead of falling
+    back to a heap scan.
+    """
+    await _seed_account("acc_bg_plan", log_count=8, usage_count=8)
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        from app.db.models import AdditionalUsageHistory
+
+        session.add_all(
+            AdditionalUsageHistory(
+                account_id="acc_bg_plan",
+                quota_key="codex_spark",
+                limit_name="GPT-5.3-Codex-Spark",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=float(index),
+            )
+            for index in range(8)
+        )
+        await session.commit()
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        await session.execute(text("SET enable_sort = off"))
+        await session.execute(text("SET enable_incremental_sort = off"))
+        for batch_fn, _table, index_name in _batch_pinning_cases():
+            for account_id in ("acc_bg_plan", "acc_bg_plan_drained_probe"):
+                compiled = batch_fn(account_id, 5).compile(
+                    dialect=session.get_bind().dialect, compile_kwargs={"literal_binds": True}
+                )
+                plan = (await session.execute(text(f"EXPLAIN (FORMAT JSON) {compiled}"))).scalar_one()
+                plan_json = json.dumps(plan)
+                assert index_name in plan_json, (account_id, plan_json)
+                assert "Seq Scan" not in plan_json, (account_id, plan_json)
+                assert "Sort Key" not in plan_json, (account_id, plan_json)
+
+
+@pytest.mark.asyncio
+async def test_pass_probes_drained_tables_once_per_pass(db_setup, monkeypatch):
+    """A table observed empty for an account is not re-probed on later rounds
+    of the same pass: each probe is a full account-row-locking transaction,
+    and per-account statistics can go stale exactly during the churn window."""
+    from app.modules.accounts import deletion
+
+    await _seed_account("acc_bg_memo", log_count=3)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_memo")
+
+    calls = {"usage_history": 0, "additional_usage_history": 0, "request_logs": 0}
+    for attr, key in (
+        ("_usage_history_chunk", "usage_history"),
+        ("_additional_usage_history_chunk", "additional_usage_history"),
+        ("_request_logs_chunk", "request_logs"),
+    ):
+        original = getattr(deletion, attr)
+
+        def _make_spy(original=original, key=key):
+            async def spy(session, account_id, *, delete_history, batch_size):
+                calls[key] += 1
+                return await original(session, account_id, delete_history=delete_history, batch_size=batch_size)
+
+            return spy
+
+        monkeypatch.setattr(deletion, attr, _make_spy())
+
+    outcomes = await run_account_deletion_pass(batch_size=1)
+    assert outcomes == {"acc_bg_memo": "finalized"}
+    # usage tables: exactly one (empty) probe in round 1, then skipped while
+    # rounds 2-4 drain the logs; request_logs: three one-row chunks plus the
+    # final empty probe that lets the pass finalize.
+    assert calls == {"usage_history": 1, "additional_usage_history": 1, "request_logs": 4}
+    assert await _account_row("acc_bg_memo") is None
