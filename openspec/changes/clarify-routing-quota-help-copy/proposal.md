@@ -15,17 +15,19 @@ is decided per request.
 - `Sticky threads` copy states it is a soft preference and adds a note that
   hard Codex continuation affinity (turn state, previous responses, uploaded
   files) is not disabled by the toggle.
-- A `Primary vs secondary quota` explainer names the 5-hour and weekly
-  windows and states the used-vs-remaining unit split.
+- A `Primary vs secondary quota` explainer names the 5-hour and
+  weekly/monthly windows and states the used-vs-remaining unit split.
 - Sticky threshold descriptions name the window and unit (percent used) and
-  render a live `X% used · equivalent to Y% remaining` hint.
+  render a live `X% used · equivalent to Y% remaining` hint whose two values
+  always sum to 100.
 - `Prefer earlier reset` copy describes the actual selection behavior
   (earliest reset bucket of the selected window, day-bucketed weekly
-  comparison, not applied under relative availability).
+  comparison, applied under capacity weighted, usage weighted, and fill
+  first).
 - `Limit warm-up` copy states that a probe is one small real request using
   the configured model/prompt and consumes a small amount of quota.
-- The `Active` status badge on the accounts list carries a hint that
-  configured status is not per-request eligibility.
+- The `Active` status badge on the accounts list carries a hint that the
+  displayed status is not per-request eligibility.
 - `docs/routing.md` gains a routing/quotas/eligibility explainer section.
 - i18n keys added/updated for `en`, `ko`, and `zh-CN`.
 

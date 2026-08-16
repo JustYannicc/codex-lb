@@ -19,9 +19,9 @@ Change the strategy live in the dashboard under **Settings → Routing** — no 
 
 ## Routing, quotas, and eligibility explainer
 
-### Account eligibility vs configured status
+### Account eligibility vs displayed status
 
-An account's badge (`Active`, `Paused`, `Limited`, …) is its **configured, durable status**. Eligibility is decided **per request**: the selector can skip an `Active` account because of a cooldown, error backoff, a quota threshold or exhaustion, model/plan incompatibility, or because a thread's continuation state is owned by a different account. `Active` therefore does not mean "will serve the next request".
+An account's badge (`Active`, `Paused`, `Limited`, …) is its **displayed status**, derived from the durable account state plus current usage. Eligibility is decided **per request**: the selector can skip an `Active` account because of a cooldown, error backoff, a quota threshold or exhaustion, model/plan incompatibility, or because a thread's continuation state is owned by a different account. `Active` therefore does not mean "will serve the next request".
 
 ### Soft sticky routing vs hard Codex continuation affinity
 
@@ -35,13 +35,13 @@ If a thread's owner account becomes unavailable, requests that still require tha
 ### Primary vs secondary quota, used vs remaining
 
 - **Primary quota** is the short **5-hour** usage window.
-- **Secondary quota** is the **weekly** usage window. (Some free plans report a single monthly window instead.)
+- **Secondary quota** is the longer window: **weekly** on most plans, or **monthly** on plans that report only a monthly window (the monthly window is normalized into the secondary slot for routing).
 
-Account pages display each window as **percent remaining**; the sticky reallocation thresholds in Settings are **percent used**. A `Sticky secondary threshold` of `70` means "move sticky sessions off an account once more than 70% of its weekly window has been used", i.e. once less than 30% is shown remaining on the Accounts page.
+Account pages display each window as **percent remaining**; the sticky reallocation thresholds in Settings are **percent used**. A `Sticky secondary threshold` of `70` means "move sticky sessions off an account once more than 70% of its secondary (weekly or monthly) window has been used", i.e. once less than 30% is shown remaining on the Accounts page.
 
 ### Prefer earlier reset
 
-When enabled and several accounts are otherwise eligible, selection is restricted to the accounts whose selected quota window (5h or weekly) resets soonest. Weekly resets are compared in whole-day buckets; when the selected window has no known reset time, the other window is used as a fallback. This preference is not applied under the `Relative availability` strategy.
+When enabled and several accounts are otherwise eligible, selection is restricted to the accounts whose selected quota window (5h or weekly) resets soonest. Weekly resets are compared in whole-day buckets; when the selected window has no known reset time, the other window is used as a fallback. The preference applies to the `Capacity weighted`, `Usage weighted`, and `Fill first` strategies; the fixed-order and draw-based strategies (`Round robin`, `Relative availability`, `Sequential drain`, `Reset drain`, `Single account`) ignore it.
 
 ### Limit warm-up
 

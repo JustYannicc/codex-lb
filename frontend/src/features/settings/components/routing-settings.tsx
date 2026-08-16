@@ -144,8 +144,12 @@ function parseNonnegativeInteger(value: string): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function formatThresholdPercent(value: number): string {
-  return String(Number(value.toFixed(1)));
+function thresholdHintValues(value: number): { used: string; remaining: string } {
+  // Derive the remaining percent from the rounded used percent so the two
+  // displayed values always sum to exactly 100.
+  const used = Number(value.toFixed(1));
+  const remaining = Number((100 - used).toFixed(1));
+  return { used: String(used), remaining: String(remaining) };
 }
 
 export function RoutingSettings({
@@ -829,10 +833,10 @@ export function RoutingSettings({
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.primaryDescription")}</p>
               {stickyPrimaryThresholdValid ? (
                 <p className="text-xs text-muted-foreground">
-                  {t("settings.routing.stickyThresholds.usedRemainingHint", {
-                    used: formatThresholdPercent(parsedStickyPrimaryThreshold),
-                    remaining: formatThresholdPercent(100 - parsedStickyPrimaryThreshold),
-                  })}
+                  {t(
+                    "settings.routing.stickyThresholds.usedRemainingHint",
+                    thresholdHintValues(parsedStickyPrimaryThreshold),
+                  )}
                 </p>
               ) : null}
             </div>
@@ -879,10 +883,10 @@ export function RoutingSettings({
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.secondaryDescription")}</p>
               {stickySecondaryThresholdValid ? (
                 <p className="text-xs text-muted-foreground">
-                  {t("settings.routing.stickyThresholds.usedRemainingHint", {
-                    used: formatThresholdPercent(parsedStickySecondaryThreshold),
-                    remaining: formatThresholdPercent(100 - parsedStickySecondaryThreshold),
-                  })}
+                  {t(
+                    "settings.routing.stickyThresholds.usedRemainingHint",
+                    thresholdHintValues(parsedStickySecondaryThreshold),
+                  )}
                 </p>
               ) : null}
             </div>

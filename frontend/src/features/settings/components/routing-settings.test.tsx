@@ -630,7 +630,7 @@ describe("RoutingSettings", () => {
       screen.getByText(/5-hour \(primary\) window has been used/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/weekly \(secondary\) window has been used/i),
+      screen.getByText(/secondary window \(weekly, or monthly on monthly-only plans\) has been used/i),
     ).toBeInTheDocument();
   });
 
@@ -647,6 +647,12 @@ describe("RoutingSettings", () => {
     await user.type(secondary, "70");
 
     expect(screen.getByText("70% used · equivalent to 30% remaining")).toBeInTheDocument();
+
+    // Decimal thresholds keep the two displayed values complementary.
+    await user.clear(secondary);
+    await user.type(secondary, "12.5");
+
+    expect(screen.getByText("12.5% used · equivalent to 87.5% remaining")).toBeInTheDocument();
   });
 
   it("describes prefer-earlier-reset selection behavior", () => {

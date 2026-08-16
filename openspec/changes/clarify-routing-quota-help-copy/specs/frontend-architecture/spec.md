@@ -30,7 +30,7 @@ equivalent percent remaining for a valid threshold value.
 #### Scenario: Quota window explainer
 
 - **WHEN** the routing settings section renders
-- **THEN** an explainer identifies primary quota as the 5-hour window and secondary quota as the weekly window
+- **THEN** an explainer identifies primary quota as the 5-hour window and secondary quota as the longer weekly window (monthly on plans without a weekly window)
 - **AND** it states that account pages show percent remaining while the thresholds are percent used
 
 ### Requirement: Prefer-earlier-reset and limit warm-up copy describe actual behavior
@@ -44,6 +44,7 @@ a small amount of quota after an opted-in account's exhausted window resets.
 
 - **WHEN** the routing settings section renders
 - **THEN** the prefer-earlier-reset description says selection prefers accounts whose selected quota window resets sooner
+- **AND** it names the strategies the preference applies to (capacity weighted, usage weighted, and fill first)
 
 #### Scenario: Limit warm-up help copy
 
@@ -51,10 +52,10 @@ a small amount of quota after an opted-in account's exhausted window resets.
 - **THEN** the limit warm-up description says a probe is sent after an opted-in account's exhausted quota window resets
 - **AND** it states that probes consume a small amount of quota
 
-### Requirement: Active status is presented as configured status, not per-request eligibility
+### Requirement: Active status is presented as displayed status, not per-request eligibility
 
 The accounts list SHALL annotate the `Active` status badge with a hint that
-the configured status does not guarantee per-request eligibility.
+the displayed status does not guarantee per-request eligibility.
 
 #### Scenario: Active badge eligibility hint
 
