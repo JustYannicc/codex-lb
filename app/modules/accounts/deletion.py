@@ -36,9 +36,16 @@ Restart safety and idempotency: all progress lives in the database (the
 marker columns plus the shrinking predicate ``WHERE account_id = :id``), so a
 leader restart resumes mid-drain, and re-running any chunk is a no-op.
 A credential replacement (re-import/reauth) clears the marker and supersedes
-the deletion: chunks re-check the marker per transaction and finalization
-re-checks it under the account row lock, so a superseded account is never
-finalized.
+the deletion: every chunk transaction re-reads the marker under the account
+row lock (PostgreSQL ``FOR NO KEY UPDATE``; the SQLite writer section
+serializes writers) before touching rows, and finalization re-checks it the
+same way, so no chunk can commit row work after a replacement committed and
+a superseded account is never finalized.
+
+Fairness: a deletion pass round-robins one chunk per pending account and
+re-scans for newly marked accounts between rounds, so one account's
+multi-minute drain can neither starve another marked account nor delay a
+delete request that arrives mid-pass.
 """
 
 from __future__ import annotations
@@ -92,20 +99,35 @@ def _get_leader_election() -> _LeaderElectionLike:
 async def run_account_deletion_pass(*, batch_size: int = DELETE_BATCH_SIZE) -> dict[str, str]:
     """Drain and finalize every account marked for deletion.
 
+    Round-robin fairness: each round advances every pending account by at
+    most one full chunk, and the pending set is re-scanned between rounds, so
+    a newly marked account starts draining within one chunk transaction of
+    its request even while another account's long drain is in progress.
+
     Returns an outcome per account id: ``finalized`` (rows drained, account
     row removed), ``superseded`` (marker cleared mid-drain by a credential
     replacement — deletion abandoned), or ``error`` (logged; retried on the
     next tick).
     """
     outcomes: dict[str, str] = {}
-    for account_id in await _pending_deletion_ids():
-        try:
-            outcomes[account_id] = await _drain_and_finalize(account_id, batch_size=batch_size)
-        except Exception:
-            logger.exception("Background account deletion failed account_id=%s", account_id)
-            outcomes[account_id] = "error"
-    if any(outcome == "finalized" for outcome in outcomes.values()):
-        await _invalidate_account_caches()
+    while True:
+        runnable = [
+            account_id for account_id in await _pending_deletion_ids() if outcomes.get(account_id) in (None, "draining")
+        ]
+        if not runnable:
+            break
+        for account_id in runnable:
+            try:
+                outcomes[account_id] = await _advance_account(account_id, batch_size=batch_size)
+            except Exception:
+                logger.exception("Background account deletion failed account_id=%s", account_id)
+                outcomes[account_id] = "error"
+    # ``draining`` cannot survive the loop: an account leaves the runnable
+    # set only through a terminal outcome or by vanishing from the pending
+    # scan (its marker was cleared — a supersede that raced the scan).
+    for account_id, outcome in outcomes.items():
+        if outcome == "draining":
+            outcomes[account_id] = "superseded"
     if outcomes:
         logger.info("Account deletion pass outcomes=%s", outcomes)
     return outcomes
@@ -121,50 +143,71 @@ async def _pending_deletion_ids() -> list[str]:
         return list(rows.scalars().all())
 
 
-async def _drain_and_finalize(account_id: str, *, batch_size: int) -> str:
-    # Usage snapshots first (not fold-governed), then the raw request logs.
+async def _advance_account(account_id: str, *, batch_size: int) -> str:
+    """One bounded round of work for one account.
+
+    Runs the drain tables in order (usage snapshots first — not
+    fold-governed — then the raw request logs) but stops after the first
+    FULL chunk so the caller can round-robin other pending accounts:
+    ``draining`` means more chunks remain. Tables whose chunk came up short
+    are drained; when every table is, finalize.
+    """
     for chunk_fn in (_usage_history_chunk, _additional_usage_history_chunk, _request_logs_chunk):
-        drained = await _drain_chunks(chunk_fn, account_id, batch_size=batch_size)
-        if chunk_fn is _usage_history_chunk:
+        affected = await _run_chunk(chunk_fn, account_id, batch_size=batch_size)
+        if affected is None:
+            return "superseded"
+        if affected and chunk_fn is _usage_history_chunk:
             # Same hygiene as retention pruning: bulk usage-history reads are
             # cached on SQLite and must not serve the drained account.
             _clear_bulk_history_since_sqlite_cache()
-        if not drained:
-            return "superseded"
+        if affected >= batch_size:
+            return "draining"
     # Finalization: residual rows (streams that settled a log row mid-drain),
     # folded-bucket mirrors, sticky/rollup rows, and the account row itself —
     # one fold-state-locked transaction, identical in shape to the historical
     # synchronous delete but over a residual row set instead of full history.
     async with get_background_session() as session:
         finalized = await AccountsRepository(session).delete(account_id, only_pending=True)
-    return "finalized" if finalized else "superseded"
+    if not finalized:
+        return "superseded"
+    # Invalidate immediately (not at end of pass): the account row is gone
+    # and ids are deterministic, so cached routing/API-key snapshots must not
+    # outlive it while the pass keeps draining other accounts.
+    await _invalidate_account_caches()
+    return "finalized"
 
 
 _ChunkFn = Callable[..., Awaitable[int]]
 
 
-async def _drain_chunks(chunk_fn: _ChunkFn, account_id: str, *, batch_size: int) -> bool:
-    """Run ``chunk_fn`` in per-transaction chunks until it drains; False when
-    the pending marker disappeared (deletion superseded)."""
-    while True:
-        async with get_background_session() as session:
-            async with sqlite_writer_section():
-                delete_history = await _pending_state(session, account_id)
-                if delete_history is None:
-                    return False
-                affected = await chunk_fn(session, account_id, delete_history=delete_history, batch_size=batch_size)
-                await session.commit()
-        if affected < batch_size:
-            return True
+async def _run_chunk(chunk_fn: _ChunkFn, account_id: str, *, batch_size: int) -> int | None:
+    """Run one chunk transaction; None when the pending marker disappeared
+    (deletion superseded)."""
+    async with get_background_session() as session:
+        async with sqlite_writer_section():
+            delete_history = await _pending_state(session, account_id)
+            if delete_history is None:
+                await session.rollback()
+                return None
+            affected = await chunk_fn(session, account_id, delete_history=delete_history, batch_size=batch_size)
+            await session.commit()
+    return affected
 
 
 async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
-    """The frozen ``delete_history`` choice, or None when no longer pending."""
-    row = (
-        await session.execute(
-            select(Account.delete_requested_at, Account.delete_history_requested).where(Account.id == account_id)
-        )
-    ).first()
+    """The frozen ``delete_history`` choice, or None when no longer pending.
+
+    On PostgreSQL the read locks the account row (``FOR NO KEY UPDATE``) for
+    the rest of the chunk transaction, so a credential replacement cannot
+    clear the marker between this read and the chunk's row mutations — the
+    replacement blocks until the chunk commits, then the next chunk observes
+    the cleared marker and stops. On SQLite the writer section already
+    serializes this transaction against every other writer.
+    """
+    stmt = select(Account.delete_requested_at, Account.delete_history_requested).where(Account.id == account_id)
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(key_share=True)
+    row = (await session.execute(stmt)).first()
     if row is None or row[0] is None:
         return None
     return bool(row[1])

@@ -424,8 +424,18 @@ class AccountsService:
                 encryptor=self._encryptor,
             )
 
-    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+    async def _get_exportable_account(self, account_id: str) -> Account | None:
+        """Account for credential-export endpoints; marked-for-deletion rows
+        are gone from the operator's perspective (the synchronous delete
+        returned 404 here) and MUST NOT keep serving decrypted tokens during
+        the background drain window."""
         account = await self._repo.get_by_id(account_id)
+        if account is None or account.delete_requested_at is not None:
+            return None
+        return account
+
+    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+        account = await self._get_exportable_account(account_id)
         if account is None:
             return None
 
@@ -450,7 +460,7 @@ class AccountsService:
         )
 
     async def export_auth(self, account_id: str) -> AccountAuthExportResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_exportable_account(account_id)
         if account is None:
             return None
 
@@ -693,7 +703,7 @@ class AccountsService:
         return await self._repo.update_alias(account_id, normalized)
 
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_exportable_account(account_id)
         if not account:
             return None
         access_token = self._encryptor.decrypt(account.access_token_encrypted)

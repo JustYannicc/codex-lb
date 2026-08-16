@@ -16,10 +16,15 @@ branch_labels = None
 depends_on = None
 
 _TABLE = "accounts"
+_INDEX = "idx_accounts_delete_requested_at"
 
 
 def _columns(bind) -> set[str]:
     return {column["name"] for column in sa.inspect(bind).get_columns(_TABLE)}
+
+
+def _indexes(bind) -> set[str]:
+    return {index["name"] for index in sa.inspect(bind).get_indexes(_TABLE)}
 
 
 def upgrade() -> None:
@@ -37,10 +42,22 @@ def upgrade() -> None:
                 server_default=sa.false(),
             ),
         )
+    if _INDEX not in _indexes(bind):
+        # Pending-deletion queue probe/order support; partial so it is empty
+        # (and free) in the steady state with no pending deletions.
+        op.create_index(
+            _INDEX,
+            _TABLE,
+            ["delete_requested_at", "id"],
+            postgresql_where=sa.text("delete_requested_at IS NOT NULL"),
+            sqlite_where=sa.text("delete_requested_at IS NOT NULL"),
+        )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
+    if _INDEX in _indexes(bind):
+        op.drop_index(_INDEX, table_name=_TABLE)
     columns = _columns(bind)
     if "delete_history_requested" in columns:
         op.drop_column(_TABLE, "delete_history_requested")

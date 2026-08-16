@@ -116,25 +116,44 @@ request-log row at stream end, possibly after every chunk ran.
 `_apply_account_updates` (every credential replacement: re-import, reauth,
 slot reuse) clears the marker: account ids are deterministic, so
 delete-then-reimport lands on the marked row, and letting the worker delete
-a just-reimported account would be data loss. Chunks re-check the marker per
-transaction and finalization re-checks under the row lock, so a superseded
+a just-reimported account would be data loss. Every chunk transaction and
+finalization re-read the marker under the account row lock (PostgreSQL
+`FOR NO KEY UPDATE`, compatible with the `KEY SHARE` taken by concurrent
+rollup FK inserts; on SQLite the writer section serializes writers), so a
+replacement either commits before the marker read (the chunk sees the
+cleared marker and stops) or blocks until the chunk commits — no chunk can
+mutate rows after a replacement has successfully returned, and a superseded
 account is never finalized (rows already drained stay detached — history
-loss was requested by the earlier delete). Repeat DELETE requests return
+loss was requested by the earlier delete). The chunk takes only the account
+row lock and touches only that account's child rows, so no new lock ordering
+is introduced. Marked accounts are also absent from the credential-export
+endpoints: the synchronous delete made exports 404 immediately, and the
+asynchronous drain window must not keep decrypted tokens retrievable after
+a successful DELETE. Repeat DELETE requests return
 success without escalating `delete_history` (first request wins), matching
 the synchronous world where a second DELETE arrived after the account was
 already gone. `reactivate_account` treats a marked account as not found
 rather than racing the worker back to ACTIVE.
 
-### D6: Worker = leader-gated 30 s tick + local wake, cheap pre-check
+### D6: Worker = leader-gated 30 s tick + local wake, cheap pre-check, round-robin pass
 
-Same scheduler shape as retention. Each tick runs one indexed `LIMIT 1`
-existence probe *before* leader election, so the steady state costs one tiny
-SELECT per interval. `delete_account` wakes the local worker after commit:
-on the leader (the single-replica common case) draining starts immediately;
-a follower's wake is a no-op and the leader's tick picks the request up
-within 30 s. Batch size 5k: measured ~1.2 s/10k `usage_history` deletes and
-~23 s/10k `request_logs` detaches put 5k comfortably under a few seconds per
-transaction on the worst table.
+Same scheduler shape as retention. Each tick runs one `LIMIT 1` existence
+probe *before* leader election — served by the partial index
+`idx_accounts_delete_requested_at` (`WHERE delete_requested_at IS NOT
+NULL`), which is empty in the steady state — so a tick with nothing to do
+costs one tiny index probe. `delete_account` wakes the local worker after
+commit: on the leader (the single-replica common case) draining starts
+immediately; a follower's wake is a no-op and the leader's tick picks the
+request up within 30 s. Batch size 5k: measured ~1.2 s/10k `usage_history`
+deletes and ~23 s/10k `request_logs` detaches put 5k comfortably under a few
+seconds per transaction on the worst table.
+
+A deletion pass round-robins: each round advances every pending account by
+at most one full chunk and the pending set is re-scanned between rounds.
+A multi-minute drain (the measured 133k-row account is ~27 chunks) therefore
+cannot starve another marked account, and a DELETE that lands mid-pass is
+picked up by the next round's re-scan rather than waiting for the whole pass
+to finish.
 
 ### D7: API contract unchanged (`{"status": "deleted"}`)
 
@@ -166,9 +185,11 @@ re-import) once the API returns. The spec states row purge is asynchronous.
 ## Migration
 
 `20260816_000000_add_account_pending_deletion`: adds
-`accounts.delete_requested_at` (nullable DateTime) and
-`accounts.delete_history_requested` (Boolean, `server_default false`), with
-column-existence guards and a symmetric downgrade. Existing rows are
+`accounts.delete_requested_at` (nullable DateTime),
+`accounts.delete_history_requested` (Boolean, `server_default false`), and
+the partial queue index `idx_accounts_delete_requested_at`
+(`(delete_requested_at, id) WHERE delete_requested_at IS NOT NULL`), with
+existence guards and a symmetric downgrade. Existing rows are
 untouched (no pending deletions can predate the feature). Rolling upgrade: an
 old replica neither sets nor reads the marker; a delete handled by an old
 replica is simply the old synchronous delete.

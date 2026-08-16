@@ -16,7 +16,10 @@ an existing account and 404 otherwise; row purge is asynchronous.
 Accounts carrying the pending-deletion marker MUST be excluded from account
 listings (`GET /api/accounts` and every listing-derived read) and MUST be
 excluded from proxy serving via the terminal status. Reactivation of a
-marked account MUST report the account as not found.
+marked account MUST report the account as not found, and the
+credential-export endpoints (account export, auth export, opencode auth
+export) MUST likewise report it as not found — a successful DELETE MUST NOT
+leave decrypted tokens retrievable during the background drain window.
 
 #### Scenario: Delete responds without draining rows
 
@@ -32,6 +35,13 @@ marked account MUST report the account as not found.
 - **WHEN** `POST /api/accounts/{id}/reactivate` is called
 - **THEN** the response is 404 `account_not_found`
 
+#### Scenario: Marked account no longer serves credential exports
+
+- **GIVEN** an account marked for background deletion whose rows are not yet
+  drained
+- **WHEN** any credential-export endpoint is called for the account
+- **THEN** the response is 404 and no token material is returned
+
 ### Requirement: Background worker drains marked accounts in bounded chunks
 
 A leader-gated background worker MUST drain each marked account's
@@ -44,7 +54,10 @@ the folded-bucket lifecycle mirrors, and removes the sticky, lifetime-rollup,
 and account rows together. The soft variant MUST detach raw rows
 (`account_id=NULL, deleted_at` set); the `delete_history` variant MUST
 delete them. The worker MUST start a drain promptly after a delete request
-on the leader replica and within one worker interval otherwise.
+on the leader replica and within one worker interval otherwise. A deletion
+pass MUST round-robin chunk work across pending accounts and re-scan for
+newly marked accounts between rounds, so one account's long drain cannot
+delay another marked account's drain start by more than one chunk round.
 
 #### Scenario: Chunked drain reaches the synchronous end state (soft)
 
@@ -60,6 +73,13 @@ on the leader replica and within one worker interval otherwise.
 - **WHEN** the worker completes the drain and finalization
 - **THEN** the account's raw request-log rows are deleted and its folded
   time-axis buckets are removed
+
+#### Scenario: A long drain does not starve other marked accounts
+
+- **GIVEN** one marked account whose drain spans many chunks
+- **WHEN** another account is marked for deletion (before or during the pass)
+- **THEN** the second account's drain starts within one chunk round and both
+  accounts finalize
 
 ### Requirement: Interleaved fold slices never resurrect a deleted account's folded rows
 
@@ -92,10 +112,11 @@ interrupted deletion with no separate recovery step. Repeat DELETE requests
 for a marked account MUST succeed idempotently and MUST NOT change the
 frozen `delete_history` choice (first request wins). A credential
 replacement (re-import or reauthentication landing on the marked row) MUST
-clear the marker and supersede the deletion: drain chunks re-check the
-marker per transaction and finalization re-checks it under the account row
-lock, so a superseded account is never finalized (rows already drained stay
-detached).
+clear the marker and supersede the deletion: every drain chunk and the
+finalization transaction MUST re-check the marker under the account row lock
+(PostgreSQL `FOR NO KEY UPDATE`; the SQLite writer section) before mutating
+rows, so no chunk commits row work after a replacement committed and a
+superseded account is never finalized (rows already drained stay detached).
 
 #### Scenario: Restart resumes a partial drain
 

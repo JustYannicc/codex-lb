@@ -4,6 +4,10 @@
       `accounts.delete_history_requested` columns (model + Alembic revision
       `20260816_000000_add_account_pending_deletion` on the current head,
       guarded upgrade/downgrade).
+- [x] 1.2 Partial queue index `idx_accounts_delete_requested_at`
+      (`(delete_requested_at, id) WHERE delete_requested_at IS NOT NULL`) so
+      the per-interval pending probe and the queue-order scan never touch the
+      full accounts table.
 
 ## 2. Fast delete path
 
@@ -15,13 +19,17 @@
       contract (`{"status": "deleted"}`).
 - [x] 2.3 Clear the marker in `_apply_account_updates` so credential
       replacement supersedes a pending deletion.
+- [x] 2.4 Hide marked accounts from the credential-export endpoints (account
+      export, auth export, opencode auth export): 404 during the drain
+      window, matching the synchronous delete's contract.
 
 ## 3. Background worker
 
 - [x] 3.1 `app/modules/accounts/deletion.py`: chunked drain
       (usage_history, additional_usage_history, request_logs; 5k rows per
-      transaction, marker re-check per chunk, no fold-state lock) for both
-      variants.
+      transaction, marker re-check under the account row lock per chunk, no
+      fold-state lock) for both variants; round-robin one chunk per pending
+      account per round with a pending re-scan between rounds.
 - [x] 3.2 Finalization via `AccountsRepository.delete(only_pending=True)`:
       historical transaction shape (identity lock → fold-state lock →
       residual rows → mirrors → sticky/rollup/account) plus marker guard and
@@ -38,7 +46,8 @@
       dimension preserves history), restart resume, straggler row settled
       mid-drain, repeat-request idempotency without variant escalation,
       supersede by replacement (including the drain/finalize race), fast-path
-      API contract (immediate hide, 404 reactivate).
+      API contract (immediate hide, 404 reactivate, 404 credential exports),
+      round-robin interleave and mid-pass pickup of newly marked accounts.
 - [x] 4.2 Update the existing delete API tests to drive the worker pass;
       keep the direct synchronous `AccountsRepository.delete` coverage.
 - [x] 4.3 `ruff check` + `ruff format` + architecture checks + focused

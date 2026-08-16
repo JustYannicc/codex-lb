@@ -188,6 +188,12 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
     reactivate = await async_client.post("/api/accounts/acc_bg_mark/reactivate")
     assert reactivate.status_code == 404
 
+    # Credential exports must not keep serving decrypted tokens during the
+    # drain window: the synchronous delete 404'd here immediately.
+    for export_path in ("export", "export/auth", "export/opencode-auth"):
+        export = await async_client.post(f"/api/accounts/acc_bg_mark/{export_path}")
+        assert export.status_code == 404, export_path
+
 
 @pytest.mark.asyncio
 async def test_chunked_soft_delete_drains_across_chunk_boundaries(db_setup):
@@ -332,6 +338,74 @@ async def test_fold_interleaved_between_chunks_does_not_resurrect_hard(db_setup)
     assert await _hourly_rows_for_dimension(account_dimension) == []
     assert await _demand_rows_for_dimension(account_dimension) == []
     assert await _log_rows("acc_bg_fhard") == []
+
+
+@pytest.mark.asyncio
+async def test_pass_round_robins_chunks_across_pending_accounts(db_setup, monkeypatch):
+    """One account's long drain must not starve another: each round advances
+    every pending account by at most one full chunk."""
+    from app.modules.accounts import deletion
+
+    await _seed_account("acc_bg_rr_a", log_count=3)
+    await _seed_account("acc_bg_rr_b", log_count=3)
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        assert await repo.begin_delete("acc_bg_rr_a")
+        assert await repo.begin_delete("acc_bg_rr_b")
+
+    chunk_calls: list[str] = []
+    original_chunk = deletion._request_logs_chunk
+
+    async def spy_chunk(session, account_id, *, delete_history, batch_size):
+        chunk_calls.append(account_id)
+        return await original_chunk(session, account_id, delete_history=delete_history, batch_size=batch_size)
+
+    monkeypatch.setattr(deletion, "_request_logs_chunk", spy_chunk)
+
+    outcomes = await run_account_deletion_pass(batch_size=1)
+    assert outcomes == {"acc_bg_rr_a": "finalized", "acc_bg_rr_b": "finalized"}
+    # Full chunks alternate between the two accounts instead of draining one
+    # account to completion first.
+    assert chunk_calls[:6] == [
+        "acc_bg_rr_a",
+        "acc_bg_rr_b",
+        "acc_bg_rr_a",
+        "acc_bg_rr_b",
+        "acc_bg_rr_a",
+        "acc_bg_rr_b",
+    ]
+    assert await _account_row("acc_bg_rr_a") is None
+    assert await _account_row("acc_bg_rr_b") is None
+
+
+@pytest.mark.asyncio
+async def test_pass_picks_up_account_marked_mid_pass(db_setup, monkeypatch):
+    """A DELETE that lands while a pass is draining another account is picked
+    up by the between-rounds re-scan, not deferred to the next tick."""
+    from app.modules.accounts import deletion
+
+    await _seed_account("acc_bg_mid_a", log_count=2)
+    await _seed_account("acc_bg_mid_b", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_mid_a")
+
+    original_advance = deletion._advance_account
+    marked_second = False
+
+    async def advance_and_mark(account_id, *, batch_size):
+        nonlocal marked_second
+        if not marked_second:
+            marked_second = True
+            async with SessionLocal() as session:
+                assert await AccountsRepository(session).begin_delete("acc_bg_mid_b")
+        return await original_advance(account_id, batch_size=batch_size)
+
+    monkeypatch.setattr(deletion, "_advance_account", advance_and_mark)
+
+    outcomes = await run_account_deletion_pass(batch_size=1)
+    assert outcomes == {"acc_bg_mid_a": "finalized", "acc_bg_mid_b": "finalized"}
+    assert await _account_row("acc_bg_mid_a") is None
+    assert await _account_row("acc_bg_mid_b") is None
 
 
 @pytest.mark.asyncio

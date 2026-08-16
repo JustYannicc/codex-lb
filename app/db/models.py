@@ -2135,6 +2135,17 @@ Index(
     postgresql_include=["used_percent", "reset_at", "window_minutes", "id"],
 )
 Index("idx_accounts_email", Account.email)
+# Pending-deletion queue: every replica probes ``delete_requested_at IS NOT
+# NULL LIMIT 1`` each worker interval and the leader orders the queue by
+# (delete_requested_at, id); the partial index keeps both reads off the full
+# accounts table and is empty in the steady state (no pending deletions).
+Index(
+    "idx_accounts_delete_requested_at",
+    Account.delete_requested_at,
+    Account.id,
+    postgresql_where=text("delete_requested_at IS NOT NULL"),
+    sqlite_where=text("delete_requested_at IS NOT NULL"),
+)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
