@@ -63,6 +63,7 @@ from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_rese
 from app.core.utils.time import utcnow
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.deletion import build_account_deletion_scheduler
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup_scheduler import build_account_usage_rollup_scheduler
 from app.modules.api_keys import api as api_keys_api
@@ -488,6 +489,7 @@ async def lifespan(app: FastAPI):
     automations_scheduler = build_automations_scheduler()
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
+    account_deletion_scheduler = build_account_deletion_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     telemetry_scheduler = build_telemetry_scheduler()
     start_live_usage_ingestor()
@@ -501,6 +503,7 @@ async def lifespan(app: FastAPI):
     await automations_scheduler.start()
     await rate_limit_reset_credits_scheduler.start()
     await account_usage_rollup_scheduler.start()
+    await account_deletion_scheduler.start()
     await data_retention_scheduler.start()
     await telemetry_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
@@ -718,6 +721,7 @@ async def lifespan(app: FastAPI):
         await stop_live_usage_ingestor()
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
+        await account_deletion_scheduler.stop()
         await data_retention_scheduler.stop()
         await telemetry_scheduler.stop()
         # Release the scheduler leader lease only after every leader-gated

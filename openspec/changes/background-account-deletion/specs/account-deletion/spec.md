@@ -1,0 +1,117 @@
+# account-deletion Delta
+
+## ADDED Requirements
+
+### Requirement: Account deletion requests return fast and hide the account immediately
+
+`DELETE /api/accounts/{account_id}` MUST NOT perform the account's bulk row
+work (raw request-log detach/delete, usage-history removal) on the request
+path. The request MUST only stamp a durable pending-deletion marker in a
+short transaction: terminal `DEACTIVATED` status, the pending-deletion
+marker (`delete_requested_at`), the frozen `delete_history` choice
+(`delete_history_requested`), sticky-session removal, and bridge-session
+closure. The response contract remains `{"status": "deleted"}` with 200 for
+an existing account and 404 otherwise; row purge is asynchronous.
+
+Accounts carrying the pending-deletion marker MUST be excluded from account
+listings (`GET /api/accounts` and every listing-derived read) and MUST be
+excluded from proxy serving via the terminal status. Reactivation of a
+marked account MUST report the account as not found.
+
+#### Scenario: Delete responds without draining rows
+
+- **GIVEN** an account with raw request-log and usage-history rows
+- **WHEN** `DELETE /api/accounts/{id}` returns 200 `{"status": "deleted"}`
+- **THEN** the account no longer appears in `GET /api/accounts`
+- **AND** the account row still exists, terminal and marked, with its raw
+  rows untouched until the background worker drains them
+
+#### Scenario: Marked account cannot be reactivated
+
+- **GIVEN** an account marked for background deletion
+- **WHEN** `POST /api/accounts/{id}/reactivate` is called
+- **THEN** the response is 404 `account_not_found`
+
+### Requirement: Background worker drains marked accounts in bounded chunks
+
+A leader-gated background worker MUST drain each marked account's
+`usage_history`, `additional_usage_history`, and `request_logs` rows in
+bounded per-transaction chunks (at most `DELETE_BATCH_SIZE` rows per
+transaction) without holding the fold-state lock, and MUST then finalize in
+ONE fold-state-locked transaction that detaches or deletes residual raw rows
+(including request-log rows settled mid-drain by in-flight streams), runs
+the folded-bucket lifecycle mirrors, and removes the sticky, lifetime-rollup,
+and account rows together. The soft variant MUST detach raw rows
+(`account_id=NULL, deleted_at` set); the `delete_history` variant MUST
+delete them. The worker MUST start a drain promptly after a delete request
+on the leader replica and within one worker interval otherwise.
+
+#### Scenario: Chunked drain reaches the synchronous end state (soft)
+
+- **GIVEN** a marked account whose raw rows exceed one chunk
+- **WHEN** the worker completes the drain and finalization
+- **THEN** every raw request-log row is detached and soft-deleted, usage
+  snapshots are removed, and the sticky, lifetime-rollup, and account rows
+  are deleted in the finalization transaction
+
+#### Scenario: Chunked drain reaches the synchronous end state (delete_history)
+
+- **GIVEN** an account marked with the `delete_history` variant
+- **WHEN** the worker completes the drain and finalization
+- **THEN** the account's raw request-log rows are deleted and its folded
+  time-axis buckets are removed
+
+### Requirement: Interleaved fold slices never resurrect a deleted account's folded rows
+
+Fold passes MUST remain able to run between drain chunks. Because every fold
+slice holds the fold-state row lock from before reading raw rows until its
+commit, and finalization takes the same lock before running the lifecycle
+mirrors over whatever is folded at that moment, a fold slice MUST either
+commit before finalization (its account-attributed output is moved or
+removed by the mirrors) or after (it observes no raw rows attributed to the
+account). After finalization commits, no folded row in any rollup table may
+carry the deleted account's dimension, and under the soft variant the
+orphaned-deleted dimension MUST preserve the account's full folded history.
+
+#### Scenario: Fold between chunks is converged by finalization
+
+- **GIVEN** a marked account with part of its raw history already detached
+  by drain chunks and part still attached
+- **WHEN** a fold pass commits between chunks (attributing the still-attached
+  rows to the account) and the worker then completes finalization
+- **THEN** no rollup table contains rows under the account's dimension
+- **AND** (soft variant) the orphaned-deleted dimension carries the account's
+  complete folded history
+- **AND** fold passes run after finalization add nothing under the account's
+  dimension
+
+### Requirement: Deletion is restart-safe, idempotent, and superseded by credential replacement
+
+All drain progress MUST live in the database so a worker restart resumes an
+interrupted deletion with no separate recovery step. Repeat DELETE requests
+for a marked account MUST succeed idempotently and MUST NOT change the
+frozen `delete_history` choice (first request wins). A credential
+replacement (re-import or reauthentication landing on the marked row) MUST
+clear the marker and supersede the deletion: drain chunks re-check the
+marker per transaction and finalization re-checks it under the account row
+lock, so a superseded account is never finalized (rows already drained stay
+detached).
+
+#### Scenario: Restart resumes a partial drain
+
+- **GIVEN** a marked account whose drain was interrupted after some chunks
+- **WHEN** a fresh worker pass runs
+- **THEN** the drain resumes from the database state and finalizes normally
+
+#### Scenario: Repeat delete does not escalate the variant
+
+- **GIVEN** an account marked by a request without `delete_history`
+- **WHEN** a second `DELETE` request arrives with `delete_history=true`
+- **THEN** the request succeeds and the frozen choice remains the soft variant
+
+#### Scenario: Re-import supersedes a pending deletion
+
+- **GIVEN** a marked account mid-drain
+- **WHEN** a credential replacement lands on the row and clears the marker
+- **THEN** the worker abandons the deletion without removing the account row
+- **AND** rows detached before the replacement remain detached

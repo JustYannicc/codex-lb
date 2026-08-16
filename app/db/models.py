@@ -137,6 +137,20 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    # Pending-deletion marker: set by the fast DELETE path, consumed by the
+    # background deletion worker, cleared only by a credential replacement
+    # (re-import/reauth) that supersedes the deletion. Non-NULL rows are
+    # hidden from account listings and are already unroutable (the fast path
+    # also sets status=DEACTIVATED).
+    delete_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Frozen at the first delete request (repeat requests do not escalate):
+    # True selects the history-deleting variant in the background worker.
+    delete_history_requested: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",

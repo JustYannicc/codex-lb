@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -50,6 +50,10 @@ from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
+# deactivation_reason stamped by the fast DELETE path while the background
+# worker drains the account's rows. The authoritative pending marker is
+# accounts.delete_requested_at; the reason string is operator-facing only.
+ACCOUNT_PENDING_DELETION_REASON = "pending_deletion"
 _UNSET = object()
 _HARD_STICKY_UNAVAILABLE_STATUSES = frozenset(
     (AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
@@ -103,7 +107,11 @@ class AccountsRepository:
         return result.scalar_one_or_none()
 
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-        stmt = select(Account).order_by(Account.email)
+        # Accounts marked for background deletion are already deleted from the
+        # operator's point of view: they never appear in listings (dashboard,
+        # usage refresh, automations) even though their rows survive until the
+        # deletion worker finishes draining them.
+        stmt = select(Account).where(Account.delete_requested_at.is_(None)).order_by(Account.email)
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
@@ -112,7 +120,12 @@ class AccountsRepository:
     async def list_accounts_by_ids(self, account_ids: list[str], *, refresh_existing: bool = False) -> list[Account]:
         if not account_ids:
             return []
-        stmt = select(Account).where(Account.id.in_(account_ids)).order_by(Account.email)
+        stmt = (
+            select(Account)
+            .where(Account.id.in_(account_ids))
+            .where(Account.delete_requested_at.is_(None))
+            .order_by(Account.email)
+        )
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
@@ -816,12 +829,84 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
-    async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
+    async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
+        """Mark an account for background deletion; commits in milliseconds.
+
+        Fast path of ``DELETE /api/accounts/{id}``: the account becomes
+        terminal (``DEACTIVATED`` — every serving path already excludes it)
+        and carries the pending-deletion marker that hides it from listings
+        and enqueues it for the deletion worker, which drains its bulk rows
+        in chunks and finalizes via :meth:`delete` with ``only_pending=True``.
+
+        Idempotent: a repeat request on an already-marked account succeeds
+        without changing the frozen ``delete_history`` choice (first request
+        wins — matching the synchronous behavior, where a second DELETE after
+        the first completed found nothing left to escalate).
+        """
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(
+                    status=AccountStatus.DEACTIVATED,
+                    deactivation_reason=ACCOUNT_PENDING_DELETION_REASON,
+                    reset_at=None,
+                    blocked_at=None,
+                    delete_requested_at=func.coalesce(Account.delete_requested_at, utcnow()),
+                    delete_history_requested=case(
+                        (Account.delete_requested_at.is_(None), delete_history),
+                        else_=Account.delete_history_requested,
+                    ),
+                )
+                .returning(Account.id)
+            )
+            updated_id = result.scalar_one_or_none()
+            if updated_id is not None:
+                # Same immediate cleanup the DEACTIVATED transition performs:
+                # sticky mappings and bridge sessions must not outlive the
+                # account's routability.
+                await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+                await self._close_http_bridge_sessions_for_account(account_id)
+            await self._session.commit()
+            return updated_id is not None
+
+    async def delete(
+        self,
+        account_id: str,
+        *,
+        delete_history: bool = False,
+        only_pending: bool = False,
+    ) -> bool:
         async with sqlite_writer_section():
             if self._dialect_name() == "postgresql":
                 # Identity membership precedes the fold-state lock so live
                 # settlement and deletion cannot form an identity/fold cycle.
-                await self._lock_postgresql_account_identity_membership(account_id, None)
+                locked_account = await self._lock_postgresql_account_identity_membership(account_id, None)
+                pending_state = (
+                    None
+                    if locked_account is None
+                    else (locked_account.delete_requested_at, locked_account.delete_history_requested)
+                )
+            else:
+                pending_state = (
+                    await self._session.execute(
+                        select(Account.delete_requested_at, Account.delete_history_requested).where(
+                            Account.id == account_id
+                        )
+                    )
+                ).first()
+            if only_pending:
+                # Background finalization: a credential replacement
+                # (re-import/reauth) that cleared the marker supersedes the
+                # deletion, so touch nothing. The variant comes from the
+                # persisted flag frozen at request time, never the caller.
+                # On PostgreSQL the identity-membership row lock held above
+                # keeps the marker stable through this transaction; on SQLite
+                # the writer section serializes all writers.
+                if pending_state is None or pending_state[0] is None:
+                    await self._session.rollback()
+                    return False
+                delete_history = bool(pending_state[1])
             # Serialize against fold passes before touching the account's
             # request logs: without the fold-state lock an in-flight hourly
             # slice could aggregate the pre-delete attribution but commit
@@ -1213,6 +1298,12 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at
     target.blocked_at = source.blocked_at
+    # A credential replacement (re-import/reauth) supersedes a pending
+    # background deletion: clearing the marker makes the deletion worker
+    # abandon the account before finalizing (rows already drained stay
+    # detached — history loss was requested by the earlier delete).
+    target.delete_requested_at = None
+    target.delete_history_requested = False
 
 
 def _slot_lock_key(account: Account, *, preserve_unknown_workspace_duplicates: bool = True) -> str:

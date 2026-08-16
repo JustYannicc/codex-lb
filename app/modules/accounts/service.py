@@ -40,6 +40,7 @@ from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
@@ -592,6 +593,11 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return False
+        if account.delete_requested_at is not None:
+            # Marked for background deletion: already invisible in listings
+            # and about to be removed — report it as gone rather than racing
+            # the deletion worker back to ACTIVE.
+            return False
         if account.status == AccountStatus.REAUTH_REQUIRED:
             raise AccountStateTransitionError("Account requires re-authentication and cannot be reactivated directly")
         result = await self._repo.update_status_if_current(
@@ -659,19 +665,25 @@ class AccountsService:
         return result
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
-        result = await self._repo.delete(account_id, delete_history=delete_history)
+        # Fast path: stamp the pending-deletion marker (terminal status, hidden
+        # from listings, sticky/bridge cleanup) and return in milliseconds; the
+        # background deletion worker drains the bulk rows and removes the
+        # account row afterwards (see app.modules.accounts.deletion).
+        result = await self._repo.begin_delete(account_id, delete_history=delete_history)
         if result:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
-            # Deletion cascades the account_proxy_bindings row away, and account
-            # ids are deterministic (delete-then-re-import regenerates the same
-            # id), so the cached route outcome must not survive the deletion.
+            # Finalization cascades the account_proxy_bindings row away, and
+            # account ids are deterministic (delete-then-re-import regenerates
+            # the same id), so the cached route outcome must not survive the
+            # delete request; the worker invalidates again after finalizing.
             await get_upstream_route_cache().invalidate()
             await propagate_account_routing_change()
             poller = get_cache_invalidation_poller()
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
+            request_account_deletion_run()
         return result
 
     async def set_account_alias(self, account_id: str, alias: str | None) -> bool:
