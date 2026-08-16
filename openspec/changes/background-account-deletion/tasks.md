@@ -93,4 +93,6 @@
 - [x] 4.4 Alembic round-trip coverage for
       `20260816_000000_add_account_pending_deletion` (parent -> revision ->
       downgrade -> guarded upgrade -> head), wired into the PostgreSQL CI
-      target list.
+      target list; downgrade REFUSES while any deletion is queued (the
+      marker columns are the queue's only durable state) and the refusal is
+      covered by the round-trip test.

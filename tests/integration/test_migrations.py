@@ -1388,6 +1388,28 @@ async def test_account_pending_deletion_migration_upgrade_and_downgrade(tmp_path
             state = await conn.run_sync(_schema_state)
         assert state == {"columns": marker_columns, "index_present": True}
 
+        # Downgrade refuses while a deletion is queued: the marker columns are
+        # the queue's only durable state, and dropping them would silently
+        # abandon an acknowledged deletion.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO accounts (id, codex_installation_id, email, plan_type, "
+                    "access_token_encrypted, refresh_token_encrypted, id_token_encrypted, "
+                    "last_refresh, status, delete_requested_at, delete_history_requested) "
+                    "VALUES ('acc_mig_pending', 'install-mig-pending', 'mig@example.com', 'plus', "
+                    "X'00', X'00', X'00', '2026-08-16 00:00:00', 'deactivated', "
+                    "'2026-08-16 00:00:00', 0)"
+                )
+            )
+        with pytest.raises(Exception, match="queued for"):
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM accounts WHERE id = 'acc_mig_pending'"))
+
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
         async with engine.connect() as conn:
             state = await conn.run_sync(_schema_state)

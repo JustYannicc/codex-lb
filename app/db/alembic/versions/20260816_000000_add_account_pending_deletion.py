@@ -56,9 +56,25 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    columns = _columns(bind)
+    if "delete_requested_at" in columns:
+        # The marker columns are the deletion queue's only durable state:
+        # dropping them while deletions are queued would silently abandon
+        # acknowledged deletions and hand the parent build unusable
+        # (credential-wiped, partially drained) account rows it would list
+        # again. Refuse instead — let the worker finish (or supersede the
+        # deletions via re-import/reauth) before downgrading.
+        pending = bind.execute(
+            sa.text(f"SELECT COUNT(*) FROM {_TABLE} WHERE delete_requested_at IS NOT NULL")  # noqa: S608
+        ).scalar()
+        if pending:
+            raise RuntimeError(
+                f"cannot downgrade {revision}: {pending} account(s) are still queued for "
+                "background deletion; wait for the deletion worker to finish (or supersede "
+                "the deletions with a credential re-import) before downgrading"
+            )
     if _INDEX in _indexes(bind):
         op.drop_index(_INDEX, table_name=_TABLE)
-    columns = _columns(bind)
     if "delete_history_requested" in columns:
         op.drop_column(_TABLE, "delete_history_requested")
     if "delete_requested_at" in columns:
