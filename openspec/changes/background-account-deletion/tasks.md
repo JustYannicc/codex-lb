@@ -51,6 +51,11 @@
 - [x] 2.13 Repeat DELETE short-circuits on an unlocked marker+wipe read so
       the millisecond contract holds while a drain chunk holds the account
       row lock / SQLite writer section.
+- [x] 2.14 Treat marked accounts as absent on every ID-based account route
+      (trends, reset-credit read/consume, probe, pause, update, alias,
+      limit-warmup, routing policy) via a marker-aware fetch or an atomic
+      write predicate; filter the marker in the unscoped API-key pool query
+      (`list_all_accounts`) as well.
 
 ## 3. Background worker
 

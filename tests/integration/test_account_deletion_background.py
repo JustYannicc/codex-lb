@@ -204,6 +204,20 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
         export = await async_client.post(f"/api/accounts/acc_bg_mark/{export_path}")
         assert export.status_code == 404, export_path
 
+    # Every other ID-based account route treats the marked row as gone too —
+    # the synchronous delete returned 404 on all of them once the row was
+    # removed.
+    base = "/api/accounts/acc_bg_mark"
+    assert (await async_client.get(f"{base}/trends")).status_code == 404
+    assert (await async_client.get(f"{base}/usage-reset-credits")).status_code == 404
+    assert (await async_client.post(f"{base}/usage-reset-credits/consume")).status_code == 404
+    assert (await async_client.post(f"{base}/probe")).status_code == 404
+    assert (await async_client.post(f"{base}/pause")).status_code == 404
+    assert (await async_client.patch(base, json={"securityWorkAuthorized": True})).status_code == 404
+    assert (await async_client.put(f"{base}/alias", json={"alias": "ghost"})).status_code == 404
+    assert (await async_client.put(f"{base}/limit-warmup", json={"enabled": True})).status_code == 404
+    assert (await async_client.put(f"{base}/routing-policy", json={"routingPolicy": "preserve"})).status_code == 404
+
 
 def _fake_id_token(payload: dict) -> str:
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")

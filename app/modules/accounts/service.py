@@ -234,7 +234,7 @@ class AccountsService:
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if not account or not self._usage_repo:
             return None
         now = utcnow()
@@ -256,7 +256,7 @@ class AccountsService:
         )
 
     async def get_usage_reset_credits(self, account_id: str) -> AccountUsageResetCreditsResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -319,7 +319,7 @@ class AccountsService:
         *,
         redeem_request_id: str | None = None,
     ) -> AccountUsageResetConsumeResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -424,18 +424,19 @@ class AccountsService:
                 encryptor=self._encryptor,
             )
 
-    async def _get_exportable_account(self, account_id: str) -> Account | None:
-        """Account for credential-export endpoints; marked-for-deletion rows
-        are gone from the operator's perspective (the synchronous delete
-        returned 404 here) and MUST NOT keep serving decrypted tokens during
-        the background drain window."""
+    async def _get_visible_account(self, account_id: str) -> Account | None:
+        """Account fetch for ID-based operator routes; marked-for-deletion
+        rows are gone from the operator's perspective (the synchronous delete
+        returned 404 on every one of these routes once the row was removed)
+        and MUST NOT keep serving reads, mutations, or decrypted tokens
+        during the background drain window."""
         account = await self._repo.get_by_id(account_id)
         if account is None or account.delete_requested_at is not None:
             return None
         return account
 
     async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
-        account = await self._get_exportable_account(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
 
@@ -460,7 +461,7 @@ class AccountsService:
         )
 
     async def export_auth(self, account_id: str) -> AccountAuthExportResponse | None:
-        account = await self._get_exportable_account(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
 
@@ -630,7 +631,7 @@ class AccountsService:
         return result
 
     async def pause_account(self, account_id: str) -> bool:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return False
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -703,7 +704,7 @@ class AccountsService:
         return await self._repo.update_alias(account_id, normalized)
 
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
-        account = await self._get_exportable_account(account_id)
+        account = await self._get_visible_account(account_id)
         if not account:
             return None
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -744,7 +745,7 @@ class AccountsService:
         before/after snapshot so the operator can see whether the upstream
         state changed.
         """
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):

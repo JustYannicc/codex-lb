@@ -204,6 +204,11 @@ class ApiKeysRepository:
             .where(
                 ~Account.status.in_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
             )
+            # Status alone is not enough: an unfenced pre-upgrade replica can
+            # briefly replace a marked account's terminal status during a
+            # rolling deploy, and a deleted account must never re-enter the
+            # unscoped pooled-usage projections.
+            .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
 

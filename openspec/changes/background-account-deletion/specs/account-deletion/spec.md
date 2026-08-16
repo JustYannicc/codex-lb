@@ -30,11 +30,16 @@ account and 404 otherwise; row purge is asynchronous.
 
 Accounts carrying the pending-deletion marker MUST be excluded from account
 listings (`GET /api/accounts` and every listing-derived read) and MUST be
-excluded from proxy serving via the terminal status. Reactivation of a
-marked account MUST report the account as not found, and the
-credential-export endpoints (account export, auth export, opencode auth
-export) MUST likewise report it as not found — a successful DELETE MUST NOT
-leave decrypted tokens retrievable during the background drain window.
+excluded from proxy serving via the terminal status. EVERY ID-based account
+route MUST report a marked account as not found — reads (trends,
+reset-credit views), mutations (account update, alias, limit-warmup,
+routing policy), action routes (pause, probe, reset-credit consumption,
+reactivation), and the credential-export endpoints (account export, auth
+export, opencode auth export) — because the synchronous delete returned 404
+on all of them once the row was removed, and a successful DELETE MUST NOT
+leave decrypted tokens retrievable during the background drain window. Only
+credential-replacement paths (re-import, reauthentication) may address the
+marked row.
 
 Ordinary status writes MUST NOT modify a marked account: a stale in-flight
 settlement (for example a 429 landing after the DELETE for a request
@@ -69,6 +74,14 @@ account in key listings before finalization.
 
 - **GIVEN** an account marked for background deletion
 - **WHEN** `POST /api/accounts/{id}/reactivate` is called
+- **THEN** the response is 404 `account_not_found`
+
+#### Scenario: All ID-based routes report the marked account as gone
+
+- **GIVEN** an account marked for background deletion whose rows are not yet
+  drained
+- **WHEN** any ID-based account route (trends, reset-credit read/consume,
+  probe, pause, update, alias, limit-warmup, routing policy) is called
 - **THEN** the response is 404 `account_not_found`
 
 #### Scenario: Marked account no longer serves credential exports

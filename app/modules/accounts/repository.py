@@ -680,6 +680,10 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account)
                 .where(Account.id == account_id)
+                # Marked-for-deletion rows are gone from the operator's
+                # perspective: ID-based mutations must report not-found, as the
+                # synchronous delete did once the row was removed.
+                .where(Account.delete_requested_at.is_(None))
                 .values(security_work_authorized=enabled)
                 .returning(Account.id)
             )
@@ -849,7 +853,14 @@ class AccountsRepository:
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
         async with sqlite_writer_section():
             result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(alias=alias).returning(Account.id)
+                update(Account)
+                .where(Account.id == account_id)
+                # Marked-for-deletion rows are gone from the operator's
+                # perspective: ID-based mutations must report not-found, as the
+                # synchronous delete did once the row was removed.
+                .where(Account.delete_requested_at.is_(None))
+                .values(alias=alias)
+                .returning(Account.id)
             )
             await self._session.commit()
             return result.scalar_one_or_none() is not None
@@ -859,6 +870,10 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account)
                 .where(Account.id == account_id)
+                # Marked-for-deletion rows are gone from the operator's
+                # perspective: ID-based mutations must report not-found, as the
+                # synchronous delete did once the row was removed.
+                .where(Account.delete_requested_at.is_(None))
                 .values(limit_warmup_enabled=enabled)
                 .returning(Account.id)
             )
@@ -870,6 +885,10 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account)
                 .where(Account.id == account_id)
+                # Marked-for-deletion rows are gone from the operator's
+                # perspective: ID-based mutations must report not-found, as the
+                # synchronous delete did once the row was removed.
+                .where(Account.delete_requested_at.is_(None))
                 .values(routing_policy=routing_policy)
                 .returning(Account.id)
             )
