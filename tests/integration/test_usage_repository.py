@@ -1386,6 +1386,64 @@ async def test_bulk_history_since_row_cap_respects_per_account_cutoffs_postgresq
 
 
 @pytest.mark.asyncio
+async def test_bulk_history_since_row_cap_exempts_uncapped_recent_floor_postgresql(db_setup):
+    """Rows at or after ``uncapped_recent_floor`` bypass the row cap.
+
+    Live ingestion writes per proxied request whenever the usage fingerprint
+    moves, so a burst can put more rows inside the pace-smoothing window than
+    any fixed cap; the smoothing mean weighs those samples equally, so they
+    must all come back. The cap still bounds the older remainder.
+    """
+    now = utcnow()
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only row-cap test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-burst"))
+
+        # Six rows inside the floor window (a burst denser than the cap) and
+        # four older rows between the cutoff and the floor.
+        for offset in range(6):
+            await repo.add_entry(
+                "acc-burst",
+                50.0 + offset,
+                window="secondary",
+                recorded_at=now - timedelta(minutes=30 - offset),
+            )
+        for offset in range(4):
+            await repo.add_entry(
+                "acc-burst",
+                10.0 + offset,
+                window="secondary",
+                recorded_at=now - timedelta(hours=10 - offset),
+            )
+
+        grouped = await repo.bulk_history_since(
+            ["acc-burst"],
+            "secondary",
+            now - timedelta(days=7),
+            per_account_row_cap=3,
+            uncapped_recent_floor=now - timedelta(minutes=60),
+        )
+
+    # All six in-floor rows survive despite cap=3; the older tail keeps only
+    # its newest three rows; the slice stays oldest-first.
+    assert [snapshot.used_percent for snapshot in grouped["acc-burst"]] == [
+        11.0,
+        12.0,
+        13.0,
+        50.0,
+        51.0,
+        52.0,
+        53.0,
+        54.0,
+        55.0,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_bulk_history_since_capped_query_plan_is_index_only_postgresql(db_setup):
     """The capped lateral probes must stay heap-free on the covering indexes.
 
@@ -1428,6 +1486,55 @@ async def test_bulk_history_since_capped_query_plan_is_index_only_postgresql(db_
     assert "Index Only Scan" in plan_json
     assert "idx_usage_window_raw_account_time_covering" in plan_json
     assert "Seq Scan on usage_history" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_capped_floor_query_plan_is_index_only_postgresql(db_setup):
+    """The floor-exempt probe shape (uncapped recent branch UNION ALL capped
+    older branch) must keep both branches heap-free on the covering index."""
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        plan = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT recent.*
+                    FROM (VALUES ('acc1', now() - interval '7 days', now() - interval '4 hours'),
+                                 ('acc2', now() - interval '7 days', now() - interval '4 hours'))
+                         AS account_cutoffs (account_id, cutoff, uncapped_floor)
+                    JOIN LATERAL (
+                        (SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                         FROM usage_history
+                         WHERE account_id = account_cutoffs.account_id
+                           AND recorded_at >= account_cutoffs.uncapped_floor
+                           AND "window" = 'secondary')
+                        UNION ALL
+                        (SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                         FROM usage_history
+                         WHERE account_id = account_cutoffs.account_id
+                           AND recorded_at >= account_cutoffs.cutoff
+                           AND recorded_at < account_cutoffs.uncapped_floor
+                           AND "window" = 'secondary'
+                         ORDER BY recorded_at DESC, id DESC
+                         LIMIT 100)
+                    ) AS recent ON true
+                    """
+                )
+            )
+        ).scalar_one()
+
+    plan_json = json.dumps(plan)
+    assert "Index Only Scan" in plan_json
+    assert "idx_usage_window_raw_account_time_covering" in plan_json
+    assert "Seq Scan on usage_history" not in plan_json
+    assert "Index Scan using" not in plan_json
 
 
 def _legacy_additional_entry(

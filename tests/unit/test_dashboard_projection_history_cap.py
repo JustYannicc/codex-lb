@@ -34,6 +34,7 @@ class _RecordingRepo:
         *,
         cutoffs=None,
         per_account_row_cap=None,
+        uncapped_recent_floor=None,
     ):
         self.calls.append(
             {
@@ -42,6 +43,7 @@ class _RecordingRepo:
                 "since": since,
                 "cutoffs": cutoffs,
                 "per_account_row_cap": per_account_row_cap,
+                "uncapped_recent_floor": uncapped_recent_floor,
             }
         )
         return {}
@@ -69,10 +71,21 @@ async def test_projection_history_fetch_passes_per_account_row_cap():
         "acc1": _usage_entry("acc1", "secondary", 10080, now - timedelta(minutes=1)),
     }
 
-    await _load_projection_histories(cast(DashboardRepository, repo), primary_usage, secondary_usage, now)
+    await _load_projection_histories(
+        cast(DashboardRepository, repo),
+        primary_usage,
+        secondary_usage,
+        now,
+        smoothing_window_minutes=240,
+    )
 
     assert len(repo.calls) == 2
     assert {call["window"] for call in repo.calls} == {"primary", "secondary"}
     for call in repo.calls:
         assert call["per_account_row_cap"] == _PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP
         assert call["cutoffs"] is not None
+        # The weekly-pace smoothing mean weighs every in-window sample
+        # equally, so the fetch must exempt the configured smoothing window
+        # from the row cap; a write burst may otherwise out-write the cap and
+        # shift the smoothed schedule gap.
+        assert call["uncapped_recent_floor"] == now - timedelta(minutes=240)
