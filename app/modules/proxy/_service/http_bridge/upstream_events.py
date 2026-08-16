@@ -1531,8 +1531,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # close, which is already exempted below. Keep the individual
                 # drop account-neutral; repeated eventless drops still feed
                 # the windowed account drain signal inside the failure path.
-                account_neutral_transport_drop = not account_neutral and _is_account_neutral_transport_drop(
-                    message.close_code, response_events_seen=response_events_seen
+                # Only terminal transport messages qualify: a protocol-invalid
+                # binary frame also carries no close code but did not end the
+                # socket, so it keeps the existing penalty semantics.
+                account_neutral_transport_drop = (
+                    message.kind in ("close", "error")
+                    and not account_neutral
+                    and _is_account_neutral_transport_drop(
+                        message.close_code, response_events_seen=response_events_seen
+                    )
                 )
                 async with session.lifecycle_lock:
                     if (

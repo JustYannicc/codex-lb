@@ -17,7 +17,9 @@
 - [x] 2.3 Assert a drop after streamed response events still penalizes.
 - [x] 2.4 Assert a non-clean close frame (1008/1011) with zero events still
   penalizes.
-- [x] 2.5 Helper unit coverage for `_is_account_neutral_transport_drop`.
+- [x] 2.5 Assert a non-terminal protocol-invalid binary frame still penalizes
+  and records no drop signal.
+- [x] 2.6 Helper unit coverage for `_is_account_neutral_transport_drop`.
 
 ## 3. Validation
 

@@ -26882,6 +26882,50 @@ async def test_http_bridge_non_clean_close_frame_before_response_still_penalizes
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_protocol_invalid_binary_frame_still_penalizes_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-terminal protocol-invalid frame (binary payload) also carries no
+    close code, but the socket did not end: it must keep the existing account
+    penalty instead of being classified as an abrupt transport drop."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-binary-frame")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="binary", data=b"\x00\x01")),
+            close=AsyncMock(),
+        ),
+    )
+    fail_pending = AsyncMock(return_value=True)
+    retire = AsyncMock()
+    drop_signals: list[dict[str, object]] = []
+
+    async def record_signal(
+        target_service: object,
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> None:
+        drop_signals.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_record_http_bridge_account_timeout_signal",
+        record_signal,
+    )
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["penalize_account"] is True
+    assert drop_signals == []
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_response_create_gate_timeout_logs_pending_bridge_context(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

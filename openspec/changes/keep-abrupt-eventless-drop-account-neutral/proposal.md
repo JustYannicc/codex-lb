@@ -12,12 +12,16 @@ seconds while healthy pool siblings idle (issue #1754).
 
 # What Changes
 
-- Classify an abrupt upstream websocket ending with no close frame and zero
-  response events as account-neutral in the HTTP bridge reader failure path:
-  no `record_error` health write for the individual drop.
+- Classify an abrupt upstream websocket ending — a terminal close or receive
+  error with no close frame, no established account-neutral transport
+  classification, and zero response events — as account-neutral in the HTTP
+  bridge reader failure path: no `record_error` health write for the
+  individual drop.
 - Keep the existing penalty when any close frame arrived (including
-  non-clean codes such as 1008/1011) or when response events were already
-  streamed, and keep all established account-neutral transport codes.
+  non-clean codes such as 1008/1011), when response events were already
+  streamed, or when a non-terminal protocol-invalid frame (for example a
+  binary message) triggered the failure, and keep all established
+  account-neutral transport codes on their existing contract.
 - Feed account-neutral eventless drops into the existing windowed eventless
   account drain signal so repeated drops on the same account still drain it
   (same threshold/window as repeated eventless upstream timeouts), keeping
