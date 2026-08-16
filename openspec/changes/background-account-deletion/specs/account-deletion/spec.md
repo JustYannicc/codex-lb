@@ -17,7 +17,10 @@ untouched), and an overwrite of the stored access/refresh/id token
 ciphertext with empty-credential ciphertext so that NO reader of the
 surviving row — including a pre-upgrade replica during a rolling deploy,
 whose export endpoints do not know the marker — can produce usable
-credentials during the drain window. Because targeted reauthentication (a
+credentials during the drain window. Repeat DELETE requests MUST
+short-circuit before taking the account row lock or the SQLite writer
+section, so the millisecond contract holds even while a drain chunk
+transaction is holding the row. Because targeted reauthentication (a
 supersede path) verifies the seat against `chatgpt_user_id` or, on legacy
 rows where it was never backfilled, the stored id-token claims, the fast
 path MUST preserve the non-secret seat identity before the wipe by
@@ -37,7 +40,12 @@ Ordinary status writes MUST NOT modify a marked account: a stale in-flight
 settlement (for example a 429 landing after the DELETE for a request
 selected before it) must not replace the terminal `DEACTIVATED` state and
 make the account selectable mid-drain. Only a credential replacement —
-which clears the marker — may change a marked account's state.
+which clears the marker — may change a marked account's state. Because
+pre-upgrade replicas' status writers are unfenced during a rolling deploy,
+every drain chunk transaction MUST re-assert the terminal status (and
+re-remove any recreated API-key assignments) under the account row lock
+when the marked row has drifted without a credential replacement, bounding
+such drift to one chunk transaction.
 
 Marked accounts MUST be rejected by API-key account-assignment validation
 and excluded from API-key pooled-usage projections, and assignment
@@ -103,6 +111,22 @@ account in key listings before finalization.
 - **WHEN** an ordinary status write (e.g. a late rate-limit settlement)
   targets the account
 - **THEN** the write is rejected and the account stays terminal and marked
+
+#### Scenario: Drift written by an unfenced pre-upgrade replica is re-fenced
+
+- **GIVEN** a marked account whose status was replaced (or whose API-key
+  assignment was recreated) by a pre-upgrade replica's unfenced writer,
+  with the token ciphertext still wiped
+- **WHEN** the next drain chunk transaction runs
+- **THEN** the terminal status and reason are re-asserted and the recreated
+  assignment is removed, in the same chunk transaction
+
+#### Scenario: Repeat delete stays fast during an active drain
+
+- **GIVEN** a marked account whose drain chunk transaction currently holds
+  the account row lock
+- **WHEN** a repeat `DELETE /api/accounts/{id}` arrives
+- **THEN** it returns success without waiting for the chunk transaction
 
 ### Requirement: Background worker drains marked accounts in bounded chunks
 

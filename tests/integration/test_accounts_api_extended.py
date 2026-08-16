@@ -595,8 +595,15 @@ async def test_delete_account_removes_from_list(async_client):
 @pytest.mark.asyncio
 async def test_delete_account_soft_deletes_request_logs(async_client, db_setup, monkeypatch):
     # The suite's inline leader election would let the API's worker wake race
-    # the explicit pass below; keep the drain under test control.
+    # the explicit pass below; keep the drain under test control. The
+    # scheduler's own startup/interval tick is neutralized for the same
+    # reason.
     monkeypatch.setattr("app.modules.accounts.service.request_account_deletion_run", lambda: None)
+
+    async def _no_tick(self) -> None:
+        return None
+
+    monkeypatch.setattr("app.modules.accounts.deletion.AccountDeletionScheduler._run_once", _no_tick)
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
@@ -639,8 +646,15 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup, 
 @pytest.mark.asyncio
 async def test_delete_account_with_delete_history_hard_deletes_request_logs(async_client, db_setup, monkeypatch):
     # The suite's inline leader election would let the API's worker wake race
-    # the explicit pass below; keep the drain under test control.
+    # the explicit pass below; keep the drain under test control. The
+    # scheduler's own startup/interval tick is neutralized for the same
+    # reason.
     monkeypatch.setattr("app.modules.accounts.service.request_account_deletion_run", lambda: None)
+
+    async def _no_tick(self) -> None:
+        return None
+
+    monkeypatch.setattr("app.modules.accounts.deletion.AccountDeletionScheduler._run_once", _no_tick)
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)

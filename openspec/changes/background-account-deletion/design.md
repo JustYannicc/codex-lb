@@ -60,7 +60,21 @@ would otherwise replace `DEACTIVATED` with `RATE_LIMITED` and make the
 account selectable again for direct-by-id paths mid-drain. Credential
 replacement does not go through these writers (it writes fields directly and
 clears the marker in the same transaction), so the supersede path is
-unaffected.
+unaffected. Pre-upgrade replicas' writers are unfenced during a rolling
+deploy, so every drain chunk additionally self-heals: when the marked row
+drifted (non-terminal status or a recreated API-key assignment) without a
+credential replacement, the chunk re-asserts the terminal status and
+re-removes the assignments under the row lock it already holds — a DB
+trigger was rejected as disproportionate machinery for a drift window that
+is already bounded to one chunk transaction (seconds).
+
+Repeat DELETE requests short-circuit on an unlocked marker+wipe read before
+entering the writer section / row lock: a drain chunk holds the account row
+(and, on SQLite, the writer section) for seconds at a time, and the
+fast-path contract must hold throughout the drain. The short-circuit falls
+through to the full path when the credentials were replaced without
+clearing the marker, so an explicit re-delete after a legacy replacement
+re-wipes and re-arms the deletion.
 
 `begin_delete` additionally produces the two projections the synchronous
 delete's row removal produced instantly: it deletes the account's

@@ -65,9 +65,20 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
-from app.db.models import Account, AdditionalUsageHistory, RequestLog, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AdditionalUsageHistory,
+    ApiKeyAccountAssignment,
+    RequestLog,
+    UsageHistory,
+)
 from app.db.session import get_background_session, sqlite_writer_section
-from app.modules.accounts.repository import AccountsRepository, credentials_replaced_since_wipe
+from app.modules.accounts.repository import (
+    ACCOUNT_PENDING_DELETION_REASON,
+    AccountsRepository,
+    credentials_replaced_since_wipe,
+)
 from app.modules.proxy.account_cache import get_account_selection_cache, propagate_account_routing_change
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
@@ -217,6 +228,8 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
         Account.access_token_encrypted,
         Account.refresh_token_encrypted,
         Account.id_token_encrypted,
+        Account.status,
+        Account.deactivation_reason,
     ).where(Account.id == account_id)
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(key_share=True)
@@ -231,6 +244,26 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
         )
         await session.commit()
         return None
+    # Self-heal drift written by pre-upgrade replicas during a rolling
+    # deploy (their writers are unfenced): a late settlement may have
+    # replaced the terminal status — making the wiped account selectable
+    # again — and an unconditional assignment insert may have recreated an
+    # API-key assignment begin_delete removed. Re-fence both under the row
+    # lock held above; any drift is bounded by one chunk transaction. The
+    # credentials check above already excluded genuine replacements, so a
+    # non-DEACTIVATED status here can only be such drift.
+    if row[5] is not AccountStatus.DEACTIVATED or row[6] != ACCOUNT_PENDING_DELETION_REASON:
+        await session.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(
+                status=AccountStatus.DEACTIVATED,
+                deactivation_reason=ACCOUNT_PENDING_DELETION_REASON,
+                reset_at=None,
+                blocked_at=None,
+            )
+        )
+    await session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id))
     return bool(row[1])
 
 

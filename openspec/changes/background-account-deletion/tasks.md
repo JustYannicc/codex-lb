@@ -45,6 +45,12 @@
 - [x] 2.11 Finalization upgrades the account row to `FOR UPDATE` before the
       residual sweeps (PostgreSQL) so in-flight FK inserts are either swept
       or fail post-delete — no live orphans, no surviving history.
+- [x] 2.12 Per-chunk self-heal of drift written by unfenced pre-upgrade
+      replicas: re-assert terminal status and re-remove recreated API-key
+      assignments under the chunk's row lock.
+- [x] 2.13 Repeat DELETE short-circuits on an unlocked marker+wipe read so
+      the millisecond contract holds while a drain chunk holds the account
+      row lock / SQLite writer section.
 
 ## 3. Background worker
 

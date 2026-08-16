@@ -912,6 +912,32 @@ class AccountsRepository:
         wins — matching the synchronous behavior, where a second DELETE after
         the first completed found nothing left to escalate).
         """
+        # Repeat requests short-circuit BEFORE the writer section / row lock:
+        # a drain chunk holds the account row (and, on SQLite, the writer
+        # section) for up to a few seconds, and the fast-path contract is a
+        # millisecond-scale response. The unlocked read is safe because the
+        # repeat changes nothing — the first request froze the variant and
+        # the wipe/cleanup already ran — and a replacement racing this read
+        # supersedes the deletion exactly as if it landed after this
+        # response. When credentials were replaced WITHOUT clearing the
+        # marker (a pre-upgrade replica's replacement), fall through to the
+        # full path so an explicit re-delete re-wipes and re-arms.
+        marked_row = (
+            await self._session.execute(
+                select(
+                    Account.delete_requested_at,
+                    Account.access_token_encrypted,
+                    Account.refresh_token_encrypted,
+                    Account.id_token_encrypted,
+                ).where(Account.id == account_id)
+            )
+        ).first()
+        if (
+            marked_row is not None
+            and marked_row[0] is not None
+            and not credentials_replaced_since_wipe(marked_row[1], marked_row[2], marked_row[3])
+        ):
+            return True
         encryptor = TokenEncryptor()
         wiped_token = encryptor.encrypt("")
         async with sqlite_writer_section():

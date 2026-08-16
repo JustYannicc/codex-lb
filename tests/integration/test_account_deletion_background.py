@@ -42,9 +42,17 @@ def _no_background_wake(monkeypatch):
 
     The suite's stand-in leader election runs scheduler bodies inline, so the
     delete API's worker wake would drain accounts concurrently with (and race)
-    the passes these tests drive step by step.
+    the passes these tests drive step by step. The scheduler's own tick (one
+    pass at startup plus every interval) is neutralized as well: a tick firing
+    between a DELETE and the assertions would drain the account these tests
+    expect to still be marked.
     """
     monkeypatch.setattr("app.modules.accounts.service.request_account_deletion_run", lambda: None)
+
+    async def _no_tick(self) -> None:
+        return None
+
+    monkeypatch.setattr("app.modules.accounts.deletion.AccountDeletionScheduler._run_once", _no_tick)
 
 
 def _make_account(account_id: str, email: str) -> Account:
@@ -640,6 +648,82 @@ async def test_legacy_replica_replacement_before_finalize_is_abandoned(db_setup)
     assert row is not None
     assert row.delete_requested_at is None
     assert encryptor.decrypt(row.refresh_token_encrypted) == "fresh-refresh"
+
+
+@pytest.mark.asyncio
+async def test_repeat_delete_short_circuits_without_waiting_on_chunk_lock(db_setup):
+    """A repeat DELETE must keep the millisecond contract even while a drain
+    chunk transaction holds the account row lock."""
+    import asyncio
+
+    async with SessionLocal() as probe:
+        if probe.get_bind().dialect.name != "postgresql":
+            pytest.skip("row-lock wait behavior is PostgreSQL-specific")
+
+    await _seed_account("acc_bg_repeat", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_repeat")
+
+    async with SessionLocal() as locker:
+        # Hold the same lock a drain chunk holds for its whole transaction.
+        await locker.execute(select(Account.id).where(Account.id == "acc_bg_repeat").with_for_update(key_share=True))
+        async with SessionLocal() as session:
+            repeat = await asyncio.wait_for(AccountsRepository(session).begin_delete("acc_bg_repeat"), timeout=2.0)
+        assert repeat is True
+        await locker.rollback()
+
+
+@pytest.mark.asyncio
+async def test_chunk_self_heals_drift_from_unfenced_replicas(db_setup):
+    """During a rolling deploy, pre-upgrade replicas' unfenced writers can
+    replace the terminal status or recreate API-key assignments on a marked
+    row; the next chunk transaction must re-fence both."""
+    from app.db.models import ApiKey, ApiKeyAccountAssignment
+    from app.modules.accounts import deletion
+
+    await _seed_account("acc_bg_heal", log_count=2)
+    async with SessionLocal() as session:
+        session.add(
+            ApiKey(
+                id="key_bg_heal",
+                name="heal-key",
+                key_hash="hash_bg_heal",
+                key_prefix="sk-heal",
+                account_assignment_scope_enabled=True,
+            )
+        )
+        await session.commit()
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_heal")
+
+    # Old-replica drift: unfenced status write + unconditional assignment
+    # insert (tokens stay wiped, so this is NOT a credential replacement).
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == "acc_bg_heal")
+            .values(status=AccountStatus.RATE_LIMITED, deactivation_reason="rate_limited")
+        )
+        session.add(ApiKeyAccountAssignment(api_key_id="key_bg_heal", account_id="acc_bg_heal"))
+        await session.commit()
+
+    affected = await deletion._run_chunk(deletion._usage_history_chunk, "acc_bg_heal", batch_size=10)
+    assert affected is not None
+
+    row = await _account_row("acc_bg_heal")
+    assert row is not None
+    assert row.status is AccountStatus.DEACTIVATED
+    assert row.deactivation_reason == ACCOUNT_PENDING_DELETION_REASON
+    assert row.delete_requested_at is not None
+    async with SessionLocal() as session:
+        assigned = (
+            await session.execute(
+                select(func.count())
+                .select_from(ApiKeyAccountAssignment)
+                .where(ApiKeyAccountAssignment.account_id == "acc_bg_heal")
+            )
+        ).scalar_one()
+    assert assigned == 0
 
 
 @pytest.mark.asyncio
