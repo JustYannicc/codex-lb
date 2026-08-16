@@ -17,21 +17,28 @@ the TTFT-critical selection path.
 ## What Changes
 
 - The owner lookup that selection already performs per request now also reports
-  whether the row was observed fresh: `updated_at` within
-  `min(15s, 1% of the mapping TTL)` AND no abandonment marker in either
-  `continuity_abandoned_at` or `continuity_abandonment_scope`.
-- When selection retains the same pinned owner and that flag is set, the
-  same-owner refresh upsert is skipped entirely — no statement, no row lock.
-  The next request after the window closes performs the normal write-through
-  refresh.
+  a refresh-skip deadline when the row was observed fresh: `updated_at` within
+  `min(15s, 1% of the mapping TTL)`, not stamped in the future, AND no
+  abandonment marker in either `continuity_abandoned_at` or
+  `continuity_abandonment_scope`. The deadline is
+  `observed_updated_at + skip window`.
+- When selection retains the same pinned owner, the mutation carries that
+  deadline to the persist site, which revalidates it against the clock at the
+  moment the statement would be issued and only then omits the same-owner
+  refresh upsert — no statement, no row lock. A deadline that lapsed during
+  admission or account-state persistence writes through, so the mapping's
+  effective expiry never moves earlier by more than the skip window. The next
+  request after the window closes performs the normal write-through refresh.
 - Every state-changing write is unaffected and still immediate: rebinding to a
   different account, deleting a mapping, restoring after failed admission,
-  clearing an abandonment tombstone, seeding a new mapping, and the raw legacy
-  owner paths. A row carrying any abandonment marker is never skippable because
-  the upsert also clears those marker columns.
-- The flag is DB-observed within the same request (no cross-request cache), so
-  it is correct with any number of workers or replicas: a replica can only skip
-  a write whose freshness it just read from the shared database.
+  clearing an abandonment tombstone, seeding a new mapping (including a thread
+  retention that must initialize a missing process seed — that write is the
+  seed-initialization carrier and is never skipped), and the raw legacy owner
+  paths. A row carrying any abandonment marker is never skippable because the
+  upsert also clears those marker columns.
+- The deadline is DB-observed within the same request (no cross-request cache),
+  so it is correct with any number of workers or replicas: a replica can only
+  skip a write whose freshness it just read from the shared database.
 
 ## Freshness window rationale
 

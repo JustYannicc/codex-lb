@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -2960,9 +2960,9 @@ async def _backdate_sticky_row(key: str, kind: StickySessionKind, *, age_seconds
 
 @pytest.mark.asyncio
 async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_setup):
-    """refresh_can_be_skipped is set only when a same-owner upsert would be a
-    pure updated_at rewrite: fresh within min(15s, 1% of TTL) and free of any
-    abandonment marker."""
+    """refresh_skip_deadline is set only when a same-owner upsert would be a
+    pure updated_at rewrite: fresh within min(15s, 1% of TTL), not stamped in
+    the future, and free of any abandonment marker."""
     from app.db.models import StickySession
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 
@@ -2979,12 +2979,15 @@ async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_s
             max_age_seconds=1800,
         )
         assert fresh.account_id == "acc_refresh_skip"
-        assert fresh.refresh_can_be_skipped is True
+        assert isinstance(fresh.refresh_skip_deadline, datetime)
+        # The deadline is observed_updated_at + window: never further out
+        # than the full window from now.
+        assert fresh.refresh_skip_deadline <= utcnow() + timedelta(seconds=15.0)
 
         # Without a TTL there is no refresh write to skip.
         durable = await repo.get_account_id_and_abandonment(key, kind=StickySessionKind.PROMPT_CACHE)
         assert durable.account_id == "acc_refresh_skip"
-        assert durable.refresh_can_be_skipped is False
+        assert durable.refresh_skip_deadline is None
 
     # 10s old: inside the 15s cap for an 1800s TTL, but outside 1% of a 600s
     # TTL (6s) — the window scales with the TTL it protects.
@@ -2997,14 +3000,28 @@ async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_s
             max_age_seconds=1800,
         )
         assert within_cap.account_id == "acc_refresh_skip"
-        assert within_cap.refresh_can_be_skipped is True
+        assert isinstance(within_cap.refresh_skip_deadline, datetime)
         beyond_fraction = await repo.get_account_id_and_abandonment(
             key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=600,
         )
         assert beyond_fraction.account_id == "acc_refresh_skip"
-        assert beyond_fraction.refresh_can_be_skipped is False
+        assert beyond_fraction.refresh_skip_deadline is None
+
+    # A future updated_at (database clock ahead of the application, or a
+    # restored row) is never skippable: an upper-bound-only age check would
+    # otherwise satisfy the window for longer than the documented bound.
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=-30.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        future_stamped = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert future_stamped.account_id == "acc_refresh_skip"
+        assert future_stamped.refresh_skip_deadline is None
 
     # An abandonment marker disqualifies the skip even on a fresh row: the
     # upsert that would be skipped also clears the marker columns.
@@ -3026,7 +3043,7 @@ async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_s
         # Non-matching source keeps the owner, but the marker still makes a
         # same-owner upsert semantic (it would clear the scope).
         assert marked.account_id == "acc_refresh_skip"
-        assert marked.refresh_can_be_skipped is False
+        assert marked.refresh_skip_deadline is None
 
 
 @pytest.mark.asyncio
@@ -3094,7 +3111,7 @@ async def test_sticky_refresh_skip_never_clobbers_concurrent_rebind(db_setup):
         )
         assert lookup.account_id == "acc_skip_old"
         # The selection layer would skip its same-owner refresh here.
-        assert lookup.refresh_can_be_skipped is True
+        assert isinstance(lookup.refresh_skip_deadline, datetime)
 
     # Concurrent request rebinds the mapping while the first request is still
     # in flight; the first request performs no compensating write.

@@ -1635,7 +1635,7 @@ class LoadBalancer:
         ignore_standard_quota: bool = False,
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
-        sticky_refresh_skippable: bool = False,
+        sticky_refresh_skip_deadline: datetime | None = None,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1660,7 +1660,7 @@ class LoadBalancer:
             ignore_standard_quota=ignore_standard_quota,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
-            sticky_refresh_skippable=sticky_refresh_skippable,
+            sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)

@@ -30,12 +30,13 @@ _SESSION_HEADER_ABANDONMENT_SCOPE = "session_header"
 
 # A same-owner TTL refresh upsert only rewrites ``updated_at``. On hot
 # (key, kind) rows, concurrent requests serialize on that row lock, so the
-# selection path skips the rewrite entirely while the row is younger than
-# this window. The window is bounded to at most 1% of the mapping TTL (so
-# expiry moves by at most 1% of the window it protects) and to a small
-# absolute ceiling; a rebind to a different owner or a row carrying any
-# abandonment marker is never skippable because those writes change state
-# beyond freshness.
+# selection path may skip the rewrite while the row is younger than this
+# window, revalidating the observed deadline at write time. The window is
+# bounded to at most 1% of the mapping TTL (so expiry moves by at most 1% of
+# the window it protects) and to a small absolute ceiling; a rebind to a
+# different owner, a row carrying any abandonment marker, or a row stamped in
+# the future is never skippable because those writes change state beyond
+# freshness (or the observation itself is untrustworthy).
 _REFRESH_SKIP_TTL_FRACTION = 0.01
 _REFRESH_SKIP_MAX_SECONDS = 15.0
 
@@ -69,13 +70,16 @@ class StickyOwnerLookup:
     # was retired. Global stale-hard tombstones leave this unset because their
     # established recovery path may legitimately reselect a recovered owner.
     abandoned_account_id: str | None = None
-    # True only when the row was observed in this lookup with a fresh
+    # Set only when the row was observed in this lookup with a fresh
     # ``updated_at`` (within the refresh-skip window derived from
     # ``max_age_seconds``) and no abandonment marker, so a same-owner TTL
-    # refresh upsert would be a pure ``updated_at`` rewrite. Consumers must
-    # compare with ``is True`` (test doubles may auto-vivify attributes) and
-    # must never skip a write that changes the owner account.
-    refresh_can_be_skipped: bool = False
+    # refresh upsert would be a pure ``updated_at`` rewrite. The value is the
+    # naive-UTC instant (``observed_updated_at`` + skip window) after which
+    # the skip is no longer valid; consumers must isinstance-check
+    # ``datetime`` (test doubles may auto-vivify attributes), must revalidate
+    # the deadline against the clock immediately before omitting the write,
+    # and must never skip a write that changes the owner account.
+    refresh_skip_deadline: datetime | None = None
 
 
 def _continuity_is_abandoned_for_source(
@@ -108,7 +112,7 @@ def _owner_lookup_from_row(
     row: StickySession,
     *,
     continuity_source: _ContinuitySource | None,
-    refresh_can_be_skipped: bool = False,
+    refresh_skip_deadline: datetime | None = None,
 ) -> StickyOwnerLookup:
     if _continuity_is_abandoned_for_source(
         row.continuity_abandoned_at,
@@ -127,28 +131,36 @@ def _owner_lookup_from_row(
     return StickyOwnerLookup(
         account_id=row.account_id,
         continuity_abandoned=False,
-        refresh_can_be_skipped=refresh_can_be_skipped,
+        refresh_skip_deadline=refresh_skip_deadline,
     )
 
 
-def _same_owner_refresh_can_be_skipped(
+def _same_owner_refresh_skip_deadline(
     row: StickySession,
     *,
     observed_updated_at: datetime,
     now: datetime,
     max_age_seconds: int,
-) -> bool:
-    """Whether a same-owner upsert of this row would be a pure freshness rewrite.
+) -> datetime | None:
+    """Deadline until which a same-owner upsert of this row stays skippable.
 
     Any abandonment marker disqualifies the skip: an upsert re-establishes
     ownership by clearing both marker columns, so that write is semantic even
-    when the owner account is unchanged.
+    when the owner account is unchanged. A row whose ``updated_at`` sits in
+    the future (database clock ahead of this process, or a restored row) is
+    also never skippable: an upper-bound-only age comparison would let such a
+    row satisfy the window for longer than the documented bound.
     """
 
     if row.continuity_abandoned_at is not None or row.continuity_abandonment_scope is not None:
-        return False
+        return None
+    age_seconds = (now - observed_updated_at).total_seconds()
+    if age_seconds < 0:
+        return None
     skip_window_seconds = min(_REFRESH_SKIP_MAX_SECONDS, max_age_seconds * _REFRESH_SKIP_TTL_FRACTION)
-    return (now - observed_updated_at).total_seconds() <= skip_window_seconds
+    if age_seconds > skip_window_seconds:
+        return None
+    return observed_updated_at + timedelta(seconds=skip_window_seconds)
 
 
 class StickySessionsRepository:
@@ -200,7 +212,7 @@ class StickySessionsRepository:
             return _owner_lookup_from_row(
                 row,
                 continuity_source=continuity_source,
-                refresh_can_be_skipped=_same_owner_refresh_can_be_skipped(
+                refresh_skip_deadline=_same_owner_refresh_skip_deadline(
                     row,
                     observed_updated_at=observed_updated_at,
                     now=now,

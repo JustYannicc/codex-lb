@@ -15,14 +15,22 @@ write-per-request behavior.
 
 The skip decision MUST be derived from row state observed in the current request's
 database lookup, not from cross-request in-process state, so any number of workers or
-replicas remain correct.
+replicas remain correct. The lookup MUST report the skip as a deadline (the observed
+freshness timestamp plus the skip window), and the write path MUST revalidate that
+deadline against the clock at the moment the write would otherwise be issued — a
+deadline that lapsed while the request was being admitted no longer authorizes a
+skip. A row whose observed freshness timestamp lies in the future (clock skew or a
+restored row) MUST NOT be skippable at all.
 
 A skip MUST apply only to a pure freshness rewrite. The following writes MUST remain
 immediate and unconditional: rebinding the mapping to a different account, deleting
 the mapping, restoring a provisional owner after failed admission, initializing a
 seed mapping, and any upsert against a row carrying an abandonment marker (whose
-write also clears the marker columns). A raw legacy owner that shadows the namespaced
-row MUST NOT inherit the namespaced row's freshness observation.
+write also clears the marker columns). In particular, a retention write that would
+initialize a missing seed mapping MUST NOT be skipped even when the retained row
+itself was observed fresh, because the seed initialization piggybacks on that write.
+A raw legacy owner that shadows the namespaced row MUST NOT inherit the namespaced
+row's freshness observation.
 
 #### Scenario: Hot same-owner retention skips the redundant refresh write
 
@@ -52,3 +60,23 @@ row MUST NOT inherit the namespaced row's freshness observation.
 - **AND** a concurrent request rebinds the same mapping to another account
 - **WHEN** both requests complete
 - **THEN** the mapping's owner is the rebind target
+
+#### Scenario: A retention that must initialize a missing seed is never skipped
+
+- **GIVEN** a thread mapping observed fresher than the skip window
+- **AND** the corresponding process seed mapping does not exist
+- **WHEN** selection retains the thread mapping's pinned account
+- **THEN** the retention write is issued and the seed mapping is initialized
+
+#### Scenario: A deadline that lapsed during admission writes through
+
+- **GIVEN** a request whose lookup observed the row inside the skip window
+- **AND** admission latency carried the request past the observed skip deadline
+- **WHEN** the retention write would be issued
+- **THEN** the deadline is revalidated and the freshness write is performed
+
+#### Scenario: A future freshness timestamp is never skippable
+
+- **GIVEN** a mapping whose freshness timestamp lies ahead of the current clock
+- **WHEN** the owner lookup evaluates the skip window
+- **THEN** no skip deadline is reported and retention writes through

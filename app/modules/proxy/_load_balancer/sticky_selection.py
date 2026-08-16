@@ -23,6 +23,7 @@ from app.core.balancer import (
     TrafficClass,
     select_account,
 )
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.types import (
@@ -194,7 +195,7 @@ class StickySelectionOwner(Protocol):
         ignore_standard_quota: bool,
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
-        sticky_refresh_skippable: bool = False,
+        sticky_refresh_skip_deadline: datetime | None = None,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -244,6 +245,12 @@ class _StickyMutation:
     # ``None`` is an intentional delete; absence of a mutation means preserve
     # the current mapping until final admission succeeds.
     account_id: str | None
+    # Set only when this mutation is a pure same-owner freshness rewrite of a
+    # row this request's lookup observed inside the repository's refresh-skip
+    # window. The persist site revalidates the deadline against the clock at
+    # write time and may then omit the statement entirely; a mutation that
+    # rebinds, deletes, or must initialize a seed mapping never carries it.
+    refresh_skip_deadline: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +335,13 @@ async def run_sticky_selection_path(
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
-    sticky_refresh_skippable = False
+    sticky_refresh_skip_deadline: datetime | None = None
+    # A thread row whose process seed is still missing must keep its retention
+    # write: that write doubles as the seed-initialization carrier (see the
+    # ``initialize_seed_key`` argument at the persist site below), and
+    # suppressing it would let sibling threads select divergent owners until
+    # the skip window closes.
+    seed_initialization_pending = sticky_source == "thread_header" and sticky_seed_account_id is None
     # A source-qualified marker can be observed before this call or after a
     # retirement CAS miss. In both cases its retained owner is authoritative
     # exclusion evidence even though it is no longer affinity ownership for
@@ -359,10 +372,16 @@ async def run_sticky_selection_path(
                 # always has, rather than silently bypassing the ambiguous
                 # owner check below.
                 sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
-                # ``is True`` for the same test-double reason as above. The
-                # flag is only ever an optimization hint: False always falls
-                # back to today's write-on-every-request refresh behavior.
-                sticky_refresh_skippable = sticky_owner_lookup.refresh_can_be_skipped is True
+                # ``isinstance`` for the same test-double reason as above. The
+                # deadline is only ever an optimization hint: None always
+                # falls back to today's write-on-every-request refresh
+                # behavior, and seed-needing requests never skip.
+                observed_refresh_skip_deadline = sticky_owner_lookup.refresh_skip_deadline
+                sticky_refresh_skip_deadline = (
+                    observed_refresh_skip_deadline
+                    if isinstance(observed_refresh_skip_deadline, datetime) and not seed_initialization_pending
+                    else None
+                )
                 sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
                 if sticky_owner_lookup.continuity_abandoned is True and isinstance(
                     sticky_abandoned_account_id,
@@ -378,7 +397,7 @@ async def run_sticky_selection_path(
                 sticky_continuity_abandoned = False
                 # The freshness observation belongs to the namespaced row,
                 # not the raw legacy owner that now shadows it.
-                sticky_refresh_skippable = False
+                sticky_refresh_skip_deadline = None
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
@@ -652,7 +671,7 @@ async def run_sticky_selection_path(
                         routing_costs_by_account_id=effective_routing_costs,
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
-                        sticky_refresh_skippable=sticky_refresh_skippable,
+                        sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
                     )
                     result = sticky_outcome.selection
                     if (
@@ -1064,27 +1083,27 @@ async def run_sticky_selection_path(
             assert sticky_kind is not None
             sticky_mutation = sticky_outcome.mutation
             assert sticky_mutation is not None
-            try:
-                async with owner._repo_factory() as repos:
-                    await _persist_sticky_mutation(
-                        sticky_repo=repos.sticky_sessions,
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        mutation=sticky_mutation,
-                        initialize_seed_key=(
-                            sticky_seed_key
-                            if sticky_source == "thread_header" and sticky_seed_account_id is None
-                            else None
-                        ),
-                        initialize_seed_kind=sticky_seed_kind,
-                    )
-            except BaseException:
-                # Runtime admission may already be committed. Preserve
-                # its selection timestamp, but never leak the local
-                # concurrency lease when sticky persistence fails.
-                await owner.release_account_lease(selected_lease)
-                selected_lease = None
-                raise
+            initialize_seed_key = (
+                sticky_seed_key if sticky_source == "thread_header" and sticky_seed_account_id is None else None
+            )
+            if not _sticky_refresh_write_skippable(sticky_mutation, initialize_seed_key=initialize_seed_key):
+                try:
+                    async with owner._repo_factory() as repos:
+                        await _persist_sticky_mutation(
+                            sticky_repo=repos.sticky_sessions,
+                            sticky_key=sticky_key,
+                            sticky_kind=sticky_kind,
+                            mutation=sticky_mutation,
+                            initialize_seed_key=initialize_seed_key,
+                            initialize_seed_kind=sticky_seed_kind,
+                        )
+                except BaseException:
+                    # Runtime admission may already be committed. Preserve
+                    # its selection timestamp, but never leak the local
+                    # concurrency lease when sticky persistence fails.
+                    await owner.release_account_lease(selected_lease)
+                    selected_lease = None
+                    raise
         break
 
     return StickySelectionOutcome(
@@ -1121,7 +1140,7 @@ async def _select_with_stickiness(
     ignore_standard_quota: bool = False,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
-    sticky_refresh_skippable: bool = False,
+    sticky_refresh_skip_deadline: datetime | None = None,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1149,10 +1168,14 @@ async def _select_with_stickiness(
         selection: SelectionResult,
         *,
         persist_account_id: str | None = None,
+        refresh_skip_deadline: datetime | None = None,
     ) -> _StickySelectionOutcome:
         mutation = pending_mutation
         if persist_account_id is not None:
-            mutation = _StickyMutation(account_id=persist_account_id)
+            mutation = _StickyMutation(
+                account_id=persist_account_id,
+                refresh_skip_deadline=refresh_skip_deadline,
+            )
         return _StickySelectionOutcome(selection=selection, mutation=mutation)
 
     if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
@@ -1161,10 +1184,10 @@ async def _select_with_stickiness(
             kind=sticky_kind,
             max_age_seconds=sticky_max_age_seconds,
         )
-        # The skippable flag is only valid for the lookup that produced the
+        # The skip deadline is only valid for the lookup that produced the
         # caller's ``sticky_existing_account_id``; this fresh lookup did not
         # observe row freshness, so fall back to write-through refresh.
-        sticky_refresh_skippable = False
+        sticky_refresh_skip_deadline = None
     else:
         existing = sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None
     # When the pinned account is temporarily unavailable (rate-limited,
@@ -1208,11 +1231,14 @@ async def _select_with_stickiness(
             # Retaining the pinned owner persists only to advance
             # ``updated_at`` on TTL-based kinds. When this request's lookup
             # already observed the row inside the repository's refresh-skip
-            # window, skip that write: concurrent requests on a hot session
-            # otherwise serialize on the same row's upsert lock. Rebinds and
-            # deletes never consult this value and always write immediately.
-            pinned_refresh_account_id = (
-                pinned.account_id if sticky_max_age_seconds is not None and not sticky_refresh_skippable else None
+            # window, the persist site may skip that write after revalidating
+            # the observed deadline against the clock: concurrent requests on
+            # a hot session otherwise serialize on the same row's upsert
+            # lock. Rebinds and deletes never carry the deadline and always
+            # write immediately.
+            pinned_refresh_account_id = pinned.account_id if sticky_max_age_seconds is not None else None
+            pinned_refresh_skip_deadline = (
+                sticky_refresh_skip_deadline if pinned_refresh_account_id is not None else None
             )
             # Proactively rebind session affinity for any sticky kind
             # once the pinned account is already above the configured
@@ -1276,6 +1302,7 @@ async def _select_with_stickiness(
                     return finish_selection(
                         pinned_result,
                         persist_account_id=pinned_refresh_account_id,
+                        refresh_skip_deadline=pinned_refresh_skip_deadline,
                     )
             else:
                 # Reallocate only when a burn-first target exists and can
@@ -1330,6 +1357,7 @@ async def _select_with_stickiness(
                             return finish_selection(
                                 pinned_result,
                                 persist_account_id=pinned_refresh_account_id,
+                                refresh_skip_deadline=pinned_refresh_skip_deadline,
                             )
                 reallocate_sticky = True
             # Grace period: if the pinned account is rate-limited with a
@@ -1357,6 +1385,7 @@ async def _select_with_stickiness(
                     return finish_selection(
                         grace_result,
                         persist_account_id=pinned_refresh_account_id,
+                        refresh_skip_deadline=pinned_refresh_skip_deadline,
                     )
             if reallocate_sticky:
                 pending_mutation = _StickyMutation(account_id=None)
@@ -1406,6 +1435,27 @@ async def _select_with_stickiness(
             sticky_kind.value,
         )
     return finish_selection(chosen)
+
+
+def _sticky_refresh_write_skippable(
+    mutation: _StickyMutation,
+    *,
+    initialize_seed_key: str | None,
+) -> bool:
+    """Whether this mutation's write may be omitted at persist time.
+
+    True only for a pure same-owner freshness rewrite whose observed skip
+    deadline still holds now, at the moment the statement would otherwise be
+    issued — admission and account-state persistence sit between selection
+    and this point, so the deadline computed at lookup time must be
+    revalidated to keep the mapping's effective expiry within the documented
+    skip-window bound. Deletes and seed-initializing writes are never
+    skippable.
+    """
+    if mutation.account_id is None or initialize_seed_key is not None:
+        return False
+    deadline = mutation.refresh_skip_deadline
+    return isinstance(deadline, datetime) and utcnow() <= deadline
 
 
 async def _persist_sticky_mutation(
