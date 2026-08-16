@@ -19,13 +19,16 @@ affinity for requests that carry continuation state.
 
 The sticky reallocation threshold controls SHALL name the quota window they
 apply to, SHALL state that the value is percent used, and SHALL show the
-equivalent percent remaining for a valid threshold value.
+quota-arithmetic remaining percent for a valid threshold value, qualified so
+it is not presented as the exact account-page remaining figure (routing adds
+temporary in-flight pressure on top of reported usage).
 
 #### Scenario: Threshold unit hint
 
 - **GIVEN** the sticky secondary threshold input holds the valid value `70`
 - **WHEN** the routing settings section renders
-- **THEN** a hint shows `70% used` as equivalent to `30% remaining`
+- **THEN** a hint shows `70% used` alongside `30% remaining` in quota terms
+- **AND** the quota-window explainer states that in-flight work counts as temporary extra usage
 
 #### Scenario: Quota window explainer
 
@@ -55,13 +58,19 @@ to have newly reset.
 
 ### Requirement: Active status is presented as displayed status, not per-request eligibility
 
-The accounts list SHALL annotate the `Active` status badge with a hint that
-the displayed status does not guarantee per-request eligibility.
+The accounts list SHALL present a visible note that displayed status does not
+guarantee per-request eligibility, and SHALL annotate active rows and their
+status badges with the same hint for pointer and assistive-technology users.
+
+#### Scenario: Accounts list eligibility note
+
+- **GIVEN** the accounts list contains at least one account
+- **WHEN** the list renders
+- **THEN** a visible note states that individual requests can still skip an `Active` account
 
 #### Scenario: Active badge eligibility hint
 
 - **GIVEN** an account whose status is `active`
 - **WHEN** its accounts-list entry renders
-- **THEN** the focusable account row and the status badge carry a hint that individual requests can still skip the account
-- **AND** the row hint is exposed as the row's accessible description for keyboard and screen-reader users
+- **THEN** the focusable account row and the status badge carry the hint as a native tooltip and accessible description
 - **AND** non-active statuses do not carry that hint
