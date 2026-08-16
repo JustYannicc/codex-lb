@@ -1706,7 +1706,9 @@ async def _ensure_v1_reset_credit_account_fresh(account_id: str) -> _V1ResetCred
     async with get_background_session() as session:
         repo = AccountsRepository(session)
         account = await repo.get_by_id(account_id)
-        if account is None:
+        # An account marked for background deletion is already deleted from
+        # every consumer's point of view (its credentials are wiped).
+        if account is None or account.delete_requested_at is not None:
             raise HTTPException(status_code=404, detail="Account not found")
         auth_manager = AuthManager(
             repo,
@@ -1747,6 +1749,11 @@ async def v1_redeem_reset_credit(
         return capability_transport_denial
     async with get_background_session() as session:
         account = await AccountsRepository(session).get_by_id(payload.account_id)
+        # A pending-deletion account is gone (credentials wiped): treat it
+        # exactly like an account outside the pool. ``getattr`` because pool
+        # membership tests stub the account with plain namespaces.
+        if account is not None and getattr(account, "delete_requested_at", None) is not None:
+            account = None
         if not _is_reset_credit_account_in_api_key_pool(account, api_key):
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         if account is None:

@@ -1353,6 +1353,67 @@ async def test_usage_history_autovacuum_tuning_migration_sets_and_resets_relopti
 
 
 @pytest.mark.asyncio
+async def test_account_pending_deletion_migration_upgrade_and_downgrade(tmp_path):
+    """Round-trip the pending-deletion marker migration through Alembic:
+    parent -> revision adds the two guarded marker columns and the partial
+    queue index, downgrade removes all three, the guarded upgrade tolerates
+    pre-existing columns, and an upgrade to head proves the revision sits on
+    the single-head path."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-pending-deletion.sqlite'}"
+    parent_revision = "20260812_120000_add_sticky_abandonment_scope"
+    pending_deletion_revision = "20260816_000000_add_account_pending_deletion"
+    marker_columns = {"delete_requested_at", "delete_history_requested"}
+    index_name = "idx_accounts_delete_requested_at"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = {column["name"] for column in inspector.get_columns("accounts")}
+        indexes = {index["name"] for index in inspector.get_indexes("accounts")}
+        return {"columns": columns & marker_columns, "index_present": index_name in indexes}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": set(), "index_present": False}
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pending_deletion_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": set(), "index_present": False}
+
+        # Guarded upgrade: a database where the columns already exist (e.g. a
+        # pre-merge build of this revision) must upgrade cleanly and still
+        # create the missing index.
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN delete_requested_at DATETIME"))
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pending_deletion_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+
+        # Single-head path: upgrading to head from here must succeed and keep
+        # the marker schema in place.
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_account_plan_downgrade_observations_migration_upgrade_and_downgrade(tmp_path):
     """Round-trip the plan-downgrade evidence migration through Alembic itself.
 

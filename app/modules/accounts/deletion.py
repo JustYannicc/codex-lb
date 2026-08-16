@@ -79,7 +79,11 @@ from app.modules.accounts.repository import (
     AccountsRepository,
     credentials_replaced_since_wipe,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, propagate_account_routing_change
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    propagate_account_routing_change,
+)
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -196,19 +200,29 @@ _ChunkFn = Callable[..., Awaitable[int]]
 async def _run_chunk(chunk_fn: _ChunkFn, account_id: str, *, batch_size: int) -> int | None:
     """Run one chunk transaction; None when the pending marker disappeared
     (deletion superseded)."""
+    drift_repaired = False
     async with get_background_session() as session:
         async with sqlite_writer_section():
-            delete_history = await _pending_state(session, account_id)
-            if delete_history is None:
+            state = await _pending_state(session, account_id)
+            if state is None:
                 await session.rollback()
                 return None
+            delete_history, drift_repaired = state
             affected = await chunk_fn(session, account_id, delete_history=delete_history, batch_size=batch_size)
             await session.commit()
+    if drift_repaired:
+        # The drift a pre-upgrade replica wrote may already be cached in
+        # selection/API-key snapshots on this or peer replicas; repairing the
+        # database alone would leave those caches selecting the wiped account
+        # (or honoring a stale assignment) until expiry. Same invalidation
+        # fan-out as the delete request itself.
+        mark_account_routing_unavailable(account_id)
+        await _invalidate_account_caches()
     return affected
 
 
-async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
-    """The frozen ``delete_history`` choice, or None when no longer pending.
+async def _pending_state(session: AsyncSession, account_id: str) -> tuple[bool, bool] | None:
+    """``(delete_history, drift_repaired)``, or None when no longer pending.
 
     On PostgreSQL the read locks the account row (``FOR NO KEY UPDATE``) for
     the rest of the chunk transaction, so a credential replacement cannot
@@ -251,8 +265,11 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
     # API-key assignment begin_delete removed. Re-fence both under the row
     # lock held above; any drift is bounded by one chunk transaction. The
     # credentials check above already excluded genuine replacements, so a
-    # non-DEACTIVATED status here can only be such drift.
+    # non-DEACTIVATED status here can only be such drift. The caller
+    # propagates cache invalidation after commit when drift was repaired.
+    drift_repaired = False
     if row[5] is not AccountStatus.DEACTIVATED or row[6] != ACCOUNT_PENDING_DELETION_REASON:
+        drift_repaired = True
         await session.execute(
             update(Account)
             .where(Account.id == account_id)
@@ -263,8 +280,14 @@ async def _pending_state(session: AsyncSession, account_id: str) -> bool | None:
                 blocked_at=None,
             )
         )
-    await session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id))
-    return bool(row[1])
+    assignment_rows = await session.execute(
+        delete(ApiKeyAccountAssignment)
+        .where(ApiKeyAccountAssignment.account_id == account_id)
+        .returning(ApiKeyAccountAssignment.account_id)
+    )
+    if assignment_rows.scalars().first() is not None:
+        drift_repaired = True
+    return bool(row[1]), drift_repaired
 
 
 async def _usage_history_chunk(session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int) -> int:

@@ -31,13 +31,15 @@ account and 404 otherwise; row purge is asynchronous.
 Accounts carrying the pending-deletion marker MUST be excluded from account
 listings (`GET /api/accounts` and every listing-derived read) and MUST be
 excluded from proxy serving via the terminal status. EVERY ID-based account
-route MUST report a marked account as not found — reads (trends,
-reset-credit views), mutations (account update, alias, limit-warmup,
-routing policy), action routes (pause, probe, reset-credit consumption,
-reactivation), and the credential-export endpoints (account export, auth
-export, opencode auth export) — because the synchronous delete returned 404
-on all of them once the row was removed, and a successful DELETE MUST NOT
-leave decrypted tokens retrievable during the background drain window. Only
+surface MUST report a marked account as not found (or absent) — reads
+(trends, reset-credit views), mutations (account update, alias,
+limit-warmup, routing policy, upstream-proxy binding), action routes
+(pause, probe, reset-credit consumption on both the dashboard and
+rate-limit route families, `/v1` reset-credit redemption, reactivation),
+and the credential-export endpoints (account export, auth export, opencode
+auth export) — because the synchronous delete returned 404 on all of them
+once the row was removed, and a successful DELETE MUST NOT leave decrypted
+tokens retrievable during the background drain window. Only
 credential-replacement paths (re-import, reauthentication) may address the
 marked row.
 
@@ -50,7 +52,10 @@ pre-upgrade replicas' status writers are unfenced during a rolling deploy,
 every drain chunk transaction MUST re-assert the terminal status (and
 re-remove any recreated API-key assignments) under the account row lock
 when the marked row has drifted without a credential replacement, bounding
-such drift to one chunk transaction.
+such drift to one chunk transaction; after the repairing chunk commits, the
+worker MUST propagate the same cache invalidation as the delete request
+(routing unavailability, selection/API-key snapshots, routing-change bump)
+so replicas that cached the drift stop serving it.
 
 Marked accounts MUST be rejected by API-key account-assignment validation
 and excluded from API-key pooled-usage projections, and assignment

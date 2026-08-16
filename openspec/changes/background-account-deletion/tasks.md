@@ -51,11 +51,14 @@
 - [x] 2.13 Repeat DELETE short-circuits on an unlocked marker+wipe read so
       the millisecond contract holds while a drain chunk holds the account
       row lock / SQLite writer section.
-- [x] 2.14 Treat marked accounts as absent on every ID-based account route
-      (trends, reset-credit read/consume, probe, pause, update, alias,
-      limit-warmup, routing policy) via a marker-aware fetch or an atomic
-      write predicate; filter the marker in the unscoped API-key pool query
-      (`list_all_accounts`) as well.
+- [x] 2.14 Treat marked accounts as absent on every ID-based account surface
+      (trends, reset-credit read/consume on both route families, probe,
+      pause, update, alias, limit-warmup, routing policy, upstream-proxy
+      binding, `/v1` reset-credit redemption) via a marker-aware fetch or an
+      atomic write predicate; filter the marker in the unscoped API-key pool
+      query (`list_all_accounts`) as well.
+- [x] 2.15 Propagate the delete-request cache invalidation after a chunk
+      repairs pre-upgrade-replica drift, so cached drift stops being served.
 
 ## 3. Background worker
 
@@ -87,3 +90,7 @@
       keep the direct synchronous `AccountsRepository.delete` coverage.
 - [x] 4.3 `ruff check` + `ruff format` + architecture checks + focused
       account/rollup/migration test suites + strict OpenSpec validation.
+- [x] 4.4 Alembic round-trip coverage for
+      `20260816_000000_add_account_pending_deletion` (parent -> revision ->
+      downgrade -> guarded upgrade -> head), wired into the PostgreSQL CI
+      target list.
