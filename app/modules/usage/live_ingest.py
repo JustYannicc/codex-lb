@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from dataclasses import dataclass
 
 from app.core import usage as usage_core
@@ -22,6 +23,14 @@ logger = logging.getLogger(__name__)
 _QUEUE_SIZE = 512
 _WRITE_MIN_INTERVAL_SECONDS = 5.0
 _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS = 5.0
+
+# Weak ownership registry of every task any ingestor instance creates
+# (consumer and trailing cache invalidation). Weak references never extend a
+# task's lifetime; the registry exists so an owner that loses track of a task
+# (a stop cancelled mid-await) still leaves an auditable handle for the test
+# suite's leak fence to cancel pending tasks and consume exceptions from dead
+# ones before they cross a test boundary (issue #1755).
+_owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +105,7 @@ class LiveUsageIngestor:
     def start(self) -> None:
         if self._consumer is None or self._consumer.done():
             self._consumer = asyncio.create_task(self._run(), name="live-usage-ingestor")
+            _owned_tasks.add(self._consumer)
 
     async def stop(self) -> None:
         consumer = self._consumer
@@ -217,6 +227,7 @@ class LiveUsageIngestor:
                 self._trailing_invalidate(remaining),
                 name="live-usage-trailing-invalidation",
             )
+            _owned_tasks.add(self._trailing_invalidation)
 
     async def _trailing_invalidate(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)

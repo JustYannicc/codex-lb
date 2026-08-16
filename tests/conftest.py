@@ -422,16 +422,15 @@ async def _capture_session_loop():
     _SESSION_LOOP = None
 
 
-async def _reap_leaked_live_usage_ingestor() -> list[str]:
-    """Stop and reset the live-usage ingestor singleton, consuming failures.
+async def _reap_leaked_live_usage_ingestor() -> None:
+    """Stop and reset the live-usage ingestor singleton.
 
-    Mirrors ``stop_live_usage_ingestor()`` but retrieves (instead of
-    re-raising) exceptions from tasks that already died, so a poisoned zombie
-    is reported at the test that leaked it rather than crashing the fence
-    mid-reap or surfacing later as an unobserved-task loop exception. Also
-    sweeps by name for ingestor-owned tasks (consumer and trailing
-    invalidation) the stop path no longer tracks — a stop that was itself
-    cancelled between clearing the global and awaiting the tasks.
+    Mirrors ``stop_live_usage_ingestor()`` but never re-raises: every awaited
+    task ends up done, and ``_consume_dead_live_ingest_task_failures`` then
+    retrieves and reports its exception exactly once. Also sweeps by name for
+    ingestor-owned tasks (consumer and trailing invalidation) the stop path no
+    longer tracks — a stop that was itself cancelled between clearing the
+    global and awaiting the tasks.
     """
     from app.core.usage.live_hub import register_live_usage_publisher
     from app.modules.usage import live_ingest
@@ -449,15 +448,40 @@ async def _reap_leaked_live_usage_ingestor() -> list[str]:
     for task in _pending_live_ingest_tasks(asyncio.get_running_loop()):
         if task not in leaked:
             leaked.append(task)
-    failures: list[str] = []
     for task in leaked:
+        live_ingest._owned_tasks.add(task)
         task.cancel()
     for task in leaked:
         try:
             await task
-        except asyncio.CancelledError:
+        except (Exception, asyncio.CancelledError):
+            # Reported by _consume_dead_live_ingest_task_failures.
             continue
-        except Exception as exc:
+
+
+def _consume_dead_live_ingest_task_failures() -> list[str]:
+    """Retrieve exceptions from dead ingestor-owned tasks, loop-free.
+
+    ``asyncio.all_tasks`` only returns unfinished tasks, so a leaked task that
+    already died with an exception is invisible to the pending sweep; its
+    unretrieved exception would fire the loop exception handler when the task
+    object is garbage-collected inside a LATER test (test_proxy_utils'
+    startup-probe assertions capture exactly that). Walk the ingestor's weak
+    ownership registry instead: ``Task.exception()`` both returns the failure
+    for attribution at the test that leaked it and marks it retrieved so no
+    unobserved-task warning can fire later.
+    """
+    from app.modules.usage import live_ingest
+
+    failures: list[str] = []
+    for task in list(live_ingest._owned_tasks):
+        if not task.done():
+            continue
+        live_ingest._owned_tasks.discard(task)
+        if task.cancelled():
+            continue
+        exc = task.exception()
+        if exc is not None:
             failures.append(f"{task.get_name()!r} died with {exc!r}")
     return failures
 
@@ -485,19 +509,24 @@ def _stop_leaked_live_usage_ingestor():
     several tests monkeypatch globally with finite or call-count-sensitive
     fakes that are still active while function-scoped teardowns run (e.g.
     test_conversation_archive's exhausting iterator). Leak detection itself is
-    loop-passive: reading the module globals and enumerating
-    ``asyncio.all_tasks(loop)`` on the idle session loop never runs it.
+    loop-passive: reading the module globals, enumerating
+    ``asyncio.all_tasks(loop)`` on the idle session loop, and retrieving
+    exceptions from already-dead owned tasks never runs the loop.
     """
     yield
     from app.core.usage import live_hub
     from app.modules.usage import live_ingest
 
     loop = _SESSION_LOOP
-    if loop is None or loop.is_closed() or loop.is_running():
-        return
-    if live_ingest._ingestor is None and live_hub._publisher is None and not _pending_live_ingest_tasks(loop):
-        return
-    failures = loop.run_until_complete(_reap_leaked_live_usage_ingestor())
+    loop_usable = loop is not None and not loop.is_closed() and not loop.is_running()
+    needs_reap = (
+        live_ingest._ingestor is not None
+        or live_hub._publisher is not None
+        or (loop_usable and loop is not None and _pending_live_ingest_tasks(loop))
+    )
+    if needs_reap and loop_usable and loop is not None:
+        loop.run_until_complete(_reap_leaked_live_usage_ingestor())
+    failures = _consume_dead_live_ingest_task_failures()
     if failures:
         pytest.fail(
             "test leaked a live-usage ingestor whose task(s) already failed: " + "; ".join(failures),
