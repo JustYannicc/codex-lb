@@ -44,8 +44,12 @@ and stop exactly that instance at shutdown. Stopping an instance MUST touch
 the process-wide singleton registration and the publisher hook only when the
 stopped instance still owns them; when it does own them, the most recently
 displaced ingestor that is still running MUST be restored as the registration
-and publisher (an instance that is stopped or dead MUST never be restored,
-and a stopped instance MUST never become restorable later). When several
+and publisher. Restoration eligibility is defined as: the candidate holds an
+existing consumer task whose `done()` is false — this excludes consumers that
+failed or completed, and ingestors whose `stop()` already cleared their
+consumer. An instance MUST be removed from restoration tracking before its own
+shutdown begins, so a stopping or stopped instance can never be restored
+later. When several
 lifespans are live in one process, no lifespan's startup or shutdown may
 orphan another lifespan's running ingestor, leave it without a stop path, or
 leave it registered-less while it still runs.
@@ -70,3 +74,18 @@ leave it registered-less while it still runs.
 - **AND** a displaced ingestor that already stopped is not restored (the
   registration falls through to the next still-running displaced instance,
   or is cleared)
+
+#### Scenario: A failed displaced ingestor is not restored
+
+- **GIVEN** displaced ingestor A whose consumer task has settled with an
+  exception (its task `done()` is true)
+- **WHEN** the current registration stops
+- **THEN** A is skipped by restoration (fall through to the next eligible
+  displaced instance, or clear the registration)
+
+#### Scenario: A stopping displaced ingestor is not restored
+
+- **GIVEN** displaced ingestor A whose `stop()` has begun (A was removed from
+  restoration tracking before its shutdown started)
+- **WHEN** the current registration stops concurrently
+- **THEN** A is never restored, even if its consumer task has not yet finished
