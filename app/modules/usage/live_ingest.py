@@ -143,6 +143,10 @@ class LiveUsageIngestor:
             self._consumer = asyncio.create_task(self._run(), name="live-usage-ingestor")
             _enroll_owned_task(self._consumer)
 
+    def is_running(self) -> bool:
+        consumer = self._consumer
+        return consumer is not None and not consumer.done()
+
     async def stop(self) -> None:
         consumer = self._consumer
         self._consumer = None
@@ -279,6 +283,13 @@ class LiveUsageIngestor:
 
 
 _ingestor: LiveUsageIngestor | None = None
+# Registrations a nested startup displaced, innermost-last. A stack rather
+# than a single prior slot: lifespans can nest more than one level deep (each
+# portal-loop ``TestClient`` adds one), and a stack restores each displaced
+# outer lifespan in LIFO order while an out-of-order stop simply removes its
+# instance from wherever it sits — a single slot would forget everything below
+# the most recent displacement.
+_displaced_ingestors: list[LiveUsageIngestor] = []
 
 
 def start_live_usage_ingestor() -> LiveUsageIngestor | None:
@@ -304,6 +315,11 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
         write_min_interval_seconds=_WRITE_MIN_INTERVAL_SECONDS,
     )
     ingestor.start()
+    if _ingestor is not None and _ingestor.is_running():
+        # A nested startup displaces a still-running outer registration;
+        # remember it so the nested shutdown can restore it (a dead instance
+        # is never worth remembering).
+        _displaced_ingestors.append(_ingestor)
     register_live_usage_publisher(ingestor.publish)
     _ingestor = ingestor
     return ingestor
@@ -312,17 +328,34 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
 async def stop_live_usage_ingestor(ingestor: LiveUsageIngestor | None = None) -> None:
     """Stop ``ingestor``, or the current singleton when omitted.
 
-    The module global and the publisher registration are cleared only when
+    The module global and the publisher registration are touched only when
     the stopped instance still owns them, so a lifespan shutting down cannot
     orphan or unregister a nested lifespan's newer instance — and a nested
     lifespan's shutdown cannot leave the outer instance dangling with no
-    stop path (the leak behind issue #1755's cross-test poisoning).
+    stop path (the leak behind issue #1755's cross-test poisoning). When the
+    stopped instance is the current registration, the most recent displaced
+    ingestor that is still running is restored (registration and publisher
+    wiring), so a still-live outer lifespan resumes receiving publications
+    instead of going silently deaf after a nested shutdown.
     """
     global _ingestor
     if ingestor is None:
         ingestor = _ingestor
+    if ingestor is not None:
+        # Whatever happens next, a stopped instance must never be restorable.
+        try:
+            _displaced_ingestors.remove(ingestor)
+        except ValueError:
+            pass
     if ingestor is None or _ingestor is ingestor:
-        _ingestor = None
-        register_live_usage_publisher(None)
+        restored: LiveUsageIngestor | None = None
+        while _displaced_ingestors:
+            candidate = _displaced_ingestors.pop()
+            if candidate.is_running():
+                restored = candidate
+                break
+            # Stopped or dead in the meantime — never restore a dead instance.
+        _ingestor = restored
+        register_live_usage_publisher(restored.publish if restored is not None else None)
     if ingestor is not None:
         await ingestor.stop()

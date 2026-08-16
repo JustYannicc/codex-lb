@@ -10,9 +10,14 @@
       reap runs on; foreign-loop tasks are enrolled and left inert), and
       drains the failure handoff after every test.
 - [x] 1.4 Make the lifecycle instance-scoped: the lifespan holds the started
-      instance and stops exactly that instance; stop clears the module global
+      instance and stops exactly that instance; stop touches the module global
       and publisher only when the stopped instance still owns them, so nested
       lifespans cannot orphan the outer ingestor into a GC-collectable cycle.
+- [x] 1.5 Restore the displaced registration after nested shutdown: a startup
+      that displaces a still-running instance remembers it (LIFO stack), and
+      stopping the current instance restores the most recent displaced
+      instance that still runs — never a stopped or dead one — so the outer
+      lifespan's ingestion resumes instead of going deaf.
 
 ## 2. Validation
 
@@ -22,7 +27,8 @@
       detached-death recording, queued-callback settlement, and exactly-once
       reporting.
 - [x] 2.3 Regression for nested lifespans: a nested start/stop pair must not
-      orphan, kill, or unhook the outer lifespan's ingestor, and the outer
-      stop must reap its own consumer even after the global moved on.
+      orphan, kill, or unhook the outer lifespan's ingestor; the nested stop
+      restores the outer registration (a post-exit publication is ingested
+      end to end), and the outer stop reaps its own consumer.
 - [x] 2.4 Run the full unit suite, live-usage integration tests, lint, type
       checks, and strict OpenSpec validation.

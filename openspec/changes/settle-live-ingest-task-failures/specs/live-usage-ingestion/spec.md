@@ -40,11 +40,15 @@ affect the serving path.
 ### Requirement: Ingestor lifecycle is instance-scoped
 
 Each application lifespan MUST hold the ingestor instance its startup created
-and stop exactly that instance at shutdown. Stopping an instance MUST clear
+and stop exactly that instance at shutdown. Stopping an instance MUST touch
 the process-wide singleton registration and the publisher hook only when the
-stopped instance still owns them. When several lifespans are live in one
-process, no lifespan's startup or shutdown may orphan another lifespan's
-running ingestor or leave it without a stop path.
+stopped instance still owns them; when it does own them, the most recently
+displaced ingestor that is still running MUST be restored as the registration
+and publisher (an instance that is stopped or dead MUST never be restored,
+and a stopped instance MUST never become restorable later). When several
+lifespans are live in one process, no lifespan's startup or shutdown may
+orphan another lifespan's running ingestor, leave it without a stop path, or
+leave it registered-less while it still runs.
 
 #### Scenario: Nested lifespan cannot orphan the outer ingestor
 
@@ -52,5 +56,17 @@ running ingestor or leave it without a stop path.
 - **WHEN** a nested lifespan starts ingestor B (taking over the singleton and
   publisher) and later stops it
 - **THEN** ingestor A keeps running, strongly rooted by its own lifespan
-- **AND** the outer lifespan's shutdown stops ingestor A and its tasks even
-  though the singleton no longer points at A
+- **AND** the outer lifespan's shutdown stops ingestor A and its tasks
+
+#### Scenario: Nested shutdown restores the outer registration
+
+- **GIVEN** an app whose lifespan started ingestor A
+- **AND** a nested lifespan whose startup displaced A by registering
+  ingestor B
+- **WHEN** the nested lifespan stops ingestor B
+- **THEN** ingestor A is restored as the singleton registration and publisher
+- **AND** publications after the nested exit flow to ingestor A and are
+  ingested
+- **AND** a displaced ingestor that already stopped is not restored (the
+  registration falls through to the next still-running displaced instance,
+  or is cleared)

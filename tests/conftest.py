@@ -445,13 +445,19 @@ async def _reap_leaked_live_usage_ingestor() -> None:
     from app.core.usage.live_hub import register_live_usage_publisher
     from app.modules.usage import live_ingest
 
-    ingestor = live_ingest._ingestor
+    ingestors: list[live_ingest.LiveUsageIngestor] = []
+    if live_ingest._ingestor is not None:
+        ingestors.append(live_ingest._ingestor)
     live_ingest._ingestor = None
+    # Displaced (nested-over) registrations hold live tasks too, and a stale
+    # stack entry must never be restored into a later test.
+    ingestors.extend(live_ingest._displaced_ingestors)
+    live_ingest._displaced_ingestors.clear()
     register_live_usage_publisher(None)
     leaked: list[asyncio.Task[None]] = []
-    if ingestor is not None:
+    for ingestor in ingestors:
         for task in (ingestor._consumer, ingestor._trailing_invalidation):
-            if task is not None:
+            if task is not None and task not in leaked:
                 leaked.append(task)
         ingestor._consumer = None
         ingestor._trailing_invalidation = None
@@ -534,6 +540,7 @@ def _stop_leaked_live_usage_ingestor():
     loop_usable = loop is not None and not loop.is_closed() and not loop.is_running()
     needs_reap = (
         live_ingest._ingestor is not None
+        or bool(live_ingest._displaced_ingestors)
         or live_hub._publisher is not None
         or (loop_usable and loop is not None and _pending_live_ingest_tasks(loop))
     )
