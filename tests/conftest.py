@@ -479,7 +479,7 @@ def _drain_live_ingest_task_failures() -> list[str]:
     for task in list(live_ingest._owned_tasks):
         if task.done():
             live_ingest._record_owned_task_result(task)
-    failures = [f"{name!r} died with {exc!r}" for name, exc in live_ingest._owned_task_failures]
+    failures = [f"{name!r} died with {exc_repr}" for name, exc_repr in live_ingest._owned_task_failures]
     live_ingest._owned_task_failures.clear()
     return failures
 

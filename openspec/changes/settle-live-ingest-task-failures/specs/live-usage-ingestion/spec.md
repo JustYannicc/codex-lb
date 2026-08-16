@@ -7,7 +7,9 @@
 Every background task the live usage ingestor creates MUST be settled when it
 completes: if the task ends with an exception other than cancellation, the
 exception MUST be retrieved at completion time, logged immediately with its
-traceback, and recorded in a bounded in-process failure record. An
+traceback, and recorded in a bounded in-process failure record as
+traceback-free metadata (task name and exception representation) so the
+record cannot retain the failed task's object graph. An
 ingestor-owned task failure MUST NOT surface as a garbage-collection-time
 unobserved-task warning. Each task MUST be settled exactly once, including
 when an external supervisor (such as test infrastructure) also observes the

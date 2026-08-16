@@ -41,7 +41,11 @@ _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS = 5.0
 # settle each task exactly once even when both observe it.
 _owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
 _settled_owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
-_owned_task_failures: list[tuple[str, BaseException]] = []
+# (task name, exception repr) pairs. Reprs, not exception objects: a stored
+# exception's traceback would keep the failed ingestor's whole object graph
+# (task, queue, cached state) alive for the process lifetime, since production
+# never drains this record.
+_owned_task_failures: list[tuple[str, str]] = []
 _MAX_OWNED_TASK_FAILURES = 16
 
 
@@ -57,7 +61,7 @@ def _record_owned_task_result(task: asyncio.Task[None]) -> None:
         return
     logger.error("Live usage ingestor task %r died unexpectedly", task.get_name(), exc_info=exc)
     if len(_owned_task_failures) < _MAX_OWNED_TASK_FAILURES:
-        _owned_task_failures.append((task.get_name(), exc))
+        _owned_task_failures.append((task.get_name(), repr(exc)))
 
 
 def _enroll_owned_task(task: asyncio.Task[None]) -> None:
