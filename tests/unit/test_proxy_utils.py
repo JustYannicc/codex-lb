@@ -39938,6 +39938,17 @@ def test_classify_upstream_close_clean_for_clean_close_before_any_response_event
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
 
+def test_account_neutral_transport_drop_requires_no_close_frame_and_no_response_events():
+    # Issue #1754: only a frame-less drop before any application-layer
+    # response event is account-neutral; any close frame or streamed events
+    # keep the account penalty semantics.
+    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=0) is True
+    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=8) is False
+    assert proxy_service._is_account_neutral_transport_drop(1000, response_events_seen=0) is False
+    assert proxy_service._is_account_neutral_transport_drop(1008, response_events_seen=0) is False
+    assert proxy_service._is_account_neutral_transport_drop(1011, response_events_seen=0) is False
+
+
 @pytest.mark.asyncio
 async def test_open_upstream_websocket_dns_failure_recovers_on_same_account(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
