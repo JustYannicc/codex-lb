@@ -100,9 +100,10 @@ async def run_account_deletion_pass(*, batch_size: int = DELETE_BATCH_SIZE) -> d
     """Drain and finalize every account marked for deletion.
 
     Round-robin fairness: each round advances every pending account by at
-    most one full chunk, and the pending set is re-scanned between rounds, so
-    a newly marked account starts draining within one chunk transaction of
-    its request even while another account's long drain is in progress.
+    most one nonempty chunk, and the pending set is re-scanned between
+    rounds, so a newly marked account starts draining within one chunk
+    transaction of its request even while another account's long drain is in
+    progress.
 
     Returns an outcome per account id: ``finalized`` (rows drained, account
     row removed), ``superseded`` (marker cleared mid-drain by a credential
@@ -148,9 +149,10 @@ async def _advance_account(account_id: str, *, batch_size: int) -> str:
 
     Runs the drain tables in order (usage snapshots first — not
     fold-governed — then the raw request logs) but stops after the first
-    FULL chunk so the caller can round-robin other pending accounts:
-    ``draining`` means more chunks remain. Tables whose chunk came up short
-    are drained; when every table is, finalize.
+    NONEMPTY chunk so the caller can round-robin other pending accounts —
+    each round commits at most one row-touching transaction per account:
+    ``draining`` means more work may remain. Only tables whose chunk came up
+    empty are known drained; when every table is, finalize.
     """
     for chunk_fn in (_usage_history_chunk, _additional_usage_history_chunk, _request_logs_chunk):
         affected = await _run_chunk(chunk_fn, account_id, batch_size=batch_size)
@@ -160,7 +162,7 @@ async def _advance_account(account_id: str, *, batch_size: int) -> str:
             # Same hygiene as retention pruning: bulk usage-history reads are
             # cached on SQLite and must not serve the drained account.
             _clear_bulk_history_since_sqlite_cache()
-        if affected >= batch_size:
+        if affected:
             return "draining"
     # Finalization: residual rows (streams that settled a log row mid-drain),
     # folded-bucket mirrors, sticky/rollup rows, and the account row itself —

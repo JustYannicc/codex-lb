@@ -22,14 +22,24 @@
 - [x] 2.4 Hide marked accounts from the credential-export endpoints (account
       export, auth export, opencode auth export): 404 during the drain
       window, matching the synchronous delete's contract.
+- [x] 2.5 Wipe the stored token ciphertext in `begin_delete` so readers that
+      do not know the marker (pre-upgrade replicas during a rolling deploy)
+      cannot export usable credentials mid-drain.
+- [x] 2.6 Remove the account's API-key assignments in `begin_delete` (the
+      projection the synchronous FK cascade produced): key listings and
+      pooled-usage reads exclude the account immediately, scope flag intact.
+- [x] 2.7 Fence ordinary status writers (`update_status`,
+      `update_status_if_current`) on `delete_requested_at IS NULL` so stale
+      in-flight settlements cannot resurrect a marked account.
 
 ## 3. Background worker
 
 - [x] 3.1 `app/modules/accounts/deletion.py`: chunked drain
       (usage_history, additional_usage_history, request_logs; 5k rows per
       transaction, marker re-check under the account row lock per chunk, no
-      fold-state lock) for both variants; round-robin one chunk per pending
-      account per round with a pending re-scan between rounds.
+      fold-state lock) for both variants; round-robin at most one nonempty
+      chunk per pending account per round with a pending re-scan between
+      rounds.
 - [x] 3.2 Finalization via `AccountsRepository.delete(only_pending=True)`:
       historical transaction shape (identity lock → fold-state lock →
       residual rows → mirrors → sticky/rollup/account) plus marker guard and

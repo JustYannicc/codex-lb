@@ -53,6 +53,27 @@ pending-deletion state itself lives in `accounts.delete_requested_at`
 (variant, frozen at request time); `deactivation_reason="pending_deletion"`
 is operator-facing only.
 
+The marker also fences ordinary status writers (`update_status`,
+`update_status_if_current` gain `delete_requested_at IS NULL`): a stale
+in-flight settlement — e.g. a 429 for a request selected before the DELETE —
+would otherwise replace `DEACTIVATED` with `RATE_LIMITED` and make the
+account selectable again for direct-by-id paths mid-drain. Credential
+replacement does not go through these writers (it writes fields directly and
+clears the marker in the same transaction), so the supersede path is
+unaffected.
+
+`begin_delete` additionally produces the two projections the synchronous
+delete's row removal produced instantly: it deletes the account's
+`ApiKeyAccountAssignment` rows (key listings and pooled-usage reads exclude
+the account immediately; the key's persisted `account_assignment_scope_enabled`
+flag keeps the key scoped, exactly as after the FK cascade) and overwrites
+the access/refresh/id token ciphertext with empty-credential ciphertext.
+The wipe is what keeps the rolling upgrade honest: a pre-upgrade replica's
+export endpoints read the row without knowing the marker, and must not be
+able to hand out usable credentials during the drain window. Token rotation
+is CAS-guarded on the pre-wipe refresh ciphertext (a stale rotation misses),
+and every supersede path writes complete fresh ciphertext.
+
 ### D2: The account row is the queue (no new table)
 
 The marker columns make the `accounts` row its own durable work item: the
@@ -149,11 +170,13 @@ deletes and ~23 s/10k `request_logs` detaches put 5k comfortably under a few
 seconds per transaction on the worst table.
 
 A deletion pass round-robins: each round advances every pending account by
-at most one full chunk and the pending set is re-scanned between rounds.
-A multi-minute drain (the measured 133k-row account is ~27 chunks) therefore
-cannot starve another marked account, and a DELETE that lands mid-pass is
-picked up by the next round's re-scan rather than waiting for the whole pass
-to finish.
+at most one NONEMPTY chunk transaction (a round stops at the first chunk
+that touched rows, not the first batch-size-full one, so small tables cannot
+stack several row-touching transactions into one round) and the pending set
+is re-scanned between rounds. A multi-minute drain (the measured 133k-row
+account is ~27 chunks) therefore cannot starve another marked account, and a
+DELETE that lands mid-pass is picked up by the next round's re-scan rather
+than waiting for the whole pass to finish.
 
 ### D7: API contract unchanged (`{"status": "deleted"}`)
 
@@ -192,4 +215,9 @@ the partial queue index `idx_accounts_delete_requested_at`
 existence guards and a symmetric downgrade. Existing rows are
 untouched (no pending deletions can predate the feature). Rolling upgrade: an
 old replica neither sets nor reads the marker; a delete handled by an old
-replica is simply the old synchronous delete.
+replica is simply the old synchronous delete, and a delete handled by a new
+replica leaves old replicas nothing exploitable — the fast path wipes the
+token ciphertext, so old export/read paths that do not know the marker can
+only produce empty credentials until finalization removes the row (old
+replicas may transiently show the account in listings during the mixed
+window; it is unroutable via the terminal status either way).

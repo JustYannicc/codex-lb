@@ -196,6 +196,45 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_marked_account_wipes_tokens_and_rejects_stale_status_writes(db_setup):
+    await _seed_account("acc_bg_fence", log_count=1)
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).begin_delete("acc_bg_fence")
+
+    # The surviving row must not carry usable credentials: readers that do
+    # not know the marker (pre-upgrade replicas during a rolling deploy) can
+    # only produce empty credentials from it.
+    row = await _account_row("acc_bg_fence")
+    assert row is not None
+    encryptor = TokenEncryptor()
+    assert encryptor.decrypt(row.access_token_encrypted) == ""
+    assert encryptor.decrypt(row.refresh_token_encrypted) == ""
+    assert encryptor.decrypt(row.id_token_encrypted) == ""
+
+    # Stale in-flight settlements (e.g. a late 429 for a request selected
+    # before the DELETE) must not replace the terminal state and make the
+    # account selectable again mid-drain.
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        assert await repo.update_status("acc_bg_fence", AccountStatus.RATE_LIMITED, "rate_limited") is False
+        assert (
+            await repo.update_status_if_current(
+                "acc_bg_fence",
+                AccountStatus.RATE_LIMITED,
+                "rate_limited",
+                expected_status=AccountStatus.DEACTIVATED,
+                expected_deactivation_reason=ACCOUNT_PENDING_DELETION_REASON,
+            )
+            is False
+        )
+    row = await _account_row("acc_bg_fence")
+    assert row is not None
+    assert row.status is AccountStatus.DEACTIVATED
+    assert row.deactivation_reason == ACCOUNT_PENDING_DELETION_REASON
+    assert row.delete_requested_at is not None
+
+
+@pytest.mark.asyncio
 async def test_chunked_soft_delete_drains_across_chunk_boundaries(db_setup):
     await _seed_account("acc_bg_soft", log_count=7, usage_count=5)
     async with SessionLocal() as session:

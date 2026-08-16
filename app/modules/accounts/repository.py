@@ -12,6 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import advisory_lock_key, lock_postgresql_account_identities
@@ -620,7 +621,17 @@ class AccountsRepository:
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
             result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+                update(Account)
+                .where(Account.id == account_id)
+                # An account marked for background deletion is terminal: a
+                # stale in-flight settlement (e.g. a 429 from a request that
+                # was selected before the DELETE) must not replace the
+                # DEACTIVATED/pending_deletion state and make the account
+                # selectable again mid-drain. Only a credential replacement
+                # (which clears the marker) may resurrect the row.
+                .where(Account.delete_requested_at.is_(None))
+                .values(**values)
+                .returning(Account.id)
             )
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
@@ -668,6 +679,9 @@ class AccountsRepository:
                 update(Account)
                 .where(Account.id == account_id)
                 .where(Account.status == expected_status)
+                # Same pending-deletion fence as ``update_status``: marked
+                # rows are terminal for ordinary status writers.
+                .where(Account.delete_requested_at.is_(None))
                 .values(**values)
                 .returning(Account.id)
             )
@@ -838,11 +852,28 @@ class AccountsRepository:
         and enqueues it for the deletion worker, which drains its bulk rows
         in chunks and finalizes via :meth:`delete` with ``only_pending=True``.
 
+        The stored token ciphertext is overwritten with empty-credential
+        ciphertext in the same transaction: the row outlives the DELETE
+        response by the drain duration, and no reader — including a
+        pre-upgrade replica during a rolling deploy, whose export endpoints
+        do not know the marker — may still be able to produce usable
+        credentials from it. A credential replacement (the only supersede
+        path) writes fresh ciphertext, and token rotation is CAS-guarded on
+        the pre-wipe refresh ciphertext, so a stale in-flight rotation
+        misses rather than resurrecting the old material.
+
+        API-key account assignments are removed here as well (the FK cascade
+        used to do this when the synchronous delete removed the row), so key
+        listings and pooled-usage projections exclude the account
+        immediately; the key's ``account_assignment_scope_enabled`` flag is
+        persisted separately and keeps the key scoped.
+
         Idempotent: a repeat request on an already-marked account succeeds
         without changing the frozen ``delete_history`` choice (first request
         wins — matching the synchronous behavior, where a second DELETE after
         the first completed found nothing left to escalate).
         """
+        wiped_token = TokenEncryptor().encrypt("")
         async with sqlite_writer_section():
             result = await self._session.execute(
                 update(Account)
@@ -852,6 +883,9 @@ class AccountsRepository:
                     deactivation_reason=ACCOUNT_PENDING_DELETION_REASON,
                     reset_at=None,
                     blocked_at=None,
+                    access_token_encrypted=wiped_token,
+                    refresh_token_encrypted=wiped_token,
+                    id_token_encrypted=wiped_token,
                     delete_requested_at=func.coalesce(Account.delete_requested_at, utcnow()),
                     delete_history_requested=case(
                         (Account.delete_requested_at.is_(None), delete_history),
@@ -867,6 +901,9 @@ class AccountsRepository:
                 # account's routability.
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
+                await self._session.execute(
+                    delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id)
+                )
             await self._session.commit()
             return updated_id is not None
 

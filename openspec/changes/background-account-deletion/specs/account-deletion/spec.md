@@ -9,9 +9,17 @@ work (raw request-log detach/delete, usage-history removal) on the request
 path. The request MUST only stamp a durable pending-deletion marker in a
 short transaction: terminal `DEACTIVATED` status, the pending-deletion
 marker (`delete_requested_at`), the frozen `delete_history` choice
-(`delete_history_requested`), sticky-session removal, and bridge-session
-closure. The response contract remains `{"status": "deleted"}` with 200 for
-an existing account and 404 otherwise; row purge is asynchronous.
+(`delete_history_requested`), sticky-session removal, bridge-session
+closure, API-key account-assignment removal (the projection the synchronous
+delete's FK cascade produced — key listings and pooled-usage reads exclude
+the account immediately while the key's persisted assignment-scope flag is
+untouched), and an overwrite of the stored access/refresh/id token
+ciphertext with empty-credential ciphertext so that NO reader of the
+surviving row — including a pre-upgrade replica during a rolling deploy,
+whose export endpoints do not know the marker — can produce usable
+credentials during the drain window. The response contract remains
+`{"status": "deleted"}` with 200 for an existing account and 404 otherwise;
+row purge is asynchronous.
 
 Accounts carrying the pending-deletion marker MUST be excluded from account
 listings (`GET /api/accounts` and every listing-derived read) and MUST be
@@ -20,6 +28,12 @@ marked account MUST report the account as not found, and the
 credential-export endpoints (account export, auth export, opencode auth
 export) MUST likewise report it as not found — a successful DELETE MUST NOT
 leave decrypted tokens retrievable during the background drain window.
+
+Ordinary status writes MUST NOT modify a marked account: a stale in-flight
+settlement (for example a 429 landing after the DELETE for a request
+selected before it) must not replace the terminal `DEACTIVATED` state and
+make the account selectable mid-drain. Only a credential replacement —
+which clears the marker — may change a marked account's state.
 
 #### Scenario: Delete responds without draining rows
 
@@ -41,6 +55,23 @@ leave decrypted tokens retrievable during the background drain window.
   drained
 - **WHEN** any credential-export endpoint is called for the account
 - **THEN** the response is 404 and no token material is returned
+- **AND** the row's stored token ciphertext decrypts to empty credentials
+  (nothing usable remains for readers that do not know the marker)
+
+#### Scenario: Deleted account leaves API-key listings immediately
+
+- **GIVEN** an account assigned to an API key
+- **WHEN** `DELETE /api/accounts/{id}` returns
+- **THEN** the key's listed assigned-account ids no longer contain the
+  account and its pooled-usage projection excludes it
+- **AND** the key's assignment-scope flag remains enabled
+
+#### Scenario: Stale settlement cannot resurrect a marked account
+
+- **GIVEN** an account marked for background deletion
+- **WHEN** an ordinary status write (e.g. a late rate-limit settlement)
+  targets the account
+- **THEN** the write is rejected and the account stays terminal and marked
 
 ### Requirement: Background worker drains marked accounts in bounded chunks
 
@@ -55,9 +86,11 @@ and account rows together. The soft variant MUST detach raw rows
 (`account_id=NULL, deleted_at` set); the `delete_history` variant MUST
 delete them. The worker MUST start a drain promptly after a delete request
 on the leader replica and within one worker interval otherwise. A deletion
-pass MUST round-robin chunk work across pending accounts and re-scan for
-newly marked accounts between rounds, so one account's long drain cannot
-delay another marked account's drain start by more than one chunk round.
+pass MUST round-robin across pending accounts — at most one nonempty chunk
+transaction per account per round — and re-scan for newly marked accounts
+between rounds, so one account's long drain cannot delay another marked
+account's drain start by more than one chunk transaction per pending
+account.
 
 #### Scenario: Chunked drain reaches the synchronous end state (soft)
 
