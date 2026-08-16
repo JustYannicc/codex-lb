@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from datetime import timedelta
+from typing import cast
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import Table, func, select, text, update
+from sqlalchemy.sql import Select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -909,18 +912,18 @@ async def test_supersede_between_drain_and_finalize_is_abandoned(db_setup):
     assert await _account_row("acc_bg_race") is not None
 
 
-def _batch_pinning_cases() -> tuple[tuple[object, object, str], ...]:
+def _batch_pinning_cases() -> tuple[tuple[Callable[[str, int], Select[tuple[int]]], Table, str], ...]:
     from app.db.models import AdditionalUsageHistory
     from app.modules.accounts import deletion
 
     return (
-        (deletion._usage_history_batch, UsageHistory.__table__, "idx_usage_account_time"),
+        (deletion._usage_history_batch, cast("Table", UsageHistory.__table__), "idx_usage_account_time"),
         (
             deletion._additional_usage_history_batch,
-            AdditionalUsageHistory.__table__,
+            cast("Table", AdditionalUsageHistory.__table__),
             "ix_additional_usage_distinct_labels",
         ),
-        (deletion._request_logs_batch, RequestLog.__table__, "idx_logs_account_kind_deleted_latest"),
+        (deletion._request_logs_batch, cast("Table", RequestLog.__table__), "idx_logs_account_kind_deleted_latest"),
     )
 
 
@@ -939,7 +942,7 @@ def test_chunk_batch_statements_pin_account_leading_index_order():
     for batch_fn, table, index_name in _batch_pinning_cases():
         index = next(idx for idx in table.indexes if idx.name == index_name)
         sql = str(batch_fn("acc_bg_pin", 50).compile(dialect=postgresql_dialect.dialect()))
-        expected_order = ", ".join(f"{table.name}.{column.name}" for column in index.expressions)
+        expected_order = ", ".join(f"{table.name}.{column.name}" for column in index.columns)
         assert f"ORDER BY {expected_order}" in sql, sql
         assert f"{table.name}.account_id >= " in sql, sql
         assert f"{table.name}.account_id <= " in sql, sql
