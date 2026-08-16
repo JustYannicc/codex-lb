@@ -77,21 +77,24 @@ async def test_reap_consumes_and_reports_already_failed_consumer() -> None:
     assert _pending_ingestor_tasks() == []
 
 
-async def test_reap_sweeps_orphaned_consumer_not_tracked_by_singleton() -> None:
+async def test_reap_sweeps_orphaned_tasks_not_tracked_by_singleton() -> None:
     # A stop that is itself cancelled between clearing the module global and
-    # awaiting the consumer leaves a pending task no singleton tracks; the
-    # reap's name-based sweep must still cancel and await it.
+    # awaiting the ingestor's tasks leaves pending tasks no singleton tracks;
+    # the reap's name-based sweep must still cancel and await both the
+    # consumer and the trailing cache-invalidation sleeper.
     from tests import conftest as suite_conftest
 
     async def _pending_forever() -> None:
         await asyncio.Event().wait()
 
-    task = asyncio.create_task(_pending_forever(), name="live-usage-ingestor")
+    consumer = asyncio.create_task(_pending_forever(), name="live-usage-ingestor")
+    trailing = asyncio.create_task(_pending_forever(), name="live-usage-trailing-invalidation")
     await asyncio.sleep(0)
     assert live_ingest._ingestor is None
 
     failures = await suite_conftest._reap_leaked_live_usage_ingestor()
 
     assert failures == []
-    assert task.cancelled()
-    assert _pending_ingestor_tasks() == []
+    assert consumer.cancelled()
+    assert trailing.cancelled()
+    assert suite_conftest._pending_live_ingest_tasks(asyncio.get_running_loop()) == []

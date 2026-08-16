@@ -397,6 +397,15 @@ def _reset_shutdown_task_admission():
 
 _SESSION_LOOP: asyncio.AbstractEventLoop | None = None
 
+# Both task names the live-usage ingestor owns (consumer and throttled
+# trailing cache invalidation); the fence below reclaims them by name when the
+# singleton no longer tracks them.
+_LIVE_INGEST_TASK_NAMES = ("live-usage-ingestor", "live-usage-trailing-invalidation")
+
+
+def _pending_live_ingest_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
+    return [task for task in asyncio.all_tasks(loop) if not task.done() and task.get_name() in _LIVE_INGEST_TASK_NAMES]
+
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _capture_session_loop():
@@ -420,8 +429,9 @@ async def _reap_leaked_live_usage_ingestor() -> list[str]:
     re-raising) exceptions from tasks that already died, so a poisoned zombie
     is reported at the test that leaked it rather than crashing the fence
     mid-reap or surfacing later as an unobserved-task loop exception. Also
-    sweeps for consumer tasks the stop path no longer tracks (a stop that was
-    itself cancelled between clearing the global and awaiting the task).
+    sweeps by name for ingestor-owned tasks (consumer and trailing
+    invalidation) the stop path no longer tracks — a stop that was itself
+    cancelled between clearing the global and awaiting the tasks.
     """
     from app.core.usage.live_hub import register_live_usage_publisher
     from app.modules.usage import live_ingest
@@ -436,8 +446,8 @@ async def _reap_leaked_live_usage_ingestor() -> list[str]:
                 leaked.append(task)
         ingestor._consumer = None
         ingestor._trailing_invalidation = None
-    for task in asyncio.all_tasks():
-        if not task.done() and task.get_name() == "live-usage-ingestor" and task not in leaked:
+    for task in _pending_live_ingest_tasks(asyncio.get_running_loop()):
+        if task not in leaked:
             leaked.append(task)
     failures: list[str] = []
     for task in leaked:
@@ -474,16 +484,18 @@ def _stop_leaked_live_usage_ingestor():
     after EVERY test, and the loop's clock calls ``time.monotonic()`` — which
     several tests monkeypatch globally with finite or call-count-sensitive
     fakes that are still active while function-scoped teardowns run (e.g.
-    test_conversation_archive's exhausting iterator).
+    test_conversation_archive's exhausting iterator). Leak detection itself is
+    loop-passive: reading the module globals and enumerating
+    ``asyncio.all_tasks(loop)`` on the idle session loop never runs it.
     """
     yield
     from app.core.usage import live_hub
     from app.modules.usage import live_ingest
 
-    if live_ingest._ingestor is None and live_hub._publisher is None:
-        return
     loop = _SESSION_LOOP
     if loop is None or loop.is_closed() or loop.is_running():
+        return
+    if live_ingest._ingestor is None and live_hub._publisher is None and not _pending_live_ingest_tasks(loop):
         return
     failures = loop.run_until_complete(_reap_leaked_live_usage_ingestor())
     if failures:

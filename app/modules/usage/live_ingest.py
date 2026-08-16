@@ -213,7 +213,10 @@ class LiveUsageIngestor:
             await self._invalidate_caches_now()
             return
         if self._trailing_invalidation is None or self._trailing_invalidation.done():
-            self._trailing_invalidation = asyncio.create_task(self._trailing_invalidate(remaining))
+            self._trailing_invalidation = asyncio.create_task(
+                self._trailing_invalidate(remaining),
+                name="live-usage-trailing-invalidation",
+            )
 
     async def _trailing_invalidate(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)
