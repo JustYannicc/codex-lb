@@ -144,6 +144,10 @@ function parseNonnegativeInteger(value: string): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function formatThresholdPercent(value: number): string {
+  return String(Number(value.toFixed(1)));
+}
+
 export function RoutingSettings({
   settings,
   accounts = EMPTY_ACCOUNTS,
@@ -796,23 +800,41 @@ export function RoutingSettings({
             </Button>
           </div>
 
-          <div className="flex items-center justify-between p-3">
-            <div>
-              <p className="text-sm font-medium">{t("settings.routing.stickyThreads.label")}</p>
-              <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThreads.description")}</p>
+          <div className="space-y-2 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium">{t("settings.routing.stickyThreads.label")}</p>
+                <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThreads.description")}</p>
+              </div>
+              <Switch
+                aria-label={t("settings.routing.stickyThreads.ariaLabel")}
+                checked={settings.stickyThreadsEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
+              />
             </div>
-            <Switch
-              aria-label={t("settings.routing.stickyThreads.ariaLabel")}
-              checked={settings.stickyThreadsEnabled}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
-            />
+            <p className="text-xs text-muted-foreground">
+              {t("settings.routing.stickyThreads.hardAffinityNote")}
+            </p>
+          </div>
+
+          <div className="space-y-1 p-3">
+            <p className="text-sm font-medium">{t("settings.routing.quotaWindows.title")}</p>
+            <p className="text-xs text-muted-foreground">{t("settings.routing.quotaWindows.explainer")}</p>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.stickyThresholds.primaryLabel")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.primaryDescription")}</p>
+              {stickyPrimaryThresholdValid ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.routing.stickyThresholds.usedRemainingHint", {
+                    used: formatThresholdPercent(parsedStickyPrimaryThreshold),
+                    remaining: formatThresholdPercent(100 - parsedStickyPrimaryThreshold),
+                  })}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input
@@ -855,6 +877,14 @@ export function RoutingSettings({
             <div>
               <p className="text-sm font-medium">{t("settings.routing.stickyThresholds.secondaryLabel")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.secondaryDescription")}</p>
+              {stickySecondaryThresholdValid ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.routing.stickyThresholds.usedRemainingHint", {
+                    used: formatThresholdPercent(parsedStickySecondaryThreshold),
+                    remaining: formatThresholdPercent(100 - parsedStickySecondaryThreshold),
+                  })}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input

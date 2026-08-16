@@ -119,7 +119,10 @@ export function AccountListItem({
             aria-label={t("accounts.actions.trustedAccess")}
           />
         ) : null}
-        <StatusBadge status={status} />
+        <StatusBadge
+          status={status}
+          title={status === "active" ? t("accounts.listItem.statusActiveHint") : undefined}
+        />
       </div>
       <div
         className={cn(

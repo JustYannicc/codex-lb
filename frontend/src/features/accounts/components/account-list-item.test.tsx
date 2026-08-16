@@ -248,6 +248,22 @@ describe("AccountListItem", () => {
     expect(screen.queryByText("99+")).not.toBeInTheDocument();
   });
 
+  it("explains that Active is the configured status, not per-request eligibility", () => {
+    const account = createAccountSummary({ status: "active" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByTitle(/Active is the configured account status/i)).toBeInTheDocument();
+  });
+
+  it("omits the eligibility hint for non-active statuses", () => {
+    const account = createAccountSummary({ status: "paused" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByTitle(/Active is the configured account status/i)).not.toBeInTheDocument();
+  });
+
   it("hides the reset-credit badge when badge display is disabled", () => {
     const account = createAccountSummary({ availableResetCredits: 3 });
 
