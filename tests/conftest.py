@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -392,3 +393,36 @@ def _reset_shutdown_task_admission():
     shutdown_state.reset()
     yield
     shutdown_state.reset()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _stop_leaked_live_usage_ingestor():
+    """Fence the module-global live-usage ingestor per test (issue #1755).
+
+    The suite runs on a session-scoped asyncio loop, so a task leaked by one
+    test survives into every later test. Any test that enters the real app
+    lifespan starts the live-usage ingestor singleton
+    (``app.modules.usage.live_ingest._ingestor``) whose ``live-usage-ingestor``
+    consumer task lands on that shared loop; if the lifespan is cancelled
+    before its shutdown path reaches ``stop_live_usage_ingestor()`` (e.g. a
+    ``wait_for``-bounded assertion times out mid-drain), the consumer outlives
+    the test. The zombie then poisons unrelated tests: it eats into the otel
+    lifespan test's drain budget and surfaces as an unobserved-task exception
+    inside test_proxy_utils' startup-probe loop-exception assertions — the
+    exact failing pairing from #1755. Stop and reset the singleton after every
+    test, then reap any consumer task the stop path no longer tracks (a stop
+    that was itself cancelled between clearing the global and awaiting the
+    task), so no ingestor task ever crosses a test boundary.
+    """
+    yield
+    from app.modules.usage import live_ingest
+
+    await live_ingest.stop_live_usage_ingestor()
+    leaked = [task for task in asyncio.all_tasks() if not task.done() and task.get_name() == "live-usage-ingestor"]
+    for task in leaked:
+        task.cancel()
+    for task in leaked:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
