@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     and_,
+    case,
     column,
     delete,
     func,
@@ -857,6 +858,45 @@ class UsageRepository:
             )
             for row in rows
         ]
+
+    async def positive_used_percent_deltas_by_account(
+        self,
+        account_windows: Mapping[str, str],
+        *,
+        since: datetime,
+        until: datetime,
+    ) -> dict[str, float]:
+        if not account_windows:
+            return {}
+        account_window_pairs = tuple(account_windows.items())
+        samples = (
+            select(
+                UsageHistory.account_id.label("account_id"),
+                UsageHistory.used_percent.label("used_percent"),
+                func.lag(UsageHistory.used_percent)
+                .over(
+                    partition_by=UsageHistory.account_id,
+                    order_by=(UsageHistory.recorded_at, UsageHistory.id),
+                )
+                .label("previous_used_percent"),
+            )
+            .where(
+                tuple_(UsageHistory.account_id, _normalized_window_expr()).in_(account_window_pairs),
+                UsageHistory.recorded_at >= since,
+                UsageHistory.recorded_at <= until,
+            )
+            .subquery("weekly_demand_samples")
+        )
+        delta = samples.c.used_percent - samples.c.previous_used_percent
+        statement = select(
+            samples.c.account_id,
+            func.coalesce(
+                func.sum(case((delta > 0, delta), else_=0.0)),
+                0.0,
+            ).label("positive_delta"),
+        ).group_by(samples.c.account_id)
+        rows = (await self._session.execute(statement)).all()
+        return {str(row.account_id): float(row.positive_delta) for row in rows}
 
     async def latest_by_account(
         self,

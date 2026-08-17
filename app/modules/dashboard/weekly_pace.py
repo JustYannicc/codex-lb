@@ -9,10 +9,23 @@ from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import AccountSummary
-from app.modules.dashboard.schemas import WeeklyCreditPaceResponse, WeeklyCreditPaceStatus
+from app.modules.dashboard.schemas import (
+    WeeklyCreditApiKeyAttribution,
+    WeeklyCreditPaceResponse,
+    WeeklyCreditPaceStatus,
+    WeeklyCreditResetEvent,
+    WeeklyCreditRunwayStatus,
+)
 
 PRO_WEEKLY_CAPACITY_CREDITS = 50_400.0
 RECENT_BURN_WINDOW = timedelta(hours=6)
+FLEET_BURN_WINDOW = timedelta(hours=3)
+DEMAND_WINDOW = timedelta(days=7)
+RELIEF_COHORT_USED_PERCENT = 95.0
+RELIEF_CLUSTER_WINDOW = timedelta(hours=1)
+SATURATED_USED_PERCENT = 99.5
+TIGHT_MARGIN_HOURS = 24.0
+TIGHT_HEADROOM_PERCENT = 12.0
 MIN_FRESHNESS_SECONDS = 300.0
 FRESHNESS_MISSED_REFRESH_CYCLES = 3.0
 PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
@@ -56,6 +69,8 @@ def build_weekly_credit_pace(
     secondary_history: dict[str, list[UsageHistory]],
     now: datetime,
     usage_refresh_interval_seconds: int,
+    top_api_keys: list[WeeklyCreditApiKeyAttribution] | None = None,
+    trailing_demand_used_percent_by_account: dict[str, float] | None = None,
     working_days: set[int] | None = None,
     smoothing_window_minutes: int = 30,
 ) -> WeeklyCreditPaceResponse | None:
@@ -183,6 +198,41 @@ def build_weekly_credit_pace(
     )
     pro_accounts = ceil(pro_equivalent) if pro_equivalent is not None else None
 
+    headroom_credits = total_actual_remaining_credits
+    headroom_percent = 100.0 * headroom_credits / total_full_credits
+    recent_burn_rate = _fleet_recent_burn_rate_credits_per_hour(
+        pace_accounts,
+        secondary_history,
+        now,
+    )
+    depletion_eta_hours = (
+        headroom_credits / recent_burn_rate if recent_burn_rate is not None and recent_burn_rate > 0 else None
+    )
+    next_relief_in_hours, next_relief_credits = _next_relief(pace_accounts, now_ms)
+    runway_status = _runway_status(
+        depletion_eta_hours=depletion_eta_hours,
+        next_relief_in_hours=next_relief_in_hours,
+        headroom_percent=headroom_percent,
+    )
+    saturated_account_count = sum(_used_percent(account) >= SATURATED_USED_PERCENT for account in pace_accounts)
+    trailing_demand_credits = (
+        _trailing_demand_credits(pace_accounts, secondary_history, now)
+        if trailing_demand_used_percent_by_account is None
+        else sum(
+            account.full_credits
+            * max(0.0, trailing_demand_used_percent_by_account.get(account.account_id, 0.0))
+            / 100.0
+            for account in pace_accounts
+        )
+    )
+    demand_quota_weeks = trailing_demand_credits / PRO_WEEKLY_CAPACITY_CREDITS
+    demand_surplus_accounts = demand_quota_weeks - len(pace_accounts)
+    add_pro_accounts = (
+        ceil(demand_surplus_accounts)
+        if demand_surplus_accounts > 0 and (runway_status == "runs_dry" or saturated_account_count > 0)
+        else None
+    )
+
     return WeeklyCreditPaceResponse(
         total_full_credits=total_full_credits,
         total_actual_remaining_credits=total_actual_remaining_credits,
@@ -206,12 +256,123 @@ def build_weekly_credit_pace(
         projected_minimum_remaining_credits=projection.projected_minimum_remaining_credits,
         forecast_burn_rate_credits_per_hour=forecast_rate,
         scheduled_burn_rate_credits_per_hour=scheduled_burn_rate_credits_per_hour,
-        status=_weekly_pace_status(smoothed_delta_percent, projected_shortfall_credits),
+        headroom_percent=headroom_percent,
+        headroom_credits=headroom_credits,
+        burn_rate_recent_credits_per_hour=recent_burn_rate,
+        depletion_eta_hours=depletion_eta_hours,
+        next_relief_in_hours=next_relief_in_hours,
+        next_relief_credits=next_relief_credits,
+        reset_events=_reset_events(pace_accounts, now_ms),
+        runway_status=runway_status,
+        saturated_account_count=saturated_account_count,
+        top_api_keys=top_api_keys or [],
+        add_pro_accounts=add_pro_accounts,
+        status=_legacy_status(runway_status),
         account_count=len(pace_accounts),
         stale_account_count=stale_account_count,
         inactive_account_count=inactive_account_count,
         confidence=_confidence(len(pace_accounts), rate_sample_count, stale_account_count),
     )
+
+
+def _fleet_recent_burn_rate_credits_per_hour(
+    accounts: list[_PaceAccount],
+    secondary_history: dict[str, list[UsageHistory]],
+    now: datetime,
+) -> float | None:
+    window_start = now - FLEET_BURN_WINDOW
+    total_burn_credits = 0.0
+    has_delta_sample = False
+
+    for account in accounts:
+        buckets: list[list[UsageHistory]] = [[], [], []]
+        for row in secondary_history.get(account.account_id, []):
+            if row.recorded_at < window_start or row.recorded_at > now:
+                continue
+            bucket_index = min(
+                2,
+                int((row.recorded_at - window_start).total_seconds() // 3600),
+            )
+            buckets[bucket_index].append(row)
+
+        for bucket in buckets:
+            bucket.sort(key=lambda row: row.recorded_at)
+            if len(bucket) < 2:
+                continue
+            has_delta_sample = True
+            for previous, current in zip(bucket, bucket[1:]):
+                delta_percent = current.used_percent - previous.used_percent
+                if delta_percent > 0:
+                    total_burn_credits += account.full_credits * delta_percent / 100.0
+
+    if not has_delta_sample:
+        return None
+    return total_burn_credits / (FLEET_BURN_WINDOW.total_seconds() / 3600.0)
+
+
+def _next_relief(accounts: list[_PaceAccount], now_ms: float) -> tuple[float, float]:
+    cohort = [account for account in accounts if _used_percent(account) >= RELIEF_COHORT_USED_PERCENT]
+    if not cohort:
+        cohort = accounts
+
+    soonest_reset_ms = min(account.reset_at_ms for account in cohort)
+    cluster_end_ms = soonest_reset_ms + RELIEF_CLUSTER_WINDOW.total_seconds() * 1000.0
+    relief_credits = sum(
+        account.full_credits * _used_percent(account) / 100.0
+        for account in cohort
+        if account.reset_at_ms <= cluster_end_ms
+    )
+    return max(0.0, (soonest_reset_ms - now_ms) / 3_600_000.0), relief_credits
+
+
+def _reset_events(accounts: list[_PaceAccount], now_ms: float) -> list[WeeklyCreditResetEvent]:
+    horizon_ms = now_ms + DEMAND_WINDOW.total_seconds() * 1000.0
+    return [
+        WeeklyCreditResetEvent(
+            at=datetime.fromtimestamp(account.reset_at_ms / 1000.0, UTC),
+            credits_returned=account.full_credits * _used_percent(account) / 100.0,
+        )
+        for account in sorted(accounts, key=lambda item: item.reset_at_ms)
+        if account.reset_at_ms <= horizon_ms
+    ]
+
+
+def _runway_status(
+    *,
+    depletion_eta_hours: float | None,
+    next_relief_in_hours: float,
+    headroom_percent: float,
+) -> WeeklyCreditRunwayStatus:
+    if depletion_eta_hours is not None and depletion_eta_hours < next_relief_in_hours:
+        return "runs_dry"
+    if (
+        depletion_eta_hours is not None and depletion_eta_hours - next_relief_in_hours < TIGHT_MARGIN_HOURS
+    ) or headroom_percent < TIGHT_HEADROOM_PERCENT:
+        return "tight"
+    return "safe"
+
+
+def _trailing_demand_credits(
+    accounts: list[_PaceAccount],
+    secondary_history: dict[str, list[UsageHistory]],
+    now: datetime,
+) -> float:
+    window_start = now - DEMAND_WINDOW
+    total_demand_credits = 0.0
+    for account in accounts:
+        rows = sorted(
+            (row for row in secondary_history.get(account.account_id, []) if window_start <= row.recorded_at <= now),
+            key=lambda row: row.recorded_at,
+        )
+        for previous, current in zip(rows, rows[1:]):
+            delta_percent = current.used_percent - previous.used_percent
+            if delta_percent > 0:
+                total_demand_credits += account.full_credits * delta_percent / 100.0
+    return total_demand_credits
+
+
+def _used_percent(account: _PaceAccount) -> float:
+    return 100.0 * (account.full_credits - account.remaining_credits) / account.full_credits
 
 
 def _weekly_timing(summary: AccountSummary, now_ms: float) -> tuple[float, float, float, float] | None:
@@ -449,12 +610,10 @@ def _weekday(epoch_ms: float) -> int:
     return datetime.fromtimestamp(epoch_ms / 1000.0, UTC).weekday()
 
 
-def _weekly_pace_status(delta_percent: float, projected_shortfall_credits: float) -> WeeklyCreditPaceStatus:
-    if projected_shortfall_credits > 0:
+def _legacy_status(runway_status: WeeklyCreditRunwayStatus) -> WeeklyCreditPaceStatus:
+    if runway_status == "runs_dry":
         return "danger"
-    if delta_percent < -5:
-        return "behind"
-    if delta_percent > 5:
+    if runway_status == "tight":
         return "ahead"
     return "on_track"
 
