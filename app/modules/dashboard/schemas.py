@@ -80,6 +80,7 @@ class WeeklyCreditResetEvent(DashboardModel):
 
 
 class WeeklyCreditApiKeyAttribution(DashboardModel):
+    api_key_id: str | None = None
     name: str
     requests: int
     billable_tokens: int

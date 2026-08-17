@@ -67,6 +67,8 @@ def _three_hour_history(account_id: str, *, final_used_percent: float, hourly_de
 def _build(
     summaries: list[AccountSummary],
     histories: dict[str, list[UsageHistory]],
+    *,
+    trailing_demand_used_percent_by_account: dict[str, float] | None = None,
 ):
     pace = build_weekly_credit_pace(
         accounts=[_account(summary.account_id) for summary in summaries],
@@ -74,6 +76,7 @@ def _build(
         secondary_history=histories,
         now=NOW,
         usage_refresh_interval_seconds=60,
+        trailing_demand_used_percent_by_account=trailing_demand_used_percent_by_account,
     )
     assert pace is not None
     return pace
@@ -122,6 +125,68 @@ def test_weekly_pace_relief_clusters_resets_within_one_hour() -> None:
     assert pace.next_relief_in_hours == pytest.approx(2.0)
     assert pace.next_relief_credits == pytest.approx(PRO_WEEKLY_CAPACITY_CREDITS * 1.93)
     assert len(pace.reset_events) == 3
+
+
+def test_weekly_pace_recent_burn_counts_delta_across_hour_boundary() -> None:
+    account_id = "acc-cross-hour"
+    pace = _build(
+        [_summary(account_id, used_percent=80.0, reset_in_hours=2.0)],
+        {
+            account_id: [
+                _row(account_id, 70.0, NOW - timedelta(minutes=61)),
+                _row(account_id, 80.0, NOW - timedelta(minutes=59)),
+                _row(account_id, 80.0, NOW - timedelta(minutes=1)),
+            ]
+        },
+    )
+
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(5_040.0)
+
+
+def test_weekly_pace_recent_burn_uses_floored_observed_span() -> None:
+    account_id = "acc-short-span"
+    pace = _build(
+        [_summary(account_id, used_percent=80.0, reset_in_hours=2.0)],
+        {
+            account_id: [
+                _row(account_id, 70.0, NOW - timedelta(minutes=6)),
+                _row(account_id, 80.0, NOW - timedelta(minutes=1)),
+            ]
+        },
+    )
+
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(10_080.0)
+
+
+def test_weekly_pace_recent_burn_skips_reset_delta() -> None:
+    account_id = "acc-reset"
+    pace = _build(
+        [_summary(account_id, used_percent=10.0, reset_in_hours=2.0)],
+        {
+            account_id: [
+                _row(account_id, 80.0, NOW - timedelta(minutes=6)),
+                _row(account_id, 10.0, NOW - timedelta(minutes=1)),
+            ]
+        },
+    )
+
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(0.0)
+
+
+def test_weekly_pace_recent_burn_ignores_single_sample_accounts() -> None:
+    summaries = [
+        _summary("acc-single-a", used_percent=70.0, reset_in_hours=2.0),
+        _summary("acc-single-b", used_percent=80.0, reset_in_hours=3.0),
+    ]
+    pace = _build(
+        summaries,
+        {
+            summary.account_id: [_row(summary.account_id, used, NOW - timedelta(minutes=1))]
+            for summary, used in zip(summaries, (70.0, 80.0))
+        },
+    )
+
+    assert pace.burn_rate_recent_credits_per_hour is None
 
 
 def test_weekly_pace_near_reset_is_relief_not_runs_dry() -> None:
@@ -177,6 +242,7 @@ def test_weekly_pace_add_pro_accounts_is_gated_on_for_saturation() -> None:
     pace = _build(
         [_summary(account_id, used_percent=99.5, reset_in_hours=2.0)],
         {account_id: _multi_window_history(account_id, 99.5)},
+        trailing_demand_used_percent_by_account={account_id: 277.5},
     )
 
     assert pace.saturated_account_count == 1
@@ -200,6 +266,19 @@ def test_weekly_pace_add_pro_accounts_is_none_without_demand_surplus() -> None:
     pace = _build(
         [_summary(account_id, used_percent=99.5, reset_in_hours=2.0)],
         {account_id: [_row(account_id, 99.5, NOW - timedelta(minutes=1))]},
+        trailing_demand_used_percent_by_account={account_id: 100.0},
+    )
+
+    assert pace.saturated_account_count == 1
+    assert pace.add_pro_accounts is None
+
+
+def test_weekly_pace_add_pro_accounts_is_none_without_sql_demand_mapping() -> None:
+    account_id = "acc-demand-without-mapping"
+    pace = _build(
+        [_summary(account_id, used_percent=99.5, reset_in_hours=2.0)],
+        {account_id: _multi_window_history(account_id, 99.5)},
+        trailing_demand_used_percent_by_account=None,
     )
 
     assert pace.saturated_account_count == 1
@@ -267,17 +346,31 @@ async def test_weekly_pace_attribution_merges_rankings_and_dedupes_unnamed_key(d
                 input_tokens=50_000,
             )
         )
+        session.add(
+            RequestLog(
+                api_key_id="key-alpha",
+                request_id="future-alpha",
+                requested_at=NOW + timedelta(minutes=1),
+                model="gpt-future",
+                status="success",
+                input_tokens=50_000,
+            )
+        )
         await session.commit()
 
-        rows = await DashboardRepository(session).top_api_key_attribution_since(NOW - timedelta(hours=2))
+        rows = await DashboardRepository(session).top_api_key_attribution_since(
+            NOW - timedelta(hours=2),
+            now=NOW,
+        )
 
     assert [row.name for row in rows] == ["Alpha", "(unnamed)", "(unnamed)"]
+    assert [row.api_key_id for row in rows] == ["key-alpha", "missing-key", "key-token-heavy"]
     assert sum(row.name == "Alpha" for row in rows) == 1
     alpha = rows[0]
     assert alpha.requests == 4
-    assert alpha.billable_tokens == 68
+    assert alpha.billable_tokens == 60
     assert alpha.cached_tokens == 12
     assert alpha.dominant_model == "gpt-alpha"
-    assert any(row.billable_tokens == 1_750 for row in rows)
+    assert any(row.billable_tokens == 1_500 for row in rows)
     request_logs_table = cast(Table, RequestLog.__table__)
     assert "idx_logs_dash_usage_covering" in {index.name for index in request_logs_table.indexes}

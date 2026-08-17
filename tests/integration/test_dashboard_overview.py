@@ -207,8 +207,8 @@ async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
     assert pace is not None
     assert pace["headroomPercent"] == pytest.approx(5.0)
     assert pace["headroomCredits"] == pytest.approx(2_520.0)
-    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(4_200.0)
-    assert pace["depletionEtaHours"] == pytest.approx(0.6)
+    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(4_473.3727810651)
+    assert pace["depletionEtaHours"] == pytest.approx(0.5633333333)
     assert pace["nextReliefInHours"] == pytest.approx(4.0)
     assert pace["nextReliefCredits"] == pytest.approx(47_880.0)
     assert pace["runwayStatus"] == "runs_dry"
@@ -218,9 +218,10 @@ async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
     assert len(pace["resetEvents"]) == 1
     assert pace["topApiKeys"] == [
         {
+            "apiKeyId": "key-runway",
             "name": "Runway key",
             "requests": 1,
-            "billableTokens": 135,
+            "billableTokens": 125,
             "cachedTokens": 20,
             "dominantModel": "gpt-5.1",
         }

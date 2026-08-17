@@ -21,11 +21,17 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
-from app.modules.usage.repository import AdditionalUsageRepository, UsageHistorySnapshot, UsageRepository
+from app.modules.usage.repository import (
+    AdditionalUsageRepository,
+    NormalizedUsageWindow,
+    UsageHistorySnapshot,
+    UsageRepository,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyAttributionRow:
+    api_key_id: str | None
     name: str
     requests: int
     billable_tokens: int
@@ -81,7 +87,7 @@ class DashboardRepository:
 
     async def positive_used_percent_deltas_by_account(
         self,
-        account_windows: Mapping[str, str],
+        account_windows: Mapping[str, NormalizedUsageWindow],
         *,
         since: datetime,
         until: datetime,
@@ -132,13 +138,12 @@ class DashboardRepository:
         self,
         since: datetime,
         *,
+        now: datetime,
         per_metric_limit: int = 3,
     ) -> list[ApiKeyAttributionRow]:
         key_name = func.coalesce(func.nullif(ApiKey.name, ""), "(unnamed)")
-        billable_tokens = (
-            func.coalesce(RequestLog.input_tokens, 0)
-            + func.coalesce(RequestLog.output_tokens, 0)
-            + func.coalesce(RequestLog.reasoning_tokens, 0)
+        billable_tokens = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
+            RequestLog.output_tokens, RequestLog.reasoning_tokens, 0
         )
         grouped_models = (
             select(
@@ -153,6 +158,7 @@ class DashboardRepository:
             .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
             .where(
                 RequestLog.requested_at >= since,
+                RequestLog.requested_at <= now,
                 RequestLog.deleted_at.is_(None),
             )
             .group_by(RequestLog.api_key_id, key_name, RequestLog.model)
@@ -232,6 +238,7 @@ class DashboardRepository:
         rows = (await self._session.execute(statement)).all()
         return [
             ApiKeyAttributionRow(
+                api_key_id=str(row.api_key_id) if row.api_key_id is not None else None,
                 name=str(row.name),
                 requests=int(row.requests),
                 billable_tokens=int(row.billable_tokens),

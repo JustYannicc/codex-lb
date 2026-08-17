@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from anyio import to_thread
 from sqlalchemy import (
@@ -44,6 +44,7 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+NormalizedUsageWindow = Literal["primary", "secondary"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,7 +862,7 @@ class UsageRepository:
 
     async def positive_used_percent_deltas_by_account(
         self,
-        account_windows: Mapping[str, str],
+        account_windows: Mapping[str, NormalizedUsageWindow],
         *,
         since: datetime,
         until: datetime,
