@@ -398,11 +398,10 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
 
     assert response.object == "response.compaction"
     assert response.id == "resp_compact_1"
-    assert response.model_extra == {
-        "output": [
-            {"id": "msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
-        ]
-    }
+    assert response.model_extra is not None
+    assert response.model_extra["output"] == [
+        {"id": "msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
+    ]
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
@@ -471,7 +470,10 @@ async def test_compact_responses_routed_terminal_sse_error_keeps_openai_envelope
     [
         ("invalid_request_error", "invalid_request_error", 400),
         ("authentication_error", "invalid_api_key", 401),
+        ("authentication_error", "invalid_authentication", 401),
+        ("authentication_error", "token_invalidated", 401),
         ("rate_limit_error", "rate_limit_exceeded", 429),
+        ("server_error", "insufficient_quota", 429),
     ],
 )
 async def test_compact_responses_terminal_sse_error_infers_status_from_error_detail(
@@ -518,10 +520,25 @@ async def test_compact_responses_routed_top_level_sse_error_preserves_fields(
             codex_client=cast(Any, client),
         )
 
+    assert exc_info.value.status_code == 429
     error = exc_info.value.payload["error"]
     assert error["code"] == "rate_limit_exceeded"
     assert error["message"] == "quota closed"
     assert error["param"] == "previous_response_id"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        ({"type": "response.failed", "status_code": 200}, 502),
+        ({"type": "response.failed", "status_code": 599}, 599),
+    ],
+)
+def test_compact_sse_status_code_accepts_only_http_error_statuses(
+    payload: dict[str, Any],
+    expected_status: int,
+) -> None:
+    assert proxy_module._compact_sse_terminal_status_code(payload) == expected_status
 
 
 @pytest.mark.asyncio

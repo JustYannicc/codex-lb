@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 from typing import cast
 
@@ -8,30 +7,9 @@ import pytest
 
 import app.modules.proxy.service as proxy_module
 from app.core.openai.models import CompactResponsePayload
+from tests.integration.compact_test_helpers import _make_auth_json
 
 pytestmark = pytest.mark.integration
-
-
-def _encode_jwt(payload: dict) -> str:
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    return f"header.{body}.sig"
-
-
-def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> dict:
-    payload = {
-        "email": email,
-        "chatgpt_account_id": account_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
-    }
-    return {
-        "tokens": {
-            "idToken": _encode_jwt(payload),
-            "accessToken": "access-token",
-            "refreshToken": "refresh-token",
-            "accountId": account_id,
-        },
-    }
 
 
 @pytest.mark.asyncio
@@ -118,8 +96,8 @@ async def test_proxy_compact_preserves_single_terminal_compaction_trigger(async_
 
     seen_payloads: list[dict[str, object]] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
-        del headers, access_token, account_id
+    async def fake_compact(payload, *args, **kwargs):
+        del args, kwargs
         seen_payloads.append(cast(dict[str, object], payload.to_payload()))
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 
@@ -156,8 +134,8 @@ async def test_v1_proxy_compact_keeps_trigger_handling_unchanged(async_client, m
 
     seen_payloads: list[dict[str, object]] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
-        del headers, access_token, account_id
+    async def fake_compact(payload, *args, **kwargs):
+        del args, kwargs
         seen_payloads.append(cast(dict[str, object], payload.to_payload()))
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 

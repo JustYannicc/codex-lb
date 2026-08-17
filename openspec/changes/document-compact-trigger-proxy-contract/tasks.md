@@ -4,6 +4,9 @@
   proxy-routing contract.
 - [x] 1.2 Cover exactly one terminal compact-wire `compaction_trigger` and
   local malformed-placement rejection.
+- [x] 1.3 Record the streamed `/backend-api/codex/responses` compact transport,
+  the standalone Codex compatibility endpoint, and the `/v1` normalization
+  asymmetry.
 
 ## 2. Validate the change
 
