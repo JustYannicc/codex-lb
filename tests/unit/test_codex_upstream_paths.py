@@ -115,6 +115,31 @@ class _BufferedCompactStreamResponse:
     )
 
 
+class _BufferedStrCompactStreamResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = (
+        'data: {"type":"response.completed","response":{"object":"response","id":"resp_compact_str",'
+        '"status":"completed","output":['
+        '{"id":"cmp_str","type":"compaction_summary","encrypted_content":"enc_str"}]}}\n\n'
+    )
+
+
+class _BufferedMessageOnlyCompactStreamResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+    content = (
+        b'data: {"type":"response.completed","response":{"object":"response","id":"resp_compact_messages",'
+        b'"status":"completed","output":['
+        b'{"id":"msg_history","type":"message","role":"assistant","status":"completed",'
+        b'"content":[{"type":"output_text","text":"historical plaintext"}]},'
+        b'{"id":"msg_summary","type":"message","role":"assistant","status":"completed",'
+        b'"content":[{"type":"output_text","text":"enc_summary"}]}]}}\n\n'
+    )
+
+
 class _CompactTerminalErrorStreamResponse:
     status = 200
     status_code = 200
@@ -434,6 +459,52 @@ async def test_compact_responses_routed_buffered_sse_keeps_compact_protocol(rout
     assert response.model_extra["service_tier"] == "default"
     assert response.model_extra["output"] == [
         {"id": "cmp_buffered", "type": "compaction", "encrypted_content": "enc_buffered"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_routed_buffered_str_sse_body_keeps_compact_protocol(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _RouteMetadataCodexClient(_BufferedStrCompactStreamResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert response.id == "resp_compact_str"
+    assert response.model_extra is not None
+    assert response.model_extra["output"] == [{"id": "cmp_str", "type": "compaction", "encrypted_content": "enc_str"}]
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_message_fallback_selects_last_message(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _RouteMetadataCodexClient(_BufferedMessageOnlyCompactStreamResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert response.id == "resp_compact_messages"
+    assert response.model_extra is not None
+    assert response.model_extra["output"] == [
+        {"id": "msg_summary", "type": "compaction", "status": "completed", "encrypted_content": "enc_summary"}
     ]
 
 

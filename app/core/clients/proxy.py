@@ -443,7 +443,14 @@ SSEResponse: TypeAlias = aiohttp.ClientResponse | SSEResponseProtocol
 class _CodexSSEContent:
     def __init__(self, response: Any) -> None:
         content = getattr(response, "content", None)
-        self._body = content if isinstance(content, bytes | bytearray) else None
+        if isinstance(content, bytes | bytearray):
+            self._body: bytes | None = bytes(content)
+        elif isinstance(content, str):
+            # Duck-typed upstream responses may expose a decoded string body
+            # (mirrors _codex_response_body); str has no iter_chunked.
+            self._body = content.encode()
+        else:
+            self._body = None
         self._content = content
 
     def iter_chunked(self, size: int) -> "SSEChunkIteratorProtocol":
@@ -1323,7 +1330,10 @@ def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[
                 normalized = _normalize_compact_output_item(raw_item)
                 if normalized is not None:
                     return normalized
-        for raw_item in output:
+        # Remote compaction output places the compaction summary after any
+        # historical message items, so the message-shaped fallback must pick
+        # the last usable message instead of leaking earlier history.
+        for raw_item in reversed(output):
             if not is_json_mapping(raw_item):
                 continue
             item_type = raw_item.get("type")
