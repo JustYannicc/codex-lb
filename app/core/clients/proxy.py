@@ -1484,19 +1484,13 @@ def _compact_sse_terminal_status_code(
         if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
             return value
     candidates_for_error: tuple[Mapping[str, JsonValue], ...] = tuple(
-        candidate
-        for candidate in (error_payload, response, payload)
-        if is_json_mapping(candidate)
+        candidate for candidate in (error_payload, response, payload) if is_json_mapping(candidate)
     )
     for candidate in candidates_for_error:
         error = parse_error_payload(dict(candidate))
         if error is None:
             if candidate is payload and payload.get("type") == "error":
-                root_error = {
-                    key: payload[key]
-                    for key in ("code", "message", "param", "error_type")
-                    if key in payload
-                }
+                root_error = {key: payload[key] for key in ("code", "message", "param", "error_type") if key in payload}
                 error = OpenAIError.model_validate(
                     {
                         **root_error,

@@ -5957,14 +5957,6 @@ async def responses_compact(
     raw_trigger_error = _raw_compaction_trigger_error(request)
     if raw_trigger_error is not None:
         return _logged_error_json_response(request, 400, openai_client_payload_error(raw_trigger_error))
-    try:
-        payload = ResponsesCompactRequest.model_validate(payload)
-    except ClientPayloadError as exc:
-        error = openai_client_payload_error(exc)
-        return _logged_error_json_response(request, 400, error)
-    except ValidationError as exc:
-        error = openai_validation_error(exc)
-        return _logged_error_json_response(request, 400, error)
     return await _compact_responses(
         request,
         payload,
