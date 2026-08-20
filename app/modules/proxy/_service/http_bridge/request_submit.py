@@ -2872,7 +2872,21 @@ class _HTTPBridgeRequestSubmitMixin:
                 # failure. Without this, only the admission-waiter reader
                 # path could ever poison an anchor, and an anchored session
                 # failing without waiters cooled down forever (issue #1830).
-                await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
+                durable_cleared = await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
+                if not durable_cleared and session.durable_session_id is not None:
+                    # Keep failed waiterless clears visible in the same
+                    # poison-clear telemetry the admission-waiter path emits;
+                    # the next threshold failure re-attempts the clear.
+                    _log_http_bridge_event(
+                        "durable_anchor_poison_clear_failed",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        pending_count=retired_request_count,
+                        detail=poison_detail,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
         session.closed = True
         async with self._http_bridge_lock:
             # Bounded close may return while resource finalization is still

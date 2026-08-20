@@ -28806,10 +28806,12 @@ async def test_http_bridge_retire_stale_pending_poisons_anchor_after_repeated_ev
 
 @pytest.mark.asyncio
 async def test_http_bridge_retire_stale_pending_reattempts_failed_poison_clear(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A clear that cannot be confirmed must not lose the self-heal: the next
-    # eligible eventless failure at or above the threshold re-attempts it.
+    # eligible eventless failure at or above the threshold re-attempts it, and
+    # each failed clear stays visible in the poison-clear telemetry.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
@@ -28819,20 +28821,22 @@ async def test_http_bridge_retire_stale_pending_reattempts_failed_poison_clear(
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
 
-    for _failure_number in range(8):
-        session = _make_bridge_session(
-            key_value="bridge-anchor-poison-clear-retry",
-            pending_requests=deque([_make_eventless_http_bridge_owner()]),
-            queued_request_count=1,
-        )
-        session.durable_session_id = "durable-anchor-poison-clear-retry"
-        session.durable_owner_epoch = 5
-        await service._retire_stale_pending_http_bridge_session(
-            session,
-            detail="stream_incomplete",
-        )
+    with caplog.at_level(logging.INFO):
+        for _failure_number in range(8):
+            session = _make_bridge_session(
+                key_value="bridge-anchor-poison-clear-retry",
+                pending_requests=deque([_make_eventless_http_bridge_owner()]),
+                queued_request_count=1,
+            )
+            session.durable_session_id = "durable-anchor-poison-clear-retry"
+            session.durable_owner_epoch = 5
+            await service._retire_stale_pending_http_bridge_session(
+                session,
+                detail="stream_incomplete",
+            )
 
     assert durable_bridge.rebind_session_account.await_count == 2
+    assert caplog.text.count("event=durable_anchor_poison_clear_failed") == 2
 
 
 @pytest.mark.asyncio
