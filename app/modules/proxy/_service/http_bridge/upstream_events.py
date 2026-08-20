@@ -74,6 +74,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
     _clear_http_bridge_quarantine_key,
+    _http_bridge_session_key_quarantine_generation,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -223,7 +224,15 @@ async def _advance_http_bridge_quarantine_clear_key(
     input_item_count: int | None,
     input_full_fingerprint: str | None,
     pending_tool_calls: Mapping[str, str] | None,
+    quarantine_generation: int | None,
 ) -> bool:
+    def generation_matches() -> bool:
+        if quarantine_generation is None:
+            return True
+        return _http_bridge_session_key_quarantine_generation(service, key) == quarantine_generation
+
+    if not generation_matches():
+        return False
     lookup = await service._durable_bridge.lookup_request_targets(
         session_key_kind=key.affinity_kind,
         session_key_value=key.affinity_key,
@@ -233,6 +242,8 @@ async def _advance_http_bridge_quarantine_clear_key(
         previous_response_id=None,
     )
     if lookup is None:
+        return False
+    if not generation_matches():
         return False
     settings = _service_get_settings()
     instance_id = settings.http_responses_session_bridge_instance_id
@@ -255,6 +266,8 @@ async def _advance_http_bridge_quarantine_clear_key(
         if claimed_lookup.owner_instance_id != instance_id:
             return False
         active_lookup = claimed_lookup
+    if not generation_matches():
+        return False
     if active_lookup.account_id != account_id:
         rebound = await service._durable_bridge.rebind_session_account(
             session_id=active_lookup.session_id,
@@ -266,6 +279,8 @@ async def _advance_http_bridge_quarantine_clear_key(
         )
         if not rebound:
             return False
+    if not generation_matches():
+        return False
     advanced = await service._durable_bridge.renew_live_session(
         session_id=active_lookup.session_id,
         api_key_id=api_key_id,
@@ -277,7 +292,14 @@ async def _advance_http_bridge_quarantine_clear_key(
         latest_input_full_fingerprint=input_full_fingerprint,
         latest_pending_tool_calls=pending_tool_calls,
     )
-    return advanced is not None
+    return (
+        advanced is not None
+        and advanced.session_id == active_lookup.session_id
+        and advanced.owner_instance_id == instance_id
+        and advanced.owner_epoch == active_lookup.owner_epoch
+        and advanced.account_id == account_id
+        and advanced.latest_response_id == response_id
+    )
 
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
@@ -2875,6 +2897,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 else None
                             ),
                             pending_tool_calls=_durable_pending_tool_call_manifest(terminal_request_state, payload),
+                            quarantine_generation=terminal_request_state.quarantine_clear_generation,
                         )
                     except Exception:
                         logger.warning("Failed to advance quarantined HTTP bridge continuity", exc_info=True)
