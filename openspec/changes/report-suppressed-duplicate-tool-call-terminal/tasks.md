@@ -5,5 +5,5 @@
 
 ## 2. Validation
 
-- [x] 2.1 Run focused HTTP bridge and WebSocket regression tests.
+- [x] 2.1 Run focused direct-SSE, HTTP bridge, and WebSocket regression tests.
 - [x] 2.2 Run strict OpenSpec validation.

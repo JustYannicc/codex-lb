@@ -25097,6 +25097,115 @@ async def test_websocket_terminal_hands_log_off_before_health_and_isolates_healt
 
 
 @pytest.mark.asyncio
+async def test_websocket_duplicate_tool_suppression_still_penalizes_genuine_terminal_failure(
+    monkeypatch,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_duplicate_terminal_failure")
+    handle_stream_error = AsyncMock()
+    write_request_log = AsyncMock()
+    settle_stream = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", write_request_log)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_stream)
+
+    payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_duplicate_terminal_failure",
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+    event = parse_sse_event(f"data: {json.dumps(payload)}\n\n")
+    assert event is not None
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_duplicate_terminal_failure",
+        response_id="resp_ws_duplicate_terminal_failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=asyncio.get_running_loop().time(),
+        suppressed_duplicate_tool_call=True,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=account,
+        account_id_value=account.id,
+        event=event,
+        event_type="response.failed",
+        payload=payload,
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    handle_stream_error.assert_awaited_once_with(
+        account,
+        {"message": "slow down"},
+        "rate_limit_exceeded",
+    )
+    assert upstream_control.reconnect_requested is True
+    write_request_log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_synthetic_duplicate_terminal_skips_health_penalty(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_duplicate_completed")
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_duplicate_completed",
+        response_id="resp_ws_duplicate_completed",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        suppressed_duplicate_tool_call=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "response.completed",
+        "response": {
+            "id": request_state.response_id,
+            "status": "completed",
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    downstream_payload = json.loads(downstream_text)
+    assert downstream_payload["type"] == "response.failed"
+    assert downstream_payload["response"]["error"]["code"] == "duplicate_tool_call_replay_suppressed"
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["error_code"] == "duplicate_tool_call_replay_suppressed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("settlement_committed", "request_log_handoff_fails", "expected_warning"),
     [
@@ -44347,6 +44456,7 @@ async def test_http_bridge_duplicate_tool_call_replay_emits_retryable_terminal_f
     assert session.upstream_control.reconnect_requested is True
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["error_code"] == "duplicate_tool_call_replay_suppressed"
 
 
 @pytest.mark.asyncio
