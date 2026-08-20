@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
+    _http_bridge_pending_response_events_seen,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
@@ -2816,20 +2817,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 # circuit strike. Explicit values remain authoritative for
                 # reader-failure callers whose pending deque was already
                 # drained before entering this shared boundary.
-                response_events_seen = max(
-                    (
-                        max(
-                            request_state.response_event_count,
-                            int(
-                                request_state.response_id is not None
-                                or request_state.latency_response_created_ms is not None
-                                or request_state.downstream_visible
-                            ),
-                        )
-                        for request_state in retired_request_states
-                    ),
-                    default=0,
-                )
+                response_events_seen = _http_bridge_pending_response_events_seen(retired_request_states)
             if retry_circuit_attempt_selection is None:
                 retry_circuit_attempt_selection = _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                     retired_request_states

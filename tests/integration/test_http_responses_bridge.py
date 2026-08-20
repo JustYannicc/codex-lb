@@ -13488,6 +13488,162 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
+async def test_retry_account_neutral_precreated_request_switches_from_silent_account(app_instance, monkeypatch):
+    from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+
+    service = get_proxy_service_for_app(app_instance)
+    recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("retry-silent-account")
+    first_account = cast(Account, SimpleNamespace(id="acct-silent", status=AccountStatus.ACTIVE, plan_type="plus"))
+    replacement_account = cast(
+        Account,
+        SimpleNamespace(id="acct-replacement", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    replacement_upstream = _RecordingUpstreamWebSocket()
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey(recovery_kind, recovery_key, None),
+        headers={"x-codex-turn-state": "stale-turn-state"},
+        affinity=proxy_module._AffinityPolicy(),
+        request_model="gpt-5.5",
+        account=first_account,
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_lock=anyio.Lock(),
+        pending_requests=deque(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-account-neutral-precreated-retry",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        response_create_gate_acquired=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.5", "input": []}),
+    )
+    session.pending_requests.append(request_state)
+    reconnect_calls: list[dict[str, object]] = []
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        del self, restart_reader
+        reconnect_calls.append(
+            {
+                "require_same_account": require_same_account,
+                "require_preferred_account": require_preferred_account,
+                "preferred_account_id": target_session.account.id,
+                "excluded_account_ids": set(request_state.excluded_account_ids),
+            }
+        )
+        target_session.account = replacement_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert reconnect_calls == [
+        {
+            "require_same_account": True,
+            "require_preferred_account": True,
+            "preferred_account_id": "acct-silent",
+            "excluded_account_ids": set(),
+        }
+    ]
+    assert request_state.preferred_account_id == "acct-silent"
+    assert session.account.id == "acct-replacement"
+    assert replacement_upstream.sent_text == [request_state.request_text]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_required_owner_still_fails_when_owner_unavailable(app_instance, monkeypatch):
+    service = get_proxy_service_for_app(app_instance)
+    owner_account = cast(
+        Account,
+        SimpleNamespace(id="acct-owner-required", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "required-owner-reconnect", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(),
+        request_model="gpt-5.5",
+        account=owner_account,
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_lock=anyio.Lock(),
+        pending_requests=deque(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-required-owner-reconnect",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        response_create_gate_acquired=True,
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.5", "input": []}),
+    )
+    request_state.preferred_account_id = owner_account.id
+    selection_calls: list[dict[str, object]] = []
+
+    async def fake_select_account_with_budget_for_stream(self, deadline, **kwargs):
+        del self, deadline
+        selection_calls.append(
+            {
+                "preferred_account_id": kwargs.get("preferred_account_id"),
+                "preferred_account_is_continuity_owner": kwargs.get("preferred_account_is_continuity_owner"),
+                "fallback_on_preferred_account_unavailable": kwargs.get("fallback_on_preferred_account_unavailable"),
+            }
+        )
+        return AccountSelection(
+            account=None,
+            error_message="Required continuity owner account no longer exists",
+            error_code=CONTINUITY_OWNER_UNAVAILABLE,
+        )
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget_for_stream",
+        fake_select_account_with_budget_for_stream,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            require_preferred_account=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert selection_calls == [
+        {
+            "preferred_account_id": owner_account.id,
+            "preferred_account_is_continuity_owner": False,
+            "fallback_on_preferred_account_unavailable": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,
