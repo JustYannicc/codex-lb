@@ -292,6 +292,8 @@ async def _advance_http_bridge_quarantine_clear_key(
         latest_input_full_fingerprint=input_full_fingerprint,
         latest_pending_tool_calls=pending_tool_calls,
     )
+    if not generation_matches():
+        return False
     return (
         advanced is not None
         and advanced.session_id == active_lookup.session_id
