@@ -17138,10 +17138,10 @@ async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_
     assert terminal_event["type"] == "response.failed"
     terminal_response = cast(dict[str, JsonValue], terminal_event["response"])
     terminal_error = cast(dict[str, JsonValue], terminal_response["error"])
-    assert terminal_error["code"] == "stream_incomplete"
+    assert terminal_error["code"] == "duplicate_tool_call_replay_suppressed"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
-    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert request_logs.calls[0]["error_code"] == "duplicate_tool_call_replay_suppressed"
 
 
 @pytest.mark.asyncio
@@ -44258,6 +44258,95 @@ async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
     assert forwarded_created is not None
     assert proxy_service.parse_sse_data_json(forwarded_created) == replay_created_payload
     assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_duplicate_tool_call_replay_emits_retryable_terminal_failure():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_duplicate_terminal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_bridge_duplicate_terminal",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-duplicate-terminal", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_duplicate_terminal"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_bridge_duplicate_terminal",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": ""}),
+            "call_id": "call_first",
+        },
+    }
+    replay_payload = {
+        **tool_payload,
+        "response_id": "resp_bridge_duplicate_terminal_replay",
+        "item": {**tool_payload["item"], "call_id": "call_replayed"},
+    }
+    replay_created_payload = {
+        "type": "response.created",
+        "response": {"id": "resp_bridge_duplicate_terminal_replay", "status": "in_progress"},
+    }
+    completed_payload = {
+        "type": "response.completed",
+        "response": {"id": "resp_bridge_duplicate_terminal_replay", "status": "completed", "output": []},
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(tool_payload, separators=(",", ":")))
+    session.upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_created_payload, separators=(",", ":")))
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_payload, separators=(",", ":")))
+    await service._process_http_bridge_upstream_text(session, json.dumps(completed_payload, separators=(",", ":")))
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    first = await event_queue.get()
+    created = await event_queue.get()
+    terminal_block = await event_queue.get()
+    assert isinstance(first, str)
+    assert isinstance(created, str)
+    assert isinstance(terminal_block, str)
+    assert proxy_service.parse_sse_data_json(first) == tool_payload
+    assert proxy_service.parse_sse_data_json(created) == replay_created_payload
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "response.failed"
+    terminal_response = terminal["response"]
+    assert isinstance(terminal_response, dict)
+    terminal_error = terminal_response["error"]
+    assert isinstance(terminal_error, dict)
+    assert terminal_error["code"] == "duplicate_tool_call_replay_suppressed"
+    assert await event_queue.get() is None
+    assert request_state.error_http_status_override == 502
+    assert session.upstream_control.reconnect_requested is True
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[-1]["status"] == "error"
 
 
 @pytest.mark.asyncio
