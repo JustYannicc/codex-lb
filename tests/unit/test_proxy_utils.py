@@ -34997,6 +34997,34 @@ def test_http_bridge_should_attempt_local_previous_response_recovery_invalid_req
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(non_recoverable_error) is False
 
 
+def test_http_bridge_should_attempt_local_previous_response_recovery_normalizes_upstream_error_frames():
+    # The terse parameterless rejection classified on the websocket path by
+    # #1818: no ``code``, no ``param``, classifiable only after normalizing
+    # ``type`` into the code slot (issue #1830).
+    terse_parameterless_error = proxy_module.ProxyResponseError(
+        400,
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+            }
+        },
+    )
+    # Frames that carry the classifiable code only in ``type``.
+    type_only_not_found_error = proxy_module.ProxyResponseError(
+        404,
+        {
+            "error": {
+                "type": "previous_response_not_found",
+                "message": "Previous response with id 'resp_prev_anchor' not found.",
+            }
+        },
+    )
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(terse_parameterless_error) is True
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(type_only_not_found_error) is True
+
+
 def test_http_bridge_server_recovery_mode_retries_ambiguous_transport_once(monkeypatch: pytest.MonkeyPatch):
     ambiguous_error = proxy_module.ProxyResponseError(
         502,

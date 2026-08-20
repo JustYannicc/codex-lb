@@ -95,6 +95,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _http_bridge_anchor_poison_detail,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
     _classify_upstream_close,
@@ -123,6 +126,9 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_auth_failure_permanent_code,
     _websocket_auth_failure_requires_reauth,
     _websocket_request_text_is_account_neutral_fresh_replay,
+)
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _abandon_durable_http_bridge_continuity,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -2846,11 +2852,27 @@ class _HTTPBridgeRequestSubmitMixin:
         # that handoff, genuine pre-response failures disappear from circuit
         # accounting while idle closes and request failures look identical.
         if retired_request_count > 0 and response_events_seen == 0:
-            await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+            consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
                 session,
                 detail=retry_circuit_detail or detail,
                 selection=retry_circuit_attempt_selection,
             )
+            poison_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail or detail)
+            if (
+                poison_detail is not None
+                and consecutive_failures is not None
+                and consecutive_failures
+                >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+            ):
+                # Consecutive eventless failures on one bridge key are
+                # same-anchor failures (the anchor only advances on a
+                # completed response, which resets the circuit). Clear the
+                # poisoned durable anchor while this session still owns the
+                # lease so the next attempt is not re-anchored into the same
+                # failure. Without this, only the admission-waiter reader
+                # path could ever poison an anchor, and an anchored session
+                # failing without waiters cooled down forever (issue #1830).
+                await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
         session.closed = True
         async with self._http_bridge_lock:
             # Bounded close may return while resource finalization is still
