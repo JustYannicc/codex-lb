@@ -31199,3 +31199,71 @@ async def test_settle_failed_creation_releases_a_row_rebound_away_from_the_winne
     # will be fenced on its next renewal and retry cleanly.
     assert superseded is False
     assert winner.durable_owner_epoch == 4
+
+
+@pytest.mark.asyncio
+async def test_admission_waiters_do_not_accumulate_callbacks_on_shared_inflight_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the 2026-08-20 event-loop livelock: admission waiters
+    piling onto the shared inflight future must not attach per-waiter
+    callbacks. The old ``wait_for(asyncio.shield(...))`` pattern left
+    O(waiters) callbacks on the registry future (Python 3.14 shield never
+    removes ``_clear_awaited_by_callback`` on waiter cancellation) and paid
+    O(n) removal scans per timeout, so a mass timeout ground the event loop
+    at O(n^2)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    # prompt_cache_key keeps the canonical key: session_header requests
+    # without turn state are rewritten to per-request parallel fork keys and
+    # never share the inflight future.
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", "bridge-waiter-pileup", None)
+    inflight: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    setattr(
+        inflight,
+        http_bridge_mixin_module._HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
+        time.monotonic(),
+    )
+    service._http_bridge_inflight_sessions[key] = inflight
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.2)
+
+    async def _single_instance_ring(settings: Any, ring_membership: Any = None) -> tuple[str, tuple[str, ...]]:
+        return "local-instance", ("local-instance",)
+
+    monkeypatch.setattr(proxy_service, "_active_http_bridge_instance_ring", _single_instance_ring)
+
+    async def _wait_once() -> Any:
+        return await service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="bridge-waiter-pileup"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+
+    waiters = [asyncio.create_task(_wait_once()) for _ in range(50)]
+    await asyncio.sleep(0.05)
+    assert not inflight.done()
+    callbacks = getattr(inflight, "_callbacks", None)
+    assert callbacks is not None and len(callbacks) == 1, (
+        f"admission waiters must share one fan-out callback on the inflight future, found "
+        f"{None if callbacks is None else len(callbacks)}"
+    )
+
+    # Client-disconnect storm: cancelling waiters must leave the shared future
+    # pending (the owner's creation continues) and leak no callbacks.
+    for waiter in waiters[:25]:
+        waiter.cancel()
+    cancelled = await asyncio.gather(*waiters[:25], return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in cancelled)
+    assert not inflight.done()
+    callbacks = getattr(inflight, "_callbacks", None)
+    assert callbacks is not None and len(callbacks) == 1
+
+    # The surviving waiters time out: the first to fire fails the shared
+    # future for the rest with the local-overload contract error.
+    remaining = await asyncio.gather(*waiters[25:], return_exceptions=True)
+    assert all(isinstance(result, ProxyResponseError) and result.status_code == 429 for result in remaining)
+    assert key not in service._http_bridge_inflight_sessions

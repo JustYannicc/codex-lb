@@ -54,6 +54,7 @@ from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
+from app.core.resilience.loop_lag_monitor import run_event_loop_lag_monitor
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
@@ -607,6 +608,13 @@ async def lifespan(app: FastAPI):
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
     heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    loop_lag_task: asyncio.Task[None] | None = None
+    if settings.event_loop_lag_warn_threshold_seconds > 0:
+        loop_lag_task = asyncio.create_task(
+            run_event_loop_lag_monitor(
+                warn_threshold_seconds=settings.event_loop_lag_warn_threshold_seconds,
+            )
+        )
     startup_module._startup_complete = True
 
     try:
@@ -662,6 +670,13 @@ async def lifespan(app: FastAPI):
             heartbeat_task.cancel()
             try:
                 await asyncio.wait_for(heartbeat_task, timeout=2)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        if loop_lag_task is not None:
+            loop_lag_task.cancel()
+            try:
+                await asyncio.wait_for(loop_lag_task, timeout=2)
             except (asyncio.CancelledError, TimeoutError):
                 pass
 
