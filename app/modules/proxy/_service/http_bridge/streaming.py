@@ -1346,6 +1346,12 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+        durable_model_transition_lookup = (
+            durable_lookup
+            if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
+            else None
+        )
+        durable_model_transition_uses_fresh_replay = False
         # Set when the quarantine check below suppresses the durable-anchor
         # injection for a full-resend payload; the session hydration and the
         # session-level anchor injection further down must honor it so the
@@ -1423,6 +1429,13 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
+                durable_model_transition_uses_fresh_replay = (
+                    durable_model_transition_lookup is not None
+                    and not forwarded_request
+                    and rewritten_file_account_id is None
+                    and durable_full_resend_has_safe_fresh_context
+                    and durable_full_resend_is_account_neutral is True
+                )
                 # The durable recovery-attempt fence keys persisted
                 # ``http_bridge_recovery_attempts`` rows. Hash the same
                 # unprojected body main has always hashed: a projected body
@@ -1451,6 +1464,16 @@ class _HTTPBridgeStreamingMixin:
                                 and durable_lookup.lease_is_active(now=utcnow())
                             )
                             if not owner_is_current:
+                                recovery_claim_model = (
+                                    durable_lookup.model
+                                    if durable_model_transition_uses_fresh_replay
+                                    else payload.model
+                                )
+                                recovery_claim_latest_response_id = (
+                                    durable_lookup.latest_response_id
+                                    if durable_model_transition_uses_fresh_replay
+                                    else None
+                                )
                                 claimed_session = await self._durable_bridge.claim_live_session(
                                     session_key_kind=durable_lookup.canonical_kind,
                                     session_key_value=durable_lookup.canonical_key,
@@ -1458,10 +1481,10 @@ class _HTTPBridgeStreamingMixin:
                                     instance_id=claim_instance_id,
                                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                                     account_id=durable_lookup.account_id,
-                                    model=payload.model,
+                                    model=recovery_claim_model,
                                     service_tier=None,
                                     latest_turn_state=durable_lookup.latest_turn_state,
-                                    latest_response_id=None,
+                                    latest_response_id=recovery_claim_latest_response_id,
                                     owner_process_epoch=http_bridge_owner_process_epoch(),
                                     # Revalidate the stale lookup under the
                                     # row lock; an active owner that appeared
@@ -1477,6 +1500,8 @@ class _HTTPBridgeStreamingMixin:
                                         ),
                                     )
                                 claim_owner_epoch = claimed_session.owner_epoch
+                                if durable_model_transition_uses_fresh_replay:
+                                    durable_model_transition_lookup = claimed_session
                             claimed = await self._durable_bridge.mark_recovery_attempt_replayed(
                                 session_id=durable_lookup.session_id,
                                 api_key_id=bridge_session_key.api_key_id,
@@ -1514,19 +1539,6 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
         durable_anchor_trimmable = durable_full_resend_anchor_count is not None
-        durable_model_transition_lookup = (
-            durable_lookup
-            if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
-            else None
-        )
-        durable_model_transition_uses_fresh_replay = (
-            durable_model_transition_lookup is not None
-            and not forwarded_request
-            and rewritten_file_account_id is None
-            and durable_full_resend_fresh_payload is not None
-            and durable_full_resend_has_safe_fresh_context
-            and durable_full_resend_is_account_neutral is True
-        )
         durable_model_transition_requires_owner = durable_model_transition_lookup is not None and (
             not durable_model_transition_uses_fresh_replay
             and (

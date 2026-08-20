@@ -25034,6 +25034,235 @@ async def test_durable_model_transition_full_resend_uses_account_neutral_replay(
 
 
 @pytest.mark.asyncio
+async def test_durable_model_transition_recovery_claim_keeps_parent_model_anchor_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_metadata: proxy_service.JsonValue = {"turn_id": "turn-owner"}
+    historical_input: list[proxy_service.JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call",
+            "id": "fc_owner",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.3-codex-spark",
+            "instructions": "hi",
+            "input": [
+                *historical_input,
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_old",
+                    "output": "old output",
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owner",
+                    "role": "assistant",
+                    "status": "completed",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "old answer"}],
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "next question"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                },
+            ],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-model-recovery-parent",
+        canonical_kind="session_header",
+        canonical_key="shared-root",
+        api_key_scope="__anonymous__",
+        account_id="acc-model-owner",
+        owner_instance_id="instance-before-restart",
+        owner_epoch=18,
+        lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_parent",
+        latest_response_id="resp_model_parent",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        model="gpt-5.4-mini",
+    )
+    parent_row = {
+        "model": durable_lookup.model,
+        "latest_response_id": durable_lookup.latest_response_id,
+        "owner_epoch": durable_lookup.owner_epoch,
+        "owner_instance_id": durable_lookup.owner_instance_id,
+        "state": durable_lookup.state,
+    }
+    captured_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    captured_kwargs: list[dict[str, Any]] = []
+    release_calls: list[dict[str, Any]] = []
+
+    async def fake_claim_live_session(**kwargs: Any) -> proxy_service.DurableBridgeLookup:
+        parent_row["owner_epoch"] = cast(int, parent_row["owner_epoch"]) + 1
+        parent_row["owner_instance_id"] = kwargs["instance_id"]
+        parent_row["state"] = HttpBridgeSessionState.ACTIVE
+        parent_row["model"] = kwargs["model"]
+        if kwargs["latest_response_id"] is not None:
+            parent_row["latest_response_id"] = kwargs["latest_response_id"]
+        return replace(
+            durable_lookup,
+            owner_instance_id=cast(str, parent_row["owner_instance_id"]),
+            owner_epoch=cast(int, parent_row["owner_epoch"]),
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            state=cast(HttpBridgeSessionState, parent_row["state"]),
+            model=cast(str | None, parent_row["model"]),
+            latest_response_id=cast(str | None, parent_row["latest_response_id"]),
+        )
+
+    async def fake_mark_recovery_attempt_replayed(**kwargs: Any) -> bool:
+        assert kwargs["session_id"] == durable_lookup.session_id
+        assert kwargs["owner_epoch"] == parent_row["owner_epoch"]
+        return True
+
+    async def fake_release_live_session(**kwargs: Any) -> proxy_service.DurableBridgeLookup:
+        release_calls.append(kwargs)
+        assert kwargs["session_id"] == durable_lookup.session_id
+        assert kwargs["owner_epoch"] == parent_row["owner_epoch"]
+        parent_row["owner_instance_id"] = None
+        parent_row["state"] = HttpBridgeSessionState.CLOSED
+        return replace(
+            durable_lookup,
+            owner_instance_id=None,
+            owner_epoch=cast(int, parent_row["owner_epoch"]),
+            lease_expires_at=datetime.now(timezone.utc),
+            state=HttpBridgeSessionState.CLOSED,
+            model=cast(str | None, parent_row["model"]),
+            latest_response_id=cast(str | None, parent_row["latest_response_id"]),
+        )
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        captured_keys.append(key)
+        captured_kwargs.append(kwargs)
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(Any, SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE))
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        **_kwargs: Any,
+    ):
+        assert request_state.recovery_attempt_claimed is True
+        assert request_state.previous_response_id is None
+        replay_payload = json.loads(text_data)
+        assert replay_payload["model"] == payload.model
+        assert "previous_response_id" not in replay_payload
+        await service._durable_bridge.release_live_session(
+            session_id=request_state.recovery_attempt_session_id,
+            instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=request_state.recovery_attempt_owner_epoch,
+            draining=False,
+        )
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_recovery_attempt",
+        AsyncMock(return_value=SimpleNamespace(request_fingerprint="existing-recovery-fence")),
+    )
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", AsyncMock(side_effect=fake_claim_live_session))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "mark_recovery_attempt_replayed",
+        AsyncMock(side_effect=fake_mark_recovery_attempt_replayed),
+    )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "release_live_session",
+        AsyncMock(side_effect=fake_release_live_session),
+    )
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={
+                "authorization": "Bearer test-token",
+                "x-codex-session-id": "shared-root",
+                "x-codex-turn-state": "http_turn_child",
+            },
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(captured_keys) == 1
+    assert is_http_bridge_account_neutral_replay(
+        kind=captured_keys[0].affinity_kind,
+        key=captured_keys[0].affinity_key,
+    )
+    assert captured_kwargs[0]["durable_lookup"] is None
+    assert captured_kwargs[0]["previous_response_id"] is None
+    assert release_calls == [
+        {
+            "session_id": durable_lookup.session_id,
+            "instance_id": _make_app_settings().http_responses_session_bridge_instance_id,
+            "owner_epoch": parent_row["owner_epoch"],
+            "draining": False,
+        }
+    ]
+    assert (parent_row["model"], parent_row["latest_response_id"]) == ("gpt-5.4-mini", "resp_model_parent")
+    assert parent_row["model"] != payload.model
+
+
+@pytest.mark.asyncio
 async def test_durable_model_transition_full_resend_pending_tool_context_uses_account_neutral_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
