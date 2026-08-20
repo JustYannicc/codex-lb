@@ -109,7 +109,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_session_key_quarantine_generation,
+    _http_bridge_session_key_quarantined,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
@@ -1352,8 +1352,6 @@ class _HTTPBridgeStreamingMixin:
         # dispatch genuinely goes unanchored instead of rebuilding the same
         # wedged reattach through the session-state side door.
         fresh_reattach_anchor_suppressed_quarantined = False
-        fresh_reattach_quarantine_clear_key: _HTTPBridgeSessionKey | None = None
-        fresh_reattach_quarantine_clear_generation: int | None = None
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
@@ -1423,12 +1421,6 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
-                # The durable recovery-attempt fence keys persisted
-                # ``http_bridge_recovery_attempts`` rows. Hash the same
-                # unprojected body main has always hashed: a projected body
-                # would mint a different fingerprint, so a row written
-                # before a restart would stop matching and the one-shot
-                # replay fence would silently open once.
                 _fresh_state, fresh_replay_text = prepare_bridge_request(
                     _http_bridge_payload_without_previous_response_id(payload)
                 )
@@ -1519,29 +1511,18 @@ class _HTTPBridgeStreamingMixin:
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
             else None
         )
-        durable_model_transition_uses_fresh_replay = (
-            durable_model_transition_lookup is not None
-            and not forwarded_request
-            and rewritten_file_account_id is None
-            and durable_full_resend_fresh_payload is not None
-            and durable_full_resend_has_safe_fresh_context
-            and durable_full_resend_is_account_neutral is True
-        )
         durable_model_transition_requires_owner = durable_model_transition_lookup is not None and (
-            not durable_model_transition_uses_fresh_replay
-            and (
-                payload.previous_response_id is not None
-                or bridge_session_key.strength == "hard"
-                or (
-                    bridge_session_key.affinity_kind == "prompt_cache"
-                    and _http_bridge_request_stage(
-                        headers=headers,
-                        payload=payload,
-                        durable_lookup=durable_model_transition_lookup,
-                    )
-                    == "follow_up"
-                    and durable_model_transition_lookup.latest_turn_state is not None
+            payload.previous_response_id is not None
+            or bridge_session_key.strength == "hard"
+            or (
+                bridge_session_key.affinity_kind == "prompt_cache"
+                and _http_bridge_request_stage(
+                    headers=headers,
+                    payload=payload,
+                    durable_lookup=durable_model_transition_lookup,
                 )
+                == "follow_up"
+                and durable_model_transition_lookup.latest_turn_state is not None
             )
         )
         if durable_model_transition_lookup is not None:
@@ -1555,36 +1536,7 @@ class _HTTPBridgeStreamingMixin:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=durable_model_transition_requires_owner,
             )
-            if durable_model_transition_uses_fresh_replay:
-                replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
-                bridge_session_key = _HTTPBridgeSessionKey(
-                    replay_kind,
-                    replay_key,
-                    bridge_session_key.api_key_id,
-                    strength="soft",
-                )
-                affinity = _AffinityPolicy()
-                incoming_turn_state_header = None
-                incoming_session_header = None
-                session_header_fallback_key = None
-                effective_payload = durable_full_resend_fresh_payload
-                untrimmed_effective_payload = durable_full_resend_fresh_payload
-                force_local_recovery_creation = True
-                preferred_account_has_continuity_provenance = False
-                _log_http_bridge_event(
-                    "model_transition_fresh_resend",
-                    bridge_session_key,
-                    account_id=durable_model_transition_lookup.account_id,
-                    model=payload.model,
-                    detail=(
-                        "outcome=account_neutral_full_resend_without_owner,"
-                        f"previous_model={durable_model_transition_lookup.model}"
-                    ),
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                    owner_check_applied=False,
-                )
-            elif is_http_bridge_account_neutral_replay(
+            if is_http_bridge_account_neutral_replay(
                 kind=durable_model_transition_lookup.canonical_kind,
                 key=durable_model_transition_lookup.canonical_key,
             ):
@@ -1593,12 +1545,6 @@ class _HTTPBridgeStreamingMixin:
                     replay_kind,
                     replay_key,
                     bridge_session_key.api_key_id,
-                    # This is a one-shot fresh recovery dispatch after the
-                    # original hard key was quarantined. Keep the
-                    # account-neutral marker for replay guards, but do not hash
-                    # the random recovery key through durable hard-owner
-                    # routing before the wedged upstream proof can run.
-                    strength="soft",
                 )
                 force_local_recovery_creation = True
             durable_lookup = None
@@ -1625,21 +1571,13 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
-            quarantine_generation = (
-                _http_bridge_session_key_quarantine_generation(self, bridge_session_key)
-                if payload_looks_like_full_resend
-                else None
-            )
-            if quarantine_generation is not None:
+            if payload_looks_like_full_resend and _http_bridge_session_key_quarantined(self, bridge_session_key):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
                 # conversation, so send it unanchored on the fresh path
-                # instead of rebuilding the same reattach. Only cross accounts
-                # once the sealed durable full-resend proof matches this
-                # payload; otherwise keep the durable owner while dropping the
-                # poisoned anchor. Delta-only payloads keep the anchor: it is
-                # their only way to convey prior context (same boundary as the
-                # fenced anchor clear).
+                # instead of rebuilding the same reattach. Delta-only
+                # payloads keep the anchor: it is their only way to convey
+                # prior context (same boundary as the fenced anchor clear).
                 # Evaluated independently of the fresh-reattach eligibility
                 # above: even when that gate is already false (for example a
                 # conversation-scoped payload, a live alias session, or an
@@ -1649,35 +1587,6 @@ class _HTTPBridgeStreamingMixin:
                 # paths below.
                 fresh_reattach_can_use_durable_anchor = False
                 fresh_reattach_anchor_suppressed_quarantined = True
-                if (
-                    durable_full_resend_proof is not None
-                    and durable_full_resend_proof.matches(payload, durable_lookup)
-                    and durable_full_resend_fresh_payload is not None
-                    and durable_full_resend_is_account_neutral is True
-                ):
-                    effective_payload = durable_full_resend_fresh_payload
-                    untrimmed_effective_payload = durable_full_resend_fresh_payload
-                    fresh_reattach_quarantine_clear_key = bridge_session_key
-                    fresh_reattach_quarantine_clear_generation = quarantine_generation
-                    # Name the recovery key after the body this dispatch
-                    # actually sends, not after the recovery-attempt fence
-                    # fingerprint: the two hash different bodies and must
-                    # not be conflated.
-                    _quarantine_replay_state, quarantine_replay_text = prepare_bridge_request(
-                        durable_full_resend_fresh_payload
-                    )
-                    del _quarantine_replay_state
-                    replay_nonce = durable_bridge_hash(quarantine_replay_text)
-                    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(replay_nonce)
-                    bridge_session_key = _HTTPBridgeSessionKey(
-                        replay_kind,
-                        replay_key,
-                        bridge_session_key.api_key_id,
-                        strength="soft",
-                    )
-                    force_local_recovery_creation = True
-                    incoming_session_header = None
-                    session_header_fallback_key = None
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_skipped_quarantined",
                     bridge_session_key,
@@ -1782,8 +1691,6 @@ class _HTTPBridgeStreamingMixin:
         request_state, text_data = prepare_bridge_request(effective_payload)
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
-        request_state.quarantine_clear_key = fresh_reattach_quarantine_clear_key
-        request_state.quarantine_clear_generation = fresh_reattach_quarantine_clear_generation
         _apply_http_bridge_downstream_turn_state(
             request_state,
             downstream_turn_state=downstream_turn_state,
@@ -1812,7 +1719,6 @@ class _HTTPBridgeStreamingMixin:
             durable_lookup.account_id
             if (
                 durable_lookup is not None
-                and not durable_model_transition_uses_fresh_replay
                 and (
                     request_state.previous_response_id is not None
                     or bridge_session_key.strength == "hard"
@@ -1829,7 +1735,6 @@ class _HTTPBridgeStreamingMixin:
             request_state.preferred_account_id is None
             and durable_model_transition_lookup is not None
             and durable_model_transition_requires_owner
-            and not durable_model_transition_uses_fresh_replay
         ):
             request_state.preferred_account_id = durable_model_transition_lookup.account_id
         local_previous_response_owner: str | None = None
@@ -1947,12 +1852,10 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
-        model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
 
         def durable_full_resend_allows_account_neutral_replay() -> bool:
             nonlocal durable_full_resend_fresh_payload
-            nonlocal durable_full_resend_has_safe_fresh_context
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_full_resend_retains_prior_output
 
@@ -1978,17 +1881,7 @@ class _HTTPBridgeStreamingMixin:
                     stored_count=eligibility_projection.stored_prefix_count,
                     canonical_lite_developer_index=eligibility_projection.canonical_lite_developer_index,
                 )
-                durable_full_resend_has_safe_fresh_context = durable_full_resend_retains_prior_output or (
-                    durable_lookup is not None
-                    and durable_lookup.latest_pending_tool_calls is not None
-                    and responses_input_suffix_matches_pending_tool_calls(
-                        eligibility_projection.input_items,
-                        stored_count=eligibility_projection.stored_prefix_count,
-                        pending_tool_calls=durable_lookup.latest_pending_tool_calls,
-                        canonical_lite_developer_index=eligibility_projection.canonical_lite_developer_index,
-                    )
-                )
-                if not durable_full_resend_has_safe_fresh_context:
+                if not durable_full_resend_retains_prior_output:
                     return False
                 replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
@@ -1999,90 +1892,13 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})
-            if not durable_full_resend_has_safe_fresh_context:
+            if not durable_full_resend_retains_prior_output:
                 return False
             if durable_full_resend_is_account_neutral is None:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
             return durable_full_resend_is_account_neutral
-
-        def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
-            nonlocal account_neutral_recovery
-            nonlocal affinity
-            nonlocal bridge_session_key
-            nonlocal downstream_turn_state
-            nonlocal force_local_recovery_creation
-            nonlocal incoming_turn_state_header
-            nonlocal model_transition_owner_conflict_fork_attempted
-            nonlocal preferred_account_has_continuity_provenance
-            nonlocal request_state
-            nonlocal session_creation_headers
-            nonlocal session_header_fallback_key
-
-            error_code, _error_message = _proxy_error_code_message(exc)
-            if (
-                durable_model_transition_lookup is None
-                or error_code != "continuity_owner_conflict"
-                or model_transition_owner_conflict_fork_attempted
-                or forwarded_request
-                or not _http_bridge_payload_is_account_neutral_fresh_replay(effective_payload)
-                or request_state.previous_response_id is not None
-                or rewritten_file_account_id is not None
-            ):
-                return False
-            reused_parent_turn_state = (
-                incoming_turn_state_header is not None and downstream_turn_state == incoming_turn_state_header
-            )
-            failed_owner_id = request_state.preferred_account_id
-            _log_http_bridge_event(
-                "model_transition_owner_conflict_fork",
-                bridge_session_key,
-                account_id=failed_owner_id,
-                model=effective_payload.model,
-                detail="outcome=retry_without_previous_model_owner",
-                cache_key_family=bridge_session_key.affinity_kind,
-                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
-                owner_check_applied=True,
-            )
-            if failed_owner_id is not None:
-                fresh_replay_excluded_account_ids.add(failed_owner_id)
-            session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
-            incoming_turn_state_header = None
-            session_header_fallback_key = None
-            affinity = _AffinityPolicy()
-            replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
-            # Pin the child lane hard instead of inheriting the implicit
-            # default: this fork keeps the client's own payload rather than a
-            # proved full-resend projection like the model-transition fresh
-            # resend above, so once the lane owns upstream turn state there is
-            # no verified replay text that would make a later soft reroute to a
-            # third account safe.
-            bridge_session_key = _HTTPBridgeSessionKey(
-                replay_kind,
-                replay_key,
-                bridge_session_key.api_key_id,
-                strength="hard",
-            )
-            account_neutral_recovery = True
-            force_local_recovery_creation = True
-            model_transition_owner_conflict_fork_attempted = True
-            # request_state was prepared for the parent lane before the
-            # creation loop, and `continue` re-enters the loop without
-            # rebuilding it. Reset the parent-derived continuity fields so the
-            # submit, retry, and clean-close paths classify the child as the
-            # account-neutral fresh request it is: a stale hard anchor here
-            # would block a later fresh account switch and let a clean close
-            # treat the parent turn alias as this lane's continuation.
-            request_state.affinity_policy = affinity
-            request_state.hard_continuity_anchor = False
-            request_state.preferred_account_id = None
-            request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
-            preferred_account_has_continuity_provenance = False
-            if reused_parent_turn_state:
-                request_state.session_id = None
-                downstream_turn_state = None
-            return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             return (
@@ -2283,8 +2099,6 @@ class _HTTPBridgeStreamingMixin:
                     defer_account_health_writes=request_state.api_key_reservation is not None,
                 )
             except ProxyResponseError as exc:
-                if switch_model_transition_to_account_neutral_fork(exc):
-                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
@@ -2999,16 +2813,16 @@ class _HTTPBridgeStreamingMixin:
                     previous_request_state.proxy_injected_anchor_had_full_resend_payload
                 )
                 request_state.fresh_upstream_request_text = fresh_upstream_request_text
-                # The trim branch proves the upstream submission can omit the
-                # stored prefix, but it does not by itself prove that dropping
-                # the injected anchor is safe. Keep the original anchor site's
-                # decision unless this was a durable full-resend proof with a
-                # verified safe fresh suffix. Session-level anchors may still be
-                # compacted follow-ups whose prior context only exists behind
-                # previous_response_id.
+                # The trim branch only fires when the untrimmed payload
+                # is a true full resend whose prefix exactly matches the
+                # already-stored context, so the unanchored request text
+                # is a safe fresh-turn replay target regardless of
+                # whether the anchor came from the durable or
+                # session-level injection path. Injection-only re-prepares
+                # keep the replay-safety decision made when the anchor was
+                # injected.
                 request_state.fresh_upstream_request_is_retry_safe = (
-                    previous_request_state.fresh_upstream_request_is_retry_safe
-                    or (durable_full_resend_anchor_count is not None and durable_full_resend_has_safe_fresh_context)
+                    (durable_full_resend_anchor_count is None or durable_full_resend_has_safe_fresh_context)
                     if store_context_trim_applied
                     else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
@@ -3123,7 +2937,6 @@ class _HTTPBridgeStreamingMixin:
                     owner_check_applied=True,
                 )
                 replacement_preferred_account_id = request_state.preferred_account_id
-                replacement_excluded_account_ids = set(request_state.excluded_account_ids)
                 if request_state.previous_response_id is not None and replacement_preferred_account_id is None:
                     replacement_preferred_account_id = session.account.id
                 elif replacement_preferred_account_id is None:
@@ -3136,8 +2949,9 @@ class _HTTPBridgeStreamingMixin:
                     # impossible (fallback_on_preferred_account_unavailable is
                     # False for exactly this pinned case below) and would
                     # keep poisoning every later recovery call on this
-                    # request.
-                    replacement_excluded_account_ids.add(session.account.id)
+                    # request, since excluded_account_ids persists on
+                    # request_state.
+                    request_state.excluded_account_ids.add(session.account.id)
                 while True:
                     try:
                         replacement_session = await self._get_or_create_http_bridge_session(
@@ -3170,7 +2984,7 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,
                             session_header_fallback_key=session_header_fallback_key,
-                            exclude_account_ids=replacement_excluded_account_ids or None,
+                            exclude_account_ids=request_state.excluded_account_ids or None,
                             deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
                             defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
