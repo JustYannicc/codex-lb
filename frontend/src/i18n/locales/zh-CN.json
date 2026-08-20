@@ -870,6 +870,7 @@
   "modelSources.editDialog.title": "编辑 Model source",
   "modelSources.empty": "无项目",
   "modelSources.capabilities.audioTranscriptions": "Audio transcriptions",
+  "modelSources.capabilities.embeddings": "Embeddings",
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",

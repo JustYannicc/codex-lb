@@ -870,6 +870,7 @@
   "modelSources.editDialog.title": "Edit model source",
   "modelSources.empty": "No model sources configured.",
   "modelSources.capabilities.audioTranscriptions": "Audio transcriptions",
+  "modelSources.capabilities.embeddings": "Embeddings",
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",

@@ -870,6 +870,7 @@
   "modelSources.editDialog.title": "Model source 수정",
   "modelSources.empty": "항목 없음",
   "modelSources.capabilities.audioTranscriptions": "Audio transcriptions",
+  "modelSources.capabilities.embeddings": "Embeddings",
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",
