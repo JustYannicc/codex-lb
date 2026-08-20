@@ -59,6 +59,7 @@ from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, Du
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    durable_bridge_hash,
 )
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
@@ -13698,6 +13699,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
     retained_output = {
         "type": "message",
         "role": "assistant",
+        "id": "msg_response_owned",
         "content": [{"type": "output_text", "text": "two"}],
     }
     input_items = [*prefix_items]
@@ -30869,6 +30871,53 @@ def test_http_bridge_quarantine_clear_restores_session_reusability() -> None:
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
 
 
+def test_http_bridge_quarantine_clear_generation_rejects_stale_recovery() -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-clear-generation")
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    first_generation = http_bridge_quarantine_module._http_bridge_session_key_quarantine_generation(
+        service,
+        session.key,
+    )
+    assert first_generation is not None
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="repeated_eventless_timeout",
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantine_generation(service, session.key) != (
+        first_generation
+    )
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine_key(
+        service,
+        session.key,
+        account_id="acc-late-recovery",
+        model="gpt-5.6-sol",
+        generation=first_generation,
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+
+    current_generation = http_bridge_quarantine_module._http_bridge_session_key_quarantine_generation(
+        service,
+        session.key,
+    )
+    http_bridge_quarantine_module._clear_http_bridge_quarantine_key(
+        service,
+        session.key,
+        account_id="acc-current-recovery",
+        model="gpt-5.6-sol",
+        generation=current_generation,
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+
 def test_http_bridge_session_reusable_for_lookup_excludes_quarantined() -> None:
     service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-reuse")
@@ -31239,41 +31288,47 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     unanchored instead of restoring the wedged durable anchor through session
     hydration and session-level injection."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    historical_input = [
-        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
-        {
-            "type": "additional_tools",
-            "role": "developer",
-            "tools": [{"type": "custom", "name": "shell"}],
-        },
-        {
-            "type": "message",
-            "role": "developer",
-            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
-        },
-        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
-        {
-            "type": "custom_tool_call",
-            "call_id": "call_historical_shell",
-            "name": "shell",
-            "input": "printf historical",
-        },
-        {"role": "developer", "content": [{"type": "input_text", "text": "historical control"}]},
-        {
-            "type": "custom_tool_call_output",
-            "call_id": "call_historical_shell",
-            "output": "historical",
-        },
-    ]
-    # Full resend with a trimmable durable prefix and a fresh suffix that does
-    # NOT retain the prior output (plain user turn).
+    historical_input = [{"role": "user", "content": "one"}]
+    retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "id": "msg_response_owned",
+        "content": [{"type": "output_text", "text": "two"}],
+    }
+    projected_retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "two"}],
+    }
+    retains_prior_output = True
+    account_neutral_payload = True
+    expected_account_neutral = True
+    fresh_suffix = (
+        [
+            retained_output,
+            {"role": "user", "content": [{"type": "input_text", "text": "safe follow-up"}]},
+        ]
+        if retains_prior_output
+        else [{"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]}]
+    )
+    expected_projected_input = (
+        [
+            *historical_input,
+            projected_retained_output,
+            {"role": "user", "content": [{"type": "input_text", "text": "safe follow-up"}]},
+        ]
+        if retains_prior_output
+        else [{"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]}]
+    )
+    # Full resend with a trimmable durable prefix. Only the variant retaining
+    # prior output is safe to replay account-neutrally.
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "test",
             "input": [
                 *historical_input,
-                {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+                *fresh_suffix,
             ],
         }
     )
@@ -31303,8 +31358,7 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
         quarantined_session,
         reason="reattach_missing_response_created",
     )
-    fresh_session = _make_bridge_session(key=bridge_key, key_value=bridge_key.affinity_key)
-    fresh_session.codex_session = True
+    fresh_session: proxy_service._HTTPBridgeSession | None = None
 
     prepared_payloads: list[proxy_service.ResponsesRequest] = []
 
@@ -31333,17 +31387,25 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
         request_state.previous_response_id = prepared_payload.previous_response_id
         return request_state, json.dumps(dict(prepared_payload.to_payload()), separators=(",", ":"))
 
+    captured_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    captured_kwargs: list[dict[str, object]] = []
+    captured_request_states: list[proxy_service._WebSocketRequestState] = []
+
     async def fake_get_or_create(
         key: proxy_service._HTTPBridgeSessionKey,
         **kwargs: object,
     ) -> proxy_service._HTTPBridgeSession:
-        del kwargs
-        assert key == bridge_key
+        nonlocal fresh_session
+        captured_keys.append(key)
+        captured_kwargs.append(dict(kwargs))
+        fresh_session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        fresh_session.codex_session = True
         return fresh_session
 
     dispatched_text: list[str] = []
 
     async def fake_stream_events(*args: object, **kwargs: object):
+        captured_request_states.append(cast(proxy_service._WebSocketRequestState, kwargs["request_state"]))
         dispatched_text.append(cast(str, kwargs["text_data"]))
         yield 'data: {"type":"response.completed"}\n\n'
 
@@ -31369,6 +31431,12 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    account_neutral_classifier = Mock(return_value=account_neutral_payload)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_http_bridge_payload_is_account_neutral_fresh_replay",
+        account_neutral_classifier,
+    )
     # The bypass shape: a live (alias) session makes the fresh-reattach
     # durable-anchor gate false before the quarantine is ever consulted.
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
@@ -31390,14 +31458,350 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     chunks = [chunk async for chunk in stream]
 
     assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(captured_keys) == 1
+    assert (captured_keys[0] != bridge_key) is expected_account_neutral
+    assert captured_keys[0].strength == ("soft" if expected_account_neutral else "hard")
+    assert (
+        is_http_bridge_account_neutral_replay(
+            kind=captured_keys[0].affinity_kind,
+            key=captured_keys[0].affinity_key,
+        )
+        is expected_account_neutral
+    )
+    assert captured_kwargs[0]["headers"] == (
+        {} if expected_account_neutral else {"x-codex-session-id": bridge_key.affinity_key}
+    )
+    assert captured_kwargs[0]["preferred_account_id"] == (None if expected_account_neutral else "acc-bridge")
     assert len(dispatched_text) == 1
     dispatched_payload = json.loads(dispatched_text[0])
     # Genuinely unanchored: the suppressed durable anchor did not come back
     # through session hydration or session-level injection, and the client's
     # payload was not prefix-trimmed against the durable stored context.
     assert "previous_response_id" not in dispatched_payload
-    assert len(dispatched_payload["input"]) == len(historical_input) + 1
+    assert dispatched_payload["input"] == expected_projected_input
+    assert fresh_session is not None
     assert fresh_session.last_completed_response_id is None
+    assert len(captured_request_states) == 1
+    assert (captured_request_states[0].quarantine_clear_key == bridge_key) is expected_account_neutral
+    assert (captured_request_states[0].quarantine_clear_generation is not None) is expected_account_neutral
+    expected_replay_kind, expected_replay_key = make_http_bridge_account_neutral_replay_key(
+        durable_bridge_hash(dispatched_text[0])
+    )
+    if expected_account_neutral:
+        assert captured_keys[0].affinity_kind == expected_replay_kind
+        assert captured_keys[0].affinity_key == expected_replay_key
+    if retains_prior_output:
+        account_neutral_classifier.assert_called_once()
+    else:
+        account_neutral_classifier.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_quarantined_full_resend_recovery_fence_survives_restart_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The quarantine demotion must not re-key the durable recovery fence.
+
+    ``durable_recovery_attempt_fingerprint`` is the primary key of persisted
+    ``http_bridge_recovery_attempts`` rows, so it must keep hashing the
+    unprojected request body. A row journalled before a restart has to still
+    match after it, otherwise the one-shot replay fence silently opens once.
+    The quarantine recovery key is named after the projected body that this
+    dispatch actually sends, which is a different hash on purpose.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    historical_input = [{"role": "user", "content": "one"}]
+    retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "id": "msg_response_owned",
+        "content": [{"type": "output_text", "text": "two"}],
+    }
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "input": [
+                *historical_input,
+                retained_output,
+                {"role": "user", "content": [{"type": "input_text", "text": "safe follow-up"}]},
+            ],
+        }
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("session_header", "quarantine-fence-restart", None)
+    prefix_fingerprint = http_bridge_streaming_module._fingerprint_input_items(
+        cast(list[Any], payload.input)[: len(historical_input)]
+    )
+    # The restart shape: the durable row survived, but its owner's lease died
+    # with the process that wrote the recovery-attempt row.
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-quarantine-fence",
+        canonical_kind=bridge_key.affinity_kind,
+        canonical_key=bridge_key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-bridge",
+        owner_instance_id="instance-before-restart",
+        owner_epoch=4,
+        lease_expires_at=proxy_service.utcnow() - timedelta(seconds=120),
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state=None,
+        latest_response_id="resp_wedged_anchor",
+        model="gpt-5.6-sol",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=prefix_fingerprint,
+    )
+    quarantined_session = _make_bridge_session(key=bridge_key, key_value=bridge_key.affinity_key)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        quarantined_session,
+        reason="reattach_missing_response_created",
+    )
+
+    def render_bridge_text(rendered_payload: proxy_service.ResponsesRequest) -> str:
+        return json.dumps(dict(rendered_payload.to_payload()), separators=(",", ":"))
+
+    # What a pre-restart process journalled: the hash of the unprojected body.
+    persisted_fence_fingerprint = durable_bridge_hash(
+        render_bridge_text(http_bridge_streaming_module._http_bridge_payload_without_previous_response_id(payload))
+    )
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+        **prepare_kwargs: object,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip, prepare_kwargs
+        request_state = proxy_service._WebSocketRequestState(
+            request_id="req-quarantine-fence",
+            model=prepared_payload.model,
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=asyncio.Queue(),
+            transport="http",
+        )
+        request_state.previous_response_id = prepared_payload.previous_response_id
+        return request_state, render_bridge_text(prepared_payload)
+
+    captured_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        del kwargs
+        captured_keys.append(key)
+        fresh_session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        fresh_session.codex_session = True
+        return fresh_session
+
+    dispatched_text: list[str] = []
+
+    async def fake_stream_events(*args: object, **kwargs: object):
+        del args
+        dispatched_text.append(cast(str, kwargs["text_data"]))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+    )
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+        gateway_safe_mode=False,
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+
+    claim_instance_id = _make_app_settings().http_responses_session_bridge_instance_id
+    claimed_lookup = replace(
+        durable_lookup,
+        owner_instance_id=claim_instance_id,
+        owner_epoch=durable_lookup.owner_epoch + 1,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+    )
+    lookup_recovery_attempt = AsyncMock(return_value=SimpleNamespace(request_fingerprint=persisted_fence_fingerprint))
+    mark_recovery_attempt_replayed = AsyncMock(return_value=True)
+    monkeypatch.setattr(service._durable_bridge, "lookup_recovery_attempt", lookup_recovery_attempt)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", AsyncMock(return_value=claimed_lookup))
+    monkeypatch.setattr(service._durable_bridge, "mark_recovery_attempt_replayed", mark_recovery_attempt_replayed)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_http_bridge_payload_is_account_neutral_fresh_replay",
+        Mock(return_value=True),
+    )
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    stream = service._stream_http_bridge_or_retry(
+        payload,
+        {"x-codex-session-id": bridge_key.affinity_key},
+        codex_session_affinity=True,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+    )
+    chunks = [chunk async for chunk in stream]
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+
+    # The fence looked the persisted row up under the fingerprint that row was
+    # written with, so the one-shot replay guard still holds after the restart.
+    lookup_recovery_attempt.assert_awaited_once_with(
+        session_id=durable_lookup.session_id,
+        request_fingerprint=persisted_fence_fingerprint,
+    )
+    mark_recovery_attempt_replayed.assert_awaited_once_with(
+        session_id=durable_lookup.session_id,
+        api_key_id=None,
+        instance_id=claim_instance_id,
+        owner_epoch=claimed_lookup.owner_epoch,
+        request_fingerprint=persisted_fence_fingerprint,
+    )
+
+    # Negative control. The body this recovery actually dispatches is the
+    # projected one, and its hash is NOT the fence fingerprint. Hashing the
+    # projected body into ``durable_recovery_attempt_fingerprint`` is exactly
+    # the regression this test pins shut: the lookup above would have missed
+    # the persisted row and handed out a second "first" replay.
+    assert len(dispatched_text) == 1
+    dispatched_payload = json.loads(dispatched_text[0])
+    assert dispatched_payload["input"] == [
+        *historical_input,
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "two"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "safe follow-up"}]},
+    ]
+    projected_body_fingerprint = durable_bridge_hash(dispatched_text[0])
+    assert projected_body_fingerprint != persisted_fence_fingerprint
+    fence_await = lookup_recovery_attempt.await_args
+    assert fence_await is not None
+    assert fence_await.kwargs["request_fingerprint"] != projected_body_fingerprint
+
+    # The poisoned hard key was not reused for the recovery dispatch.
+    assert len(captured_keys) == 1
+    assert captured_keys[0] != bridge_key
+    assert is_http_bridge_account_neutral_replay(
+        kind=captured_keys[0].affinity_kind,
+        key=captured_keys[0].affinity_key,
+    )
+
+
+@pytest.mark.asyncio
+async def test_advance_http_bridge_quarantine_clear_key_rebinds_and_updates_original_continuity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SimpleNamespace()
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "quarantine-original", None)
+    lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-original",
+        canonical_kind=key.affinity_kind,
+        canonical_key=key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-old",
+        owner_instance_id=None,
+        owner_epoch=7,
+        lease_expires_at=proxy_service.utcnow() - timedelta(seconds=60),
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state=None,
+        latest_response_id="resp-stale",
+        model="gpt-5.6-sol",
+    )
+    claimed_lookup = replace(
+        lookup,
+        owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=lookup.owner_epoch + 1,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_request_targets=AsyncMock(return_value=lookup),
+        claim_live_session=AsyncMock(return_value=claimed_lookup),
+        rebind_session_account=AsyncMock(return_value=True),
+        renew_live_session=AsyncMock(
+            return_value=replace(claimed_lookup, account_id="acc-new", latest_response_id="resp-new")
+        ),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_service_get_settings", _make_app_settings)
+
+    advanced = await http_bridge_upstream_events_module._advance_http_bridge_quarantine_clear_key(
+        service,
+        key=key,
+        api_key_id=None,
+        account_id="acc-new",
+        response_id="resp-new",
+        input_item_count=3,
+        input_full_fingerprint="fp-new",
+        pending_tool_calls={"call_1": "function_call"},
+    )
+
+    assert advanced is True
+    service._durable_bridge.lookup_request_targets.assert_awaited_once_with(
+        session_key_kind=key.affinity_kind,
+        session_key_value=key.affinity_key,
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    service._durable_bridge.claim_live_session.assert_awaited_once_with(
+        session_key_kind=key.affinity_kind,
+        session_key_value=key.affinity_key,
+        api_key_id=None,
+        instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+        lease_ttl_seconds=pytest.approx(http_bridge_helpers_module._http_bridge_durable_lease_ttl_seconds()),
+        account_id="acc-old",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp-stale",
+        allow_takeover=False,
+        owner_process_epoch=http_bridge_owner_process_epoch(),
+    )
+    service._durable_bridge.rebind_session_account.assert_awaited_once_with(
+        session_id=claimed_lookup.session_id,
+        api_key_id=None,
+        instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=claimed_lookup.owner_epoch,
+        account_id="acc-new",
+        clear_continuity=True,
+    )
+    service._durable_bridge.renew_live_session.assert_awaited_once()
+    renew_kwargs = service._durable_bridge.renew_live_session.await_args.kwargs
+    assert renew_kwargs == {
+        "session_id": claimed_lookup.session_id,
+        "api_key_id": None,
+        "instance_id": _make_app_settings().http_responses_session_bridge_instance_id,
+        "owner_epoch": claimed_lookup.owner_epoch,
+        "lease_ttl_seconds": renew_kwargs["lease_ttl_seconds"],
+        "latest_response_id": "resp-new",
+        "latest_input_item_count": 3,
+        "latest_input_full_fingerprint": "fp-new",
+        "latest_pending_tool_calls": {"call_1": "function_call"},
+    }
+    assert renew_kwargs["lease_ttl_seconds"] > 0
 
 
 @pytest.mark.asyncio

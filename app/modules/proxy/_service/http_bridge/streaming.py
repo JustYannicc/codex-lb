@@ -109,7 +109,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_session_key_quarantined,
+    _http_bridge_session_key_quarantine_generation,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
@@ -1352,6 +1352,8 @@ class _HTTPBridgeStreamingMixin:
         # dispatch genuinely goes unanchored instead of rebuilding the same
         # wedged reattach through the session-state side door.
         fresh_reattach_anchor_suppressed_quarantined = False
+        fresh_reattach_quarantine_clear_key: _HTTPBridgeSessionKey | None = None
+        fresh_reattach_quarantine_clear_generation: int | None = None
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
@@ -1421,6 +1423,12 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
+                # The durable recovery-attempt fence keys persisted
+                # ``http_bridge_recovery_attempts`` rows. Hash the same
+                # unprojected body main has always hashed: a projected body
+                # would mint a different fingerprint, so a row written
+                # before a restart would stop matching and the one-shot
+                # replay fence would silently open once.
                 _fresh_state, fresh_replay_text = prepare_bridge_request(
                     _http_bridge_payload_without_previous_response_id(payload)
                 )
@@ -1585,6 +1593,12 @@ class _HTTPBridgeStreamingMixin:
                     replay_kind,
                     replay_key,
                     bridge_session_key.api_key_id,
+                    # This is a one-shot fresh recovery dispatch after the
+                    # original hard key was quarantined. Keep the
+                    # account-neutral marker for replay guards, but do not hash
+                    # the random recovery key through durable hard-owner
+                    # routing before the wedged upstream proof can run.
+                    strength="soft",
                 )
                 force_local_recovery_creation = True
             durable_lookup = None
@@ -1611,13 +1625,21 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
-            if payload_looks_like_full_resend and _http_bridge_session_key_quarantined(self, bridge_session_key):
+            quarantine_generation = (
+                _http_bridge_session_key_quarantine_generation(self, bridge_session_key)
+                if payload_looks_like_full_resend
+                else None
+            )
+            if quarantine_generation is not None:
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
                 # conversation, so send it unanchored on the fresh path
-                # instead of rebuilding the same reattach. Delta-only
-                # payloads keep the anchor: it is their only way to convey
-                # prior context (same boundary as the fenced anchor clear).
+                # instead of rebuilding the same reattach. Only cross accounts
+                # once the sealed durable full-resend proof matches this
+                # payload; otherwise keep the durable owner while dropping the
+                # poisoned anchor. Delta-only payloads keep the anchor: it is
+                # their only way to convey prior context (same boundary as the
+                # fenced anchor clear).
                 # Evaluated independently of the fresh-reattach eligibility
                 # above: even when that gate is already false (for example a
                 # conversation-scoped payload, a live alias session, or an
@@ -1627,6 +1649,35 @@ class _HTTPBridgeStreamingMixin:
                 # paths below.
                 fresh_reattach_can_use_durable_anchor = False
                 fresh_reattach_anchor_suppressed_quarantined = True
+                if (
+                    durable_full_resend_proof is not None
+                    and durable_full_resend_proof.matches(payload, durable_lookup)
+                    and durable_full_resend_fresh_payload is not None
+                    and durable_full_resend_is_account_neutral is True
+                ):
+                    effective_payload = durable_full_resend_fresh_payload
+                    untrimmed_effective_payload = durable_full_resend_fresh_payload
+                    fresh_reattach_quarantine_clear_key = bridge_session_key
+                    fresh_reattach_quarantine_clear_generation = quarantine_generation
+                    # Name the recovery key after the body this dispatch
+                    # actually sends, not after the recovery-attempt fence
+                    # fingerprint: the two hash different bodies and must
+                    # not be conflated.
+                    _quarantine_replay_state, quarantine_replay_text = prepare_bridge_request(
+                        durable_full_resend_fresh_payload
+                    )
+                    del _quarantine_replay_state
+                    replay_nonce = durable_bridge_hash(quarantine_replay_text)
+                    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(replay_nonce)
+                    bridge_session_key = _HTTPBridgeSessionKey(
+                        replay_kind,
+                        replay_key,
+                        bridge_session_key.api_key_id,
+                        strength="soft",
+                    )
+                    force_local_recovery_creation = True
+                    incoming_session_header = None
+                    session_header_fallback_key = None
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_skipped_quarantined",
                     bridge_session_key,
@@ -1731,6 +1782,8 @@ class _HTTPBridgeStreamingMixin:
         request_state, text_data = prepare_bridge_request(effective_payload)
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
+        request_state.quarantine_clear_key = fresh_reattach_quarantine_clear_key
+        request_state.quarantine_clear_generation = fresh_reattach_quarantine_clear_generation
         _apply_http_bridge_downstream_turn_state(
             request_state,
             downstream_turn_state=downstream_turn_state,

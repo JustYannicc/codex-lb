@@ -7594,7 +7594,7 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         # Scope the soft-affinity key to this test's account so a parallel or
         # ordered integration run cannot inherit another instance's durable
         # owner and turn the reconnect assertion into a 409 race.
-        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
+        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}-{time.monotonic_ns()}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     second = await asyncio.wait_for(
@@ -7682,6 +7682,7 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
+    prompt_cache_key = f"http-bridge-previous-response-reconnect-{account_id}-{time.monotonic_ns()}"
     first = await asyncio.wait_for(
         async_client.post(
             "/v1/responses",
@@ -7689,7 +7690,7 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
                 "input": "hello",
-                "prompt_cache_key": "http-bridge-previous-response-reconnect",
+                "prompt_cache_key": prompt_cache_key,
             },
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
@@ -7704,7 +7705,7 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
                 "input": "hello-again",
-                "prompt_cache_key": "http-bridge-previous-response-reconnect",
+                "prompt_cache_key": prompt_cache_key,
                 "previous_response_id": first_body["id"],
             },
         ),
@@ -7761,6 +7762,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
         "acc_http_bridge_preserve_fresh_reattach",
         "http-bridge-preserve-fresh-reattach@example.com",
     )
+    scenario_key = f"{account_id}-{time.monotonic_ns()}"
     account = await _get_account(account_id)
     first_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket("resp_preserve_source")
     replay_upstream = _FakeBridgeUpstreamWebSocket("resp_preserve_replay")
@@ -7811,7 +7813,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
     monkeypatch.setattr(service._durable_bridge, "release_live_session", delay_predecessor_release)
     monkeypatch.setattr(service._durable_bridge, "claim_live_session", observe_replacement_claim)
 
-    session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
+    session_headers = {"x-codex-session-id": f"fresh-reattach-full-resend-{scenario_key}"}
     historical_input = [
         *([leading_input_item] if leading_input_item is not None else []),
         {
@@ -15341,7 +15343,7 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
-    session_headers = {"x-codex-session-id": "quarantine-silent-reattach"}
+    session_headers = {"x-codex-session-id": f"quarantine-silent-reattach-{account_id}-{time.monotonic_ns()}"}
     historical_input = [
         {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
         {
@@ -15513,9 +15515,10 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     # The turn-state header makes the bridge session a true Codex continuity
     # session (``session.codex_session``), which is what arms the session-level
     # anchor injection this regression guards against.
+    scenario_key = f"{account_id}-{time.monotonic_ns()}"
     session_headers = {
-        "x-codex-session-id": "quarantine-unsafe-suffix-reattach",
-        "x-codex-turn-state": "quarantine-unsafe-suffix-turn",
+        "x-codex-session-id": f"quarantine-unsafe-suffix-reattach-{scenario_key}",
+        "x-codex-turn-state": f"quarantine-unsafe-suffix-turn-{scenario_key}",
     }
     historical_input = [
         {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
