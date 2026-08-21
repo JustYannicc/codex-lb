@@ -32669,6 +32669,93 @@ async def test_advance_http_bridge_quarantine_clear_key_rejects_stale_generation
 
 
 @pytest.mark.asyncio
+async def test_advance_http_bridge_quarantine_clear_key_rejects_generation_reused_after_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-pruned-generation")
+    key = session.key
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    first_generation = http_bridge_quarantine_module._http_bridge_session_key_quarantine_generation(service, key)
+    assert first_generation is not None
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[key]
+    now = time.monotonic()
+    entry.quarantined_until = now - 1.0
+    entry.last_touched_monotonic = now - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, key) is False
+    assert key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+
+    replacement = _make_bridge_session(key=key)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        replacement,
+        reason="repeated_eventless_timeout",
+    )
+
+    settings = _make_app_settings()
+    lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-pruned-generation",
+        canonical_kind=key.affinity_kind,
+        canonical_key=key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-newer",
+        owner_instance_id=settings.http_responses_session_bridge_instance_id,
+        owner_epoch=7,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id="resp-newer",
+        model="gpt-5.6-sol",
+    )
+    durable_state = {"account_id": lookup.account_id, "latest_response_id": lookup.latest_response_id}
+
+    async def rebind_session_account(**kwargs: Any) -> bool:
+        durable_state["account_id"] = kwargs["account_id"]
+        return True
+
+    async def renew_live_session(**kwargs: Any) -> DurableBridgeLookup:
+        durable_state["latest_response_id"] = kwargs["latest_response_id"]
+        return replace(
+            lookup,
+            account_id=durable_state["account_id"],
+            latest_response_id=durable_state["latest_response_id"],
+        )
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_request_targets=AsyncMock(return_value=lookup),
+        claim_live_session=AsyncMock(),
+        rebind_session_account=AsyncMock(side_effect=rebind_session_account),
+        renew_live_session=AsyncMock(side_effect=renew_live_session),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_service_get_settings", lambda: settings)
+
+    advanced = await http_bridge_upstream_events_module._advance_http_bridge_quarantine_clear_key(
+        service,
+        key=key,
+        api_key_id=None,
+        account_id="acc-stale-recovery",
+        response_id="resp-stale-recovery",
+        input_item_count=3,
+        input_full_fingerprint="fp-stale-recovery",
+        pending_tool_calls={"call_1": "function_call"},
+        quarantine_generation=first_generation,
+    )
+
+    assert advanced is False
+    service._durable_bridge.rebind_session_account.assert_not_awaited()
+    service._durable_bridge.renew_live_session.assert_not_awaited()
+    assert durable_state == {"account_id": "acc-newer", "latest_response_id": "resp-newer"}
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, key) is True
+    current_generation = http_bridge_quarantine_module._http_bridge_session_key_quarantine_generation(service, key)
+    assert current_generation != first_generation
+
+
+@pytest.mark.asyncio
 async def test_advance_http_bridge_quarantine_clear_key_rejects_generation_changed_during_renew(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

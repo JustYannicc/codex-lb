@@ -56,6 +56,18 @@ def _http_bridge_quarantine_registry(
     return registry
 
 
+def _next_http_bridge_quarantine_generation(
+    service: Any,
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+) -> int:
+    generation = getattr(service, "_http_bridge_quarantine_generation_counter", None)
+    if generation is None:
+        generation = max((entry.generation for entry in registry.values()), default=0)
+    generation += 1
+    service._http_bridge_quarantine_generation_counter = generation
+    return generation
+
+
 def _prune_http_bridge_quarantine_registry(
     registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
     now: float,
@@ -124,7 +136,7 @@ def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *
     entry.quarantined_until = max(entry.quarantined_until, now + _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS)
     entry.last_touched_monotonic = now
     entry.reason = reason
-    entry.generation += 1
+    entry.generation = _next_http_bridge_quarantine_generation(service, registry)
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:
