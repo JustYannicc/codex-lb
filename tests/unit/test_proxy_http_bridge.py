@@ -28039,7 +28039,15 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         await service._claim_http_bridge_retry_circuit_generation(
             key=hard_session.key,
             captured=True,
-            generation=(0, 7.0, 2, 90.0, 2, now, now + 60.0),
+            generation=proxy_support_module._HTTPBridgeRetryCircuitGeneration(
+                admission_generation=0,
+                persisted_updated_at_epoch=7.0,
+                persisted_consecutive_failures=2,
+                durable_cooldown_until_epoch=90.0,
+                local_consecutive_failures=2,
+                last_failure_monotonic=now,
+                local_cooldown_until=now + 60.0,
+            ),
         )
         is True
     )
@@ -28051,7 +28059,15 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         await service._claim_http_bridge_retry_circuit_generation(
             key=hard_session.key,
             captured=True,
-            generation=(1, 7.0, 2, 90.0, 2, now, now + 60.0),
+            generation=proxy_support_module._HTTPBridgeRetryCircuitGeneration(
+                admission_generation=1,
+                persisted_updated_at_epoch=7.0,
+                persisted_consecutive_failures=2,
+                durable_cooldown_until_epoch=90.0,
+                local_consecutive_failures=2,
+                last_failure_monotonic=now,
+                local_cooldown_until=now + 60.0,
+            ),
         )
         is False
     )

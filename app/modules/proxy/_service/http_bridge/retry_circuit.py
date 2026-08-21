@@ -13,6 +13,7 @@ from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitGeneration,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
 )
@@ -106,13 +107,13 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_generation(
         self: Any,
         session: _HTTPBridgeSession,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         return await self._http_bridge_retry_circuit_generation_for_key(session.key)
 
     async def _http_bridge_retry_circuit_generation_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -140,14 +141,14 @@ class _HTTPBridgeRetryCircuitMixin:
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
             last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
             local_cooldown_until = state.cooldown_until if state is not None else 0.0
-            return True, (
-                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
-                persisted_updated_at_epoch,
-                persisted_consecutive_failures,
-                durable_cooldown_until_epoch,
-                local_consecutive_failures,
-                last_failure_monotonic,
-                local_cooldown_until,
+            return True, _HTTPBridgeRetryCircuitGeneration(
+                admission_generation=getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
+                persisted_updated_at_epoch=persisted_updated_at_epoch,
+                persisted_consecutive_failures=persisted_consecutive_failures,
+                durable_cooldown_until_epoch=durable_cooldown_until_epoch,
+                local_consecutive_failures=local_consecutive_failures,
+                last_failure_monotonic=last_failure_monotonic,
+                local_cooldown_until=local_cooldown_until,
             )
 
     async def _claim_http_bridge_retry_circuit_generation(
@@ -155,18 +156,18 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         key: _HTTPBridgeSessionKey,
         captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
+        generation: _HTTPBridgeRetryCircuitGeneration | None,
     ) -> bool:
         """Atomically linearize replay admission against the captured circuit."""
         if not captured:
             return False
-        expected_admission_generation = generation[0] if generation is not None else 0
-        expected_persisted_updated_at = generation[1] if generation is not None else 0.0
-        expected_persisted_failures = generation[2] if generation is not None else 0
-        expected_persisted_cooldown = generation[3] if generation is not None else 0.0
-        expected_local_failures = generation[4] if generation is not None else 0
-        expected_last_failure = generation[5] if generation is not None else 0.0
-        expected_local_cooldown = generation[6] if generation is not None else 0.0
+        expected_admission_generation = generation.admission_generation if generation is not None else 0
+        expected_persisted_updated_at = generation.persisted_updated_at_epoch if generation is not None else 0.0
+        expected_persisted_failures = generation.persisted_consecutive_failures if generation is not None else 0
+        expected_persisted_cooldown = generation.durable_cooldown_until_epoch if generation is not None else 0.0
+        expected_local_failures = generation.local_consecutive_failures if generation is not None else 0
+        expected_last_failure = generation.last_failure_monotonic if generation is not None else 0.0
+        expected_local_cooldown = generation.local_cooldown_until if generation is not None else 0.0
         claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
         if not callable(claim_generation):
             return False
@@ -596,8 +597,8 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
         return max(
             0.0,
-            generation[3] - time.time(),
-            generation[6] - time.monotonic(),
+            generation.durable_cooldown_until_epoch - time.time(),
+            generation.local_cooldown_until - time.monotonic(),
         )
 
     async def _record_http_bridge_retry_circuit_failure(

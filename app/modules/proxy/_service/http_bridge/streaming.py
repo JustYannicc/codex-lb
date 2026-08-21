@@ -167,6 +167,7 @@ from app.modules.proxy._service.support import (
     _DeferredAccountBackoffTracker,
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
+    _HTTPBridgeRetryCircuitGeneration,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
@@ -1817,7 +1818,7 @@ class _HTTPBridgeStreamingMixin:
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
-        verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
+        verified_stale_anchor_generation: _HTTPBridgeRetryCircuitGeneration | None = None
         verified_stale_anchor_quarantine_generation: int | None = None
 
         def durable_full_resend_retains_required_context() -> bool:
