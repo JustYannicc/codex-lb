@@ -191,9 +191,11 @@ class _HTTPBridgeRetryCircuitMixin:
         if not callable(claim_generation):
             return False
 
-        # Keep local failure recording behind the same lock until the durable
-        # CAS commits. Cross-replica failures serialize at the row CAS; local
-        # failures serialize here before they can mutate their in-memory base.
+        # Snapshot the local generation under the lock, then release it while
+        # the durable CAS performs I/O. Revalidate the local state after the
+        # CAS so a local failure that wins the race suppresses this replay.
+        # Cross-replica failures serialize at the durable row CAS while
+        # unrelated local keys remain able to record failures and admit work.
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(key)
             if state is not None and (
@@ -202,33 +204,47 @@ class _HTTPBridgeRetryCircuitMixin:
                 or state.cooldown_until > expected_local_cooldown
             ):
                 return False
-            try:
-                claimed = await asyncio.wait_for(
-                    claim_generation(
-                        session_key_kind=key.affinity_kind,
-                        session_key_value=key.affinity_key,
-                        api_key_id=key.api_key_id,
-                        expected_updated_at_epoch=(
-                            expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
-                        ),
-                        expected_admission_generation=expected_admission_generation,
-                        expected_consecutive_failures=expected_persisted_failures,
-                        expected_cooldown_until_epoch=expected_persisted_cooldown,
+        try:
+            claimed = await asyncio.wait_for(
+                claim_generation(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                    expected_updated_at_epoch=(
+                        expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
                     ),
-                    timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
-                    key.affinity_kind,
-                    _hash_identifier(key.affinity_key),
-                    exc_info=True,
-                )
+                    expected_admission_generation=expected_admission_generation,
+                    expected_consecutive_failures=expected_persisted_failures,
+                    expected_cooldown_until_epoch=expected_persisted_cooldown,
+                ),
+                timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return False
+        if claimed is None:
+            return False
+
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(key)
+            if state is not None and (
+                state.consecutive_failures > expected_local_failures
+                or state.last_failure_monotonic > expected_last_failure
+                or state.cooldown_until > expected_local_cooldown
+            ):
                 return False
-            if claimed is None:
-                return False
-            self._http_bridge_retry_circuit_loaded_keys.add(key)
-            self._http_bridge_retry_circuit_persisted_keys.add(key)
+            # A stateless claim can create a durable admission row without a
+            # local circuit state. Do not retain marker-only keys: pruning
+            # walks local states, so those markers would otherwise grow for
+            # every unique stale-anchor replay until process restart.
+            if state is not None:
+                self._http_bridge_retry_circuit_loaded_keys.add(key)
+                self._http_bridge_retry_circuit_persisted_keys.add(key)
             return True
 
     async def _http_bridge_retry_circuit_current_count(self: Any, session: _HTTPBridgeSession) -> int:

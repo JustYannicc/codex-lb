@@ -518,6 +518,15 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
 
 
+def test_http_bridge_explicit_previous_response_rejection_accepts_type_only_invalid_request_error() -> None:
+    error = proxy_service.openai_error("upstream_error", "Invalid previous_response_id.")
+    error["error"]["type"] = "invalid_request_error"
+    error["error"].pop("code")
+    error["error"].pop("param", None)
+
+    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
+
+
 @pytest.mark.parametrize("param", ["", "   "])
 def test_previous_response_recovery_preserves_present_blank_param(param: str) -> None:
     error = proxy_service.openai_error("invalid_request_error", "Invalid previous_response_id.")
@@ -27988,6 +27997,122 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         is False
     )
     claim_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_stateless_generation_claim_does_not_leave_orphan_retry_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    claimed = SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+    claim_generation = AsyncMock(return_value=claimed)
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", claim_generation)
+
+    for index in range(100):
+        hard_session = _make_bridge_session(key_value=f"bridge-stateless-generation-claim-{index}")
+        assert (
+            await service._claim_http_bridge_retry_circuit_generation(
+                key=hard_session.key,
+                captured=True,
+                generation=None,
+            )
+            is True
+        )
+    assert claim_generation.await_count == 100
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        service._prune_http_bridge_retry_circuit_state(time.monotonic() + 3600)
+    assert not cast(Any, service)._http_bridge_retry_circuits
+    assert not cast(Any, service)._http_bridge_retry_circuit_loaded_keys
+    assert not cast(Any, service)._http_bridge_retry_circuit_persisted_keys
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_durable_miss_clears_orphaned_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-orphaned-retry-markers")
+    service._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    service._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
+
+    assert await service._load_http_bridge_retry_circuit(hard_session) is True
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuit_loaded_keys
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuit_persisted_keys
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_claim_for_key_does_not_block_unrelated_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key_a = _make_bridge_session(key_value="bridge-retry-claim-a").key
+    key_b = _make_bridge_session(key_value="bridge-retry-claim-b").key
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def stalled_claim(**_kwargs: Any) -> Any:
+        claim_started.set()
+        await release_claim.wait()
+        return SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            claim_retry_circuit_generation=stalled_claim,
+            lookup_retry_circuit=AsyncMock(return_value=None),
+            persist_retry_circuit=AsyncMock(return_value=None),
+        ),
+    )
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(key=key_a, captured=True, generation=None)
+    )
+    await asyncio.wait_for(claim_started.wait(), timeout=1.0)
+    failure_task = asyncio.create_task(
+        service._record_http_bridge_retry_circuit_failure(
+            _make_bridge_session(key=key_b, key_value=key_b.affinity_key),
+            detail="stream_incomplete",
+        )
+    )
+    failure_count = await asyncio.wait_for(failure_task, timeout=0.25)
+    assert failure_count == 1
+    release_claim.set()
+    assert await asyncio.wait_for(claim_task, timeout=1.0) is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_same_key_claims_are_fenced_by_durable_cas() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-retry-claim-same-key")
+    claims_started = asyncio.Event()
+    claim_count = 0
+    durable_claim_won = False
+
+    async def compare_and_set_claim(**_kwargs: Any) -> Any:
+        nonlocal claim_count, durable_claim_won
+        claim_count += 1
+        if claim_count == 2:
+            claims_started.set()
+        await asyncio.wait_for(claims_started.wait(), timeout=1.0)
+        if durable_claim_won:
+            return None
+        durable_claim_won = True
+        return SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(claim_retry_circuit_generation=compare_and_set_claim),
+    )
+    results = await asyncio.gather(
+        service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
+        service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
+    )
+
+    assert sorted(results) == [False, True]
+    assert claim_count == 2
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuit_loaded_keys
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuit_persisted_keys
 
 
 @pytest.mark.asyncio
