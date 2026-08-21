@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 import anyio
 
@@ -19,7 +19,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import classify_event_type
@@ -1756,9 +1756,9 @@ def _openai_error_envelope_from_response_failed_payload(
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
 
     envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if "param" in error_payload:
-        envelope["error"]["param"] = param_value.strip() if isinstance(param_value, str) else ""
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error_payload))
+    if param_state.present:
+        envelope["error"]["param"] = param_state.raw
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:

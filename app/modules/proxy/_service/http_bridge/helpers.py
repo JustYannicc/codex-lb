@@ -41,6 +41,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
@@ -646,7 +647,7 @@ def _normalize_http_bridge_error_event(
     error_code_value: str | None = None
     error_type_value: str | None = None
     error_message_value: str | None = None
-    error_param_value: str | None = None
+    error_param_state = OpenAIErrorParam.absent()
     explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
 
@@ -654,13 +655,13 @@ def _normalize_http_bridge_error_event(
         error_code_value = event.error.code
         error_type_value = event.error.type
         error_message_value = event.error.message
-        error_param_value = event.error.param
+        error_param_state = event.error.param_state
         if isinstance(error_code_value, str) and error_code_value.strip():
             explicit_error_code = True
     elif isinstance(payload, dict):
         payload_error = payload.get("error")
         if not isinstance(payload_error, dict):
-            payload_error = _websocket_top_level_error_payload(payload)
+            payload_error = payload if payload.get("type") == "error" else None
         if isinstance(payload_error, dict):
             code_value = payload_error.get("code")
             if isinstance(code_value, str):
@@ -678,18 +679,14 @@ def _normalize_http_bridge_error_event(
                 stripped = message_value.strip()
                 if stripped:
                     error_message_value = stripped
-            param_value = payload_error.get("param")
-            if isinstance(param_value, str):
-                error_param_value = param_value.strip()
+            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
 
     if isinstance(payload, dict):
         raw_error = payload.get("error")
         if not isinstance(raw_error, dict):
-            raw_error = _websocket_top_level_error_payload(payload)
+            raw_error = payload if payload.get("type") == "error" else None
         if isinstance(raw_error, dict):
-            if "param" in raw_error:
-                raw_param = raw_error.get("param")
-                error_param_value = raw_param.strip() if isinstance(raw_param, str) else ""
+            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
                 rate_limit_metadata["plan_type"] = plan_type
@@ -709,7 +706,7 @@ def _normalize_http_bridge_error_event(
         if request_state.error_message_override is not None:
             error_message_value = request_state.error_message_override
         if request_state.error_param_override is not None:
-            error_param_value = request_state.error_param_override
+            error_param_state = OpenAIErrorParam(True, request_state.error_param_override)
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
@@ -726,7 +723,7 @@ def _normalize_http_bridge_error_event(
         normalized_error_message,
         error_type=normalized_error_type,
         response_id=normalized_response_id,
-        error_param=error_param_value,
+        error_param=error_param_state,
     )
     if rate_limit_metadata:
         normalized_event["response"]["error"].update(rate_limit_metadata)
@@ -2776,7 +2773,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # this guard cannot be bypassed by a coercion sentinel.
     if fields.param_malformed:
         return False
-    param = fields.normalized_param
     code = fields.normalized_code
     if code in {
         "bridge_owner_unreachable",
@@ -2793,7 +2789,7 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    return _is_previous_response_not_found_error(code=code, param=param, message=fields.message)
+    return _is_previous_response_not_found_error(code=code, param=fields.param_state, message=fields.message)
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
@@ -2802,11 +2798,10 @@ def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError
         return False
     if fields.param_malformed:
         return False
-    param = fields.normalized_param
     code = fields.normalized_code
     if code == "bridge_previous_response_not_found":
-        return not fields.param_present or bool(param)
-    return _is_previous_response_not_found_error(code=code, param=param, message=fields.message)
+        return not fields.param_present or bool(fields.normalized_param)
+    return _is_previous_response_not_found_error(code=code, param=fields.param_state, message=fields.message)
 
 
 def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:

@@ -235,7 +235,7 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.helpers import _rate_limit_details
+from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
@@ -8067,12 +8067,8 @@ async def _collect_responses_payload(
             if isinstance(response, dict):
                 error_value = response.get("error")
                 if isinstance(error_value, dict):
-                    try:
-                        terminal_result = OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-                        continue
-                    except ValidationError:
-                        terminal_result = _default_error_envelope()
-                        continue
+                    terminal_result = _parse_event_error_envelope({"error": error_value})
+                    continue
                 parsed = parse_response_payload(response)
                 if parsed is not None and parsed.error is not None:
                     terminal_result = _error_envelope_from_response(parsed.error)
@@ -9110,30 +9106,12 @@ def _record_public_contract_violation(kind: str) -> None:
         bridge_public_contract_error_total.labels(kind=kind).inc()
 
 
-def _preserve_malformed_canonical_previous_response_param(error_value: object) -> object:
-    if not isinstance(error_value, dict):
-        return error_value
-    if error_value.get("code") != "previous_response_not_found" or "param" not in error_value:
-        return error_value
-    if isinstance(error_value.get("param"), str):
-        return error_value
-    # The typed error model treats null as absence and rejects other JSON
-    # values. Preserve malformed presence with the same empty sentinel used by
-    # the WebSocket parser: public masking still sees the canonical code, while
-    # the recovery classifier fails closed instead of authorizing a replay.
-    normalized = dict(error_value)
-    normalized["param"] = ""
-    return normalized
-
-
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:
-    error_value = _preserve_malformed_canonical_previous_response_param(payload.get("error"))
-    if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
-    return _default_error_envelope()
+    error_value = payload.get("error")
+    if not isinstance(error_value, dict):
+        return _default_error_envelope()
+    parsed = _parse_openai_error(cast(OpenAIErrorEnvelope, {"error": error_value}))
+    return _error_envelope_from_response(parsed)
 
 
 def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
@@ -9151,14 +9129,11 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
         return _default_error_envelope()
     if payload.get("type") == "error":
         return _parse_event_error_envelope(cast(dict[str, JsonValue], payload))
-    normalized_payload = {
-        **payload,
-        "error": _preserve_malformed_canonical_previous_response_param(payload.get("error")),
-    }
-    try:
-        return OpenAIErrorEnvelopeModel.model_validate(normalized_payload)
-    except ValidationError:
+    error_value = payload.get("error")
+    if not isinstance(error_value, dict):
         return _default_error_envelope()
+    parsed = _parse_openai_error(cast(OpenAIErrorEnvelope, {"error": error_value}))
+    return _error_envelope_from_response(parsed)
 
 
 def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
@@ -9192,7 +9167,7 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
         return False
     return is_previous_response_not_found_public_shape(
         code=error_value.code,
-        param=error_value.param,
+        param=_openai_error_param(error_value),
         message=error_value.message,
     )
 
@@ -9202,7 +9177,7 @@ def _is_previous_response_not_found_recoverable_error(error_value: OpenAIError |
         return False
     return is_previous_response_not_found_error(
         code=error_value.code,
-        param=error_value.param,
+        param=_openai_error_param(error_value),
         message=error_value.message,
     )
 

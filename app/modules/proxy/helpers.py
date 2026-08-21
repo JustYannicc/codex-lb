@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Mapping
+from typing import Iterable, cast
 
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, OpenAIErrorParam
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -313,14 +314,12 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
         return None
     if not isinstance(error, dict):
         return None
-    previous_response_error = _is_previous_response_error_shape(error)
+    param_state = OpenAIErrorParam.from_mapping(cast("Mapping[str, JsonValue]", error))
     try:
         parsed = OpenAIError.model_validate(error)
     except ValidationError:
         param = _coerce_str(error.get("param"))
-        if previous_response_error and "param" in error and not isinstance(error.get("param"), str):
-            param = ""
-        return OpenAIError(
+        parsed = OpenAIError(
             message=_coerce_str(error.get("message")),
             type=_coerce_str(error.get("type")),
             code=_coerce_str(error.get("code")),
@@ -329,12 +328,14 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
             resets_at=_coerce_number(error.get("resets_at")),
             resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
         )
-    if previous_response_error and "param" in error and not isinstance(error.get("param"), str):
-        # Keep a present null/non-string parameter distinct from an omitted
-        # parameter after Pydantic normalization. The stale-anchor classifier
-        # treats the empty marker as malformed and fails closed.
-        parsed.param = ""
+    parsed.set_param_state(param_state)
     return parsed
+
+
+def _openai_error_param(error: OpenAIError | None) -> OpenAIErrorParam:
+    """Return presence-aware parameter metadata from a parsed error."""
+
+    return error.param_state if error is not None else OpenAIErrorParam.absent()
 
 
 def _coerce_str(value: JsonValue) -> str | None:

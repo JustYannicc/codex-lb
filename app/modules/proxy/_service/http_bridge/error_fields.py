@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.core.errors import OpenAIErrorParam
 from app.core.types import JsonValue
 
 
@@ -10,32 +11,34 @@ from app.core.types import JsonValue
 class _HTTPBridgeErrorFields:
     """The error fields shared by HTTP-bridge continuity classifiers.
 
-    ``param`` deliberately retains the value as it arrived on the wire.  The
-    ``param_present`` bit is required because a missing parameter and a
-    present blank, ``null`` (or other non-string JSON value) have different
-    safety consequences for stale-anchor recovery.  Callers that classify the
-    error may use :attr:`normalized_param` for the string-only comparison
-    while still checking :attr:`param_malformed` and :attr:`param_present`.
+    ``param_state`` deliberately retains the value as it arrived on the wire.
+    Its presence bit is required because a missing parameter and a present
+    blank, ``null`` (or other non-string JSON value) have different safety
+    consequences for stale-anchor recovery.  Compatibility properties expose
+    the old field names while keeping one typed source of truth.
     """
 
     code: str | None
     type: str | None
     message: str | None
-    param_present: bool
-    param: JsonValue | None
+    param_state: OpenAIErrorParam
     normalized_code: str
 
     @property
+    def param_present(self) -> bool:
+        return self.param_state.present
+
+    @property
+    def param(self) -> JsonValue | None:
+        return self.param_state.raw
+
+    @property
     def normalized_param(self) -> str | None:
-        if not isinstance(self.param, str):
-            return None
-        return self.param.strip()
+        return self.param_state.normalized
 
     @property
     def param_malformed(self) -> bool:
-        return self.param_present and (
-            not isinstance(self.param, str) or not self.param.strip()
-        )
+        return self.param_state.malformed
 
 
 def _error_detail_from_payload(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
@@ -89,14 +92,12 @@ def _parse_http_bridge_error_fields(
     code = _normalized_text(detail.get("code"))
     error_type = _normalized_text(detail.get("type"))
     message = _normalized_text(detail.get("message"))
-    param_present = "param" in detail
-    param = detail.get("param") if param_present else None
+    param_state = OpenAIErrorParam.from_mapping(detail)
     return _HTTPBridgeErrorFields(
         code=code,
         type=error_type,
         message=message,
-        param_present=param_present,
-        param=param,
+        param_state=param_state,
         normalized_code=_normalized_code(code, error_type),
     )
 

@@ -1,15 +1,57 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 import re
 import time
 from typing import Literal, NotRequired, TypedDict
+
+from app.core.types import JsonValue
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIErrorParam:
+    """The wire-level state of an OpenAI error ``param`` field.
+
+    ``None`` is a valid JSON value, so it cannot by itself distinguish a
+    missing field from an explicitly supplied JSON ``null``.  Keep presence
+    beside the raw value while normalizers and classifiers are moving an
+    upstream error through the proxy.  The raw value is never a public error
+    field; callers must deliberately choose a safe string before constructing
+    a response for a client.
+    """
+
+    present: bool
+    raw: JsonValue | None = None
+
+    @classmethod
+    def absent(cls) -> "OpenAIErrorParam":
+        return cls(False, None)
+
+    @classmethod
+    def from_mapping(cls, error: Mapping[str, JsonValue]) -> "OpenAIErrorParam":
+        if "param" not in error:
+            return cls.absent()
+        return cls(True, error["param"])
+
+    @property
+    def normalized(self) -> str | None:
+        """Return a trimmed string, or ``None`` for a non-string value."""
+
+        return self.raw.strip() if isinstance(self.raw, str) else None
+
+    @property
+    def malformed(self) -> bool:
+        """Whether a present value cannot be trusted as a parameter name."""
+
+        return self.present and (self.normalized is None or not self.normalized)
 
 
 class OpenAIErrorDetail(TypedDict, total=False):
     message: str
     type: str
     code: str
-    param: str
+    param: JsonValue
     plan_type: str
     resets_at: int | float
     resets_in_seconds: int | float
@@ -104,27 +146,34 @@ def previous_response_id_from_not_found_message(message: str | None) -> str | No
     return response_id or None
 
 
+def _coerce_error_param(param: OpenAIErrorParam | JsonValue) -> OpenAIErrorParam:
+    """Normalize legacy raw values and the presence-aware wire state."""
+
+    if isinstance(param, OpenAIErrorParam):
+        return param
+    if param is None:
+        return OpenAIErrorParam.absent()
+    return OpenAIErrorParam(True, param)
+
+
 def is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: object,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if param is not None and not isinstance(param, str):
-        return False
-    # A present blank parameter is not equivalent to an omitted parameter.
-    # The HTTP/WebSocket normalizer represents a present non-string/null value
-    # as an empty string so the stale-anchor classifier fails closed rather
-    # than treating malformed upstream metadata as a continuity miss.
-    if isinstance(param, str) and not param.strip():
+    param_state = _coerce_error_param(param)
+    # A present blank, null, or non-string parameter is not equivalent to an
+    # omitted parameter.  Preserve the raw JSON value while failing closed.
+    if param_state.malformed:
         return False
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
     if code != "invalid_request_error":
         return False
-    if param is None:
+    if not param_state.present:
         return _is_invalid_previous_response_id_message(message)
-    if param != "previous_response_id":
+    if param_state.normalized != "previous_response_id":
         return False
     return is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
 
@@ -132,7 +181,7 @@ def is_previous_response_not_found_error(
 def is_previous_response_not_found_public_shape(
     *,
     code: str | None,
-    param: object,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
     """Public-surface masking test for stale-anchor upstream errors.
@@ -163,13 +212,14 @@ def response_failed_event(
     error_type: str = "server_error",
     response_id: str | None = None,
     created_at: int | None = None,
-    error_param: str | None = None,
+    error_param: OpenAIErrorParam | JsonValue = None,
     resets_at: int | float | None = None,
     incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
     error = openai_error(code, message, error_type, resets_at=resets_at)["error"]
-    if error_param is not None:
-        error["param"] = error_param
+    error_param_state = _coerce_error_param(error_param)
+    if error_param_state.present:
+        error["param"] = error_param_state.raw
     if created_at is None:
         created_at = int(time.time())
     response: ResponseFailedResponse = {
