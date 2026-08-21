@@ -290,24 +290,6 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
     return value.lower()
 
 
-def _is_previous_response_error_shape(error: OpenAIErrorDetail) -> bool:
-    code = _normalize_error_code(
-        _coerce_str(error.get("code")),
-        _coerce_str(error.get("type")),
-    )
-    if code in {"previous_response_not_found", "bridge_previous_response_not_found"}:
-        return True
-    if code != "invalid_request_error":
-        return False
-    message = _coerce_str(error.get("message"))
-    if message is None:
-        return False
-    normalized = " ".join(message.casefold().replace("`", "").split()).removesuffix(".").rstrip()
-    return ("previous response" in normalized and "not found" in normalized) or (
-        normalized == "invalid previous_response_id"
-    )
-
-
 def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
     error = payload.get("error")
     if not error:

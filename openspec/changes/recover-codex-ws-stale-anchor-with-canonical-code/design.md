@@ -137,13 +137,16 @@ This route already has a working transparent server-side replay for `previous_re
 - **Block every transport resend mechanism.** In addition to clean-close retry,
   the shared auth-replay preparer rejects the verified marker before mutating
   counters or request text.
-- **Preserve blank params through terminal normalization.** HTTP-bridge error
-  normalization emits `param=""` when the source field is present but blank,
-  and the common error envelope retains non-`None` empty params.
-- **Reject present non-string params.** Raw HTTP and WebSocket extraction keeps
-  the distinction between a missing `param` and a present value with the wrong
-  JSON type. The latter becomes a non-matching empty sentinel and cannot
-  authorize exact-message stale-anchor recovery.
+- **Preserve parameter presence and raw values through terminal normalization.**
+  HTTP-bridge and WebSocket normalization carry an `OpenAIErrorParam` state,
+  including a present blank string, JSON `null`, or another non-string value,
+  through the terminal error envelope. No malformed value is rewritten as an
+  empty-string sentinel.
+- **Reject present malformed params.** Raw HTTP and WebSocket extraction keeps
+  the distinction between a missing `param` and a present value whose JSON type
+  or contents cannot identify `previous_response_id`. The recovery classifier
+  fails closed for those typed states, while the public masking layer remains
+  independent and can still hide the stale-anchor details.
 - **Inspect UNKNOWN journals for both replay variants.** Safe-context journal
   lookup is not conditioned on account neutrality; owner-bound same-account
   replay also fails closed when an inactive owner leaves an UNKNOWN attempt.
@@ -168,9 +171,13 @@ This route already has a working transparent server-side replay for `previous_re
 
 ## Implementation guidance
 
-The eventual delivery is split into the canonical WebSocket signal PR and an
-HTTP recovery transaction PR as documented in `split-plan.md`; the HTTP PR is
-stacked on the canonical PR because shared classifier/normalization seams overlap.
+The eventual upstream delivery is split into the canonical WebSocket signal PR
+and an HTTP recovery transaction PR as documented in `split-plan.md`; the HTTP
+PR is stacked on the canonical PR because shared classifier/normalization seams
+overlap. For this local, immutable deployment candidate, the operator has
+authorized combining the selected coherent fixes into one reviewed rollout so
+they can be deployed and verified together. That local exception does not
+assert upstream maintainer approval and does not change the upstream split plan.
 
 The mechanism this change touches is shared code, so this section exists to keep the change from growing beyond its intended scope. Each claim below was checked against the current codebase (and, where noted, against a failing test), not assumed.
 
