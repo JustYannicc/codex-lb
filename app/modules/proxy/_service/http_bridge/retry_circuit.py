@@ -150,26 +150,6 @@ class _HTTPBridgeRetryCircuitMixin:
                 local_cooldown_until,
             )
 
-    async def _http_bridge_retry_circuit_generation_is_not_newer(
-        self: Any,
-        *,
-        key: _HTTPBridgeSessionKey,
-        captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
-    ) -> bool:
-        if not captured:
-            return False
-        load_succeeded, current_generation = await self._http_bridge_retry_circuit_generation_for_key(key)
-        if not load_succeeded:
-            return False
-        if generation is None:
-            return current_generation is None
-        if current_generation is None:
-            return True
-        return all(
-            current <= captured_value for current, captured_value in zip(current_generation, generation, strict=True)
-        )
-
     async def _claim_http_bridge_retry_circuit_generation(
         self: Any,
         *,

@@ -28016,69 +28016,6 @@ async def test_http_bridge_server_anchored_replay_does_not_bypass_precreated_coo
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_verified_stale_anchor_bypasses_only_captured_circuit_generation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    hard_session = _make_bridge_session(key_value="bridge-circuit-verified-generation")
-    now = time.monotonic()
-    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
-        consecutive_failures=2,
-        cooldown_until=now + 60.0,
-        last_detail="stream_incomplete",
-        last_touched_monotonic=now,
-        persisted_updated_at_epoch=7.0,
-        last_failure_monotonic=now,
-    )
-    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
-    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
-
-    load_succeeded, generation = await service._http_bridge_retry_circuit_generation(hard_session)
-    assert load_succeeded is True
-    assert generation == (0, 7.0, 0, 0.0, 2, now, now + 60.0)
-    assert (
-        await service._http_bridge_retry_circuit_generation_is_not_newer(
-            key=hard_session.key,
-            captured=True,
-            generation=generation,
-        )
-        is True
-    )
-
-    state.last_failure_monotonic = now + 1.0
-    assert (
-        await service._http_bridge_retry_circuit_generation_is_not_newer(
-            key=hard_session.key,
-            captured=True,
-            generation=generation,
-        )
-        is False
-    )
-
-    empty_session = _make_bridge_session(key_value="bridge-circuit-verified-generation-empty")
-    empty_load_succeeded, empty_generation = await service._http_bridge_retry_circuit_generation(empty_session)
-    assert empty_load_succeeded is True
-    assert empty_generation is None
-    cast(Any, service)._http_bridge_retry_circuits[empty_session.key] = (
-        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
-            consecutive_failures=1,
-            cooldown_until=0.0,
-            last_detail="stream_incomplete",
-            last_touched_monotonic=now,
-            last_failure_monotonic=now + 2.0,
-        )
-    )
-    assert (
-        await service._http_bridge_retry_circuit_generation_is_not_newer(
-            key=empty_session.key,
-            captured=True,
-            generation=empty_generation,
-        )
-        is False
-    )
-
-
-@pytest.mark.asyncio
 async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atomically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
