@@ -9,8 +9,10 @@ from app.core.errors import (
     response_failed_event,
 )
 
-# A present param that is blank or not a JSON string. ``None`` is excluded: at
-# this layer it means "absent", which the normalizers encode as ``""``.
+# Raw malformed values used to be collapsed to an empty-string sentinel by
+# normalizers. The classifier now receives ``None`` as the legacy shorthand
+# for an absent field; explicit null/non-string presence is covered by the
+# presence-aware ``OpenAIErrorParam`` tests in the bridge suite.
 _MALFORMED_PARAMS = ("", " ", "\t\n", 0, False, {}, [])
 
 
