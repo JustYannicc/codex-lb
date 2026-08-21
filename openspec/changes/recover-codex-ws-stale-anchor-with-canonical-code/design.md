@@ -119,13 +119,15 @@ This route already has a working transparent server-side replay for `previous_re
 - **Claim only the approved account-neutral circuit generation.** At explicit
   rejection time, capture the original hard-key circuit's durable row fields and
   local failure state, including an explicit captured-absence state. Immediately
-  before queue publication, admission holds the local circuit lock and performs
-  a durable compare-and-set that advances only the independent integer
-  `admission_generation`, never the failure observation timestamp. A failure
+  before queue publication, admission snapshots the local circuit state under
+  the circuit lock, releases that lock while the durable compare-and-set
+  advances only the independent integer `admission_generation`, then
+  revalidates the local state before publishing the request. A failure
   committed first makes the claim fail; a failure committed afterward is ordered
   after the already-admitted dispatch. This durable claim is the linearization
-  point, eliminating the former lookup-to-send race without hiding a delayed
-  failure from a replica with a skewed wall clock.
+  point, eliminating the former lookup-to-send race without holding unrelated
+  local keys behind durable I/O or hiding a delayed failure from a replica with
+  a skewed wall clock.
 - **Compare the original hard key, independent of cooldown.** The marker stores
   the source `_HTTPBridgeSessionKey` as well as its generation. Account-neutral
   admission claims durable/local state for that source key before considering
