@@ -36,9 +36,7 @@ def test_parser_preserves_parameter_presence_and_raw_value() -> None:
         assert fields.param_present is param_present
         assert fields.param == param
         assert fields.normalized_param == (param.strip() if isinstance(param, str) else None)
-        assert fields.param_malformed is (
-            param_present and (not isinstance(param, str) or not param.strip())
-        )
+        assert fields.param_malformed is (param_present and (not isinstance(param, str) or not param.strip()))
 
 
 def test_parser_uses_direct_error_fields_from_top_level_error_event() -> None:
