@@ -28082,6 +28082,42 @@ async def test_http_bridge_retry_circuit_claim_for_key_does_not_block_unrelated_
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_claim_revalidates_same_key_local_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-retry-claim-local-failure")
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def stalled_claim(**_kwargs: Any) -> Any:
+        claim_started.set()
+        await release_claim.wait()
+        return SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            claim_retry_circuit_generation=stalled_claim,
+            lookup_retry_circuit=AsyncMock(return_value=None),
+            persist_retry_circuit=AsyncMock(return_value=None),
+        ),
+    )
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None)
+    )
+    await asyncio.wait_for(claim_started.wait(), timeout=1.0)
+    assert (
+        await asyncio.wait_for(
+            service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"),
+            timeout=1.0,
+        )
+        == 1
+    )
+    release_claim.set()
+
+    assert await asyncio.wait_for(claim_task, timeout=1.0) is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_same_key_claims_are_fenced_by_durable_cas() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-retry-claim-same-key")
