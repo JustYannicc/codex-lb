@@ -29,7 +29,7 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   envelope reaches the existing continuity recovery path.
 - [x] 4.4 Prove public masking, retry bounds, and existing canonical error
   behavior remain unchanged with the focused and related suites.
-- [x] 4.5 Build and canary the hotfix, then verify the live stale-anchor path
+- [ ] 4.5 Build and canary the hotfix, then verify the live stale-anchor path
   does not repeat the old anchor or enter a cooldown loop.
 
 ## 5. Verified HTTP full-resend stale-owner escape
@@ -57,7 +57,7 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 6.3 Split stale-anchor recovery into account-neutral migration and
   same-owner unanchored replay while preserving one-shot and operation-fence
   invariants.
-- [x] 6.4 Re-run focused/full related validation, rebuild ARM64, canary both
+- [ ] 6.4 Re-run focused/full related validation, rebuild ARM64, canary both
   replay variants, redeploy, and verify production cooldown does not recur.
 
 ## 7. Durable circuit admission for verified same-owner replay
@@ -68,7 +68,7 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   regression and require successful verified replay without deleting it.
 - [x] 7.3 Admit only the internally marked stale-anchor + trim-verified replay
   past the old circuit; retain local/durable state for other requests.
-- [x] 7.4 Re-run related validation, rebuild ARM64, canary, redeploy, and verify
+- [ ] 7.4 Re-run related validation, rebuild ARM64, canary, redeploy, and verify
   the production hard key no longer emits cooldown suppression.
 
 ## 8. rvw review hardening
