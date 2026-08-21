@@ -86,6 +86,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.error_fields import (
+    _parse_http_bridge_error_fields,
+)
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -2765,27 +2768,16 @@ def _http_bridge_reconnect_connect_failure(
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
-    payload = exc.payload
-    if not isinstance(payload, dict):
+    fields = _parse_http_bridge_error_fields(cast(Mapping[str, JsonValue], exc.payload))
+    if fields is None:
         return False
-    error = payload.get("error")
-    if not isinstance(error, dict):
+    # A present parameter must be a non-empty string before the proxy may
+    # replay a request.  The parser keeps malformed JSON values intact so
+    # this guard cannot be bypassed by a coercion sentinel.
+    if fields.param_malformed:
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
-    # Normalize like the websocket rewrite path (#1818): upstream frames may
-    # carry the classifiable code only in ``type`` (or omit both code and
-    # param on the terse previous-response rejection), and a raw read would
-    # misclassify them into the ambiguous transport class below (issue #1830).
-    code = _normalize_error_code(raw_code, error_type)
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
-    if param == "":
-        return False
+    param = fields.normalized_param
+    code = fields.normalized_code
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -2801,32 +2793,20 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=param, message=fields.message)
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
-    payload = exc.payload
-    if not isinstance(payload, dict):
+    fields = _parse_http_bridge_error_fields(cast(Mapping[str, JsonValue], exc.payload))
+    if fields is None:
         return False
-    error = payload.get("error")
-    if not isinstance(error, dict):
+    if fields.param_malformed:
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
-    code = _normalize_error_code(raw_code, error_type)
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
+    param = fields.normalized_param
+    code = fields.normalized_code
     if code == "bridge_previous_response_not_found":
-        return param is None or bool(param)
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+        return not fields.param_present or bool(param)
+    return _is_previous_response_not_found_error(code=code, param=param, message=fields.message)
 
 
 def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:
