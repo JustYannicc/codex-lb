@@ -107,10 +107,16 @@ def is_previous_response_not_found_error(
     param: object,
     message: str | None,
 ) -> bool:
-    if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
-        return True
     if param is not None and not isinstance(param, str):
         return False
+    # A present blank parameter is not equivalent to an omitted parameter.
+    # The HTTP/WebSocket normalizer represents a present non-string/null value
+    # as an empty string so the stale-anchor classifier fails closed rather
+    # than treating malformed upstream metadata as a continuity miss.
+    if isinstance(param, str) and not param.strip():
+        return False
+    if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
+        return True
     if code != "invalid_request_error":
         return False
     if param is None:

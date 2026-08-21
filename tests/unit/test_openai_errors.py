@@ -131,6 +131,15 @@ def test_previous_response_not_found_classifier_rejects_non_string_param():
         )
 
 
+def test_previous_response_not_found_classifier_rejects_present_blank_param():
+    for param in ("", " ", "\t\n"):
+        assert not is_previous_response_not_found_error(
+            code="previous_response_not_found",
+            param=param,
+            message="Previous response was not found.",
+        )
+
+
 def test_previous_response_id_from_not_found_message_extracts_anchor():
     assert (
         previous_response_id_from_not_found_message(
