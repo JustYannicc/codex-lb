@@ -98,18 +98,22 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   after a verified replay succeeds.
 - [x] 8.12 Fail closed on every explicit stale rejection after a prior replay,
   including delta-only and prefix-unverified inputs.
-- [x] 8.13 Reject present blank/whitespace `param` values in the explicit
-  previous-response classifier.
+- [x] 8.13 Reject present blank/whitespace `param` values using the typed
+  `OpenAIErrorParam` presence state; trimming may yield a non-matching empty
+  normalized value, but it must not become absent.
 - [x] 8.14 Reuse the pending-tool-manifest safe-context proof for stale-anchor
   replay eligibility.
-- [x] 8.15 Preserve whitespace `param` presence through shared bridge/WebSocket
-  extraction and prevent canonical stale rewriting.
+- [x] 8.15 Preserve the typed `OpenAIErrorParam` presence bit and raw JSON
+  value, including blank/whitespace strings, through shared bridge/WebSocket
+  extraction and prevent canonical stale rewriting; do not synthesize a
+  replacement value.
 - [x] 8.16 Make verified stale-anchor replacements ineligible for clean-close
   and all other transport-level redispatch.
 - [x] 8.17 Capture and compare retry-circuit generation so only the circuit
   observed at authorization may be bypassed.
 - [x] 8.18 Preserve blank parameter presence through HTTP-bridge terminal
-  normalization and common error-envelope construction.
+  normalization and common error-envelope construction; emit a present blank
+  string as `param=""` without losing its typed presence state.
 - [x] 8.19 Compare authorization generation against the original hard key for
   every circuit state, including below-threshold and expired rows.
 - [x] 8.20 Block verified stale-anchor replacements from auth replay.
@@ -135,11 +139,13 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 8.32 Clear quarantine for the original hard key after a successful
   replacement while retaining its retry-circuit evidence.
 - [x] 8.33 Reject present non-string/null error params across raw HTTP and
-  WebSocket normalization instead of collapsing them into absence.
+  WebSocket normalization as malformed `OpenAIErrorParam` values; retain their
+  raw JSON and never collapse them into absence or a replacement value.
 - [x] 8.34 Store replay admission generation independently from retry-circuit
   failure timestamps and verify delayed clock-skewed failures still merge.
-- [x] 8.35 Preserve invalid-param presence through parsed nested errors and raw
-  `response.failed` envelopes without changing the shared error parser contract.
+- [x] 8.35 Preserve invalid-param presence and raw JSON through parsed nested
+  errors and raw `response.failed` envelopes without changing the shared error
+  parser contract.
 - [x] 8.36 Keep restored rebound operation identity for capacity/gate retries
   and force a durable rebind before dispatch.
 - [x] 8.37 Generation-fence original-key quarantine clearing and fail closed on

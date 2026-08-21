@@ -98,11 +98,15 @@ This route already has a working transparent server-side replay for `previous_re
   the already-required durable operation id/session/owner fence and mandatory
   spool reset, not a second journal claim. This removes both double-claim races
   and pre-dispatch rollback gaps around session reset.
-- **Preserve parameter presence.** A missing `param` remains eligible for the
-  exact `Invalid previous_response_id` variant, while present blank/whitespace
-  values normalize to `""` and fail classification rather than collapsing to
-  the absent case. This applies at raw bridge error parsing and at the shared
-  WebSocket event extractor before any canonical rewrite occurs.
+- **Preserve typed parameter presence and raw JSON.** Error parsing carries an
+  `OpenAIErrorParam` state with an explicit `present` bit and the untouched raw
+  `JsonValue`. A missing `param` remains eligible for the exact
+  `Invalid previous_response_id` variant. A present blank/whitespace string,
+  `null`, or other non-string value remains present and malformed: string
+  normalization may produce `""` for comparison, but the raw value is never
+  collapsed to absence or coerced into a replacement value. This typed state
+  applies at raw bridge error parsing and the shared WebSocket event extractor
+  before any canonical rewrite occurs.
 - **Use the shared safe-context proof.** Stale-anchor recovery accepts either
   retained prior assistant output or an exact pending-tool-call manifest match,
   matching `classify_durable_full_resend` rather than defining a narrower
@@ -140,8 +144,8 @@ This route already has a working transparent server-side replay for `previous_re
 - **Preserve parameter presence and raw values through terminal normalization.**
   HTTP-bridge and WebSocket normalization carry an `OpenAIErrorParam` state,
   including a present blank string, JSON `null`, or another non-string value,
-  through the terminal error envelope. No malformed value is rewritten as an
-  empty-string sentinel.
+  through the terminal error envelope. No malformed value is collapsed to
+  absence or coerced into a replacement value.
 - **Reject present malformed params.** Raw HTTP and WebSocket extraction keeps
   the distinction between a missing `param` and a present value whose JSON type
   or contents cannot identify `previous_response_id`. The recovery classifier
@@ -174,7 +178,7 @@ This route already has a working transparent server-side replay for `previous_re
 The eventual upstream delivery is split into the canonical WebSocket signal PR
 and an HTTP recovery transaction PR as documented in `split-plan.md`; the HTTP
 PR is stacked on the canonical PR because shared classifier/normalization seams
-overlap. For this local, immutable deployment candidate, the operator has
+overlap. For this local, immutable deployment candidate, the user has explicitly
 authorized combining the selected coherent fixes into one reviewed rollout so
 they can be deployed and verified together. That local exception does not
 assert upstream maintainer approval and does not change the upstream split plan.

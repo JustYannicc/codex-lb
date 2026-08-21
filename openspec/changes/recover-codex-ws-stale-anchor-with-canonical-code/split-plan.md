@@ -2,8 +2,8 @@
 
 The upstream contribution remains split into the two PRs below. This local,
 immutable deployment candidate intentionally combines the selected coherent
-fixes into one reviewed rollout, with that combination authorized by the
-operator for this deployment. The exception is local delivery scope only: it
+fixes into one reviewed rollout, with that combination explicitly authorized
+by the user for this deployment. The exception is local delivery scope only: it
 does not imply upstream maintainer approval or alter the upstream split plan.
 
 ## PR 1: Canonical Codex WebSocket stale-anchor signal
