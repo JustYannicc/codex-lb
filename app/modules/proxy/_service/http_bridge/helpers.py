@@ -661,7 +661,9 @@ def _normalize_http_bridge_error_event(
     elif isinstance(payload, dict):
         payload_error = payload.get("error")
         if not isinstance(payload_error, dict):
-            payload_error = payload if payload.get("type") == "error" else None
+            payload_error = _websocket_top_level_error_payload(payload)
+            if isinstance(payload_error, dict) and "param" in payload:
+                payload_error = {**payload_error, "param": payload["param"]}
         if isinstance(payload_error, dict):
             code_value = payload_error.get("code")
             if isinstance(code_value, str):
@@ -684,7 +686,9 @@ def _normalize_http_bridge_error_event(
     if isinstance(payload, dict):
         raw_error = payload.get("error")
         if not isinstance(raw_error, dict):
-            raw_error = payload if payload.get("type") == "error" else None
+            raw_error = _websocket_top_level_error_payload(payload)
+            if isinstance(raw_error, dict) and "param" in payload:
+                raw_error = {**raw_error, "param": payload["param"]}
         if isinstance(raw_error, dict):
             error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
             plan_type = raw_error.get("plan_type")
