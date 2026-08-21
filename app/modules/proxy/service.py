@@ -2168,15 +2168,8 @@ def _is_missing_tool_output_error(
     param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if isinstance(param, OpenAIErrorParam):
-        normalized_param = param.normalized
-    elif isinstance(param, str):
-        normalized_param = param.strip()
-    else:
-        normalized_param = None
-    if code != "invalid_request_error" or normalized_param != "input":
-        return False
-    return _is_missing_tool_output_message(message)
+    normalized_param = getattr(param, "normalized", param.strip() if isinstance(param, str) else None)
+    return code == "invalid_request_error" and normalized_param == "input" and _is_missing_tool_output_message(message)
 
 
 def _is_previous_response_not_found_error(
