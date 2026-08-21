@@ -7486,7 +7486,7 @@ async def _stream_response_error_events(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
                 error.type if error and error.type else "server_error",
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
         )
 
@@ -8448,7 +8448,7 @@ def _public_response_failed_event_blocks_from_error(
             message or "Upstream error",
             error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
-            error_param=error.param,
+            error_param=error.param_state,
         ),
     )
     failed_payload["sequence_number"] = sequence_number + int(include_created)

@@ -65,6 +65,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     openai_error,
     response_failed_event,
 )
@@ -1967,7 +1968,7 @@ class _WebSocketMixin:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
-                        error_param = error.param if error else None
+                        error_param = error.param_state if error else None
                         await proxy._release_websocket_request_state_reservation(request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=None,
@@ -2104,7 +2105,7 @@ class _WebSocketMixin:
                                 error_code=error_code or "upstream_error",
                                 error_message=error_message,
                                 error_type=error.type if error and error.type else "server_error",
-                                error_param=error.param if error else None,
+                                error_param=error.param_state if error else OpenAIErrorParam.absent(),
                                 downstream_activity=downstream_activity,
                             )
                             request_state = None
@@ -2258,7 +2259,7 @@ class _WebSocketMixin:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
-                        error_param = error.param if error else None
+                        error_param = error.param_state if error else None
                         await proxy._release_websocket_request_state_reservation(response_create_request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=account.id if account else None,
@@ -2612,7 +2613,7 @@ class _WebSocketMixin:
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
                             error_type=error_type,
-                            error_param=error.param if error else None,
+                            error_param=error.param_state if error else OpenAIErrorParam.absent(),
                             downstream_activity=downstream_activity,
                         )
                     continue
@@ -5665,7 +5666,7 @@ class _WebSocketMixin:
                         request_state.error_code_override = _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
                         request_state.error_message_override = terminal_error_message
                         request_state.error_type_override = error.type if error else None
-                        request_state.error_param_override = error.param if error else None
+                        request_state.error_param_override = error.param_state if error else None
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
                         await _release_websocket_response_create_gate(request_state, response_create_gate)
@@ -6652,7 +6653,7 @@ class _WebSocketMixin:
         error_code: str,
         error_message: str,
         error_type: str = "server_error",
-        error_param: str | None = None,
+        error_param: OpenAIErrorParam | JsonValue | None = None,
         downstream_activity: _DownstreamWebSocketActivity | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)

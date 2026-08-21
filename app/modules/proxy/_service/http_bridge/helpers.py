@@ -573,13 +573,15 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
+def _http_bridge_precreated_retry_failure_error(
+    exc: BaseException,
+) -> tuple[int, str, str, str, OpenAIErrorParam]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
         error_type = parsed.type if parsed and parsed.type else "server_error"
-        error_param = parsed.param if parsed else None
+        error_param = parsed.param_state if parsed else OpenAIErrorParam.absent()
         return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
         return (
@@ -587,10 +589,10 @@ def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int
             "upstream_unavailable",
             "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out",
             "server_error",
-            None,
+            OpenAIErrorParam.absent(),
         )
     message = str(exc).strip() or "HTTP bridge pre-created retry failed"
-    return 502, "upstream_unavailable", message, "server_error", None
+    return 502, "upstream_unavailable", message, "server_error", OpenAIErrorParam.absent()
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -710,7 +712,7 @@ def _normalize_http_bridge_error_event(
         if request_state.error_message_override is not None:
             error_message_value = request_state.error_message_override
         if request_state.error_param_override is not None:
-            error_param_state = OpenAIErrorParam(True, request_state.error_param_override)
+            error_param_state = request_state.error_param_override
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":

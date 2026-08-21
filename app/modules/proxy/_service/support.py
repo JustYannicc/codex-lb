@@ -1106,7 +1106,10 @@ class _WebSocketRequestState:
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
-    error_param_override: str | None = None
+    # Preserve upstream error-param presence and malformed JSON values across
+    # account/replay handoffs. A raw string (including an empty sentinel) is
+    # not sufficient to distinguish an omitted parameter from a malformed one.
+    error_param_override: OpenAIErrorParam | None = None
     failure_phase_override: str | None = None
     failure_detail_override: str | None = None
     upstream_error_code_override: str | None = None

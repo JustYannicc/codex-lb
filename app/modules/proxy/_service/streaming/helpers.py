@@ -39,6 +39,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    OpenAIErrorParam,
     response_failed_event,
 )
 from app.core.errors import (
@@ -518,7 +519,7 @@ def _rewrite_previous_response_stream_error(
     error_code: str | None,
     error_type: str | None,
     error_message: str | None,
-    error_param: str | None,
+    error_param: OpenAIErrorParam | JsonValue,
 ) -> tuple[str, str, str | None] | None:
     if previous_response_id is None:
         return None
@@ -592,7 +593,7 @@ def _rewrite_previous_response_stream_error(
 def _raw_stream_error_fields(
     event_type: str | None,
     event_payload: dict[str, JsonValue] | None,
-) -> tuple[str | None, str | None, str | None, str]:
+) -> tuple[str | None, str | None, OpenAIErrorParam | None, str]:
     raw_error_type = _websocket_event_error_type(event_type, event_payload)
     raw_error_message = _websocket_event_error_message(event_type, event_payload)
     raw_error_param = _websocket_event_error_param(event_type, event_payload)
