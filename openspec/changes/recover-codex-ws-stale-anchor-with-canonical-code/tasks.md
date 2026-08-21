@@ -144,3 +144,10 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   and force a durable rebind before dispatch.
 - [x] 8.37 Generation-fence original-key quarantine clearing and fail closed on
   explicit stale rejection after any output.
+- [x] 8.38 Split public `/v1` masking from the fail-closed recovery classifier so
+  every canonical `previous_response_not_found` is masked as `stream_incomplete`
+  even when its `param` is malformed, and cover all nine param shapes on the
+  streaming HTTP, WebSocket, and non-streaming HTTP surfaces.
+- [x] 8.39 Add Alembic coverage for the retry-circuit admission-generation
+  revision: fresh and legacy upgrades default to `0`, downgrade drops the
+  column, re-upgrade restores it, and the graph keeps a single head.

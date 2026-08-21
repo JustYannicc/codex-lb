@@ -79,6 +79,9 @@ from app.core.errors import (
     previous_response_stream_incomplete_error,
     response_failed_event,
 )
+from app.core.errors import (
+    is_previous_response_not_found_public_shape as _is_previous_response_not_found_public_shape,  # noqa: F401
+)
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_same_account_takeover_total,

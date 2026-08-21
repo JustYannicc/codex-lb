@@ -655,6 +655,39 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert raw_failed_envelope["error"]["param"] == ""
 
 
+@pytest.mark.parametrize("param", ["", "   ", None, 0, False, {}, []])
+@pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
+def test_previous_response_recovery_rejects_malformed_canonical_param(
+    code: str,
+    param: object,
+) -> None:
+    error = proxy_service.openai_error(code, "Previous response was not found.")
+    cast(Any, error["error"])["param"] = param
+    exc = ProxyResponseError(400, error)
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
+    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
+
+    payload = cast(
+        dict[str, proxy_service.JsonValue],
+        {
+            "type": "error",
+            "code": code,
+            "message": "Previous response was not found.",
+            "param": param,
+        },
+    )
+    assert websocket_helpers_module._websocket_event_error_param("error", payload) == ""
+    assert (
+        proxy_service._is_previous_response_not_found_error(
+            code=code,
+            param=websocket_helpers_module._websocket_event_error_param("error", payload),
+            message="Previous response was not found.",
+        )
+        is False
+    )
+
+
 def test_parse_openai_error_retains_unrelated_error_with_nullable_param() -> None:
     payload = proxy_service.openai_error("rate_limit_exceeded", "Retry later", error_type="rate_limit_error")
     cast(Any, payload["error"])["param"] = None
@@ -666,6 +699,21 @@ def test_parse_openai_error_retains_unrelated_error_with_nullable_param() -> Non
     assert parsed.type == "rate_limit_error"
     assert parsed.message == "Retry later"
     assert parsed.param is None
+
+
+@pytest.mark.parametrize("param", [None, 0, False, {}, []])
+def test_parse_openai_error_preserves_present_malformed_previous_response_param(param: object) -> None:
+    payload = proxy_service.openai_error(
+        "previous_response_not_found",
+        "Previous response was not found.",
+        error_type="invalid_request_error",
+    )
+    cast(Any, payload["error"])["param"] = param
+
+    parsed = proxy_service._parse_openai_error(payload)
+
+    assert parsed is not None
+    assert parsed.param == ""
 
 
 def test_hard_continuity_operation_fence_requires_server_recovery_mode(
@@ -20813,6 +20861,80 @@ async def test_process_http_bridge_upstream_text_masks_previous_response_not_fou
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("param", ["", "   ", None, 0, False, {}, []])
+async def test_process_http_bridge_upstream_text_does_not_rewrite_malformed_canonical_previous_response_param(
+    param: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prev-malformed-param",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_malformed_param",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-malformed-param", None),
+        headers={"x-codex-session-id": "sid-malformed-param"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-malformed-param",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": "Previous response was not found.",
+                    "param": param,
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    payload = proxy_service.parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+    assert payload["type"] == "response.failed"
+    assert error["code"] == "previous_response_not_found"
+    assert request_state.previous_response_not_found_rewritten is False
+    assert request_state.error_http_status_override == 400
+    assert session.upstream_control.reconnect_requested is False
+
+
+@pytest.mark.asyncio
 async def test_process_http_bridge_upstream_text_retries_precreated_usage_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -28032,8 +28154,8 @@ async def test_http_bridge_retry_circuit_durable_miss_clears_orphaned_markers(
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-orphaned-retry-markers")
-    service._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
-    service._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
     monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
 
     assert await service._load_http_bridge_retry_circuit(hard_session) is True

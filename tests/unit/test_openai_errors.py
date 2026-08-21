@@ -3,10 +3,15 @@ from __future__ import annotations
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     is_previous_response_not_found_error,
+    is_previous_response_not_found_public_shape,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
 )
+
+# A present param that is blank or not a JSON string. ``None`` is excluded: at
+# this layer it means "absent", which the normalizers encode as ``""``.
+_MALFORMED_PARAMS = ("", " ", "\t\n", 0, False, {}, [])
 
 
 def test_response_failed_event_includes_incomplete_details():
@@ -38,7 +43,7 @@ def test_response_failed_event_preserves_reset_hint():
         resets_at=1_700_003_600,
     )
 
-    assert event["response"]["error"]["resets_at"] == 1_700_003_600
+    assert event["response"]["error"].get("resets_at") == 1_700_003_600
 
 
 def test_previous_response_not_found_classifier_covers_openai_shapes():
@@ -131,13 +136,59 @@ def test_previous_response_not_found_classifier_rejects_non_string_param():
         )
 
 
-def test_previous_response_not_found_classifier_rejects_present_blank_param():
-    for param in ("", " ", "\t\n"):
+def test_previous_response_not_found_classifier_rejects_malformed_canonical_param():
+    for param in _MALFORMED_PARAMS:
         assert not is_previous_response_not_found_error(
             code="previous_response_not_found",
             param=param,
             message="Previous response was not found.",
         )
+
+
+def test_public_shape_masks_canonical_code_regardless_of_malformed_param():
+    for param in (None, "previous_response_id", *_MALFORMED_PARAMS):
+        assert is_previous_response_not_found_public_shape(
+            code="previous_response_not_found",
+            param=param,
+            message="Previous response was not found.",
+        )
+
+
+def test_public_shape_keeps_noncanonical_malformed_params_fail_closed():
+    for param in _MALFORMED_PARAMS:
+        assert not is_previous_response_not_found_public_shape(
+            code="invalid_request_error",
+            param=param,
+            message="Invalid `previous_response_id`.",
+        )
+
+
+def test_public_shape_is_a_superset_of_the_recovery_classifier():
+    cases = [
+        ("previous_response_not_found", None, "Previous response was not found."),
+        ("invalid_request_error", "previous_response_id", "Previous response was not found."),
+        ("invalid_request_error", None, "Invalid `previous_response_id`."),
+        ("invalid_request_error", "input", "No tool output found for function call call_1."),
+        ("invalid_request_error", "input", "Previous response was not found."),
+        ("rate_limit_exceeded", None, "Rate limit reached."),
+        (None, None, None),
+    ]
+    for code, param, message in cases:
+        if is_previous_response_not_found_error(code=code, param=param, message=message):
+            assert is_previous_response_not_found_public_shape(code=code, param=param, message=message)
+
+
+def test_public_shape_does_not_claim_unrelated_params():
+    assert not is_previous_response_not_found_public_shape(
+        code="invalid_request_error",
+        param="input",
+        message="No tool output found for function call call_1.",
+    )
+    assert not is_previous_response_not_found_public_shape(
+        code="rate_limit_exceeded",
+        param=None,
+        message="Rate limit reached.",
+    )
 
 
 def test_previous_response_id_from_not_found_message_extracts_anchor():
@@ -152,6 +203,6 @@ def test_previous_response_id_from_not_found_message_extracts_anchor():
 def test_previous_response_stream_incomplete_error_is_public_safe():
     payload = previous_response_stream_incomplete_error()
 
-    assert payload["error"]["code"] == "stream_incomplete"
-    assert payload["error"]["type"] == "server_error"
-    assert payload["error"]["message"] == PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
+    assert payload["error"].get("code") == "stream_incomplete"
+    assert payload["error"].get("type") == "server_error"
+    assert payload["error"].get("message") == PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE

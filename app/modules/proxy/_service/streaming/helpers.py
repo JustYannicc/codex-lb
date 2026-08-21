@@ -37,14 +37,15 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    response_failed_event,
+)
+from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
-)
-from app.core.errors import (
-    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-    response_failed_event,
 )
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
@@ -545,6 +546,25 @@ def _rewrite_previous_response_stream_error(
         _record_continuity_fail_closed(
             surface="http_stream",
             reason="missing_tool_output",
+            previous_response_id=previous_response_id,
+            upstream_error_code=error_code,
+        )
+        return (
+            "stream_incomplete",
+            PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+            None,
+        )
+    if _facade()._is_previous_response_not_found_public_shape(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        # Canonical stale-anchor shape the recovery classifier rejected because
+        # its param is malformed. Mask it anyway; only the recovery decision
+        # fails closed, never the public envelope.
+        _record_continuity_fail_closed(
+            surface="http_stream",
+            reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
             previous_response_id=previous_response_id,
             upstream_error_code=error_code,
         )

@@ -1281,9 +1281,36 @@ async def test_v1_responses_routes_under_root_path(app_instance):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("param_present", "param"),
+    [
+        (False, None),
+        (True, "previous_response_id"),
+        (True, ""),
+        (True, "   "),
+        (True, None),
+        (True, 0),
+        (True, False),
+        (True, {}),
+        (True, []),
+    ],
+    ids=[
+        "absent",
+        "valid",
+        "blank",
+        "whitespace",
+        "null",
+        "number",
+        "boolean",
+        "object",
+        "array",
+    ],
+)
 async def test_v1_responses_previous_response_not_found_without_http_bridge_returns_stream_incomplete(
     async_client,
     monkeypatch,
+    param_present,
+    param,
 ):
     email = "prev-http-fallback@example.com"
     raw_account_id = "acc_prev_http_fallback"
@@ -1299,7 +1326,8 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_retu
             "Previous response with id 'resp_prev_http_fallback' not found.",
             error_type="invalid_request_error",
         )
-        error_payload["error"]["param"] = "previous_response_id"
+        if param_present:
+            error_payload["error"]["param"] = param
         raise proxy_module.ProxyResponseError(400, error_payload)
         if False:
             yield ""
@@ -1316,9 +1344,15 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_retu
         headers={"session_id": "sid_prev_http_fallback"},
     )
 
+    # The public surface masks every canonical previous_response_not_found,
+    # including the malformed-param variants that fail the recovery classifier.
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "stream_incomplete"
-    assert response.json()["error"]["message"] == "Upstream websocket closed before response.completed"
+    body = response.json()
+    assert body["error"]["code"] == "stream_incomplete"
+    assert body["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in body["error"]
+    assert "previous_response_not_found" not in json.dumps(body)
+    assert "resp_prev_http_fallback" not in json.dumps(body)
 
 
 @pytest.mark.asyncio

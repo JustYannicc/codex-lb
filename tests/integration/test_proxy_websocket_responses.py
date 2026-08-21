@@ -6176,9 +6176,36 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
     assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
 
 
+@pytest.mark.parametrize(
+    ("param_present", "param"),
+    [
+        (False, None),
+        (True, "previous_response_id"),
+        (True, ""),
+        (True, "   "),
+        (True, None),
+        (True, 0),
+        (True, False),
+        (True, {}),
+        (True, []),
+    ],
+    ids=[
+        "absent",
+        "valid",
+        "blank",
+        "whitespace",
+        "null",
+        "number",
+        "boolean",
+        "object",
+        "array",
+    ],
+)
 def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
+    param_present,
+    param,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6214,7 +6241,9 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "message": "Invalid `previous_response_id`.",
+                                "code": "previous_response_not_found",
+                                "message": "Previous response was not found.",
+                                **({"param": param} if param_present else {}),
                             },
                         },
                         separators=(",", ":"),
@@ -6330,9 +6359,13 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
             )
             failed_2 = json.loads(websocket.receive_text())
 
+    # Every canonical previous_response_not_found is masked on the public /v1
+    # surface, including the malformed-param variants the recovery classifier
+    # fails closed on. Masking and recovery are separate decisions.
     assert failed_2["type"] == "response.failed"
     assert failed_2["response"]["error"]["code"] == "stream_incomplete"
     assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in failed_2["response"]["error"]
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1

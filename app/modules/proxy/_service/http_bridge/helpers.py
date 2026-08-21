@@ -2780,6 +2780,12 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # param on the terse previous-response rejection), and a raw read would
     # misclassify them into the ambiguous transport class below (issue #1830).
     code = _normalize_error_code(raw_code, error_type)
+    param_value = error.get("param")
+    if "param" in error and not isinstance(param_value, str):
+        return False
+    param = param_value.strip() if isinstance(param_value, str) else None
+    if param == "":
+        return False
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -2795,10 +2801,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param, message=message)
@@ -2816,12 +2818,12 @@ def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError
     type_value = error.get("type")
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
     code = _normalize_error_code(raw_code, error_type)
-    if code == "bridge_previous_response_not_found":
-        return True
     param_value = error.get("param")
     if "param" in error and not isinstance(param_value, str):
         return False
     param = param_value.strip() if isinstance(param_value, str) else None
+    if code == "bridge_previous_response_not_found":
+        return param is None or bool(param)
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param, message=message)

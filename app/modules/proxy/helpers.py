@@ -289,24 +289,52 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
     return value.lower()
 
 
+def _is_previous_response_error_shape(error: OpenAIErrorDetail) -> bool:
+    code = _normalize_error_code(
+        _coerce_str(error.get("code")),
+        _coerce_str(error.get("type")),
+    )
+    if code in {"previous_response_not_found", "bridge_previous_response_not_found"}:
+        return True
+    if code != "invalid_request_error":
+        return False
+    message = _coerce_str(error.get("message"))
+    if message is None:
+        return False
+    normalized = " ".join(message.casefold().replace("`", "").split()).removesuffix(".").rstrip()
+    return ("previous response" in normalized and "not found" in normalized) or (
+        normalized == "invalid previous_response_id"
+    )
+
+
 def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
     error = payload.get("error")
     if not error:
         return None
+    if not isinstance(error, dict):
+        return None
+    previous_response_error = _is_previous_response_error_shape(error)
     try:
-        return OpenAIError.model_validate(error)
+        parsed = OpenAIError.model_validate(error)
     except ValidationError:
-        if not isinstance(error, dict):
-            return None
+        param = _coerce_str(error.get("param"))
+        if previous_response_error and "param" in error and not isinstance(error.get("param"), str):
+            param = ""
         return OpenAIError(
             message=_coerce_str(error.get("message")),
             type=_coerce_str(error.get("type")),
             code=_coerce_str(error.get("code")),
-            param=_coerce_str(error.get("param")),
+            param=param,
             plan_type=_coerce_str(error.get("plan_type")),
             resets_at=_coerce_number(error.get("resets_at")),
             resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
         )
+    if previous_response_error and "param" in error and not isinstance(error.get("param"), str):
+        # Keep a present null/non-string parameter distinct from an omitted
+        # parameter after Pydantic normalization. The stale-anchor classifier
+        # treats the empty marker as malformed and fails closed.
+        parsed.param = ""
+    return parsed
 
 
 def _coerce_str(value: JsonValue) -> str | None:

@@ -45,6 +45,9 @@ class ResponseFailedEvent(TypedDict):
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
 PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
 PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
+# Continuity fail-closed reason for a canonical stale-anchor error whose ``param``
+# is present but malformed. Masked on the public surface, never recovered.
+PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON = "previous_response_not_found_malformed_param"
 
 
 def openai_error(
@@ -124,6 +127,34 @@ def is_previous_response_not_found_error(
     if param != "previous_response_id":
         return False
     return is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
+
+
+def is_previous_response_not_found_public_shape(
+    *,
+    code: str | None,
+    param: object,
+    message: str | None,
+) -> bool:
+    """Public-surface masking test for stale-anchor upstream errors.
+
+    This is deliberately a superset of :func:`is_previous_response_not_found_error`.
+    The recovery classifier fails closed on a present-but-malformed ``param`` so
+    the proxy never replays a turn on untrustworthy metadata; masking must not
+    inherit that, or a canonical ``previous_response_not_found`` carrying a
+    malformed ``param`` would be forwarded verbatim and leak both the internal
+    classifier code and the raw malformed value to a public ``/v1`` client.
+
+    Masking therefore keys off the canonical code alone. Non-canonical shapes
+    still use the strict recovery classifier without changing how their
+    parameter metadata is interpreted.
+    """
+    if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
+        return True
+    return is_previous_response_not_found_error(
+        code=code,
+        param=param,
+        message=message,
+    )
 
 
 def response_failed_event(

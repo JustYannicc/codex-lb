@@ -23,6 +23,15 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **THEN** the downstream event remains a retryable `stream_incomplete` continuity failure
 - **AND** the downstream payload does not expose `previous_response_not_found` or the missing upstream response id
 
+#### Scenario: Public masking is independent of the fail-closed recovery classifier
+- **GIVEN** upstream returns a canonical `previous_response_not_found` error whose `param` is present but blank, whitespace-only, null, or a non-string JSON value
+- **WHEN** that error is served to a public `/v1` client on the streaming, WebSocket, or non-streaming response path
+- **THEN** codex-lb MUST mask it as a generic `stream_incomplete` server error
+- **AND** the downstream payload MUST NOT contain the `previous_response_not_found` code, the raw malformed `param`, or the missing upstream response id
+- **AND** the stale-anchor recovery classifier MUST still fail closed on that same error, so no anchor removal, replay, reconnect, or client full-history resend is authorized by it
+- **AND** the opt-in `client_full_history_once` recovery mode MUST NOT pass the upstream-shaped 400 through for a malformed-`param` error
+- **AND** the fail-closed outcome MUST be recorded with a continuity reason distinct from a proven stale-anchor miss
+
 #### Scenario: Non-stale-anchor failures do not trigger full-context retry
 - **WHEN** the upstream failure is quota, policy, auth, context-window, or another non-continuity error
 - **THEN** the client MUST NOT convert it into a stale-anchor full-context retry

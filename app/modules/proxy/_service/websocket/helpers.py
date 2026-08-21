@@ -39,6 +39,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
@@ -1186,6 +1187,16 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         message=error_message,
     )
     reason = "previous_response_not_found"
+    if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        # Canonical stale-anchor shape carrying a malformed param: the recovery
+        # classifier refused it, so do not replay or reconnect -- but the frame
+        # still must not reach the client with the upstream code and raw param.
+        should_rewrite = True
+        reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
     if not should_rewrite:
         if request_state.previous_response_id is None:
             return event, payload, event_type, original_text
@@ -1198,7 +1209,9 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     if not should_rewrite:
         return event, payload, event_type, original_text
 
-    reconnect_requested = reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    reconnect_requested = reason != PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON and (
+        reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    )
     return _rewrite_websocket_continuity_corruption_event(
         request_state=request_state,
         upstream_control=upstream_control,
@@ -1462,6 +1475,16 @@ def _sanitize_websocket_previous_response_error(
             message=normalized_message,
         )
         reason = "missing_tool_output"
+    if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
+        code=normalized_code,
+        param=parsed_error.param if parsed_error else None,
+        message=normalized_message,
+    ):
+        # Mask-only path: the malformed param keeps this out of the recovery
+        # classifier, so record it as fail-closed without the stale-anchor
+        # bookkeeping that drives replay.
+        should_rewrite = True
+        reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
@@ -1504,19 +1527,33 @@ def _sanitize_websocket_terminal_error_fields(
     error_param: str | None,
 ) -> tuple[str, str, str, str | None]:
     normalized_code = _normalize_error_code(error_code, error_type)
-    if not _facade()._is_previous_response_not_found_error(
+    recoverable = _facade()._is_previous_response_not_found_error(
+        code=normalized_code,
+        param=error_param,
+        message=error_message,
+    )
+    if not recoverable and not _facade()._is_previous_response_not_found_public_shape(
         code=normalized_code,
         param=error_param,
         message=error_message,
     ):
         return error_code, error_message, error_type, error_param
-    _record_websocket_stale_anchor_failure(
-        request_state,
-        surface="websocket_terminal",
-        upstream_error_code=normalized_code,
-    )
+    if recoverable:
+        _record_websocket_stale_anchor_failure(
+            request_state,
+            surface="websocket_terminal",
+            upstream_error_code=normalized_code,
+        )
+    else:
+        _record_continuity_fail_closed(
+            surface="websocket_terminal",
+            reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+            previous_response_id=request_state.previous_response_id,
+            session_id=request_state.session_id,
+            upstream_error_code=normalized_code,
+        )
     rewritten_code, rewritten_message = _websocket_continuity_error_fields(
-        reason="previous_response_not_found",
+        reason="previous_response_not_found" if recoverable else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
         expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
     )
     return (
@@ -1945,7 +1982,7 @@ def _wrapped_websocket_error_event(
     )
     error_param = error.get("param")
     error_message = error.get("message")
-    if _facade()._is_previous_response_not_found_error(
+    if _facade()._is_previous_response_not_found_public_shape(
         code=error_code,
         param=error_param,
         message=error_message,
@@ -1956,7 +1993,16 @@ def _wrapped_websocket_error_event(
         # do not re-mask it back to stream_incomplete. Every other caller
         # (public /v1, or a raw error this function is seeing for the first
         # time) keeps the existing stream_incomplete safety net.
-        if not expose_stale_previous_response_classifier:
+        #
+        # A malformed param never earns the canonical exposure: it fails the
+        # recovery classifier, so the sanitized-caller exemption does not apply
+        # and the payload is masked regardless of the exposure setting.
+        expose = expose_stale_previous_response_classifier and _facade()._is_previous_response_not_found_error(
+            code=error_code,
+            param=error_param,
+            message=error_message,
+        )
+        if not expose:
             payload = previous_response_stream_incomplete_error()
     error_payload = cast(JsonValue, dict(payload["error"]))
     event: dict[str, JsonValue] = {
