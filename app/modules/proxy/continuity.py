@@ -68,8 +68,13 @@ class _ReconnectPreferredOwner(Protocol):
 
 
 class _AccountNeutralReplayKey(Protocol):
-    affinity_kind: str
-    affinity_key: str
+    # Read-only members: session keys are frozen dataclasses, and a plain
+    # attribute declaration would demand a writable one.
+    @property
+    def affinity_kind(self) -> str: ...
+
+    @property
+    def affinity_key(self) -> str: ...
 
 
 class AccountNeutralOwnerBinding(NamedTuple):
