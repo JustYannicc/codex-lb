@@ -3206,6 +3206,14 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
+        # Only an account-neutral replay that proved it carries no account-scoped
+        # state asks to rebind. Every other reconnect keeps its existing call
+        # shape, because nothing about how it picks an account has changed.
+        reconnect_rebind_kwargs = (
+            {"allow_account_rebind": True}
+            if account_neutral_recovery and fresh_hard_request_account_switch_allowed
+            else {}
+        )
         try:
             if retry_jitter_seconds > 0:
                 logger.info(
@@ -3248,11 +3256,20 @@ class _HTTPBridgeRequestSubmitMixin:
                     **reconnect_reader_kwargs,
                 )
             elif require_preferred_reconnect:
+                # The branch above already released this request's
+                # account-scoped lease because a fresh hard replay may land on
+                # a replacement account. Binding the same account here would
+                # contradict that and pin the replay to an account that just
+                # went silent, so keep the old owner only as a preference.
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
-                    require_same_account=account_neutral_recovery or account_bound_replay,
+                    require_same_account=(
+                        (account_neutral_recovery or account_bound_replay)
+                        and not fresh_hard_request_account_switch_allowed
+                    ),
                     require_preferred_account=True,
+                    **reconnect_rebind_kwargs,
                     **reconnect_reader_kwargs,
                 )
             elif clean_close_hard_continuation or clean_close_hard_continuity_anchor:
@@ -3269,6 +3286,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
+                    **reconnect_rebind_kwargs,
                     **reconnect_reader_kwargs,
                 )
             if request_state.account_response_create_lease is None:

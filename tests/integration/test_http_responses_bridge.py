@@ -287,6 +287,40 @@ def _install_bridge_settings_with_limits(
     )
 
 
+def _make_integration_proxy_service() -> proxy_module.ProxyService:
+    request_logs = SimpleNamespace(
+        add_log=AsyncMock(),
+        find_latest_owner_record_for_response_id=AsyncMock(return_value=None),
+        find_latest_account_id_for_response_id=AsyncMock(return_value=None),
+        find_latest_response_id_for_session_id=AsyncMock(return_value=None),
+    )
+    capability_lineage = SimpleNamespace(
+        is_required=AsyncMock(return_value=False),
+        require=AsyncMock(return_value=("test-marker",)),
+    )
+
+    class _RepoContext:
+        def __init__(self) -> None:
+            self._repos = SimpleNamespace(
+                accounts=AsyncMock(),
+                usage=AsyncMock(),
+                request_logs=request_logs,
+                sticky_sessions=AsyncMock(),
+                api_keys=AsyncMock(),
+                additional_usage=AsyncMock(),
+                capability_lineage=capability_lineage,
+            )
+
+        async def __aenter__(self):
+            return self._repos
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            del exc_type, exc, tb
+            return False
+
+    return proxy_module.ProxyService(lambda: _RepoContext())
+
+
 class _FakeUpstreamMessage:
     def __init__(
         self,
@@ -13490,10 +13524,11 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
-async def test_retry_account_neutral_precreated_request_switches_from_silent_account(app_instance, monkeypatch):
+async def test_retry_account_neutral_precreated_request_switches_from_silent_account(monkeypatch):
     from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
 
-    service = get_proxy_service_for_app(app_instance)
+    service = _make_integration_proxy_service()
+    _install_bridge_settings(monkeypatch, enabled=True)
     recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("retry-silent-account")
     first_account = cast(Account, SimpleNamespace(id="acct-silent", status=AccountStatus.ACTIVE, plan_type="plus"))
     replacement_account = cast(
@@ -13529,38 +13564,60 @@ async def test_retry_account_neutral_precreated_request_switches_from_silent_acc
         request_text=json.dumps({"type": "response.create", "model": "gpt-5.5", "input": []}),
     )
     session.pending_requests.append(request_state)
-    reconnect_calls: list[dict[str, object]] = []
+    selection_calls: list[dict[str, object]] = []
 
-    async def fake_reconnect(
+    async def fake_select_account_with_budget_for_stream(
         self,
-        target_session,
-        *,
-        request_state,
-        restart_reader=False,
-        require_same_account=False,
-        require_preferred_account=False,
+        deadline,
+        **kwargs,
     ):
-        del self, restart_reader
-        reconnect_calls.append(
+        del self, deadline
+        selection_calls.append(
             {
-                "require_same_account": require_same_account,
-                "require_preferred_account": require_preferred_account,
-                "preferred_account_id": target_session.account.id,
-                "excluded_account_ids": set(request_state.excluded_account_ids),
+                "preferred_account_id": kwargs.get("preferred_account_id"),
+                "preferred_account_is_continuity_owner": kwargs.get("preferred_account_is_continuity_owner"),
+                "fallback_on_preferred_account_unavailable": kwargs.get("fallback_on_preferred_account_unavailable"),
+                "excluded_account_ids": set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set()),
             }
         )
-        target_session.account = replacement_account
-        target_session.upstream = replacement_upstream
+        return AccountSelection(account=replacement_account, error_message=None, error_code=None)
 
-    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds=0.0):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_open_upstream_websocket_with_budget(
+        self,
+        account,
+        headers,
+        *,
+        timeout_seconds,
+        request_state=None,
+    ):
+        del self, headers, timeout_seconds, request_state
+        assert account is replacement_account
+        return replacement_upstream
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget_for_stream",
+        fake_select_account_with_budget_for_stream,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_websocket_with_budget,
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
 
     assert await service._retry_http_bridge_precreated_request(session) is True
 
-    assert reconnect_calls == [
+    assert selection_calls == [
         {
-            "require_same_account": True,
-            "require_preferred_account": True,
             "preferred_account_id": "acct-silent",
+            "preferred_account_is_continuity_owner": False,
+            "fallback_on_preferred_account_unavailable": True,
             "excluded_account_ids": set(),
         }
     ]
