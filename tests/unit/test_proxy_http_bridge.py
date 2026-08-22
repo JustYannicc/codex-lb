@@ -28850,6 +28850,49 @@ async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear()
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_does_not_report_reset_after_durable_clear_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-clear-failure")
+    now = time.monotonic()
+    now_epoch = time.time()
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_epoch,
+        admission_generation=0,
+    )
+    clear_retry_circuit = AsyncMock(side_effect=RuntimeError("durable clear unavailable"))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=persisted),
+        clear_retry_circuit=clear_retry_circuit,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now + 60.0,
+            last_detail="stream_incomplete",
+            last_touched_monotonic=now,
+            persisted_updated_at_epoch=now_epoch,
+        )
+    )
+    labels = Mock()
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "http_bridge_retry_circuit_total",
+        SimpleNamespace(labels=labels),
+    )
+
+    await service._clear_http_bridge_retry_circuit(hard_session)
+
+    clear_retry_circuit.assert_awaited_once()
+    labels.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_clear_preserves_newer_failure_after_lookup_failure() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-retry-clear-after-lookup-failure")

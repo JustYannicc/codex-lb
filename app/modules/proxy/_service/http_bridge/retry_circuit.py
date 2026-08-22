@@ -794,6 +794,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
+            return
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
             http_bridge_retry_circuit_total.labels(outcome="reset").inc()
         logger.info(
