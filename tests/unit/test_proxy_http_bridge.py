@@ -653,7 +653,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
                 code="invalid_request_error",
                 type="invalid_request_error",
                 message="Invalid previous_response_id.",
-                param=None,
+                param=cast(proxy_service.JsonValue, param),
                 param_state=OpenAIErrorParam(True, cast(proxy_service.JsonValue, param)),
             )
         ),
@@ -14043,6 +14043,7 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
     ),
     [
         pytest.param(False, True, True, "acc-1", None, None, False, id="local-create-safe-resend"),
+        pytest.param(True, True, True, "acc-1", None, None, True, id="owner-forward-recovery-failure"),
         pytest.param(True, True, True, "acc-1", None, None, False, id="owner-forward-safe-resend"),
         pytest.param(True, False, True, "acc-1", None, None, False, id="owner-forward-unsafe-resend"),
         pytest.param(True, False, True, "acc-2", None, None, False, id="owner-forward-refreshed-account"),
@@ -28554,9 +28555,12 @@ async def test_http_bridge_retry_circuit_same_key_claims_are_fenced_by_durable_c
         Any,
         SimpleNamespace(claim_retry_circuit_generation=compare_and_set_claim),
     )
-    results = await asyncio.gather(
-        service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
-        service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
+            service._claim_http_bridge_retry_circuit_generation(key=session.key, captured=True, generation=None),
+        ),
+        timeout=1.0,
     )
 
     assert sorted(results) == [False, True]
@@ -28580,10 +28584,13 @@ async def test_http_bridge_verified_stale_anchor_claim_times_out_and_releases_ci
     monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.001)
 
     assert (
-        await service._claim_http_bridge_retry_circuit_generation(
-            key=hard_session.key,
-            captured=True,
-            generation=None,
+        await asyncio.wait_for(
+            service._claim_http_bridge_retry_circuit_generation(
+                key=hard_session.key,
+                captured=True,
+                generation=None,
+            ),
+            timeout=1.0,
         )
         is False
     )
