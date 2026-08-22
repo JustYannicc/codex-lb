@@ -21172,6 +21172,75 @@ async def test_process_http_bridge_upstream_text_groups_anonymous_malformed_stal
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_groups_parameterless_stale_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parameterless public stale-anchor frame reconnects the bridge lane."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    anchor = "resp-shared-parameterless"
+    request_states = [
+        proxy_service._WebSocketRequestState(
+            request_id=f"req-parameterless-group-{index}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            previous_response_id=anchor,
+            event_queue=asyncio.Queue(),
+            transport="http",
+            skip_request_log=True,
+        )
+        for index in range(2)
+    ]
+    session = _make_bridge_session(
+        key_value="parameterless-group",
+        pending_requests=deque(request_states),
+        queued_request_count=2,
+    )
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": f"Previous response with id '{anchor}' not found.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert session.pending_requests == deque()
+    assert session.queued_request_count == 0
+    assert session.upstream_control.reconnect_requested is True
+    for request_state in request_states:
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        event_block = await event_queue.get()
+        assert event_block is not None
+        assert await event_queue.get() is None
+        payload = proxy_service.parse_sse_data_json(event_block)
+        assert isinstance(payload, dict)
+        response = payload.get("response")
+        assert isinstance(response, dict)
+        error = response.get("error")
+        assert isinstance(error, dict)
+        assert payload["type"] == "response.failed"
+        assert response["id"] == request_state.request_id
+        assert error["code"] == "stream_incomplete"
+        assert "previous_response_not_found" not in json.dumps(payload)
+        assert anchor not in json.dumps(payload)
+        assert request_state.previous_response_not_found_recovery_blocked is False
+
+
+@pytest.mark.asyncio
 async def test_process_http_bridge_upstream_text_sanitizes_noncanonical_error_param() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(

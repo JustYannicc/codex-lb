@@ -37,7 +37,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
-from app.core.errors import PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON, response_failed_event
+from app.core.errors import PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON, coerce_error_param, response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
@@ -1774,31 +1774,30 @@ class _HTTPBridgeUpstreamEventsMixin:
             and not isinstance(payload.get("type"), str)
             and isinstance(payload.get("error"), dict)
         )
+        error_code = _normalize_error_code(
+            _websocket_event_error_code(event_type, payload),
+            _websocket_event_error_type(event_type, payload),
+        )
+        error_param = coerce_error_param(_websocket_event_error_param(event_type, payload))
         is_previous_response_not_found_event = _is_previous_response_not_found_error(
-            code=_normalize_error_code(
-                _websocket_event_error_code(event_type, payload),
-                _websocket_event_error_type(event_type, payload),
-            ),
-            param=_websocket_event_error_param(event_type, payload),
+            code=error_code,
+            param=error_param,
+            message=error_message,
+        )
+        is_previous_response_not_found_public_shape = _is_previous_response_not_found_public_shape(
+            code=error_code,
+            param=error_param,
             message=error_message,
         )
         is_previous_response_not_found_matching_event = (
-            is_previous_response_not_found_event
-            or _is_previous_response_not_found_public_shape(
-                code=_normalize_error_code(
-                    _websocket_event_error_code(event_type, payload),
-                    _websocket_event_error_type(event_type, payload),
-                ),
-                param=_websocket_event_error_param(event_type, payload),
-                message=error_message,
-            )
+            is_previous_response_not_found_event or is_previous_response_not_found_public_shape
+        )
+        is_previous_response_not_found_parameterless_public_shape = (
+            is_previous_response_not_found_public_shape and not error_param.present
         )
         is_missing_tool_output_event = _is_missing_tool_output_error(
-            code=_normalize_error_code(
-                _websocket_event_error_code(event_type, payload),
-                _websocket_event_error_type(event_type, payload),
-            ),
-            param=_websocket_event_error_param(event_type, payload),
+            code=error_code,
+            param=error_param,
             message=error_message,
         )
         previous_response_id_hint = _previous_response_id_from_not_found_message(error_message)
@@ -2031,7 +2030,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         if len(grouped_previous_response_request_states) > 1:
             grouped_error_reason = (
                 "previous_response_not_found"
-                if is_previous_response_not_found_event
+                if is_previous_response_not_found_event or is_previous_response_not_found_parameterless_public_shape
                 else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
                 if is_previous_response_not_found_matching_event
                 else "missing_tool_output"
