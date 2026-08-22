@@ -191,7 +191,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return await claim_generation(
                 session_key_kind=key.affinity_kind,
                 session_key_value=key.affinity_key,
-                api_key_scope=key.api_key_id,
+                api_key_id=key.api_key_id,
                 expected_updated_at_epoch=(
                     expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
                 ),

@@ -28275,7 +28275,7 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         *,
         session_key_kind: str,
         session_key_value: str,
-        api_key_scope: str | None,
+        api_key_id: str | None,
         expected_updated_at_epoch: float | None,
         expected_admission_generation: int,
         expected_consecutive_failures: int,
@@ -28285,7 +28285,7 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
             {
                 "session_key_kind": session_key_kind,
                 "session_key_value": session_key_value,
-                "api_key_scope": api_key_scope,
+                "api_key_id": api_key_id,
                 "expected_updated_at_epoch": expected_updated_at_epoch,
                 "expected_admission_generation": expected_admission_generation,
                 "expected_consecutive_failures": expected_consecutive_failures,
@@ -28316,7 +28316,7 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         {
             "session_key_kind": "session_header",
             "session_key_value": "bridge-circuit-generation-claim",
-            "api_key_scope": "key-replay",
+            "api_key_id": "key-replay",
             "expected_updated_at_epoch": 7.0,
             "expected_admission_generation": 0,
             "expected_consecutive_failures": 2,

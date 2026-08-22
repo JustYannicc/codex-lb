@@ -3288,7 +3288,7 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     claimed = await coordinator.claim_retry_circuit_generation(
         session_key_kind="session_header",
         session_key_value="sid-retry-circuit-claim",
-        api_key_scope="key-claim",
+        api_key_id="key-claim",
         expected_updated_at_epoch=1200.0,
         expected_admission_generation=0,
         expected_consecutive_failures=2,
