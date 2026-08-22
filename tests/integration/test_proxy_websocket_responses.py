@@ -11550,15 +11550,14 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
             assert error_log["upstream_error_code"] == "previous_response_not_found"
             assert error_log["failure_phase"] == "upstream"
 
+    expected_reason = (
+        "previous_response_not_found_malformed_param" if malformed_param else "previous_response_not_found"
+    )
     fail_closed = [
         record.getMessage()
         for record in caplog.records
         if "continuity_fail_closed" in record.getMessage()
-        and (
-            "reason=previous_response_not_found_malformed_param" in record.getMessage()
-            if malformed_param
-            else "reason=previous_response_not_found" in record.getMessage()
-        )
+        and f"reason={expected_reason} " in record.getMessage()
     ]
     if malformed_param:
         assert len(fail_closed) >= 2
