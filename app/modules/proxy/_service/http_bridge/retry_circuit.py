@@ -143,7 +143,7 @@ class _HTTPBridgeRetryCircuitMixin:
             last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
             local_cooldown_until = state.cooldown_until if state is not None else 0.0
             return True, _HTTPBridgeRetryCircuitGeneration(
-                admission_generation=getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
+                admission_generation=persisted.admission_generation if persisted is not None else 0,
                 persisted_updated_at_epoch=persisted_updated_at_epoch,
                 persisted_consecutive_failures=persisted_consecutive_failures,
                 durable_cooldown_until_epoch=durable_cooldown_until_epoch,
