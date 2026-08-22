@@ -11556,8 +11556,7 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
     fail_closed = [
         record.getMessage()
         for record in caplog.records
-        if "continuity_fail_closed" in record.getMessage()
-        and f"reason={expected_reason} " in record.getMessage()
+        if "continuity_fail_closed" in record.getMessage() and f"reason={expected_reason} " in record.getMessage()
     ]
     if malformed_param:
         assert len(fail_closed) >= 2
