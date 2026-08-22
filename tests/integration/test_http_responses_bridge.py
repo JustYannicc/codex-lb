@@ -8240,6 +8240,12 @@ async def test_v1_responses_http_bridge_replays_full_resend_once_then_stays_on_n
     assert durable_lookup.latest_input_item_count == len(historical_input)
     assert durable_lookup.latest_input_full_fingerprint is not None
 
+    # A live durable owner serves ordinary full-resend continuations without
+    # consulting the recovery-attempt journal.  A transient journal outage
+    # must not turn this undispatched request into a persistence 502.
+    lookup_recovery_attempt = AsyncMock(side_effect=RuntimeError("recovery journal unavailable"))
+    monkeypatch.setattr(service._durable_bridge, "lookup_recovery_attempt", lookup_recovery_attempt)
+
     if fresh_developer_followup:
         retained_prior_output = {
             "type": "message",
@@ -8305,6 +8311,7 @@ async def test_v1_responses_http_bridge_replays_full_resend_once_then_stays_on_n
     )
     assert second.status_code == 200, second.text
     assert second.json()["id"] == "resp_alternate_1"
+    lookup_recovery_attempt.assert_not_awaited()
 
     third = await asyncio.wait_for(
         async_client.post(

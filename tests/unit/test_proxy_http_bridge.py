@@ -883,20 +883,26 @@ def test_verified_stale_anchor_replay_requires_complete_durable_operation_fence(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("anchored", "recovery_blocked"),
-    [(False, False), (True, False), (True, True)],
+    ("anchored", "recovery_blocked", "lower_layer_fail_closed"),
+    [
+        pytest.param(False, False, False, id="without-parent-proof"),
+        pytest.param(True, False, False, id="with-parent-proof"),
+        pytest.param(True, True, False, id="recovery-blocked"),
+        pytest.param(True, False, True, id="explicitly-fail-closed"),
+    ],
 )
 async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
     monkeypatch: pytest.MonkeyPatch,
     anchored: bool,
     recovery_blocked: bool,
+    lower_layer_fail_closed: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     turn_state = "turn-recovery-proof"
     payload_data: dict[str, Any] = {"model": "gpt-5.6", "instructions": "", "input": "retry"}
     payload = proxy_service.ResponsesRequest.model_validate(payload_data)
     request_state = proxy_service._WebSocketRequestState(
-        request_id=f"req-recovery-proof-{anchored}",
+        request_id=f"req-recovery-proof-{anchored}-{lower_layer_fail_closed}",
         model="gpt-5.6",
         service_tier=None,
         reasoning_effort=None,
@@ -1011,14 +1017,19 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
         request_deadline: float | None = None,
     ):
         del propagate_http_errors, downstream_turn_state, request_deadline
-        await service._submit_http_bridge_request_with_handoff(
-            _session,
-            request_state=request_state,
-            text_data=text_data,
-            queue_limit=queue_limit,
-            request_scope_id=request_state.request_id,
-            owned_unanchored_handoff=False,
-        )
+        try:
+            await service._submit_http_bridge_request_with_handoff(
+                _session,
+                request_state=request_state,
+                text_data=text_data,
+                queue_limit=queue_limit,
+                request_scope_id=request_state.request_id,
+                owned_unanchored_handoff=False,
+            )
+        except ProxyResponseError as exc:
+            if lower_layer_fail_closed:
+                setattr(exc, "http_bridge_durable_recovery_eligible", False)
+            raise
         yield ""
 
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", submit_then_fail)
@@ -1041,7 +1052,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
             pass
 
     assert getattr(exc_info.value, "http_bridge_durable_recovery_eligible", False) is (
-        anchored and not recovery_blocked
+        anchored and not recovery_blocked and not lower_layer_fail_closed
     )
     if anchored:
         assert request_state.previous_response_id == "resp-parent"

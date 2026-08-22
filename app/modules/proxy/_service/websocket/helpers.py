@@ -1410,6 +1410,9 @@ def _rewrite_websocket_continuity_corruption_event(
             reason=reason,
             previous_response_id=request_state.previous_response_id,
             session_id=request_state.session_id,
+            upstream_error_code=(
+                "previous_response_not_found" if reason == PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON else None
+            ),
         )
     rewritten_code, rewritten_message = _websocket_continuity_error_fields(
         reason=reason,

@@ -26316,6 +26316,62 @@ async def test_process_upstream_websocket_text_records_fail_closed_for_unmatched
     handle_stream_error.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_code_for_matched_malformed_prev_nf(
+    monkeypatch,
+    caplog,
+):
+    """The matched in-flight masking path keeps the canonical upstream code in telemetry."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_matched_malformed_prev_nf")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_matched_malformed_prev_nf",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_matched_malformed_prev_nf",
+        previous_response_id="resp_anchor_matched_malformed",
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_anchor_matched_malformed' not found.",
+            "param": {},
+        },
+    }
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([pending_request]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "upstream_error_code=previous_response_not_found" in caplog.text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+
+
 @pytest.mark.parametrize(
     "payload",
     [

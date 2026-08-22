@@ -1,42 +1,51 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.types import JsonValue
 from app.modules.proxy._service.http_bridge.error_fields import (
     _parse_http_bridge_error_fields,
 )
 
 
-def test_parser_preserves_parameter_presence_and_raw_value() -> None:
-    cases: tuple[tuple[bool, JsonValue], ...] = (
-        (False, None),
-        (True, "previous_response_id"),
-        (True, "  previous_response_id  "),
-        (True, ""),
-        (True, "   "),
-        (True, None),
-        (True, 0),
-        (True, False),
-        (True, {}),
-        (True, []),
-    )
-    for param_present, param in cases:
-        error: dict[str, JsonValue] = {
-            "code": " invalid_request_error ",
-            "type": " invalid_request_error ",
-            "message": " Invalid previous_response_id. ",
-        }
-        if param_present:
-            error["param"] = param
+@pytest.mark.parametrize(
+    ("param_present", "param", "expected_normalized_param", "expected_param_malformed"),
+    [
+        pytest.param(False, None, None, False, id="absent"),
+        pytest.param(True, "previous_response_id", "previous_response_id", False, id="string"),
+        pytest.param(True, "  previous_response_id  ", "previous_response_id", False, id="trimmed-string"),
+        pytest.param(True, "", "", True, id="empty-string"),
+        pytest.param(True, "   ", "", True, id="blank-string"),
+        pytest.param(True, None, None, True, id="null"),
+        pytest.param(True, 0, None, True, id="zero"),
+        pytest.param(True, False, None, True, id="false"),
+        pytest.param(True, {}, None, True, id="object"),
+        pytest.param(True, [], None, True, id="array"),
+    ],
+)
+def test_parser_preserves_parameter_presence_and_raw_value(
+    param_present: bool,
+    param: JsonValue,
+    expected_normalized_param: str | None,
+    expected_param_malformed: bool,
+) -> None:
+    error: dict[str, JsonValue] = {
+        "code": " invalid_request_error ",
+        "type": " invalid_request_error ",
+        "message": " Invalid previous_response_id. ",
+    }
+    if param_present:
+        error["param"] = param
 
-        fields = _parse_http_bridge_error_fields({"error": error})
+    fields = _parse_http_bridge_error_fields({"error": error})
 
-        assert fields is not None
-        assert fields.normalized_code == "invalid_request_error"
-        assert fields.message == "Invalid previous_response_id."
-        assert fields.param_present is param_present
-        assert fields.param == param
-        assert fields.normalized_param == (param.strip() if isinstance(param, str) else None)
-        assert fields.param_malformed is (param_present and (not isinstance(param, str) or not param.strip()))
+    assert fields is not None
+    assert fields.normalized_code == "invalid_request_error"
+    assert fields.message == "Invalid previous_response_id."
+    assert fields.param_present is param_present
+    assert fields.param == param
+    assert fields.normalized_param == expected_normalized_param
+    assert fields.param_malformed is expected_param_malformed
 
 
 def test_parser_uses_direct_error_fields_from_top_level_error_event() -> None:

@@ -1436,40 +1436,49 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
-                if durable_lookup is not None:
-                    try:
-                        _fresh_state, fresh_replay_text = prepare_bridge_request(
-                            _http_bridge_payload_without_previous_response_id(payload)
-                        )
-                        del _fresh_state
-                        durable_recovery_attempt_fingerprint = durable_bridge_hash(fresh_replay_text)
-                        existing_attempt = await self._durable_bridge.lookup_recovery_attempt(
-                            session_id=durable_lookup.session_id,
-                            request_fingerprint=durable_recovery_attempt_fingerprint,
-                        )
-                        if existing_attempt is not None and (
-                            durable_lookup.state != HttpBridgeSessionState.ACTIVE
-                            or not durable_lookup.lease_is_active(now=utcnow())
-                        ):
+                if durable_lookup is not None and durable_full_resend_proof is None:
+                    # An active lease still owns ordinary continuation
+                    # traffic; only an inactive or expired owner needs a
+                    # durable recovery checkpoint lookup before an
+                    # unanchored replay.
+                    durable_recovery_checkpoint_required = (
+                        durable_lookup.state != HttpBridgeSessionState.ACTIVE
+                        or not durable_lookup.lease_is_active(now=utcnow())
+                    )
+                    if durable_recovery_checkpoint_required:
+                        try:
+                            _fresh_state, fresh_replay_text = prepare_bridge_request(
+                                _http_bridge_payload_without_previous_response_id(payload)
+                            )
+                            del _fresh_state
+                            durable_recovery_attempt_fingerprint = durable_bridge_hash(fresh_replay_text)
+                            existing_attempt = await self._durable_bridge.lookup_recovery_attempt(
+                                session_id=durable_lookup.session_id,
+                                request_fingerprint=durable_recovery_attempt_fingerprint,
+                            )
+                            if existing_attempt is not None and (
+                                durable_lookup.state != HttpBridgeSessionState.ACTIVE
+                                or not durable_lookup.lease_is_active(now=utcnow())
+                            ):
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "bridge_continuity_persistence_failed",
+                                        "A prior HTTP response outcome is ambiguous; retry after its recovery "
+                                        "state settles.",
+                                    ),
+                                )
+                        except ProxyResponseError:
+                            raise
+                        except Exception:
+                            logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)
                             raise ProxyResponseError(
                                 502,
                                 openai_error(
                                     "bridge_continuity_persistence_failed",
-                                    "A prior HTTP response outcome is ambiguous; retry after its recovery "
-                                    "state settles.",
+                                    "HTTP responses recovery state could not be claimed; retry the request.",
                                 ),
                             )
-                    except ProxyResponseError:
-                        raise
-                    except Exception:
-                        logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP responses recovery state could not be claimed; retry the request.",
-                            ),
-                        )
         durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
@@ -2218,6 +2227,9 @@ class _HTTPBridgeStreamingMixin:
                         else:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
                                 durable_lookup = fresh_turn_state_lookup
+                                durable_full_resend_retains_required_context_cache = None
+                                durable_full_resend_fresh_payload = None
+                                durable_full_resend_is_account_neutral = None
                                 if fresh_turn_state_lookup is None:
                                     durable_full_resend_anchor_count = None
                                     durable_full_resend_anchor_fingerprint = None
@@ -2942,7 +2954,11 @@ class _HTTPBridgeStreamingMixin:
                 # insufficient during a rolling migration where the durable
                 # tables may be unavailable and the bridge falls back to an
                 # in-memory session.
-                setattr(exc, "http_bridge_durable_recovery_eligible", True)
+                # A lower layer can explicitly fail closed (for example when
+                # a malformed previous-response parameter was observed). Do
+                # not let the outer proof check overwrite that decision.
+                if getattr(exc, "http_bridge_durable_recovery_eligible", None) is not False:
+                    setattr(exc, "http_bridge_durable_recovery_eligible", True)
             if yielded_any:
                 yield _partial_output_proxy_error_event_block(
                     exc,
