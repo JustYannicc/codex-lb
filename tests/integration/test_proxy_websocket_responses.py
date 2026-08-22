@@ -11010,6 +11010,25 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
+    async def fake_resolve_previous_response_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+        request_state=None,
+    ):
+        del self, api_key, surface
+        assert previous_response_id == "resp_ws_prev_anchor_client"
+        assert session_id == "sid-client-stale"
+        assert request_state is not None
+        request_state.previous_response_owner_lookup_source = "request_logs"
+        request_state.previous_response_owner_lookup_outcome = "hit"
+        request_state.previous_response_owner_requested_at = owner_requested_at
+        request_state.previous_response_owner_session_id = session_id
+        return "acct_ws_prev_connect_failure"
+
     async def fake_select_websocket_connect_account(
         self,
         deadline,
@@ -11057,10 +11076,6 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True
         assert request_state.fresh_upstream_request_text is not None
-        request_state.previous_response_owner_lookup_source = "request_logs"
-        request_state.previous_response_owner_lookup_outcome = "hit"
-        request_state.previous_response_owner_requested_at = owner_requested_at
-        request_state.previous_response_owner_session_id = request_state.session_id
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
 
     async def fake_try_open_websocket_connect_attempt(
@@ -11093,6 +11108,11 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
