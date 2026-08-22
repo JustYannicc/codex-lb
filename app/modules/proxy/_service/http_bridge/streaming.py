@@ -1436,7 +1436,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
-                if durable_lookup is not None and durable_full_resend_proof is None:
+                if durable_lookup is not None:
                     # An active lease still owns ordinary continuation
                     # traffic; only an inactive or expired owner needs a
                     # durable recovery checkpoint lookup before an
