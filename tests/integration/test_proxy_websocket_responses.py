@@ -6022,10 +6022,33 @@ def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
-def test_responses_websocket_replays_client_full_resend_previous_response_miss_without_anchor(
+@pytest.mark.parametrize(
+    ("upstream_error", "expect_replay"),
+    [
+        (
+            {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+            },
+            True,
+        ),
+        (
+            {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+                "param": {},
+            },
+            False,
+        ),
+    ],
+    ids=["parameterless-replays", "malformed-param-fails-closed"],
+)
+def test_responses_websocket_handles_client_full_resend_previous_response_miss(
     endpoint,
     app_instance,
     monkeypatch,
+    upstream_error,
+    expect_replay,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6059,10 +6082,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                         {
                             "type": "error",
                             "status": 400,
-                            "error": {
-                                "type": "invalid_request_error",
-                                "message": "Invalid `previous_response_id`.",
-                            },
+                            "error": upstream_error,
                         },
                         separators=(",", ":"),
                     ),
@@ -6188,21 +6208,33 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            if expect_replay:
+                created_2 = json.loads(websocket.receive_text())
+                completed_2 = json.loads(websocket.receive_text())
+                assert created_2["type"] == "response.created"
+                assert created_2["response"]["id"] == "resp_ws_prev_retry"
+                assert completed_2["type"] == "response.completed"
+                assert "previous_response_not_found" not in json.dumps(created_2)
+            else:
+                failed_2 = json.loads(websocket.receive_text())
+                assert failed_2["type"] == "response.failed"
+                # A malformed present parameter is not a confirmed stale-anchor
+                # rejection, even on the Codex-native route. It must fail closed
+                # without emitting the client-retryable canonical signal.
+                assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+                assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
 
-    assert created_2["type"] == "response.created"
-    assert created_2["response"]["id"] == "resp_ws_prev_retry"
-    assert completed_2["type"] == "response.completed"
-    assert "previous_response_not_found" not in json.dumps(created_2)
-    assert connect_count == 2
+    assert connect_count == (2 if expect_replay else 1)
     first_payload = json.loads(first_upstream.sent_text[-1])
     assert first_payload["previous_response_id"] == "resp_ws_prev_anchor"
     assert first_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
-    replay_payload = json.loads(recovered_upstream.sent_text[-1])
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == full_resend_input
-    assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
+    if expect_replay:
+        replay_payload = json.loads(recovered_upstream.sent_text[-1])
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == full_resend_input
+        assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
+    else:
+        assert recovered_upstream.sent_text == []
 
 
 @pytest.mark.parametrize(
