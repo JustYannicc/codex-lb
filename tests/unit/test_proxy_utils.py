@@ -23104,6 +23104,53 @@ def test_websocket_client_previous_response_full_resend_retry_rejects_output_bef
     )
 
 
+@pytest.mark.parametrize(
+    ("output_type", "call_type"),
+    [
+        ("function_call_output", "function_call"),
+        ("custom_tool_call_output", "custom_tool_call"),
+        ("apply_patch_call_output", "apply_patch_call"),
+    ],
+)
+def test_websocket_client_previous_response_full_resend_retry_rejects_every_output_only_tool_type(
+    output_type: str,
+    call_type: str,
+) -> None:
+    """Output-only bodies carry no conversation state of their own, so replaying
+    them without the anchor would fabricate a turn out of tool results whose
+    calls upstream never saw. Pairing the call back in makes the body safe."""
+
+    output_only_delta: list[JsonValue] = [
+        {"type": output_type, "call_id": "call_orphan", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=output_only_delta,
+            continuity_state=None,
+        )
+        is False
+    )
+
+    self_contained_history: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "do the thing"}]},
+        {"type": call_type, "name": "shell_command", "call_id": "call_orphan", "arguments": "{}"},
+        {"type": output_type, "call_id": "call_orphan", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=self_contained_history,
+            continuity_state=None,
+        )
+        is True
+    )
+
+
 def test_websocket_client_previous_response_full_resend_retry_allows_self_contained_tool_history() -> None:
     self_contained_tool_history: list[JsonValue] = [
         {"role": "user", "content": [{"type": "input_text", "text": "run a command"}]},
@@ -33399,6 +33446,89 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
 
     assert request_logs.lookup_calls == [("resp_prev_lookup_failure", None, "sid_owner_lookup_failure")]
     assert len(downstream.sent_text) == 1
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "response.failed"
+    assert payload["response"]["status"] == "failed"
+    assert payload["response"]["error"]["code"] == "upstream_unavailable"
+    assert payload["response"]["error"]["message"] == "Previous response owner lookup failed; retry later."
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_websocket_owner_lookup_failure_is_not_a_stale_anchor_rejection(
+    monkeypatch,
+):
+    """The Codex-native route exposes the canonical stale-anchor classifier, but
+    upstream never rejected this anchor — ownership just could not be proved. A
+    ``previous_response_not_found`` here would burn the client's one full-context
+    retry on a failure that resending cannot fix."""
+
+    request_logs = _RequestLogsRecorder()
+    request_logs.lookup_error = RuntimeError("lookup unavailable")
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self._disconnect_sent = False
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            if not self._disconnect_sent:
+                await self._done.wait()
+                self._disconnect_sent = True
+                return {"type": "websocket.disconnect"}
+            await asyncio.sleep(0)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    async def fail_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("owner lookup failure must fail before websocket connect")
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_codex_owner_lookup_failure",
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_codex_owner_lookup_failure"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert len(downstream.sent_text) == 1
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_codex_owner_lookup_failure" not in downstream.sent_text[0]
     payload = json.loads(downstream.sent_text[0])
     assert payload["type"] == "response.failed"
     assert payload["response"]["status"] == "failed"

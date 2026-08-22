@@ -754,6 +754,34 @@ WebSocket continuation already attached to its required open owner socket MUST
 NOT be failed solely because a new per-turn selection attempt temporarily
 excludes that owner.
 
+The `previous_response_not_found` code is reserved for a confirmed upstream
+rejection of the request's own `previous_response_id`. An ownership failure is
+not that rejection: when ring, durable-session, or request-log ownership cannot
+be proved, the anchor itself was never presented upstream or never refused. The
+service MUST therefore classify an ownership failure as owner-unavailable rather
+than stale-anchor, and MUST NOT surface `previous_response_not_found` for it on
+any route — including the Codex-native `/backend-api/codex/responses` route,
+where that code would make an unmodified client burn its one stale-anchor
+full-context retry against a failure a resend cannot fix. The service MUST use a
+separate retryable error instead: `upstream_unavailable` when the ownership
+lookup itself failed, `previous_response_owner_unavailable` when a required owner
+was resolved but cannot serve the request, and `bridge_owner_unreachable` on the
+HTTP-bridge ownership path. An ownership failure MUST be recorded with a
+continuity reason distinct from a proven stale-anchor miss.
+
+#### Scenario: ownership failure is not reported as a stale-anchor rejection
+
+- **GIVEN** a follow-up carrying `previous_response_id` on either the Codex-native
+  `/backend-api/codex/responses` route or public `/v1/responses`
+- **WHEN** ring, durable, or request-log ownership cannot be proved and upstream
+  never rejected that `previous_response_id`
+- **THEN** the terminal downstream error code is the retryable owner-unavailable
+  error for that path (`upstream_unavailable`,
+  `previous_response_owner_unavailable`, or `bridge_owner_unreachable`)
+- **AND** the downstream error code is not `previous_response_not_found`
+- **AND** the failure is recorded with a continuity reason distinct from a proven
+  stale-anchor miss
+
 #### Scenario: websocket previous-response owner lookup errors
 
 - **WHEN** a websocket or HTTP fallback follow-up includes
@@ -1743,14 +1771,34 @@ The `/backend-api/codex/responses` HTTP endpoint SHALL accept the OpenAI-compati
 - **THEN** the proxy preserves the normalized request content and continues applying backend Codex session affinity
 
 ### Requirement: Codex WebSocket stale-anchor failures remain recoverable by a full-context retry
-When serving or consuming the Codex-native `/backend-api/codex/responses` WebSocket route, upstream `previous_response_id` MUST be treated as an ephemeral optimization rather than durable conversation state. A stale-anchor continuity failure during a long-wait tool-output continuation MUST NOT hard-end the user turn before one full-context retry without `previous_response_id` has been attempted. The sanitized signal the service surfaces for a Codex-native stale-anchor failure MUST be the canonical `previous_response_not_found` error code, because that is the code an unmodified Codex client acts on to recover; the service MUST NOT substitute a proxy-specific classifier that standard clients do not recognize, and MUST NOT expose the raw upstream error envelope or the missing upstream response id.
+When serving or consuming the Codex-native `/backend-api/codex/responses` WebSocket route, upstream `previous_response_id` MUST be treated as an ephemeral optimization rather than durable conversation state. A confirmed stale-anchor continuity failure during a long-wait tool-output continuation MUST NOT hard-end the user turn before one full-context retry without `previous_response_id` has been attempted — either by the proxy replaying a retained body, or by the compatible client the proxy signals. Exactly one of those two paths MUST run, chosen by the retry boundary below.
+
+The proxy MAY run that full-context retry itself only when it retained, for the same turn, a self-contained retry-safe body: a body that carries the whole conversation input needed to reproduce the turn on its own, and that pairs every `function_call_output`, `custom_tool_call_output`, and `apply_patch_call_output` item with its matching tool-call item in the same payload. The proxy MUST replay such a body at most once and MUST remove `previous_response_id` from the replay.
+
+The proxy MUST NOT replay an output-only body as a fresh turn. A body whose `function_call_output`, `custom_tool_call_output`, or `apply_patch_call_output` items have no matching tool-call item in the same payload carries no conversation state of its own; replaying it without `previous_response_id` would fabricate a turn out of tool results whose calls upstream never saw. For any body that is not retained and retry-safe, the proxy MUST fail the turn closed instead of retrying, and MUST require the compatible client to resend full context by surfacing the sanitized canonical signal below.
+
+The sanitized signal the service surfaces for a Codex-native stale-anchor failure MUST be the canonical `previous_response_not_found` error code, because that is the code an unmodified Codex client acts on to recover; the service MUST NOT substitute a proxy-specific classifier that standard clients do not recognize, and MUST NOT expose the raw upstream error envelope or the missing upstream response id. That canonical code is reserved for a confirmed upstream rejection of the request's `previous_response_id`; an ownership failure MUST use the separate retryable owner-unavailable errors required by "Hard continuity owner lookup fails closed".
 
 #### Scenario: Long-running terminal wait invalidates the upstream previous response anchor
 - **GIVEN** a Codex-native WebSocket session has completed a response with id `resp_old`
 - **AND** the client later sends a `response.create` frame with `previous_response_id: "resp_old"` and tool-output or other delta input after a long idle period
 - **WHEN** the upstream rejects `resp_old` with a stale-anchor error such as `previous_response_not_found`
 - **THEN** the failure is classified as stale-anchor continuity loss
-- **AND** the downstream signal uses `error.code = "previous_response_not_found"`, which an unmodified Codex client's built-in stale-anchor recovery retries once using full conversation history without `previous_response_id` before surfacing a turn-ending error
+- **AND** because that delta input is not a retained self-contained retry-safe body, the proxy does not replay it and the downstream signal uses `error.code = "previous_response_not_found"`, which an unmodified Codex client's built-in stale-anchor recovery retries once using full conversation history without `previous_response_id` before surfacing a turn-ending error
+- **AND** the downstream payload does not expose the raw upstream error envelope or the missing upstream response id
+
+#### Scenario: Retained self-contained body is retried by the proxy without the rejected anchor
+- **GIVEN** a Codex-native WebSocket `response.create` whose retained replay body carries the whole conversation input and pairs every tool-output item with its matching tool-call item in the same payload
+- **WHEN** upstream rejects `previous_response_id` with a stale-anchor error before `response.created`
+- **THEN** the proxy replays that retained body once with `previous_response_id` removed
+- **AND** it dispatches no second replay for the same turn
+- **AND** a successful replay surfaces no stale-anchor error downstream
+
+#### Scenario: Output-only tool results are never replayed as a fresh turn
+- **GIVEN** a Codex-native WebSocket `response.create` whose input carries `function_call_output`, `custom_tool_call_output`, or `apply_patch_call_output` items whose matching tool-call items are absent from the same payload
+- **WHEN** upstream rejects `previous_response_id` with a stale-anchor error before `response.created`
+- **THEN** the proxy MUST NOT replay that body as a fresh turn without `previous_response_id`
+- **AND** the turn fails closed carrying the sanitized canonical `previous_response_not_found` code, which requires the compatible client to resend full context itself
 - **AND** the downstream payload does not expose the raw upstream error envelope or the missing upstream response id
 
 #### Scenario: codex-lb sanitizes stale-anchor errors for client classification
@@ -1764,6 +1812,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **WHEN** the stale-anchor failure is served to an OpenAI-compatible `/v1/responses` WebSocket client rather than the Codex-native route
 - **THEN** the downstream event remains a retryable `stream_incomplete` continuity failure
 - **AND** the downstream payload does not expose `previous_response_not_found` or the missing upstream response id
+- **AND** the same retry boundary applies unchanged: a retained self-contained retry-safe body is still replayed once without `previous_response_id`, and an output-only body is still never replayed as a fresh turn
 
 #### Scenario: Non-stale-anchor failures do not trigger full-context retry
 - **WHEN** the upstream failure is quota, policy, auth, context-window, or another non-continuity error
@@ -1794,7 +1843,8 @@ When a direct Responses WebSocket request depends on `previous_response_id`, the
 - **AND** a later direct WebSocket follow-up references that completed response id
 - **THEN** owner lookup uses request-log metadata or fails closed with a retryable error
 - **AND** it does not continue on an unpinned account
-- **AND** any terminal Codex-native error uses the sanitized canonical `previous_response_not_found` code without the raw upstream envelope or missing response id
+- **AND** a fail-closed ownership outcome uses the retryable owner-unavailable error required by "Hard continuity owner lookup fails closed", not `previous_response_not_found`, because upstream never rejected the anchor
+- **AND** it does not expose the raw upstream error envelope or the missing previous response id
 
 ### Requirement: Failed precreated HTTP bridge replay retires stale sessions
 

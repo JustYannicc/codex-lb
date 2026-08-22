@@ -210,3 +210,29 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 8.56 Record the continuity fail-closed decision on the ungrouped
   malformed stale-anchor WebSocket path with surface `websocket_stream`, so the
   unmatched frame is as observable as the grouped one.
+
+## 9. Exact-head review 5000818761
+
+- [x] 9.1 Define the full-context retry boundary normatively: the proxy may
+  replay only a retained self-contained retry-safe body (every
+  `function_call_output` / `custom_tool_call_output` / `apply_patch_call_output`
+  paired with its tool call in the same payload), at most once and without
+  `previous_response_id`; an output-only body MUST NOT be replayed as a fresh
+  turn and instead fails closed with the sanitized canonical
+  `previous_response_not_found` so the compatible client resends full context.
+  Public `/v1` masking and the same boundary are preserved. The requirement
+  previously read as an unconditional "one full-context retry MUST be attempted"
+  and contradicted the existing output-only fail-closed requirement.
+- [x] 9.2 Stop classifying ownership failures as confirmed stale-anchor
+  rejections. `previous_response_not_found` is reserved for a confirmed upstream
+  rejection of the request's own `previous_response_id`; unprovable
+  ring/durable/request-log ownership uses the separate retryable
+  `upstream_unavailable`, `previous_response_owner_unavailable`, or
+  `bridge_owner_unreachable` error on every route and is recorded with a
+  distinct continuity reason. Carried in the change delta so sync/archive keeps
+  it in the main spec.
+- [x] 9.3 Cover both boundaries at the failing surfaces: the Codex-native
+  `/backend-api/codex/responses` WebSocket owner-lookup failure asserts
+  `upstream_unavailable` (never `previous_response_not_found`), and the
+  retry-safety classifier asserts output-only rejection plus matched-call
+  acceptance for all three tool-output item types.
