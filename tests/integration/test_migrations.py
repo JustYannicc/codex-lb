@@ -2083,6 +2083,33 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
 
 
 @pytest.mark.asyncio
+async def test_retry_circuit_admission_generation_migration_upgrade_noops_when_table_missing(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-generation-missing-table.sqlite'}"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, _RETRY_CIRCUIT_PARENT_REVISION, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP TABLE http_bridge_retry_circuits"))
+
+        await to_thread.run_sync(
+            lambda: command.upgrade(_build_alembic_config(db_url), _RETRY_CIRCUIT_GENERATION_REVISION)
+        )
+
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_retry_circuit_columns)
+            revision = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+        assert columns is None
+        assert revision == _RETRY_CIRCUIT_GENERATION_REVISION
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_retry_circuit_admission_generation_fresh_upgrade_head_has_single_head(tmp_path):
     from alembic.script import ScriptDirectory
 

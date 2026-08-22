@@ -787,7 +787,17 @@ def test_codex_stream_keeps_canonical_response_failed_classifier() -> None:
     )
 
     assert violation_kind is None
-    assert normalized is payload
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    response = normalized.get("response")
+    assert isinstance(response, dict)
+    assert response.get("status") == "failed"
+    error = response.get("error")
+    assert isinstance(error, dict)
+    # The Codex-native route keeps the canonical stale-anchor classifier so
+    # compatible clients can trigger their full-context retry.
+    assert error.get("code") == "previous_response_not_found"
+    assert error.get("param") == "previous_response_id"
 
 
 @pytest.mark.asyncio

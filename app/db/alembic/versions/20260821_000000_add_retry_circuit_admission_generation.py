@@ -19,6 +19,10 @@ _TABLE = "http_bridge_retry_circuits"
 _COLUMN = "admission_generation"
 
 
+def _has_table(bind) -> bool:
+    return sa.inspect(bind).has_table(_TABLE)
+
+
 def _columns(bind) -> set[str]:
     inspector = sa.inspect(bind)
     if not inspector.has_table(_TABLE):
@@ -28,7 +32,7 @@ def _columns(bind) -> set[str]:
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if _COLUMN in _columns(bind):
+    if not _has_table(bind) or _COLUMN in _columns(bind):
         return
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.add_column(
