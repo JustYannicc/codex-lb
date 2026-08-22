@@ -11,6 +11,17 @@
   "commitConvention": "angular",
   "contributors": [
     {
+      "login": "JustYannicc",
+      "name": "Yannic Charlon",
+      "avatar_url": "https://avatars.githubusercontent.com/u/52761674?v=4",
+      "profile": "https://github.com/JustYannicc",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
       "login": "Soju06",
       "name": "Soju06",
       "avatar_url": "https://avatars.githubusercontent.com/u/34199905?v=4",
