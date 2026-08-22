@@ -28965,6 +28965,7 @@ async def test_http_bridge_retry_circuit_does_not_report_reset_after_durable_cle
 
     clear_retry_circuit.assert_awaited_once()
     labels.assert_not_called()
+    assert hard_session.key in cast(Any, service)._http_bridge_retry_circuits
 
 
 @pytest.mark.asyncio
