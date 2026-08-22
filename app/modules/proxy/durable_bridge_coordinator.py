@@ -280,17 +280,21 @@ class DurableBridgeSessionCoordinator:
         *,
         session_key_kind: str,
         session_key_value: str,
-        api_key_id: str | None,
+        api_key_id: str | None = None,
+        api_key_scope: str | None = None,
         expected_updated_at_epoch: float | None,
         expected_admission_generation: int,
         expected_consecutive_failures: int,
         expected_cooldown_until_epoch: float,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
+        resolved_api_key_scope = durable_bridge_api_key_scope(
+            api_key_scope if api_key_scope is not None else api_key_id
+        )
         async with self._session() as session:
             return await DurableBridgeRepository(session).claim_retry_circuit_generation(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
-                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                api_key_scope=resolved_api_key_scope,
                 expected_updated_at_epoch=expected_updated_at_epoch,
                 expected_admission_generation=expected_admission_generation,
                 expected_consecutive_failures=expected_consecutive_failures,

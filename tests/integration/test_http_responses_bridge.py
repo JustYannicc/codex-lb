@@ -14240,11 +14240,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         )
         assert failed_response.status_code == 503
         assert failed_response.json()["error"]["code"] == "upstream_request_timeout"
-        assert connected_account_ids == (
-            [owner_chatgpt_account_id, alternate_chatgpt_account_id]
-            if account_neutral
-            else [owner_chatgpt_account_id, owner_chatgpt_account_id]
-        )
+        assert connected_account_ids == [owner_chatgpt_account_id, alternate_chatgpt_account_id]
         assert len(owner_upstream.sent_text) == 1
         assert alternate_upstream.sent_text == []
         return

@@ -1770,14 +1770,14 @@ The behavior for Codex-native WebSocket previous-response continuity MUST be spe
 - **AND** direct `/backend-api/codex/responses` WebSocket tests or Codex client WebSocket tests cover the changed behavior
 
 ### Requirement: Direct WebSocket previous-response misses never leak raw upstream errors
-When a direct Responses WebSocket request depends on `previous_response_id`, the service MUST NOT send a raw upstream `previous_response_not_found` payload to the downstream client. This applies to `/v1/responses` and `/backend-api/codex/responses` WebSocket clients.
+When a direct Responses WebSocket request depends on `previous_response_id`, the service MUST NOT send the raw upstream `previous_response_not_found` error envelope or the missing upstream response id to the downstream client. On the Codex-native `/backend-api/codex/responses` route the service MUST surface the sanitized canonical `error.code = "previous_response_not_found"` so an unmodified Codex client can recover; on public `/v1/responses` the service MUST rewrite the failure to a retryable `stream_incomplete` continuity error. This applies to both `/v1/responses` and `/backend-api/codex/responses` WebSocket clients.
 
 #### Scenario: Codex Desktop continue receives upstream previous-response miss before response.created
 - **WHEN** a direct WebSocket `response.create` request includes `previous_response_id`
 - **AND** upstream emits a top-level `type=error` payload with `code=previous_response_not_found` or `param=previous_response_id`
 - **AND** no stable upstream `response.id` has been assigned yet
-- **THEN** the downstream client receives either a transparent replay result or a retryable terminal event
-- **AND** the downstream payload does not include `previous_response_not_found`
+- **THEN** a Codex-native downstream client receives either a transparent replay result or a retryable terminal `previous_response_not_found` error
+- **AND** the downstream payload does not include the raw upstream error envelope
 - **AND** the downstream payload does not include the missing previous response id
 
 #### Scenario: Codex Desktop continue has only request-log owner metadata
@@ -1785,7 +1785,7 @@ When a direct Responses WebSocket request depends on `previous_response_id`, the
 - **AND** a later direct WebSocket follow-up references that completed response id
 - **THEN** owner lookup uses request-log metadata or fails closed with a retryable error
 - **AND** it does not continue on an unpinned account
-- **AND** it does not expose raw `previous_response_not_found`
+- **AND** any terminal Codex-native error uses the sanitized canonical `previous_response_not_found` code without the raw upstream envelope or missing response id
 
 ### Requirement: Failed precreated HTTP bridge replay retires stale sessions
 

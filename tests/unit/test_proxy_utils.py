@@ -35391,6 +35391,33 @@ def test_app_error_websocket_event_preserves_error_param():
     }
 
 
+@pytest.mark.parametrize("raw_param", [" model ", "", "   ", None, 0, False, {}, []])
+def test_websocket_precreated_replay_fallback_sanitizes_error_param(raw_param: object):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_precreated_fallback_param",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        precreated_replay_reason="account_model_unsupported",
+        error_code_override="invalid_request_error",
+        error_message_override="The requested model is not supported by this account.",
+        error_type_override="invalid_request_error",
+        error_param_override=OpenAIErrorParam(True, cast(JsonValue, raw_param)),
+    )
+
+    fallback = websocket_helpers_module._websocket_precreated_replay_fallback_error(request_state)
+    assert fallback is not None
+    assert request_state.error_param_override is not None
+    assert request_state.error_param_override.raw == raw_param
+    error = fallback[1]["error"]
+    if isinstance(raw_param, str) and raw_param.strip():
+        assert error["param"] == raw_param.strip()
+    else:
+        assert "param" not in error
+
+
 def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_missing_tool_output_connect",

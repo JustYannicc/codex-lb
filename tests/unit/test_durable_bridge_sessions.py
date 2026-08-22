@@ -611,7 +611,7 @@ async def test_durable_bridge_lookup_rejects_ownerless_and_live_alias_divergence
             previous_response_id="resp_live_owner",
         )
 
-    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert exc_info.value.payload["error"].get("code") == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -673,7 +673,7 @@ async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_alias
             previous_response_id="resp_conflicting_owner",
         )
 
-    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert exc_info.value.payload["error"].get("code") == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -1307,7 +1307,7 @@ async def test_durable_bridge_ordinary_unanchored_key_does_not_override_shared_s
             previous_response_id=None,
         )
 
-    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert exc_info.value.payload["error"].get("code") == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -1370,7 +1370,7 @@ async def test_durable_bridge_verified_replay_does_not_hide_specific_alias_confl
             previous_response_id="resp_other_owner",
         )
 
-    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert exc_info.value.payload["error"].get("code") == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -2969,7 +2969,7 @@ async def test_startup_retention_normalizes_aware_postgres_timestamps() -> None:
         scalars=AsyncMock(return_value=[]),
         commit=AsyncMock(),
     )
-    repository = DurableBridgeRepository(cast(AsyncSession, session))
+    repository = DurableBridgeRepository(cast(AsyncSession, cast(object, session)))
 
     deleted = await repository.purge_owned_sessions_on_startup(
         instance_id="instance-a",
@@ -3288,7 +3288,7 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     claimed = await coordinator.claim_retry_circuit_generation(
         session_key_kind="session_header",
         session_key_value="sid-retry-circuit-claim",
-        api_key_id="key-claim",
+        api_key_scope="key-claim",
         expected_updated_at_epoch=1200.0,
         expected_admission_generation=0,
         expected_consecutive_failures=2,

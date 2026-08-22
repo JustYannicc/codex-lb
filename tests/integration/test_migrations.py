@@ -1939,7 +1939,10 @@ def _retry_circuit_column(sync_conn, name: str):
     inspector = sa_inspect(sync_conn)
     if not inspector.has_table("http_bridge_retry_circuits"):
         return None
-    return next(column for column in inspector.get_columns("http_bridge_retry_circuits") if column["name"] == name)
+    return next(
+        (column for column in inspector.get_columns("http_bridge_retry_circuits") if column["name"] == name),
+        None,
+    )
 
 
 @pytest.mark.asyncio
@@ -1978,6 +1981,7 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
             admission_generation_column = await conn.run_sync(
                 lambda sync_conn: _retry_circuit_column(sync_conn, "admission_generation")
             )
+            missing_column = await conn.run_sync(lambda sync_conn: _retry_circuit_column(sync_conn, "missing_column"))
             legacy_row = (
                 await conn.execute(
                     text(
@@ -1989,6 +1993,7 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
             ).one()
         assert columns is not None
         assert columns == _RETRY_CIRCUIT_COLUMNS
+        assert missing_column is None
         assert admission_generation_column is not None
         assert admission_generation_column["nullable"] is False
         assert legacy_row == (

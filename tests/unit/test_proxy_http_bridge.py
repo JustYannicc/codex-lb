@@ -882,10 +882,14 @@ def test_verified_stale_anchor_replay_requires_complete_durable_operation_fence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("anchored", [False, True])
+@pytest.mark.parametrize(
+    ("anchored", "recovery_blocked"),
+    [(False, False), (True, False), (True, True)],
+)
 async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
     monkeypatch: pytest.MonkeyPatch,
     anchored: bool,
+    recovery_blocked: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     turn_state = "turn-recovery-proof"
@@ -901,6 +905,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
         transport="http",
         previous_response_id=None,
         hard_continuity_anchor=True,
+        previous_response_not_found_recovery_blocked=recovery_blocked,
     )
     session = _make_bridge_session(
         key=proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None),
@@ -1035,7 +1040,9 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
         ):
             pass
 
-    assert getattr(exc_info.value, "http_bridge_durable_recovery_eligible", False) is anchored
+    assert getattr(exc_info.value, "http_bridge_durable_recovery_eligible", False) is (
+        anchored and not recovery_blocked
+    )
     if anchored:
         assert request_state.previous_response_id == "resp-parent"
         assert request_state.operation_parent_response_id == "resp-parent"
@@ -28236,7 +28243,9 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-claim")
+    hard_session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-circuit-generation-claim", "key-replay")
+    )
     now = time.monotonic()
     state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
         consecutive_failures=2,
@@ -28248,7 +28257,32 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
     )
     cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
     claimed = SimpleNamespace(updated_at_epoch=7.0, admission_generation=1)
-    claim_generation = AsyncMock(return_value=claimed)
+
+    claim_calls: list[dict[str, Any]] = []
+
+    async def claim_generation(
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str | None,
+        expected_updated_at_epoch: float | None,
+        expected_admission_generation: int,
+        expected_consecutive_failures: int,
+        expected_cooldown_until_epoch: float,
+    ) -> Any:
+        claim_calls.append(
+            {
+                "session_key_kind": session_key_kind,
+                "session_key_value": session_key_value,
+                "api_key_scope": api_key_scope,
+                "expected_updated_at_epoch": expected_updated_at_epoch,
+                "expected_admission_generation": expected_admission_generation,
+                "expected_consecutive_failures": expected_consecutive_failures,
+                "expected_cooldown_until_epoch": expected_cooldown_until_epoch,
+            }
+        )
+        return claimed
+
     monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", claim_generation)
 
     assert (
@@ -28267,7 +28301,17 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         )
         is True
     )
-    claim_generation.assert_awaited_once()
+    assert claim_calls == [
+        {
+            "session_key_kind": "session_header",
+            "session_key_value": "bridge-circuit-generation-claim",
+            "api_key_scope": "key-replay",
+            "expected_updated_at_epoch": 7.0,
+            "expected_admission_generation": 0,
+            "expected_consecutive_failures": 2,
+            "expected_cooldown_until_epoch": 90.0,
+        }
+    ]
     assert state.persisted_updated_at_epoch == 7.0
 
     state.last_failure_monotonic = now + 1.0
@@ -28287,7 +28331,7 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
         )
         is False
     )
-    claim_generation.assert_awaited_once()
+    assert len(claim_calls) == 1
 
 
 @pytest.mark.asyncio

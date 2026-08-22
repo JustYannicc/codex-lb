@@ -45,6 +45,7 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
+    normalize_public_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
@@ -865,7 +866,9 @@ def _websocket_precreated_replay_fallback_error(
     error_type = request_state.error_type_override or "invalid_request_error"
     payload = openai_error(error_code, error_message, error_type=error_type)
     if request_state.error_param_override is not None and request_state.error_param_override.present:
-        payload["error"]["param"] = request_state.error_param_override.raw
+        public_param = normalize_public_error_param(request_state.error_param_override)
+        if public_param is not None:
+            payload["error"]["param"] = public_param
     return (
         request_state.error_http_status_override or 400,
         payload,

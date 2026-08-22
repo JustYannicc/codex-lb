@@ -2935,6 +2935,7 @@ class _HTTPBridgeStreamingMixin:
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
                 and _http_bridge_durable_recovery_predecessor_proven(request_state)
+                and not request_state.previous_response_not_found_recovery_blocked
             ):
                 # The API-level recovery loop must only run when this request
                 # has an actual durable operation fence. Settings alone are
