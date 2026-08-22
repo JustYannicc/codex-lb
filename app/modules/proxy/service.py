@@ -2169,12 +2169,7 @@ def _is_missing_tool_output_error(
     param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if isinstance(param, OpenAIErrorParam):
-        normalized_param = param.normalized
-    elif isinstance(param, str):
-        normalized_param = param.strip()
-    else:
-        normalized_param = None
+    normalized_param = (param if isinstance(param, OpenAIErrorParam) else OpenAIErrorParam(True, param)).normalized
     return code == "invalid_request_error" and normalized_param == "input" and _is_missing_tool_output_message(message)
 
 
