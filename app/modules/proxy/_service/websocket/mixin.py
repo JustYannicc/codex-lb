@@ -6605,6 +6605,9 @@ class _WebSocketMixin:
                         error_message=request_error_message,
                         error_type=request_error_type,
                         error_param=request_error_param,
+                        # Terminal fields were normalized above; re-running
+                        # the sanitizer would duplicate continuity telemetry.
+                        already_sanitized=True,
                         downstream_activity=downstream_activity,
                     )
                 except Exception:
@@ -6731,17 +6734,19 @@ class _WebSocketMixin:
         error_message: str,
         error_type: str = "server_error",
         error_param: OpenAIErrorParam | JsonValue | None = None,
+        already_sanitized: bool = False,
         downstream_activity: _DownstreamWebSocketActivity | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        error_code, error_message, error_type, error_param = _sanitize_websocket_terminal_error_fields(
-            request_state=request_state,
-            error_code=error_code,
-            error_message=error_message,
-            error_type=error_type,
-            error_param=error_param,
-        )
+        if not already_sanitized:
+            error_code, error_message, error_type, error_param = _sanitize_websocket_terminal_error_fields(
+                request_state=request_state,
+                error_code=error_code,
+                error_message=error_message,
+                error_type=error_type,
+                error_param=error_param,
+            )
         event = response_failed_event(
             error_code,
             error_message,

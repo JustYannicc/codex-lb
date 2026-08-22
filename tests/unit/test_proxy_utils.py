@@ -49,7 +49,12 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
-from app.core.errors import OpenAIErrorParam, openai_error
+from app.core.errors import (
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
+    OpenAIErrorParam,
+    openai_error,
+)
 from app.core.exceptions import ProxyReasoningEffortNotAllowed
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -35785,6 +35790,58 @@ async def test_emit_websocket_terminal_error_masks_previous_response_override():
     assert error["type"] == "server_error"
     assert error["message"] == "Upstream websocket closed before response.completed"
     assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_records_canonical_stale_anchor_once(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_terminal_stale_anchor_once",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_stale_anchor_once",
+        expose_stale_previous_response_classifier=True,
+        skip_request_log=True,
+    )
+    request_state.error_code_override = PREVIOUS_RESPONSE_NOT_FOUND_CODE
+    request_state.error_message_override = "Previous response with id 'resp_terminal_stale_anchor_once' not found."
+    request_state.error_type_override = "invalid_request_error"
+    request_state.error_param_override = OpenAIErrorParam(True, "previous_response_id")
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+
+    await service._fail_pending_websocket_requests(
+        account_id_value=None,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="fallback",
+        api_key=None,
+        websocket=websocket,
+        client_send_lock=anyio.Lock(),
+        penalize_account=False,
+    )
+
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_terminal", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+    websocket_send.assert_awaited_once()
+    send_call = websocket_send.await_args
+    assert send_call is not None
+    payload = json.loads(send_call.args[0])
+    assert payload["response"]["error"]["code"] == PREVIOUS_RESPONSE_NOT_FOUND_CODE
+    assert payload["response"]["error"]["message"] == PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
+    assert "resp_terminal_stale_anchor_once" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio
