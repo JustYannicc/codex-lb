@@ -1586,6 +1586,13 @@ def _sanitize_websocket_terminal_error_fields(
     error_param: OpenAIErrorParam | JsonValue | None,
 ) -> tuple[str, str, str, OpenAIErrorParam | None]:
     error_param_state = coerce_error_param(error_param)
+    if request_state.websocket_terminal_error_fields_sanitized:
+        return (
+            error_code,
+            error_message,
+            error_type,
+            error_param_state if error_param_state.present else None,
+        )
     normalized_code = _normalize_error_code(error_code, error_type)
     recoverable = _facade()._is_previous_response_not_found_error(
         code=normalized_code,
@@ -1617,6 +1624,7 @@ def _sanitize_websocket_terminal_error_fields(
         reason="previous_response_not_found" if recoverable else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
         expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
     )
+    request_state.websocket_terminal_error_fields_sanitized = True
     return (
         rewritten_code,
         rewritten_message,

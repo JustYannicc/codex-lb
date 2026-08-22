@@ -1117,6 +1117,10 @@ class _WebSocketRequestState:
     response_event_count: int = 0
     last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
+    # Terminal WebSocket error sanitization records continuity telemetry once;
+    # later serializers must preserve the already-normalized fields without
+    # recording the same stale-anchor failure again.
+    websocket_terminal_error_fields_sanitized: bool = False
     previous_response_not_found_rewritten: bool = False
     # A canonical stale-anchor code with a present malformed ``param`` may
     # still be matched and masked, but it must never authorize any replay

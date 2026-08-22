@@ -35509,6 +35509,45 @@ def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unk
     assert "previous_response_source=none" not in request_state.failure_detail_override
 
 
+def test_sanitize_websocket_terminal_error_is_idempotent(monkeypatch):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_terminal_sanitize_idempotent",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_sanitize_idempotent",
+        expose_stale_previous_response_classifier=True,
+    )
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    fields = {
+        "error_code": "previous_response_not_found",
+        "error_message": "Previous response with id 'resp_terminal_sanitize_idempotent' not found.",
+        "error_type": "invalid_request_error",
+        "error_param": OpenAIErrorParam(True, "previous_response_id"),
+    }
+
+    first = proxy_service._sanitize_websocket_terminal_error_fields(request_state=request_state, **fields)
+    second = proxy_service._sanitize_websocket_terminal_error_fields(
+        request_state=request_state,
+        error_code=first[0],
+        error_message=first[1],
+        error_type=first[2],
+        error_param=first[3],
+    )
+
+    assert first == second
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_terminal", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+
+
 def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_response_not_found():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure_invalid_request",
