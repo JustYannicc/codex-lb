@@ -90,9 +90,11 @@ and the parameter-less ChatGPT backend report
 - Reject present blank/whitespace `param` values instead of treating them as an
   absent parameter, and accept an exact stored pending-tool manifest as the
   same safe-context proof already used by durable full-resend classification.
-- Preserve blank/whitespace `param` values through every shared WebSocket and
-  HTTP-bridge extraction path so they cannot be rewritten into a canonical
-  stale-anchor error later in the pipeline.
+- Preserve blank/whitespace `param` presence and raw values through every
+  shared WebSocket and HTTP-bridge extraction/normalization path for internal
+  classification, so malformed values cannot be treated as absent or
+  rewritten into canonical stale-anchor recovery. Client-facing Responses
+  serializers omit malformed/blank values and trim valid strings.
 - Forbid clean-close and other transport retries of the internally verified
   replacement; its single dispatch exhausts the replay budget.
 - Capture and compare the original hard-key retry-circuit generation only when

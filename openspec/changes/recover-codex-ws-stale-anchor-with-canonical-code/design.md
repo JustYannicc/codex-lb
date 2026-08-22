@@ -155,11 +155,15 @@ This route already has a working transparent server-side replay for `previous_re
 - **Block every transport resend mechanism.** In addition to clean-close retry,
   the shared auth-replay preparer rejects the verified marker before mutating
   counters or request text.
-- **Preserve parameter presence and raw values through terminal normalization.**
-  HTTP-bridge and WebSocket normalization carry an `OpenAIErrorParam` state,
-  including a present blank string, JSON `null`, or another non-string value,
-  through the terminal error envelope. No malformed value is collapsed to
-  absence or coerced into a replacement value.
+- **Preserve parameter presence and raw values through internal terminal
+  normalization.** HTTP-bridge and WebSocket normalization carry an
+  `OpenAIErrorParam` state, including a present blank string, JSON `null`, or
+  another non-string value, through the internal terminal error envelope and
+  payload used for classification, request matching, and replay authorization.
+  No malformed value is collapsed to absence or coerced into a replacement
+  value. Client-facing Responses serializers are a separate boundary: they
+  emit only trimmed, non-empty string parameters and omit blank, whitespace,
+  null, and other non-string values.
 - **Reject present malformed params.** Raw HTTP and WebSocket extraction keeps
   the distinction between a missing `param` and a present value whose JSON type
   or contents cannot identify `previous_response_id`. The recovery classifier

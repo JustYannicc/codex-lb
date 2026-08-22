@@ -112,9 +112,12 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   and all other transport-level redispatch.
 - [x] 8.17 For account-neutral replay, capture and compare retry-circuit
   generation so only the circuit observed at authorization may be claimed.
-- [x] 8.18 Preserve blank parameter presence through HTTP-bridge terminal
-  normalization and common error-envelope construction; emit a present blank
-  string as `param=""` without losing its typed presence state.
+- [x] 8.18 Preserve blank parameter presence and raw JSON through HTTP-bridge
+  terminal normalization and common internal error-envelope construction
+  without losing its typed presence state. Keep that malformed state internal
+  for matching and fail-closed authorization; client-facing Responses
+  serializers omit blank, whitespace, null, and non-string params while
+  trimming valid strings.
 - [x] 8.19 Compare account-neutral authorization generation against the original
   hard key for every circuit state, including below-threshold and expired rows.
 - [x] 8.20 Block verified stale-anchor replacements from auth replay.

@@ -130,11 +130,12 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** a request with a nonzero replay count MUST NOT dispatch another stale-anchor replacement
 - **AND** a present blank or whitespace-only `param` MUST NOT be treated as an absent parameter for stale-anchor classification
 - **AND** a present non-string or null `param` MUST NOT be treated as an absent parameter for stale-anchor classification
-- **AND** blank or whitespace-only parameter presence MUST survive every upstream event-normalization layer and MUST NOT be rewritten to the canonical continuity code
+- **AND** blank or whitespace-only parameter presence MUST survive every internal upstream event-normalization layer and MUST NOT be rewritten to the canonical continuity code
 - **AND** the verified replacement MUST NOT receive a clean-close or other transport-level resend after its first dispatch
 - **AND** a local or durable circuit failure recorded after recovery authorization MUST NOT suppress the same-owner replacement
 - **AND** verified replacement MUST NOT enter authentication replay
-- **AND** HTTP-bridge terminal normalization MUST preserve a present empty parameter in the normalized error envelope
+- **AND** HTTP-bridge terminal normalization MUST preserve a present empty parameter in the internal normalized error state/envelope for classification and matching
+- **AND** any client-facing Responses serializer MUST omit that malformed parameter, as required by the client-facing canonicalization requirement above
 - **AND** inactive-owner UNKNOWN journal inspection MUST apply to both account-neutral and owner-bound verified full resends
 - **AND** a pre-dispatch failure after rebinding an existing durable operation MUST restore that operation's failed fence and MUST NOT delete its row
 - **AND** a durable operation snapshot MUST distinguish newly inserted rows from rebound rows

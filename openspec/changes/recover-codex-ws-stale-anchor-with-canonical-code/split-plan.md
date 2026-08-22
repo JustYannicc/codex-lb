@@ -14,7 +14,9 @@ Scope:
 - Preserve raw-envelope and stale-id masking.
 - Keep public `/v1/responses` masking on `stream_incomplete`.
 - Recognize only the exact parameter-less `Invalid previous_response_id.` variant.
-- Preserve parameter presence through shared WebSocket normalization.
+- Preserve parameter presence and raw values through shared WebSocket
+  normalization for internal classification; client-facing serializers omit
+  malformed values and trim valid strings.
 
 Primary files/hunks:
 
@@ -57,7 +59,8 @@ Primary files/hunks:
 ## Overlap handling
 
 `app/core/errors.py`, `app/modules/proxy/service.py`, and WebSocket helpers contain
-shared seams. PR 1 owns canonical classification and parameter-preserving error
-normalization. PR 2 must consume those APIs without reintroducing signal-shape
+shared seams. PR 1 owns canonical classification and presence-aware internal
+error normalization; client-facing serializers still canonicalize parameters at
+the boundary. PR 2 must consume those APIs without reintroducing signal-shape
 changes. Build PR 2 on PR 1 rather than independently cherry-picking overlapping
 files.
