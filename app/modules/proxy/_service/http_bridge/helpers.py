@@ -45,6 +45,7 @@ from app.core.errors import (
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -65,7 +66,7 @@ from app.core.openai.requests import (
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     AccountStatus,
@@ -732,11 +733,30 @@ def _normalize_http_bridge_error_event(
         response_id=normalized_response_id,
         error_param=error_param_state,
     )
+    # ``response_failed_event`` is a client-facing serializer, so it strips
+    # malformed parameters.  The bridge still needs the wire-level state for
+    # settlement and replay classification.  Restore that state only in the
+    # internal event/payload returned to the caller; the serialized block below
+    # is copied and sanitized before it can enter a downstream queue.
+    if error_param_state.present:
+        normalized_event["response"]["error"]["param"] = error_param_state.raw
     if rate_limit_metadata:
         normalized_event["response"]["error"].update(rate_limit_metadata)
-    normalized_event_block = format_sse_event(normalized_event)
-    normalized_payload = parse_sse_data_json(normalized_event_block)
+    public_event: dict[str, JsonValue] = dict(cast(Mapping[str, JsonValue], normalized_event))
+    public_response: dict[str, JsonValue] = dict(cast(Mapping[str, JsonValue], normalized_event["response"]))
+    public_response["error"] = sanitize_public_error_detail(
+        cast(Mapping[str, JsonValue], normalized_event["response"]["error"])
+    )
+    public_event["response"] = public_response
+    normalized_event_block = format_sse_event(public_event)
+    normalized_payload = cast(dict[str, JsonValue], cast(object, normalized_event))
     parsed_event = parse_sse_event(normalized_event_block)
+    if parsed_event is not None and parsed_event.response is not None and parsed_event.response.error is not None:
+        # Pydantic cannot represent malformed JSON values in its public
+        # ``param`` field, but its private presence-aware state can.  Keep the
+        # parsed event usable for settlement while retaining the exact wire
+        # value for internal policy decisions.
+        parsed_event.response.error.set_param_state(error_param_state)
     return normalized_event_block, normalized_payload, parsed_event, "response.failed"
 
 

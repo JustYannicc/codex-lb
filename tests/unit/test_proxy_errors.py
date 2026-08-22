@@ -98,6 +98,75 @@ def test_logged_error_json_response_preserves_upstream_diagnostic_markers():
     assert json.loads(bytes(response.body))["error"]["message"] == message
 
 
+@pytest.mark.parametrize(
+    ("raw_param", "expected_param"),
+    [
+        (_OMITTED_PARAM, None),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        (0, None),
+        (False, None),
+        ({}, None),
+        ([], None),
+        ("  input  ", "input"),
+    ],
+)
+def test_logged_error_json_response_canonicalizes_param_at_public_boundary(raw_param, expected_param):
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    error: OpenAIErrorDetail = {
+        "code": "invalid_request_error",
+        "message": "Invalid request payload.",
+        "type": "invalid_request_error",
+    }
+    if raw_param is not _OMITTED_PARAM:
+        error["param"] = cast(JsonValue, raw_param)
+
+    response = _logged_error_json_response(request, 400, {"error": error})
+    public_error = json.loads(bytes(response.body))["error"]
+    assert public_error["code"] == "invalid_request_error"
+    assert public_error["message"] == "Invalid request payload."
+    assert public_error["type"] == "invalid_request_error"
+    if expected_param is None:
+        assert "param" not in public_error
+    else:
+        assert public_error["param"] == expected_param
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "type": "error",
+            "code": "invalid_request_error",
+            "message": "Invalid request payload.",
+            "param": {},
+        },
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "Invalid request payload.",
+                    "type": "invalid_request_error",
+                    "param": None,
+                }
+            },
+        },
+    ],
+)
+def test_logged_error_json_response_sanitizes_error_event_shapes(payload):
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+
+    response = _logged_error_json_response(request, 400, payload)
+
+    body = json.loads(bytes(response.body))
+    if body["type"] == "error":
+        assert "param" not in body
+    else:
+        assert "param" not in body["response"]["error"]
+
+
 @pytest.mark.asyncio
 async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
     message = "Provider Exception: failed while reading /tmp/upstream-cache"

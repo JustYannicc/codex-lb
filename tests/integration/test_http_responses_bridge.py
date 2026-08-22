@@ -14369,6 +14369,15 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             # A falsy best-effort reset must not turn an anchored local rebind
             # into a hard continuity failure or remove its anchor.
             falsy_reset_operation_event_spool.assert_awaited()
+    if account_neutral or owner_bound_replay:
+        # The completion path must carry the recovery-origin key and the
+        # generation observed when that retry was authorized.  This fixture
+        # starts without a quarantine entry, so the observed absence is the
+        # explicit ``None`` fence rather than an omitted argument.
+        clear_call = clear_http_bridge_quarantine.call_args
+        assert clear_call is not None
+        assert clear_call.kwargs["additional_key"] == session.key
+        assert clear_call.kwargs["additional_key_generation"] is None
     if account_neutral:
         assert "previous_response_id" not in replay_payload
         assert replay_payload["input"] == expected_replay_input

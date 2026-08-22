@@ -7579,6 +7579,36 @@ def _logged_error_json_response(
         )
     else:
         public_content = content
+    if isinstance(public_content, Mapping):
+        sanitized_content = dict(cast(Mapping[str, JsonValue], public_content))
+        changed = False
+        error_value = public_content.get("error")
+        if is_json_mapping(error_value):
+            sanitized_error = sanitize_public_error_detail(error_value)
+            if sanitized_error != error_value:
+                sanitized_content["error"] = sanitized_error
+                changed = True
+        response_value = public_content.get("response")
+        if is_json_mapping(response_value):
+            response_error = response_value.get("error")
+            if is_json_mapping(response_error):
+                sanitized_response_error = sanitize_public_error_detail(response_error)
+                if sanitized_response_error != response_error:
+                    sanitized_response = dict(response_value)
+                    sanitized_response["error"] = sanitized_response_error
+                    sanitized_content["response"] = sanitized_response
+                    changed = True
+        if public_content.get("type") == "error" and "param" in public_content:
+            public_param = sanitize_public_error_detail(
+                cast(Mapping[str, JsonValue], {"param": public_content["param"]})
+            ).get("param")
+            if public_param is None:
+                sanitized_content.pop("param", None)
+            else:
+                sanitized_content["param"] = public_param
+            changed = True
+        if changed:
+            public_content = sanitized_content
     code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):

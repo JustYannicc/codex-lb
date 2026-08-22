@@ -38,6 +38,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import Settings
 from app.core.errors import OpenAIErrorParam, openai_error
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
+from app.core.utils.sse import parse_sse_data_json
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
@@ -527,6 +528,23 @@ def test_http_bridge_explicit_previous_response_rejection_accepts_type_only_inva
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
 
 
+def test_http_bridge_top_level_error_type_drives_parameterless_recovery_classification() -> None:
+    error = ProxyResponseError(
+        400,
+        cast(
+            Any,
+            {
+                "type": "error",
+                "error_type": "invalid_request_error",
+                "message": "Invalid previous_response_id.",
+            },
+        ),
+    )
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(error) is True
+    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(error) is True
+
+
 @pytest.mark.parametrize("param", ["", "   "])
 def test_previous_response_recovery_preserves_present_blank_param(param: str) -> None:
     error = proxy_service.openai_error("invalid_request_error", "Invalid previous_response_id.")
@@ -577,7 +595,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert parsed_param.raw == param
     assert parsed_param.malformed is True
 
-    _event_block, normalized_payload, _event, event_type = (
+    event_block, normalized_payload, parsed_event, event_type = (
         http_bridge_helpers_module._normalize_http_bridge_error_event(
             event=None,
             payload=cast(
@@ -598,10 +616,20 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert normalized_payload is not None
     normalized_response = cast(dict[str, Any], normalized_payload["response"])
     normalized_error = cast(dict[str, Any], normalized_response["error"])
-    # The normalized event is the client-facing ``response.failed``, so the raw
-    # malformed value stops at that serialization boundary.  Classification
-    # keeps working off the presence-aware state parsed from the raw payload.
-    assert "param" not in normalized_error
+    # The returned payload is the internal settlement representation and keeps
+    # the exact wire value.  Only the serialized event block is client-facing.
+    assert "param" in normalized_error
+    assert normalized_error["param"] == param
+    public_payload = parse_sse_data_json(event_block)
+    assert public_payload is not None
+    public_response = cast(dict[str, Any], public_payload["response"])
+    public_error = cast(dict[str, Any], public_response["error"])
+    assert "param" not in public_error
+    assert parsed_event is not None
+    assert parsed_event.response is not None
+    assert parsed_event.response.error is not None
+    assert parsed_event.response.error.param_state.present is True
+    assert parsed_event.response.error.param_state.raw == param
     normalized_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(normalized_payload)
     assert "param" not in normalized_envelope["error"]
 
@@ -630,7 +658,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
             )
         ),
     )
-    _event_block, nested_normalized, _event, _event_type = (
+    nested_event_block, nested_normalized, nested_event, _event_type = (
         http_bridge_helpers_module._normalize_http_bridge_error_event(
             event=parsed_event,
             payload=nested_payload,
@@ -640,7 +668,16 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert nested_normalized is not None
     nested_response = cast(dict[str, Any], nested_normalized["response"])
     nested_error = cast(dict[str, Any], nested_response["error"])
-    assert "param" not in nested_error
+    assert nested_error["param"] == param
+    nested_public_payload = parse_sse_data_json(nested_event_block)
+    assert nested_public_payload is not None
+    nested_public_response = cast(dict[str, Any], nested_public_payload["response"])
+    nested_public_error = cast(dict[str, Any], nested_public_response["error"])
+    assert "param" not in nested_public_error
+    assert nested_event is not None
+    assert nested_event.response is not None
+    assert nested_event.response.error is not None
+    assert nested_event.response.error.param_state.raw == param
 
     public_failed_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(
         cast(
