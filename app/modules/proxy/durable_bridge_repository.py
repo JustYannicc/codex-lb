@@ -497,18 +497,16 @@ class DurableBridgeRepository:
             "admission_generation": 1,
         }
         dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
         async with sqlite_writer_section():
             if expected_updated_at_epoch is None:
                 if expected_admission_generation != 0:
                     return None
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
-                elif dialect == "sqlite":
-                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 else:
-                    raise RuntimeError(
-                        f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
-                    )
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
             else:
                 statement = (
                     update(HttpBridgeRetryCircuit)

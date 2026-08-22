@@ -60,14 +60,15 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [ ] 6.4 Re-run focused/full related validation, rebuild ARM64, canary both
   replay variants, redeploy, and verify production cooldown does not recur.
 
-## 7. Durable circuit admission for verified same-owner replay
+## 7. Owner-pinned circuit isolation for verified same-owner replay
 
 - [x] 7.1 Record the production carry-over where the same-owner recovery branch
   ran but the prior hard-key durable circuit suppressed the unanchored submit.
 - [x] 7.2 Seed an expired two-failure circuit in the external owner-bound
   regression and require successful verified replay without deleting it.
-- [x] 7.3 Admit only the internally marked stale-anchor + trim-verified replay
-  past the old circuit; retain local/durable state for other requests.
+- [x] 7.3 Route the internally marked stale-anchor + trim-verified replay through
+  a unique owner-pinned key without bypassing or deleting the original circuit;
+  retain local/durable state for other requests.
 - [ ] 7.4 Re-run related validation, rebuild ARM64, canary, redeploy, and verify
   the production hard key no longer emits cooldown suppression.
 
@@ -109,13 +110,13 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   replacement value.
 - [x] 8.16 Make verified stale-anchor replacements ineligible for clean-close
   and all other transport-level redispatch.
-- [x] 8.17 Capture and compare retry-circuit generation so only the circuit
-  observed at authorization may be bypassed.
+- [x] 8.17 For account-neutral replay, capture and compare retry-circuit
+  generation so only the circuit observed at authorization may be claimed.
 - [x] 8.18 Preserve blank parameter presence through HTTP-bridge terminal
   normalization and common error-envelope construction; emit a present blank
   string as `param=""` without losing its typed presence state.
-- [x] 8.19 Compare authorization generation against the original hard key for
-  every circuit state, including below-threshold and expired rows.
+- [x] 8.19 Compare account-neutral authorization generation against the original
+  hard key for every circuit state, including below-threshold and expired rows.
 - [x] 8.20 Block verified stale-anchor replacements from auth replay.
 - [x] 8.21 Apply inactive UNKNOWN journal inspection to owner-bound safe-context
   replay as well as account-neutral replay.
@@ -128,7 +129,8 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 8.26 Restore prior durable ownership fields when an undispatched rebound
   operation rolls back.
 - [x] 8.27 Move same-owner verified replay to a unique owner-pinned internal key
-  and remove its dependency on original circuit bypass.
+  and remove its dependency on capturing or consuming the original circuit
+  generation.
 - [x] 8.28 Run related validation and obtain a clean rvw re-review.
 - [x] 8.29 Preserve owner-pinned internal keys in the presence of normal
   `http_turn_*` headers and cover the production-shaped header path.
@@ -157,3 +159,16 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 8.39 Add Alembic coverage for the retry-circuit admission-generation
   revision: fresh and legacy upgrades default to `0`, downgrade drops the
   column, re-upgrade restores it, and the graph keeps a single head.
+- [x] 8.40 Parse nested `response.failed` startup errors through the shared
+  presence-aware parser and prove malformed canonical params remain canonical
+  internally while public startup responses mask them as `stream_incomplete`.
+- [x] 8.41 Issue quarantine generations from a service-wide monotonic counter
+  and prove TTL pruning plus key reuse cannot recycle a generation.
+- [x] 8.42 Prove pre-dispatch rollback restores prior session, account, model,
+  and parent ownership after a real cross-session durable rebind, and assert the
+  submit caller forwards the captured fields.
+- [x] 8.43 Reject unsupported retry-circuit claim dialects before either INSERT
+  or UPDATE statement construction/execution.
+- [x] 8.44 Align every change artifact with the current replay safety model:
+  original-key generation CAS is account-neutral only, while same-owner replay
+  uses a unique owner-pinned key and does not consume that generation.

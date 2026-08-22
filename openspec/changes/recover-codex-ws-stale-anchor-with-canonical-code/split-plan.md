@@ -13,7 +13,7 @@ Scope:
 - Rename the sanitized Codex-native classifier to `previous_response_not_found`.
 - Preserve raw-envelope and stale-id masking.
 - Keep public `/v1/responses` masking on `stream_incomplete`.
-- Recognize only the exact parameter-less `Invalid previous_response_id` variant.
+- Recognize only the exact parameter-less `Invalid previous_response_id.` variant.
 - Preserve parameter presence through shared WebSocket normalization.
 
 Primary files/hunks:
@@ -36,7 +36,9 @@ Scope:
 - Explicit-rejection-only full-context replay.
 - Account-neutral versus same-owner replay safety.
 - Durable operation fencing and inserted-versus-rebound rollback semantics.
-- Original-hard-key circuit generation capture and send-adjacent revalidation.
+- Account-neutral original-hard-key circuit generation capture, CAS, and
+  send-adjacent revalidation; same-owner replay instead uses a unique
+  owner-pinned key and does not consume the original generation.
 - Central denial of transport-only anchor removal and all verified redispatch.
 - Circuit preservation, quarantine cleanup, forwarding, and negative coverage.
 

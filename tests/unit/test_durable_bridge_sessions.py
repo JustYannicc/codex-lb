@@ -3346,6 +3346,35 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
 
 
 @pytest.mark.asyncio
+async def test_retry_circuit_generation_claim_rejects_unsupported_dialect_before_update() -> None:
+    execute = AsyncMock(side_effect=AssertionError("unsupported dialect must fail before SQL execution"))
+    session = cast(
+        AsyncSession,
+        cast(
+            object,
+            SimpleNamespace(
+                get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="mysql")),
+                execute=execute,
+            ),
+        ),
+    )
+    repository = DurableBridgeRepository(session)
+
+    with pytest.raises(RuntimeError, match="retry circuit claim unsupported for dialect='mysql'"):
+        await repository.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value="sid-unsupported-claim",
+            api_key_scope="__anonymous__",
+            expected_updated_at_epoch=1200.0,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=1300.0,
+        )
+
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_retry_circuit_generation_claim_reconciliation_is_at_most_once(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

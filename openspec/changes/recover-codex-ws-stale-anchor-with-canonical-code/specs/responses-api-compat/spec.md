@@ -105,6 +105,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** rebound rollback MUST restore the prior session/account/model/parent ownership fields
 - **AND** a restored rebound operation MUST retain its durable identity and require a fresh rebind before any in-memory capacity or gate retry dispatches
 - **AND** successful replacement completion MUST clear the original-key quarantine only when it still matches the generation observed at recovery authorization
+- **AND** quarantine generations MUST remain unique for the service lifetime across TTL and size-cap pruning so a stale completion cannot clear a reused key
 - **AND** explicit stale-anchor rejection after any emitted response event or downstream-visible output MUST fail closed without anchored fallback dispatch
 - **AND** same-owner verified replay MUST use a unique internal key pinned to the proven owner rather than bypassing the original hard-key circuit
 
@@ -169,10 +170,11 @@ Top-level error normalization MUST NOT treat the event discriminator `type: "err
 - **AND** the downstream payload does not contain the raw upstream error envelope
 - **AND** the downstream payload does not expose the missing previous response id
 
-#### Scenario: top-level previous-response miss remains masked
+#### Scenario: Public top-level previous-response miss remains masked
 
-- **WHEN** a `/backend-api/codex/responses` WebSocket follow-up has `previous_response_id`
+- **WHEN** a public `/v1/responses` WebSocket follow-up has `previous_response_id`
 - **AND** upstream emits a top-level `previous_response_not_found` wrapped-error frame using `status_code`
-- **THEN** the downstream event is a retryable stale-anchor failure carrying the sanitized canonical `previous_response_not_found` code
+- **THEN** the downstream event is a retryable `stream_incomplete` continuity failure
 - **AND** the downstream payload does not contain the raw upstream error envelope
 - **AND** the downstream payload does not expose the missing previous response id
+- **AND** the downstream payload does not expose the `previous_response_not_found` code

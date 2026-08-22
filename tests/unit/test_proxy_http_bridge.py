@@ -22024,10 +22024,20 @@ async def test_submit_hard_turn_rolls_back_operation_before_retiring_session(
         transport="http",
         skip_request_log=True,
     )
+    rebound_from = {
+        "session_id": "durable-prior-session",
+        "account_id": "account-prior",
+        "model": "gpt-prior",
+        "parent_response_id": "resp-prior-parent",
+    }
     record_operation = AsyncMock(
         return_value=SimpleNamespace(
             created=operation_created,
             rebound=operation_rebound,
+            rebound_from_session_id=rebound_from["session_id"] if operation_rebound else None,
+            rebound_from_account_id=rebound_from["account_id"] if operation_rebound else None,
+            rebound_from_model=rebound_from["model"] if operation_rebound else None,
+            rebound_from_parent_response_id=(rebound_from["parent_response_id"] if operation_rebound else None),
             operation_id="operation-unsent",
             state="submitted",
             response_id=None,
@@ -22077,10 +22087,10 @@ async def test_submit_hard_turn_rolls_back_operation_before_retiring_session(
         "instance_id": "instance-hard-turn-unsent-operation",
         "owner_epoch": 3,
         "restore_rebound": restore_rebound,
-        "rebound_from_session_id": None,
-        "rebound_from_account_id": None,
-        "rebound_from_model": None,
-        "rebound_from_parent_response_id": None,
+        "rebound_from_session_id": rebound_from["session_id"] if operation_rebound else None,
+        "rebound_from_account_id": rebound_from["account_id"] if operation_rebound else None,
+        "rebound_from_model": rebound_from["model"] if operation_rebound else None,
+        "rebound_from_parent_response_id": rebound_from["parent_response_id"] if operation_rebound else None,
     }
     assert request_state.operation_created is False
     assert request_state.operation_rebound is False
@@ -31339,6 +31349,48 @@ def test_http_bridge_quarantine_recovery_clear_preserves_newer_origin_generation
         origin,
         reason="repeated_eventless_timeout",
     )
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        replacement,
+        additional_key=origin.key,
+        additional_key_generation=observed_generation,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
+
+
+def test_http_bridge_quarantine_recovery_clear_rejects_generation_reused_after_prune() -> None:
+    service = SimpleNamespace()
+    origin = _make_bridge_session(key_value="quarantine-pruned-generation")
+    replacement = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("internal_unanchored_parallel", "recovery-pruned-generation", None),
+        key_value="recovery-pruned-generation",
+    )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        origin,
+        reason="reattach_missing_response_created",
+    )
+    observed_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, origin.key)
+    assert observed_generation is not None
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[origin.key]
+    now = time.monotonic()
+    entry.quarantined_until = now - 1.0
+    entry.last_touched_monotonic = now - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is False
+    assert origin.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+
+    reused_key_session = _make_bridge_session(key=origin.key)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        reused_key_session,
+        reason="repeated_eventless_timeout",
+    )
+    current_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, origin.key)
+    assert current_generation is not None
+    assert current_generation != observed_generation
+
     http_bridge_quarantine_module._clear_http_bridge_quarantine(
         service,
         replacement,

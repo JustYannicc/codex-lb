@@ -7542,10 +7542,7 @@ def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel |
         return _default_error_envelope()
     error_value = response.get("error")
     if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
+        return _parse_event_error_envelope({"error": error_value})
     parsed = parse_response_payload(response)
     if parsed is not None and parsed.error is not None:
         return _error_envelope_from_response(parsed.error)

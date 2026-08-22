@@ -27,14 +27,14 @@ This route already has a working transparent server-side replay for `previous_re
 - **Keep public `/v1/responses` on `stream_incomplete`.** OpenAI-compatible clients do not expect the Codex continuity code; the canonical-code signal is scoped to the Codex-native route.
 - **Recognize the parameter-less ChatGPT backend variant narrowly.** Treat
   `code = "invalid_request_error"` plus the normalized message
-  `Invalid previous_response_id` as continuity loss only when `param` is absent
+  `Invalid previous_response_id.` as continuity loss only when `param` is absent
   or equals `previous_response_id`. Do not classify other generic invalid
   requests, and keep the existing canonical `previous_response_not_found`
   fast path unchanged.
 - **Parameter-less classification is exact, not substring-based.** The broad
   `previous response` + `not found` message matcher remains valid only when
   upstream explicitly sets `param=previous_response_id`. With no parameter,
-  only the normalized `Invalid previous_response_id` sentence is accepted so
+  only the normalized `Invalid previous_response_id.` sentence is accepted so
   missing-tool-output errors cannot enter stale-anchor replay.
 - **Use explicit rejection plus the existing full-resend proof for HTTP
   migration.** A classified `previous_response_not_found` proves that the
@@ -101,7 +101,7 @@ This route already has a working transparent server-side replay for `previous_re
 - **Preserve typed parameter presence and raw JSON.** Error parsing carries an
   `OpenAIErrorParam` state with an explicit `present` bit and the untouched raw
   `JsonValue`. A missing `param` remains eligible for the exact
-  `Invalid previous_response_id` variant. A present blank/whitespace string,
+  `Invalid previous_response_id.` variant. A present blank/whitespace string,
   `null`, or other non-string value remains present and malformed: string
   normalization may produce `""` for comparison, but the raw value is never
   collapsed to absence or coerced into a replacement value. This typed state
@@ -115,7 +115,9 @@ This route already has a working transparent server-side replay for `previous_re
   completion skips only `_clear_http_bridge_retry_circuit`. It clears quarantine
   for both the replacement key and the stored original hard key, because
   completion disproves the recovery-origin wedge even though it must not erase
-  circuit evidence from concurrent failures.
+  circuit evidence from concurrent failures. Quarantine generations come from a
+  service-wide monotonic counter so TTL or size-cap eviction cannot recycle a
+  generation and let a stale completion clear a newer quarantine.
 - **The verified replacement is the final transport attempt.** Its marker makes
   the request ineligible for clean-close replay and every other pre-created
   transport retry. `replay_count == 1` records the replacement itself, not a
@@ -174,8 +176,9 @@ This route already has a working transparent server-side replay for `previous_re
 - **Avoid same-owner circuit bypass.** Same-owner stale recovery receives a
   unique `internal_request_parallel` key while remaining pinned to the proven
   owner. That internal key is preserved even when the incoming header contains a
-  normal `http_turn_*` value. Account-neutral recovery keeps its unique key but
-  still uses the source-circuit CAS claim above. The original hard-key circuit is
+  normal `http_turn_*` value. It neither captures nor consumes the original
+  hard-key generation. Account-neutral recovery keeps its unique key but still
+  uses the source-circuit CAS claim above. The original hard-key circuit is
   preserved in both cases.
 - **Centralize transport-only replay denial.** The pre-created retry selector
   rejects verified replacements and anchored safe-fresh candidates when no

@@ -32,9 +32,10 @@ request once without changing accounts.
 
 The second production replay reached that same-owner branch but was rejected
 before submit because the hard-key retry circuit persisted across container
-replacement. A stale-anchor recovery changes the request from anchored to
-verified unanchored full history, so that internally constructed one-shot
-replay may bypass the old circuit without deleting shared circuit state.
+replacement. The same-owner recovery now uses a unique owner-pinned internal
+key, leaving the original hard-key circuit and its admission generation
+untouched. Account-neutral recovery remains separately fenced by a
+compare-and-set claim on the original generation.
 
 References: pi report [#1529](https://github.com/Soju06/codex-lb/issues/1529)
 and the parameter-less ChatGPT backend report
@@ -60,11 +61,13 @@ and the parameter-less ChatGPT backend report
 - When the same explicit rejection occurs for a prefix-verified full resend
   that is not account-neutral (for example retained account-bound tool/file
   history), remove the stale anchor and replay the retained full request once
-  on the same owner. Do not carry the rejected `previous_response_id` into the
-  replacement socket.
-- Allow only the internally marked, verified one-shot unanchored replay to pass
-  an older hard-key retry circuit. Do not delete local or durable circuit state;
-  transport-only failures and ordinary reconnects continue to observe it.
+  on the same owner through a unique owner-pinned internal key. Do not carry the
+  rejected `previous_response_id` into the replacement socket, and do not
+  capture, claim, or consume the original hard-key circuit generation.
+- For account-neutral replay only, allow the internally marked, verified
+  one-shot unanchored replay to claim the original hard-key circuit generation.
+  Do not delete local or durable circuit state; transport-only failures and
+  ordinary reconnects continue to observe it.
 - Require an attached durable operation identity plus live session/owner fence
   before either stale-anchor replay may remove the anchor. If that fence or its
   spool-reset operation is unavailable, retain the anchor and fail closed.
@@ -82,6 +85,8 @@ and the parameter-less ChatGPT backend report
   operation identity and mandatory spool reset.
 - Keep retry-circuit preservation independent from quarantine cleanup: a
   verified successful response retains the circuit but still clears quarantine.
+- Keep quarantine generations monotonic for the service lifetime so TTL and
+  size-cap pruning cannot let a stale completion clear a reused key.
 - Reject present blank/whitespace `param` values instead of treating them as an
   absent parameter, and accept an exact stored pending-tool manifest as the
   same safe-context proof already used by durable full-resend classification.
@@ -90,9 +95,11 @@ and the parameter-less ChatGPT backend report
   stale-anchor error later in the pipeline.
 - Forbid clean-close and other transport retries of the internally verified
   replacement; its single dispatch exhausts the replay budget.
-- Capture the hard-key retry-circuit generation when stale-anchor recovery is
-  authorized and bypass only that generation. A newer local or durable failure
-  appearing before submit must suppress the replacement.
+- Capture and compare the original hard-key retry-circuit generation only when
+  account-neutral stale-anchor recovery is authorized. A newer local or durable
+  failure appearing before submit must suppress that replacement. Same-owner
+  recovery uses its unique owner-pinned key and does not consume the original
+  circuit generation.
 
 ## Capabilities
 

@@ -730,6 +730,58 @@ async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
     assert closed is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("param", [0, False, {}, []])
+async def test_response_failed_startup_preserves_malformed_previous_response_param_and_masks_publicly(
+    param: JsonValue,
+) -> None:
+    missing_response_id = "resp_malformed_startup"
+    raw_error = {
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "message": f"Previous response with id '{missing_response_id}' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "param": param,
+            }
+        },
+    }
+
+    async def stream():
+        yield f"data: {json.dumps(raw_error)}\n\n"
+
+    probed, startup_error = await proxy_api_module._probe_stream_startup_error(
+        stream(),
+        convert_event_errors=True,
+    )
+
+    assert startup_error is not None
+    assert not isinstance(startup_error, ProxyResponseError)
+    assert startup_error.error is not None
+    assert startup_error.error.code == "previous_response_not_found"
+    assert startup_error.error.param_state.present is True
+    assert type(startup_error.error.param_state.raw) is type(param)
+    assert startup_error.error.param_state.raw == param
+    assert startup_error.error.param_state.malformed is True
+    assert [chunk async for chunk in probed] == []
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    response = proxy_api_module._stream_startup_error_response(request, startup_error, headers={})
+    body = json.loads(bytes(response.body))
+
+    assert response.status_code == 502
+    assert body == {
+        "error": {
+            "message": proxy_api_module.PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+            "type": "server_error",
+            "code": "stream_incomplete",
+        }
+    }
+    assert missing_response_id not in bytes(response.body).decode()
+    assert "previous_response_not_found" not in bytes(response.body).decode()
+
+
 def test_stream_startup_error_response_masks_proxy_previous_response_error():
     request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
     error = ProxyResponseError(
