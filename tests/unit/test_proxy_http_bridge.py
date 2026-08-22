@@ -598,7 +598,10 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert normalized_payload is not None
     normalized_response = cast(dict[str, Any], normalized_payload["response"])
     normalized_error = cast(dict[str, Any], normalized_response["error"])
-    assert normalized_error["param"] == param
+    # The normalized event is the client-facing ``response.failed``, so the raw
+    # malformed value stops at that serialization boundary.  Classification
+    # keeps working off the presence-aware state parsed from the raw payload.
+    assert "param" not in normalized_error
     normalized_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(normalized_payload)
     assert "param" not in normalized_envelope["error"]
 
@@ -637,7 +640,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert nested_normalized is not None
     nested_response = cast(dict[str, Any], nested_normalized["response"])
     nested_error = cast(dict[str, Any], nested_response["error"])
-    assert nested_error["param"] == param
+    assert "param" not in nested_error
 
     public_failed_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(
         cast(
@@ -31644,6 +31647,62 @@ def test_http_bridge_quarantine_recovery_clear_rejects_generation_reused_after_p
     )
 
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
+
+
+def test_http_bridge_quarantine_distinct_key_clear_denied_when_no_generation_observed() -> None:
+    """An observed absence must not clear a quarantine raced in during the retry."""
+    service = SimpleNamespace()
+    origin = _make_bridge_session(key_value="quarantine-origin-absent-generation")
+    replacement = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("internal_unanchored_parallel", "recovery-absent", None),
+        key_value="recovery-absent",
+    )
+
+    # The recovery was authorized while the origin key carried no quarantine.
+    observed_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, origin.key)
+    assert observed_generation is None
+
+    # The origin key is quarantined while the recovery retry is in flight.
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        origin,
+        reason="repeated_eventless_timeout",
+    )
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        replacement,
+        additional_key=origin.key,
+        additional_key_generation=observed_generation,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
+    assert origin.quarantined is True
+
+
+def test_http_bridge_quarantine_same_key_clear_denied_when_no_generation_observed() -> None:
+    """The same-key recovery shape is fenced by an observed absence too."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-same-key-absent-generation")
+
+    observed_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, session.key)
+    assert observed_generation is None
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="repeated_eventless_timeout",
+    )
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        additional_key=session.key,
+        additional_key_generation=observed_generation,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    assert session.quarantined is True
 
 
 def test_http_bridge_quarantine_same_key_clear_requires_observed_generation() -> None:

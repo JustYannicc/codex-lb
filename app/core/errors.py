@@ -250,9 +250,13 @@ def response_failed_event(
     incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
     error = openai_error(code, message, error_type, resets_at=resets_at)["error"]
-    error_param_state = _coerce_error_param(error_param)
-    if error_param_state.present:
-        error["param"] = error_param_state.raw
+    # ``response.failed`` is only ever built for a client, so the raw wire
+    # state stops here: callers keep their presence-aware ``OpenAIErrorParam``
+    # for classification and replay authorization, while the serialized event
+    # carries a trimmed non-empty string or no ``param`` at all.
+    public_param = normalize_public_error_param(error_param)
+    if public_param is not None:
+        error["param"] = public_param
     if created_at is None:
         created_at = int(time.time())
     response: ResponseFailedResponse = {

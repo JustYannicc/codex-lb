@@ -55,6 +55,47 @@ def test_parser_uses_direct_error_fields_from_top_level_error_event() -> None:
     assert fields.normalized_param == "previous_response_id"
 
 
+def test_parser_uses_error_type_as_the_upstream_type_on_a_top_level_error_frame() -> None:
+    """``type: "error"`` is the event discriminator, never the upstream type."""
+    fields = _parse_http_bridge_error_fields(
+        {
+            "type": "error",
+            "error_type": " invalid_request_error ",
+            "code": "previous_response_not_found",
+            "message": "Previous response was not found.",
+            "param": "previous_response_id",
+        }
+    )
+
+    assert fields is not None
+    assert fields.type == "invalid_request_error"
+    assert fields.code == "previous_response_not_found"
+    assert fields.normalized_code == "previous_response_not_found"
+    assert fields.normalized_param == "previous_response_id"
+
+
+def test_parser_top_level_error_frame_without_error_type_has_no_type() -> None:
+    fields = _parse_http_bridge_error_fields({"type": "error", "message": "Upstream error."})
+
+    assert fields is not None
+    assert fields.type is None
+    assert fields.normalized_code == "upstream_error"
+
+
+def test_parser_keeps_nested_detail_type_for_a_top_level_error_frame() -> None:
+    """A nested ``error`` detail still owns its own ``type``."""
+    fields = _parse_http_bridge_error_fields(
+        {
+            "type": "error",
+            "error_type": "server_error",
+            "error": {"type": "invalid_request_error", "code": "previous_response_not_found"},
+        }
+    )
+
+    assert fields is not None
+    assert fields.type == "invalid_request_error"
+
+
 def test_parser_reads_response_failed_error_detail() -> None:
     fields = _parse_http_bridge_error_fields(
         {

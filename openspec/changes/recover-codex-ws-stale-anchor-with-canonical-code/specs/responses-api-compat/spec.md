@@ -1,3 +1,40 @@
+## ADDED Requirements
+
+### Requirement: Client-facing Responses error params are canonicalized
+
+The presence-aware raw `OpenAIErrorParam` state MUST remain available to
+internal classification, request matching, and replay authorization. At every
+client-facing Responses serialization boundary, however, an error `param` MUST
+be emitted only when its normalized value is a non-empty string; the emitted
+value MUST be trimmed. Explicit null, number, boolean, object, array, blank,
+and whitespace values MUST be omitted. Public masking MUST remain independent
+of replay authorization: a malformed present value MUST fail closed for
+recovery while a canonical stale-anchor error is still masked without exposing
+its raw value. When a masked `response.failed` already carries the current
+downstream response id, that id MUST be preserved while the stale upstream id
+and raw error details are removed.
+
+#### Scenario: malformed params cannot cross a Responses stream boundary
+
+- **GIVEN** an upstream `error` or `response.failed` carries a malformed present `param`
+- **WHEN** the event is serialized for `/v1/responses` or a Codex Responses client
+- **THEN** the client event omits `param`
+- **AND** the raw value is absent from the serialized event
+- **AND** the malformed value does not authorize replay or full-history recovery
+
+#### Scenario: valid params are trimmed at the public boundary
+
+- **GIVEN** an upstream error carries `param = "  input  "`
+- **WHEN** the event is serialized for a client
+- **THEN** the client event carries `param = "input"`
+
+#### Scenario: masked failure retains the current downstream id
+
+- **GIVEN** an upstream stale-anchor `response.failed` carries the current downstream response id
+- **WHEN** public masking rewrites the failure
+- **THEN** the rewritten failure retains that current id
+- **AND** it omits the stale upstream id and malformed parameter
+
 ## MODIFIED Requirements
 
 ### Requirement: Codex WebSocket stale-anchor failures remain recoverable by a full-context retry
@@ -178,3 +215,195 @@ Top-level error normalization MUST NOT treat the event discriminator `type: "err
 - **AND** the downstream payload does not contain the raw upstream error envelope
 - **AND** the downstream payload does not expose the missing previous response id
 - **AND** the downstream payload does not expose the `previous_response_not_found` code
+
+### Requirement: Durable retry-circuit state protects repeated hard-affinity failures
+
+For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by
+affinity kind, affinity key, and API-key scope (using a stable anonymous scope
+when no API key is present). The proxy MUST record only the documented
+pre-response failure classes (`stream_incomplete`, `clean_close`, and
+`stream_idle_timeout`).
+
+A bridge retirement MUST record one of those failures only when the retiring
+session still owns at least one pending request and no response event has been
+observed for that request lifecycle. Retiring an idle upstream bridge with no
+pending request MUST NOT advance the circuit or cause a later request to be
+treated as a repeated failure. A pending request that has already emitted a
+response event MUST remain excluded from this pre-response circuit.
+
+The default circuit MUST open after two consecutive recorded failures. Once
+open, it MUST suppress pre-created replay until the persisted cooldown expires,
+using exponential backoff from sixty seconds up to ten minutes. Clean-close
+failures MUST cap their cooldown at thirty seconds. The proxy MUST persist
+failure count, cooldown deadline, last failure detail, and update time in the
+`http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
+replicas cannot shorten an existing cooldown.
+
+The clean-close retry jitter maximum MUST be read from the
+`http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
+setting and MUST be bounded to the inclusive range 0–30 seconds.
+
+The proxy MUST evict process-local circuit entries and their loaded/persisted
+markers after one hour without use, independently of durable-row cleanup, so
+one-shot hard-affinity keys cannot grow the worker's memory without bound.
+
+Before every hard-affinity retry decision, the proxy MUST refresh the durable
+row so a cooldown opened by another replica is observed even when this process
+has already loaded the key. A durable lookup or persistence failure MUST NOT
+crash the request; the proxy MUST continue using available local state and
+record the failure for observability. Rows older than one hour MUST be treated
+as expired and removed. A successful terminal response MUST clear the local
+and durable circuit state only after a successful durable read establishes the
+version fence. When that read fails, the proxy MUST retain local admission
+state and MUST skip any unfenced durable clear so a newer concurrent failure
+cannot be erased.
+
+#### Scenario: idle bridge retirement does not consume a circuit strike
+
+- **GIVEN** a hard-affinity HTTP bridge has no pending requests
+- **WHEN** its upstream WebSocket closes and the idle bridge is retired
+- **THEN** the retry-circuit failure count for that key remains unchanged
+- **AND** a later request is not placed in cooldown because of the idle close
+
+#### Scenario: eventless pending retirement consumes exactly one strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with no observed response event
+- **WHEN** the bridge retires because the upstream fails before acknowledging the request
+- **THEN** the retry circuit records exactly one failure for that request lifecycle
+
+#### Scenario: midstream retirement does not consume a pre-response strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with an observed response event
+- **WHEN** the bridge retires before completion
+- **THEN** the pre-response retry-circuit failure count remains unchanged
+
+#### Scenario: the second hard-key failure opens a durable circuit
+
+- **GIVEN** a hard-affinity key has one recorded pre-response failure
+- **WHEN** a second eligible failure is recorded
+- **THEN** the proxy opens the retry circuit
+- **AND** persists at least two consecutive failures and a cooldown deadline
+- **AND** subsequent pre-created replay is suppressed until that deadline
+
+#### Scenario: retry decisions observe a cooldown opened by another replica
+
+- **GIVEN** this replica previously looked up a hard-affinity key with no row
+- **AND** another replica persists an open cooldown for that same key and API-key scope
+- **WHEN** this replica evaluates the next pre-created retry
+- **THEN** it refreshes durable state before deciding
+- **AND** suppresses the retry for the persisted cooldown
+
+#### Scenario: circuit state remains isolated by key and API-key scope
+
+- **GIVEN** one hard-affinity key has an open circuit
+- **WHEN** a different affinity key or API-key scope evaluates a retry
+- **THEN** that request is not suppressed by the first key's circuit
+
+#### Scenario: durable circuit lookup failure does not fail the request
+
+- **GIVEN** durable retry-circuit lookup or persistence is unavailable
+- **WHEN** the proxy evaluates or records a retry-circuit event
+- **THEN** the request continues using any available local circuit state
+- **AND** the failure is logged and exposed through retry-circuit observability
+
+#### Scenario: durable clear lookup failure preserves a newer failure
+
+- **GIVEN** a terminal success begins clearing a hard-key retry circuit
+- **AND** the durable lookup fails while a newer failure is committed
+- **WHEN** the terminal cleanup settles
+- **THEN** the proxy does not issue an unfenced durable clear
+- **AND** the newer durable failure remains authoritative
+- **AND** the local admission guard remains available on the clearing replica
+
+### Requirement: Silent HTTP bridge sessions are quarantined from re-attach and reuse
+
+When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, or (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.
+
+While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
+
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. A recovery-origin key supplied by a stale-anchor completion MUST be fenced by the exact quarantine generation observed when that recovery was authorized, for both the distinct-key and same-key shapes; when no generation was observed, that completion MUST NOT clear the recovery-origin key.
+
+#### Scenario: Reattach streams events but response.created is never assigned (#1534)
+
+- **GIVEN** a durable HTTP bridge session with a stored anchor whose fresh reattach injected a proxy-owned `previous_response_id`
+- **AND** the reattached upstream stream delivers response events but `response.created` is never assigned
+- **WHEN** the stream fails or the session is retired with that request still pending
+- **THEN** the request fails terminally as before
+- **AND** the session key is quarantined with reason `reattach_missing_response_created`
+
+#### Scenario: All-stale direct retirement still quarantines the key
+
+- **GIVEN** a wedged reattach (proxy-injected `previous_response_id`, `response.create` sent, response events observed, `response.created` never assigned) that is the ONLY stale pending request on its session
+- **WHEN** the stuck-gate watchdog retires the session directly instead of failing the stale holder individually
+- **THEN** the session key is quarantined with reason `reattach_missing_response_created`
+- **AND** the next request takes the fresh no-anchor path instead of rebuilding the identical anchored reattach
+
+#### Scenario: Next request after the wedge completes on the fresh path
+
+- **GIVEN** a session key quarantined after a reattach that streamed events without `response.created`
+- **WHEN** a later request arrives for the same key with a full-conversation-resend payload and no client `previous_response_id`
+- **THEN** the proxy does not inject the durable anchor for that request
+- **AND** the request is sent upstream unanchored with the client's own full payload
+- **AND** the request can complete normally instead of rebuilding the identical wedged reattach
+
+#### Scenario: Suppressed anchor does not come back through session state
+
+- **GIVEN** a quarantined session key and a full-conversation-resend payload whose stored durable prefix is trimmable but whose fresh suffix does not retain the prior output
+- **WHEN** the fresh-reattach durable-anchor injection is skipped because of the quarantine
+- **THEN** the durable anchor is not rehydrated into the fresh session's completed-response state
+- **AND** the session-level injection does not re-add the same anchor or trim the stored prefix
+- **AND** the dispatch goes upstream genuinely unanchored with the client's untrimmed payload
+- **AND** the suppression applies even when the fresh-reattach injection was already ineligible for other reasons (for example a conversation-scoped payload, a live alias session, or an active-owner forward that falls back to a local rebind)
+
+#### Scenario: Quarantined session is excluded from reuse selection
+
+- **GIVEN** a session marked quarantined that is still live or retained for admission handoff
+- **WHEN** a new request looks up that session key
+- **THEN** the session is not considered reusable
+- **AND** the request proceeds on a fresh session instead
+- **AND** a replacement session created under the same still-quarantined key is likewise not reusable until a completion or the TTL clears the quarantine
+
+#### Scenario: Repeated eventless timeouts quarantine the key
+
+- **GIVEN** a session key whose pending request already retired once with the eventless `missing_response_created_timeout`
+- **WHEN** a subsequent attach on the same key retires with the same eventless timeout before any response completes on the key
+- **THEN** the session key is quarantined with reason `repeated_eventless_timeout`
+- **AND** the first timeout alone does not quarantine the key
+
+#### Scenario: Deferred-reasoning live turn is never quarantined
+
+- **GIVEN** an owned live turn whose `response.created` was observed and whose events flow with long gaps (deferred reasoning)
+- **WHEN** its stream later fails or its session is retired
+- **THEN** the session key is not quarantined
+- **AND** later requests keep the existing reuse and anchor-injection behavior
+
+#### Scenario: Delta-only payloads keep their anchor while quarantined
+
+- **GIVEN** a quarantined session key — including one whose quarantined session is still open with other active requests
+- **WHEN** a later request arrives whose payload does not look like a full conversation resend
+- **THEN** the still-open quarantined session counts as absent for durable-anchor selection
+- **AND** the durable anchor is still injected for that request, preserving the client's only way to convey prior context
+
+#### Scenario: Quarantine is bounded and self-clearing
+
+- **GIVEN** a quarantined session key
+- **WHEN** a response completes on that session key, or the quarantine TTL elapses
+- **THEN** the quarantine (and its eventless strike counter) is cleared
+- **AND** a session that survived the quarantine window is reusable again instead of staying rejected forever
+- **AND** no durable row, janitor work, or account-health write was involved at any point
+
+#### Scenario: Detached predecessor cannot clear a replacement quarantine
+
+- **GIVEN** a predecessor session quarantined a primary bridge key
+- **AND** a replacement session reused that key and received a newer quarantine generation
+- **WHEN** the detached predecessor completes and runs quarantine cleanup
+- **THEN** the replacement's primary-key quarantine remains active
+- **AND** the replacement generation remains authoritative
+
+#### Scenario: A recovery that observed no quarantine cannot clear a raced one
+
+- **GIVEN** a stale-anchor recovery observed no active quarantine on its recovery-origin key when it was authorized
+- **AND** that key is quarantined while the retry is in flight
+- **WHEN** the recovery completes and runs quarantine cleanup
+- **THEN** the raced quarantine remains active
+- **AND** this holds whether the recovery-origin key is a distinct key or the completing session's own key

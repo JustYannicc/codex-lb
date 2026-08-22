@@ -653,6 +653,19 @@ def _normalize_http_bridge_error_event(
     explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
 
+    # One derivation for both consumers below: the event still wins over the
+    # payload for code/type/message, but the payload error detail is also the
+    # source of the rate-limit metadata and of the fallback parameter state.
+    payload_error: dict[str, JsonValue] | None = None
+    if isinstance(payload, dict):
+        candidate = payload.get("error")
+        if not isinstance(candidate, dict):
+            candidate = _websocket_top_level_error_payload(payload)
+            if isinstance(candidate, dict) and "param" in payload:
+                candidate = {**candidate, "param": payload["param"]}
+        if isinstance(candidate, dict):
+            payload_error = candidate
+
     if event is not None and event.error is not None:
         error_code_value = event.error.code
         error_type_value = event.error.type
@@ -660,50 +673,36 @@ def _normalize_http_bridge_error_event(
         error_param_state = event.error.param_state
         if isinstance(error_code_value, str) and error_code_value.strip():
             explicit_error_code = True
-    elif isinstance(payload, dict):
-        payload_error = payload.get("error")
-        if not isinstance(payload_error, dict):
-            payload_error = _websocket_top_level_error_payload(payload)
-            if isinstance(payload_error, dict) and "param" in payload:
-                payload_error = {**payload_error, "param": payload["param"]}
-        if isinstance(payload_error, dict):
-            code_value = payload_error.get("code")
-            if isinstance(code_value, str):
-                stripped = code_value.strip()
-                if stripped:
-                    error_code_value = stripped
-                    explicit_error_code = True
-            type_value = payload_error.get("type")
-            if isinstance(type_value, str):
-                stripped = type_value.strip()
-                if stripped:
-                    error_type_value = stripped
-            message_value = payload_error.get("message")
-            if isinstance(message_value, str):
-                stripped = message_value.strip()
-                if stripped:
-                    error_message_value = stripped
-            if not error_param_state.present:
-                error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
+    elif payload_error is not None:
+        code_value = payload_error.get("code")
+        if isinstance(code_value, str):
+            stripped = code_value.strip()
+            if stripped:
+                error_code_value = stripped
+                explicit_error_code = True
+        type_value = payload_error.get("type")
+        if isinstance(type_value, str):
+            stripped = type_value.strip()
+            if stripped:
+                error_type_value = stripped
+        message_value = payload_error.get("message")
+        if isinstance(message_value, str):
+            stripped = message_value.strip()
+            if stripped:
+                error_message_value = stripped
 
-    if isinstance(payload, dict):
-        raw_error = payload.get("error")
-        if not isinstance(raw_error, dict):
-            raw_error = _websocket_top_level_error_payload(payload)
-            if isinstance(raw_error, dict) and "param" in payload:
-                raw_error = {**raw_error, "param": payload["param"]}
-        if isinstance(raw_error, dict):
-            if not error_param_state.present:
-                error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
-            plan_type = raw_error.get("plan_type")
-            if isinstance(plan_type, str):
-                rate_limit_metadata["plan_type"] = plan_type
-            resets_at = raw_error.get("resets_at")
-            if isinstance(resets_at, int | float):
-                rate_limit_metadata["resets_at"] = resets_at
-            resets_in = raw_error.get("resets_in_seconds")
-            if isinstance(resets_in, int | float):
-                rate_limit_metadata["resets_in_seconds"] = resets_in
+    if payload_error is not None:
+        if not error_param_state.present:
+            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
+        plan_type = payload_error.get("plan_type")
+        if isinstance(plan_type, str):
+            rate_limit_metadata["plan_type"] = plan_type
+        resets_at = payload_error.get("resets_at")
+        if isinstance(resets_at, int | float):
+            rate_limit_metadata["resets_at"] = resets_at
+        resets_in = payload_error.get("resets_in_seconds")
+        if isinstance(resets_in, int | float):
+            rate_limit_metadata["resets_in_seconds"] = resets_in
 
     if request_state is not None:
         if request_state.error_code_override is not None:

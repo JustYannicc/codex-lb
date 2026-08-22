@@ -5444,6 +5444,18 @@ class _WebSocketMixin:
                 malformed_param = not is_previous_response_not_found_event
                 if not malformed_param:
                     upstream_control.reconnect_requested = True
+                else:
+                    # Same accounting as the grouped path: the frame claimed
+                    # ownership for masking only, so the fail-closed decision
+                    # must stay visible to continuity observability instead of
+                    # disappearing with the unmatched frame.
+                    _record_continuity_fail_closed(
+                        surface="websocket_stream",
+                        reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+                        previous_response_id=previous_response_id_hint,
+                        session_id=None,
+                        upstream_error_code="previous_response_not_found",
+                    )
                 fallback_error_code, fallback_error_message = _websocket_continuity_error_fields(
                     reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
                     if malformed_param

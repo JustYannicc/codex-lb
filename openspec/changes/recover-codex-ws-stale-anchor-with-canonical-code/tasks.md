@@ -190,3 +190,21 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   failure survives.
 - [x] 8.50 Assert the retry-circuit migration's `admission_generation`
   nullability and the delayed-failure `updated_at_epoch` contract.
+- [x] 8.51 Deny recovery-origin quarantine clearing when no generation was
+  observed at authorization, covering the distinct-key and same-key shapes.
+- [x] 8.52 Canonicalize `param` inside `response_failed_event` and the public
+  client error-detail serializers so no raw malformed, blank, or non-string
+  value reaches a client, while valid values stay trimmed and
+  code/message/type are preserved.
+- [x] 8.53 Use top-level `error_type` rather than the `type: "error"` frame
+  discriminator when the shared HTTP-bridge error parser reads a top-level
+  error frame, with direct shared-parser coverage.
+- [x] 8.54 Collapse the duplicated payload-error derivation in
+  `http_bridge/helpers.py` into one lookup without changing event-over-payload
+  precedence.
+- [x] 8.55 Carry the client param canonicalization, fenced retry-circuit clear,
+  and quarantine generation fencing requirements in the change delta so
+  archive/sync preserves them in the main spec.
+- [x] 8.56 Record the continuity fail-closed decision on the ungrouped
+  malformed stale-anchor WebSocket path with surface `websocket_stream`, so the
+  unmatched frame is as observable as the grouped one.

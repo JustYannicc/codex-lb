@@ -511,6 +511,10 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 - **THEN** the public stream MUST emit a synthesized `response.created` event derived from the failed event's `response` envelope before forwarding the `response.failed` event
 - **AND** an OpenAI Python SDK consumer iterating the stream MUST NOT raise `RuntimeError` from the parser's initial-response check
 
+#### Scenario: Normal stream is not double-emitted
+- **WHEN** the upstream's first standard event is already `response.created`
+- **THEN** the public stream MUST emit exactly one `response.created` event (no synthesized duplicate)
+
 ### Requirement: Client-facing Responses error params are canonicalized
 
 The presence-aware raw `OpenAIErrorParam` state MUST remain available to
@@ -545,10 +549,6 @@ and raw error details are removed.
 - **WHEN** public masking rewrites the failure
 - **THEN** the rewritten failure retains that current id
 - **AND** it omits the stale upstream id and malformed parameter
-
-#### Scenario: Normal stream is not double-emitted
-- **WHEN** the upstream's first standard event is already `response.created`
-- **THEN** the public stream MUST emit exactly one `response.created` event (no synthesized duplicate)
 
 ### Requirement: Upstream overload envelopes are classified as retryable transient failures
 
@@ -4950,7 +4950,7 @@ When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its 
 
 While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
 
-Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. Additional recovery-origin keys MUST retain their existing generation fence.
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. A recovery-origin key supplied by a stale-anchor completion MUST be fenced by the exact quarantine generation observed when that recovery was authorized, for both the distinct-key and same-key shapes; when no generation was observed, that completion MUST NOT clear the recovery-origin key.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 
@@ -5028,6 +5028,14 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 - **WHEN** the detached predecessor completes and runs quarantine cleanup
 - **THEN** the replacement's primary-key quarantine remains active
 - **AND** the replacement generation remains authoritative
+
+#### Scenario: A recovery that observed no quarantine cannot clear a raced one
+
+- **GIVEN** a stale-anchor recovery observed no active quarantine on its recovery-origin key when it was authorized
+- **AND** that key is quarantined while the retry is in flight
+- **WHEN** the recovery completes and runs quarantine cleanup
+- **THEN** the raced quarantine remains active
+- **AND** this holds whether the recovery-origin key is a distinct key or the completing session's own key
 
 ### Requirement: Scoped operation identity
 

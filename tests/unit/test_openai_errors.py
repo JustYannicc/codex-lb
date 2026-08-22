@@ -51,6 +51,36 @@ def test_response_failed_event_preserves_reset_hint():
     assert event["response"]["error"].get("resets_at") == 1_700_003_600
 
 
+def test_response_failed_event_omits_malformed_params():
+    """No raw malformed value may cross this client-facing serializer."""
+    for param in (OpenAIErrorParam.absent(), OpenAIErrorParam(True, None), *_MALFORMED_PARAMS):
+        event = response_failed_event(
+            "previous_response_not_found",
+            "Previous response was not found.",
+            error_type="invalid_request_error",
+            response_id="resp_1",
+            error_param=param,
+        )
+
+        error = event["response"]["error"]
+        assert "param" not in error
+        assert error.get("code") == "previous_response_not_found"
+        assert error.get("type") == "invalid_request_error"
+        assert error.get("message") == "Previous response was not found."
+
+
+def test_response_failed_event_trims_canonical_param():
+    for param in ("  previous_response_id  ", OpenAIErrorParam(True, "  previous_response_id  ")):
+        event = response_failed_event(
+            "previous_response_not_found",
+            "Previous response was not found.",
+            response_id="resp_1",
+            error_param=param,
+        )
+
+        assert event["response"]["error"].get("param") == "previous_response_id"
+
+
 def test_public_error_param_normalization_omits_malformed_values():
     for param in (None, 0, False, {}, [], "", "   ", "\t\n"):
         assert normalize_public_error_param(param) is None

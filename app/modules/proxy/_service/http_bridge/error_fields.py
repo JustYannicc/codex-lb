@@ -53,9 +53,17 @@ def _error_detail_from_payload(payload: Mapping[str, JsonValue]) -> Mapping[str,
             return response_error
 
     # ChatGPT-backed Codex websocket frames may put OpenAI error fields
-    # directly on a ``type: error`` event rather than under ``error``.
+    # directly on a ``type: error`` event rather than under ``error``.  On that
+    # shape ``type`` is the event discriminator, so the upstream error type
+    # arrives as ``error_type``; reading ``type`` here would classify every
+    # such frame as type ``error``.
     if payload.get("type") == "error":
-        return payload
+        detail = dict(payload)
+        detail.pop("type", None)
+        error_type = payload.get("error_type")
+        if error_type is not None:
+            detail["type"] = error_type
+        return detail
     return None
 
 

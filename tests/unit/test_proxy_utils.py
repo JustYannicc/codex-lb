@@ -26264,6 +26264,58 @@ async def test_process_upstream_websocket_text_skips_foreign_prev_nf_for_mismatc
     assert list(pending_requests) == [pending_request]
 
 
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_fail_closed_for_unmatched_malformed_prev_nf(
+    monkeypatch,
+    caplog,
+):
+    """The ungrouped malformed stale-anchor frame must record the fail-closed reason.
+
+    The grouped path already records it; an unmatched frame masked on the same
+    classifier must not stay invisible to continuity observability.
+    """
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_unmatched_malformed_prev_nf")
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Cannot continue conversation because upstream lost resp_anchor_unmatched.",
+            "param": {},
+        },
+    }
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        downstream_text = await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=deque(),
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(1),
+        )
+
+    assert (
+        "continuity_fail_closed surface=websocket_stream reason=previous_response_not_found_malformed_param"
+        in caplog.text
+    )
+    assert "upstream_error_code=previous_response_not_found" in caplog.text
+    assert '"type":"response.failed"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "resp_anchor_unmatched" not in downstream_text
+    # A malformed parameter is never a reconnect or replay signal.
+    assert upstream_control.reconnect_requested is False
+    handle_stream_error.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "payload",
     [

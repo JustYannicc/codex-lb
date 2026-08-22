@@ -212,50 +212,48 @@ def _clear_http_bridge_quarantine(
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
 ) -> None:
-    """A completed response disproves the current and recovery-origin wedges."""
+    """A completed response disproves the current and recovery-origin wedges.
+
+    ``additional_key_generation`` is the quarantine generation the recovery
+    observed for ``additional_key`` when the retry was authorized, and ``None``
+    means it observed no quarantine at all.  Either way the recovery-origin
+    clear is fenced: only an exact generation match clears it.
+    """
     registry = _http_bridge_quarantine_registry(service)
     keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
     for key in keys:
         entry = registry.get(key)
-        # A stale-anchor recovery records the generation it observed before
-        # retrying.  When its recovery key is also the primary key, that
-        # generation is the only proof that this completion may clear the
-        # entry: the same session/key can have been quarantined again while
-        # the retry was in flight.  Check before mutating the session marker or
-        # popping the registry entry.
-        if (
-            key == session.key
-            and additional_key == session.key
-            and additional_key_generation is not None
-            and (entry is None or entry.generation != additional_key_generation)
-        ):
-            continue
-        active_sessions = getattr(service, "_http_bridge_sessions", None)
-        is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
-        if (
-            key == session.key
-            and entry is not None
-            and entry.owner_ref is not None
-            and entry.owner_ref() is not session
-            and not is_current_primary_session
-        ):
-            # Only the session that created the primary-key entry may clear
-            # it.  A detached predecessor can finish after a replacement has
-            # reused the key, even if its per-session flag was already reset;
-            # the canonical registry fences that completion from popping the
-            # replacement's newer primary entry.  A healthy canonical
-            # replacement may still clear the key after its own response
-            # completes.
-            continue
+        if additional_key is not None and key == additional_key:
+            # A stale-anchor recovery snapshots the quarantine generation of
+            # its recovery-origin key when the retry is authorized, and that
+            # snapshot is the only proof that this completion may clear the
+            # entry.  ``None`` is the observed *absence* of a quarantine, not
+            # a missing fence: any entry sitting on the key now was raced in
+            # while the retry was in flight and must survive.  A mismatching
+            # generation is a newer quarantine for the same reason.  This
+            # holds for both recovery shapes — a distinct recovery key and the
+            # completing session's own key — and is checked before mutating
+            # the session marker or popping the registry entry.
+            if additional_key_generation is None or entry is None or entry.generation != additional_key_generation:
+                continue
         if key == session.key:
+            active_sessions = getattr(service, "_http_bridge_sessions", None)
+            is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
+            if (
+                entry is not None
+                and entry.owner_ref is not None
+                and entry.owner_ref() is not session
+                and not is_current_primary_session
+            ):
+                # Only the session that created the primary-key entry may
+                # clear it.  A detached predecessor can finish after a
+                # replacement has reused the key, even if its per-session flag
+                # was already reset; the canonical registry fences that
+                # completion from popping the replacement's newer primary
+                # entry.  A healthy canonical replacement may still clear the
+                # key after its own response completes.
+                continue
             session.quarantined = False
-        if (
-            key == additional_key
-            and key != session.key
-            and additional_key_generation is not None
-            and (entry is None or entry.generation != additional_key_generation)
-        ):
-            continue
         entry = registry.pop(key, None)
         if entry is None or entry.quarantined_until <= time.monotonic():
             continue
