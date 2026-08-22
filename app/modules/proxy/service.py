@@ -802,7 +802,8 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # Maximum consecutive keepalive frames sent before terminating the stream.
 # 6 × 10s (default interval) = 60s.  Combined with the 0.5s startup-probe
-# window this ensures the client sees a terminal event within ≈70s when the upstream silently stops responding.
+# window this ensures the client sees a terminal event within ≈70s when the
+# upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
 
@@ -1329,9 +1330,8 @@ class ProxyService(
                 if not should_retire_stuck_session and any(
                     max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
                 ):
-                    # A gate waiter starved past the stuck threshold without the
-                    # watchdog firing: dump every pending state's verdict inputs
-                    # so the blocking condition is identifiable from prod logs.
+                    # A gate waiter starved past the threshold without the watchdog firing.
+                    # Dump every pending state's verdict inputs so production logs show the blocker.
                     logger.warning(
                         "http_bridge_stuck_watchdog_skipped session_closed=%s candidates=%s states=%s",
                         bridge_session.closed,
