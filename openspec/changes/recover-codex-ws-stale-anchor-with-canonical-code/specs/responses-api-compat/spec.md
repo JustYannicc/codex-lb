@@ -248,21 +248,6 @@ continuity reason distinct from a proven stale-anchor miss.
 - **AND** it does not create or recover a local bridge session on the current
   replica
 
-#### Scenario: unreplayable client anchor uses the dead-owner contract
-
-- **GIVEN** a request is bound to a client-provided durable previous-response
-  anchor
-- **AND** that durable row belongs to a dead owner
-- **AND** the payload does not have a safe fresh-turn replay proof
-- **WHEN** the bridge must fail closed
-- **THEN** the client receives the retryable
-  `previous_response_owner_unavailable` error because the durable previous-
-  response owner was resolved but is unavailable
-- **AND** the error code is not `previous_response_not_found`
-- **AND** continuity failure metadata records reason
-  `owner_account_unavailable`, distinct from a proven stale-anchor miss
-- **AND** the response does not include a bridge-specific recovery code
-
 #### Scenario: required owner differs from the open WebSocket account
 
 - **WHEN** a direct WebSocket follow-up resolves to an owner different from the
@@ -277,6 +262,55 @@ continuity reason distinct from a proven stale-anchor miss.
 - **WHEN** a direct WebSocket follow-up resolves to the currently open owner
 - **THEN** the service sends it on that socket without a new selector-based
   eligibility check
+
+### Requirement: Dead durable anchors recover transparently when safe
+
+When a continuity-bound HTTP bridge request is supplied by a durable
+previous-response anchor whose owner instance, process epoch, or lease is
+proven dead, the proxy MUST use the existing safe replay proof to dispatch a
+fresh turn without that anchor. When a client-provided anchor cannot be safely
+replayed as a fresh turn, the proxy MUST fail closed with the applicable
+retryable owner-unavailable error and MUST record a continuity reason distinct
+from a proven stale-anchor miss. It MUST NOT surface
+`previous_response_not_found` for this path because upstream never rejected the
+anchor.
+
+#### Scenario: Previous-process anchor with replayable context recovers automatically
+
+- **GIVEN** a request is bound to a durable previous-response anchor
+- **AND** that durable row belongs to the same instance id but a different
+  process owner epoch
+- **AND** the payload has a safe full-context replay proof
+- **WHEN** the bridge hits the pre-submit, startup-cooldown, or retry-circuit
+  idle terminal path
+- **THEN** the proxy dispatches the request as a fresh turn without the dead
+  previous-response anchor
+- **AND** the client receives the normal streaming response
+- **AND** the response does not include `stream_idle_timeout` retry guidance or
+  a bridge-specific recovery error
+
+#### Scenario: Unreplayable client anchor uses the owner-unavailable contract
+
+- **GIVEN** a request is bound to a client-provided durable previous-response
+  anchor
+- **AND** that durable row belongs to a dead owner
+- **AND** the payload does not have a safe fresh-turn replay proof
+- **WHEN** the bridge must fail closed
+- **THEN** the client receives the retryable
+  `previous_response_owner_unavailable` error because the durable previous-
+  response owner was resolved but is unavailable
+- **AND** the error code is not `previous_response_not_found`
+- **AND** continuity failure metadata records reason
+  `owner_account_unavailable`, distinct from a proven stale-anchor miss
+- **AND** the response does not include a bridge-specific recovery code
+
+#### Scenario: Current-owner silence remains retryable
+
+- **GIVEN** a request is bound to a durable owner whose instance id, process
+  owner epoch, and lease are current
+- **WHEN** upstream produces no response events through the existing idle window
+- **THEN** the proxy preserves the existing retryable `stream_idle_timeout`
+  behavior
 
 ### Requirement: Codex WebSocket top-level previous-response errors are masked
 When serving the Codex-native `/backend-api/codex/responses` WebSocket route, the proxy MUST treat upstream `type: "error"` frames with top-level error fields as upstream error envelopes if the frame does not contain a nested `error` object. If those fields describe a `previous_response_not_found` continuity miss, the proxy MUST use the existing continuity fail-closed behavior and MUST NOT forward the raw upstream error envelope or the missing response id to the downstream Codex client. The proxy MUST surface the sanitized canonical `previous_response_not_found` code to the Codex-native client so an unmodified client recovers, while public `/v1/responses` clients receive `stream_incomplete`.
