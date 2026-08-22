@@ -3323,6 +3323,28 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     assert absent_claim is not None
     assert absent_claim.admission_generation == 1
 
+    absent_existing_row_conflict = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+        expected_updated_at_epoch=None,
+        expected_admission_generation=0,
+        expected_consecutive_failures=0,
+        expected_cooldown_until_epoch=0.0,
+    )
+    assert absent_existing_row_conflict is None
+
+    absent_nonzero_generation = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim-absent-nonzero-generation",
+        api_key_id="key-claim",
+        expected_updated_at_epoch=None,
+        expected_admission_generation=1,
+        expected_consecutive_failures=0,
+        expected_cooldown_until_epoch=0.0,
+    )
+    assert absent_nonzero_generation is None
+
     await coordinator.persist_retry_circuit(
         session_key_kind="session_header",
         session_key_value="sid-retry-circuit-claim",
