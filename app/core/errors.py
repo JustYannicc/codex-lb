@@ -231,11 +231,19 @@ def is_previous_response_not_found_public_shape(
     malformed ``param`` would be forwarded verbatim and leak both the internal
     classifier code and the raw malformed value to a public ``/v1`` client.
 
-    Masking therefore keys off the canonical code alone. Non-canonical shapes
-    still use the strict recovery classifier without changing how their
-    parameter metadata is interpreted.
+    Masking therefore keys off the canonical code or a clearly stale-anchor
+    message, even when a non-canonical error carries malformed parameter
+    metadata. Non-canonical shapes still use the strict recovery classifier for
+    replay authorization without changing how their parameter metadata is
+    interpreted.
     """
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
+        return True
+    if code == "invalid_request_error" and (
+        is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
+    ):
+        # A malformed ``param`` must not let a message that contains a raw
+        # previous-response id pass through an unmasked public boundary.
         return True
     return is_previous_response_not_found_error(
         code=code,

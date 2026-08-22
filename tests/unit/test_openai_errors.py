@@ -214,13 +214,30 @@ def test_public_shape_masks_canonical_code_regardless_of_malformed_param():
         )
 
 
-def test_public_shape_keeps_noncanonical_malformed_params_fail_closed():
+def test_recovery_classifier_keeps_noncanonical_malformed_params_fail_closed():
     for param in _MALFORMED_PARAMS:
-        assert not is_previous_response_not_found_public_shape(
+        assert not is_previous_response_not_found_error(
             code="invalid_request_error",
             param=param,
             message="Invalid `previous_response_id`.",
         )
+
+
+def test_public_shape_masks_noncanonical_malformed_params_with_stale_message():
+    for param in _MALFORMED_PARAMS:
+        assert is_previous_response_not_found_public_shape(
+            code="invalid_request_error",
+            param=param,
+            message="Invalid `previous_response_id`.",
+        )
+
+
+def test_public_shape_masks_raw_previous_response_id_with_malformed_param():
+    assert is_previous_response_not_found_public_shape(
+        code="invalid_request_error",
+        param={},
+        message="Previous response with id 'resp_leaked' not found.",
+    )
 
 
 def test_public_shape_is_a_superset_of_the_recovery_classifier():

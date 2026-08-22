@@ -2113,11 +2113,17 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
             "code": "invalid_request_error",
             "message": "Invalid `previous_response_id`.",
         },
+        {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Previous response with id 'resp_http_raw_id' not found.",
+            "param": {},
+        },
     ],
-    ids=["canonical-malformed-param", "parameterless-invalid-request"],
+    ids=["canonical-malformed-param", "parameterless-invalid-request", "noncanonical-malformed-param"],
 )
 async def test_v1_responses_stream_masks_stale_errors_without_raw_fields(async_client, monkeypatch, upstream_error):
-    if upstream_error.get("code") == "invalid_request_error":
+    if upstream_error.get("message") == "Invalid `previous_response_id`.":
         normalized_message = " ".join(upstream_error["message"].replace("`", "").split())
         assert normalized_message == "Invalid previous_response_id."
 
@@ -2164,6 +2170,7 @@ async def test_v1_responses_stream_masks_stale_errors_without_raw_fields(async_c
     assert "param" not in error
     assert "previous_response_not_found" not in json.dumps(event)
     assert "resp_http_stale" not in json.dumps(event)
+    assert "resp_http_raw_id" not in json.dumps(event)
 
 
 @pytest.mark.asyncio
