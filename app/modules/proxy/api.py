@@ -8724,7 +8724,7 @@ def _normalize_public_stream_payload(
     # they continue to forward unchanged.
     if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
-    if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
+    if enforce_openai_sdk_contract and (event_type == "error" or event_type == "response.failed"):
         if event_type == "error":
             parsed_error = _parse_event_error_envelope(payload)
         else:

@@ -680,7 +680,13 @@ def test_public_previous_response_invalid_request_param_is_masked_to_stream_inco
     assert error["code"] == "stream_incomplete"
 
 
-def test_public_previous_response_error_event_is_masked_to_response_failed():
+@pytest.mark.parametrize(
+    "enforce_openai_sdk_contract",
+    [pytest.param(True, id="openai-sdk-contract"), pytest.param(False, id="codex-native")],
+)
+def test_previous_response_error_event_rewrite_is_scoped_to_openai_sdk_contract(
+    enforce_openai_sdk_contract: bool,
+) -> None:
     payload = {
         "type": "error",
         "status": 400,
@@ -692,16 +698,26 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(
+        cast(dict[str, JsonValue], payload),
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
 
     assert violation_kind is None
     assert normalized is not None
-    assert normalized["type"] == "response.failed"
-    response = cast(dict[str, object], normalized["response"])
-    error = cast(dict[str, object], response["error"])
-    assert error["code"] == "stream_incomplete"
-    assert error["type"] == "server_error"
-    assert "resp_missing" not in json.dumps(normalized)
+    if enforce_openai_sdk_contract:
+        assert normalized["type"] == "response.failed"
+        response = cast(dict[str, object], normalized["response"])
+        error = cast(dict[str, object], response["error"])
+        assert error["code"] == "stream_incomplete"
+        assert error["type"] == "server_error"
+        assert "resp_missing" not in json.dumps(normalized)
+    else:
+        assert normalized["type"] == "error"
+        error = cast(dict[str, object], normalized["error"])
+        assert error["code"] == "previous_response_not_found"
+        assert error["param"] == "previous_response_id"
+        assert "resp_missing" in json.dumps(normalized)
 
 
 def test_public_previous_response_failed_mask_preserves_current_response_id():
