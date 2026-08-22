@@ -4073,12 +4073,12 @@ transient upstream silence.
 - **AND** that durable row belongs to a dead owner
 - **AND** the payload does not have a safe fresh-turn replay proof
 - **WHEN** the bridge must fail closed
-- **THEN** the client receives the applicable retryable owner-unavailable
-  error (`previous_response_owner_unavailable`, `bridge_owner_unreachable`, or
-  `upstream_unavailable`)
+- **THEN** the client receives the retryable
+  `previous_response_owner_unavailable` error because the durable previous-
+  response owner was resolved but is unavailable
 - **AND** the error code is not `previous_response_not_found`
-- **AND** continuity failure metadata records an owner-unavailable reason
-  distinct from a proven stale-anchor miss
+- **AND** continuity failure metadata records reason
+  `owner_account_unavailable`, distinct from a proven stale-anchor miss
 - **AND** the response does not include a bridge-specific recovery code
 
 #### Scenario: Current-owner silence remains retryable

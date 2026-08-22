@@ -87,7 +87,7 @@ def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> 
     )
 
 
-def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_contract() -> None:
+def test_http_bridge_dead_owner_epoch_uses_owner_unavailable_contract() -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     stale = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
         _durable_owner_lookup(process_epoch="boot-a", lease_expires_at=now + timedelta(minutes=5)),
@@ -105,22 +105,25 @@ def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_
 
     terminal = cast(
         dict[str, Any],
-        http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_terminal(
-            previous_response_id="resp-dead-owner",
-            response_id="resp-dead-owner",
+        http_bridge_streaming_module._http_bridge_dead_owner_unavailable_terminal(
+            response_id="resp-downstream",
         ),
     )
     terminal_error = cast(dict[str, Any], cast(dict[str, Any], terminal["response"])["error"])
-    assert terminal_error["type"] == "invalid_request_error"
-    assert terminal_error["code"] == "previous_response_not_found"
-    assert terminal_error["param"] == "previous_response_id"
-    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_proxy_error(
-        previous_response_id="resp-dead-owner",
-    )
-    assert proxy_error.status_code == 400
-    assert proxy_error.payload["error"]["type"] == "invalid_request_error"
-    assert proxy_error.payload["error"]["code"] == "previous_response_not_found"
-    assert proxy_error.payload["error"]["param"] == "previous_response_id"
+    assert terminal_error == {
+        "type": "server_error",
+        "code": "previous_response_owner_unavailable",
+        "message": "Previous response owner account is unavailable; retry later.",
+    }
+    assert "resp-dead-owner" not in json.dumps(terminal)
+    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_unavailable_proxy_error()
+    assert proxy_error.status_code == 502
+    assert proxy_error.payload["error"] == {
+        "type": "server_error",
+        "code": "previous_response_owner_unavailable",
+        "message": "Previous response owner account is unavailable; retry later.",
+    }
+    assert "resp-dead-owner" not in json.dumps(proxy_error.payload)
 
 
 def test_http_bridge_rejected_dead_owner_recovery_code_is_not_emitted_from_app() -> None:

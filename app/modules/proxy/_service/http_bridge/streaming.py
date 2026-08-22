@@ -82,7 +82,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
-    _http_bridge_previous_response_error_envelope,
+    _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
@@ -477,23 +477,10 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     return payload
 
 
-_HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
+def _http_bridge_dead_owner_unavailable_terminal(*, response_id: str) -> dict[str, JsonValue]:
+    """Return the retryable owner-unavailable terminal for an unreplayable dead owner."""
 
-
-def _http_bridge_dead_owner_previous_response_not_found_terminal(
-    *,
-    previous_response_id: str,
-    response_id: str,
-) -> dict[str, JsonValue]:
-    """Return the standard not-found terminal for an unreplayable dead owner."""
-
-    error = cast(
-        dict[str, JsonValue],
-        _http_bridge_previous_response_error_envelope(
-            previous_response_id,
-            _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
-        )["error"],
-    )
+    error = cast(dict[str, JsonValue], _http_bridge_previous_response_owner_unavailable_error().payload["error"])
     return cast(
         dict[str, JsonValue],
         response_failed_event(
@@ -501,26 +488,14 @@ def _http_bridge_dead_owner_previous_response_not_found_terminal(
             cast(str, error["message"]),
             error_type=cast(str, error["type"]),
             response_id=response_id,
-            error_param=cast(str, error["param"]),
         ),
     )
 
 
-def _http_bridge_dead_owner_previous_response_not_found_proxy_error(
-    *,
-    previous_response_id: str,
-) -> ProxyResponseError:
-    return ProxyResponseError(
-        400,
-        _http_bridge_previous_response_error_envelope(
-            previous_response_id,
-            _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
-        ),
-    )
+def _http_bridge_dead_owner_unavailable_proxy_error() -> ProxyResponseError:
+    """Return the retryable owner-unavailable error for an unreplayable dead owner."""
 
-
-def _http_bridge_dead_owner_previous_response_id(request_state: _WebSocketRequestState) -> str:
-    return request_state.previous_response_id or _websocket_downstream_response_id(request_state)
+    return _http_bridge_previous_response_owner_unavailable_error()
 
 
 def _http_bridge_durable_owner_is_dead(
@@ -3890,9 +3865,16 @@ class _HTTPBridgeStreamingMixin:
                 stream_idle_timeout_total.labels(surface="http_bridge").inc()
             _record_continuity_fail_closed(
                 surface="http_bridge",
-                reason="retry_circuit_cooldown_continuity_bound",
+                reason=(
+                    "owner_account_unavailable"
+                    if request_state.durable_owner_dead
+                    else "retry_circuit_cooldown_continuity_bound"
+                ),
                 previous_response_id=request_state.previous_response_id,
                 session_id=downstream_turn_state or request_state.session_id,
+                upstream_error_code=(
+                    "previous_response_owner_unavailable" if request_state.durable_owner_dead else None
+                ),
             )
             logger.info(
                 "HTTP bridge stream idle timeout fail-closed before submit without safe replay "
@@ -3906,15 +3888,13 @@ class _HTTPBridgeStreamingMixin:
             # non-streaming collector.
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
-            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
-                    raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
-                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    raise _http_bridge_dead_owner_unavailable_proxy_error()
+                if _http_bridge_client_full_history_recovery_enabled(request_state):
+                    raise ProxyResponseError(
+                        400,
+                        _http_bridge_client_full_history_recovery_error(),
                     )
                 raise ProxyResponseError(
                     503,
@@ -3929,8 +3909,7 @@ class _HTTPBridgeStreamingMixin:
             return format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    _http_bridge_dead_owner_previous_response_not_found_terminal(
-                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    _http_bridge_dead_owner_unavailable_terminal(
                         response_id=_websocket_downstream_response_id(request_state),
                     )
                     if request_state.durable_owner_dead
@@ -4054,9 +4033,16 @@ class _HTTPBridgeStreamingMixin:
                 stream_idle_timeout_total.labels(surface="http_bridge").inc()
             _record_continuity_fail_closed(
                 surface="http_bridge",
-                reason="retry_circuit_cooldown_continuity_bound",
+                reason=(
+                    "owner_account_unavailable"
+                    if request_state.durable_owner_dead
+                    else "retry_circuit_cooldown_continuity_bound"
+                ),
                 previous_response_id=request_state.previous_response_id,
                 session_id=downstream_turn_state or request_state.session_id,
+                upstream_error_code=(
+                    "previous_response_owner_unavailable" if request_state.durable_owner_dead else None
+                ),
             )
             logger.info(
                 "HTTP bridge stream idle timeout fail-closed at startup without safe replay "
@@ -4067,8 +4053,7 @@ class _HTTPBridgeStreamingMixin:
             terminal_event = format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    _http_bridge_dead_owner_previous_response_not_found_terminal(
-                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    _http_bridge_dead_owner_unavailable_terminal(
                         response_id=_websocket_downstream_response_id(request_state),
                     )
                     if request_state.durable_owner_dead
@@ -4084,15 +4069,13 @@ class _HTTPBridgeStreamingMixin:
             # gate, reservation, and pending queue entry while marking the
             # upstream handoff for retirement.
             await self._detach_http_bridge_request(session, request_state=request_state)
-            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
-                    raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
-                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    raise _http_bridge_dead_owner_unavailable_proxy_error()
+                if _http_bridge_client_full_history_recovery_enabled(request_state):
+                    raise ProxyResponseError(
+                        400,
+                        _http_bridge_client_full_history_recovery_error(),
                     )
                 raise ProxyResponseError(
                     503,
@@ -4316,12 +4299,19 @@ class _HTTPBridgeStreamingMixin:
                                     _record_continuity_fail_closed(
                                         surface="http_bridge",
                                         reason=(
-                                            "retry_circuit_cooldown_continuity_bound"
+                                            "owner_account_unavailable"
+                                            if request_state.durable_owner_dead
+                                            else "retry_circuit_cooldown_continuity_bound"
                                             if continuity_bound
                                             else "retry_circuit_cooldown_no_safe_replay"
                                         ),
                                         previous_response_id=request_state.previous_response_id,
                                         session_id=downstream_turn_state or request_state.session_id,
+                                        upstream_error_code=(
+                                            "previous_response_owner_unavailable"
+                                            if request_state.durable_owner_dead
+                                            else None
+                                        ),
                                     )
                                     logger.info(
                                         "HTTP bridge stream idle timeout fail-closed without safe replay "
@@ -4330,6 +4320,8 @@ class _HTTPBridgeStreamingMixin:
                                         retry_cooldown_seconds,
                                         continuity_bound,
                                     )
+                                    if propagate_http_errors and request_state.durable_owner_dead:
+                                        raise _http_bridge_dead_owner_unavailable_proxy_error()
                                     if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(
                                         request_state
                                     ):
@@ -4340,10 +4332,7 @@ class _HTTPBridgeStreamingMixin:
                                     yield format_sse_event(
                                         cast(
                                             Mapping[str, JsonValue],
-                                            _http_bridge_dead_owner_previous_response_not_found_terminal(
-                                                previous_response_id=_http_bridge_dead_owner_previous_response_id(
-                                                    request_state
-                                                ),
+                                            _http_bridge_dead_owner_unavailable_terminal(
                                                 response_id=downstream_response_id,
                                             )
                                             if request_state.durable_owner_dead

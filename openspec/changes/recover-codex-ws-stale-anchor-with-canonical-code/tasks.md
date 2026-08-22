@@ -239,13 +239,11 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 
 ## 10. Exact-head review 5000900294
 
-- [x] 10.1 Correct the normative dead-owner fallback in the main
-  `responses-api-compat` spec: an unreplayable client anchor whose durable
-  owner is dead uses the applicable retryable owner-unavailable error and a
-  distinct owner-unavailable continuity reason, never
-  `previous_response_not_found`. The current implementation and its existing
-  regression test still emit/assert the old contract; no application or test
-  change is in scope for this docs-only review correction.
+- [x] 10.1 Align the dead-owner contract across the `responses-api-compat`
+  change delta, main spec, implementation, and regression: an unreplayable
+  client anchor whose durable owner is dead returns the retryable
+  `previous_response_owner_unavailable` error, records continuity reason
+  `owner_account_unavailable`, and never uses `previous_response_not_found`.
 - [x] 10.2 Align the main and change-delta quarantine requirements: quarantine
   handling may detach a session and invoke ordinary account selection, but
   MUST NOT itself mutate account health, routing score, eligibility, or durable
