@@ -14270,7 +14270,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
 
     assert chunks == []
     if forward_to_active_owner and retains_prior_output:
-        assert prepared_previous_response_ids == [None, None, None]
+        assert prepared_previous_response_ids == [None, None]
         assert forwarded_payloads == [payload]
     elif forward_to_active_owner:
         assert prepared_previous_response_ids == [None, "resp_latest"]
@@ -14278,7 +14278,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         normalized_input = cast(list[proxy_service.JsonValue], payload.input)
         assert prepared_inputs[-1] == normalized_input[len(prefix_items) :]
     else:
-        assert prepared_previous_response_ids == [None, None]
+        assert prepared_previous_response_ids == [None]
         assert forwarded_payloads == []
     assert get_or_create_kwargs[-1]["allow_forward_to_owner"] is False
     assert get_or_create_kwargs[-1]["exclude_account_ids"] == ({"acc-1"} if retains_prior_output else None)
