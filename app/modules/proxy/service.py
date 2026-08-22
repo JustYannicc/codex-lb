@@ -802,8 +802,7 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # Maximum consecutive keepalive frames sent before terminating the stream.
 # 6 × 10s (default interval) = 60s.  Combined with the 0.5s startup-probe
-# window this ensures the client sees a terminal event within ≈70s when the
-# upstream silently stops responding.
+# window this ensures the client sees a terminal event within ≈70s when the upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
 
