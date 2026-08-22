@@ -21,6 +21,8 @@ Scope:
 Primary files/hunks:
 
 - `app/core/errors.py`
+- `app/core/openai/models.py`
+- `app/modules/proxy/helpers.py`
 - Codex-native WebSocket sanitizer/export hunks in `app/modules/proxy/service.py`
 - WebSocket helper/mixin hunks that expose the canonical sanitized classifier
 - `tests/unit/test_openai_errors.py`

@@ -145,7 +145,6 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** successful replacement completion MUST clear the original-key quarantine only when it still matches the generation observed at recovery authorization
 - **AND** quarantine generations MUST remain unique for the service lifetime across TTL and size-cap pruning so a stale completion cannot clear a reused key
 - **AND** explicit stale-anchor rejection after any emitted response event or downstream-visible output MUST fail closed without anchored fallback dispatch
-- **AND** same-owner verified replay MUST use a unique internal key pinned to the proven owner rather than bypassing the original hard-key circuit
 
 #### Scenario: Anchored same-owner rebind treats spool reset as best effort
 - **GIVEN** an anchored HTTP-bridge continuity retry is locally rebound without removing its `previous_response_id`
