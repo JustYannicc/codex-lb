@@ -28968,6 +28968,115 @@ async def test_http_bridge_retry_circuit_does_not_report_reset_after_durable_cle
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_clear_keeps_local_state_when_newer_durable_failure_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-clear-race")
+    now_epoch = time.time()
+    durable_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=1800.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_epoch,
+        admission_generation=4,
+    )
+    clear_started = asyncio.Event()
+    release_clear = asyncio.Event()
+
+    async def clear_retry_circuit_impl(**kwargs: Any) -> bool:
+        assert kwargs["expected_updated_at_epoch"] == now_epoch
+        assert kwargs["expected_admission_generation"] == 4
+        clear_started.set()
+        await release_clear.wait()
+        if kwargs["expected_admission_generation"] != durable_row.admission_generation:
+            return False
+        if kwargs["expected_updated_at_epoch"] != durable_row.updated_at_epoch:
+            return False
+        return True
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=durable_row),
+        clear_retry_circuit=AsyncMock(side_effect=clear_retry_circuit_impl),
+    )
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now + 60.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=now_epoch,
+        persisted_admission_generation=4,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    labels = Mock()
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "http_bridge_retry_circuit_total",
+        SimpleNamespace(labels=labels),
+    )
+
+    clear_task = asyncio.create_task(service._clear_http_bridge_retry_circuit(hard_session))
+    await asyncio.wait_for(clear_started.wait(), timeout=0.5)
+    durable_row.consecutive_failures = 3
+    durable_row.cooldown_until_epoch = 1900.0
+    durable_row.last_detail = "stream_idle_timeout"
+    durable_row.updated_at_epoch = now_epoch + 1.0
+    durable_row.admission_generation = 5
+    release_clear.set()
+    await asyncio.wait_for(clear_task, timeout=0.5)
+
+    assert durable_row.consecutive_failures == 3
+    assert durable_row.cooldown_until_epoch == 1900.0
+    assert durable_row.last_detail == "stream_idle_timeout"
+    assert hard_session.key in cast(Any, service)._http_bridge_retry_circuits
+    assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key] is state
+    labels.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_clear_drops_local_state_after_conditional_success() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-clear-success")
+    now_epoch = time.time()
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=now_epoch + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_epoch,
+        admission_generation=4,
+    )
+    clear_retry_circuit = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=persisted),
+        clear_retry_circuit=clear_retry_circuit,
+    )
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=time.monotonic() + 60.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+        persisted_updated_at_epoch=now_epoch,
+        persisted_admission_generation=4,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+
+    await service._clear_http_bridge_retry_circuit(hard_session)
+
+    clear_retry_circuit.assert_awaited_once_with(
+        session_key_kind="session_header",
+        session_key_value="bridge-retry-clear-success",
+        api_key_id=None,
+        expected_updated_at_epoch=now_epoch,
+        expected_admission_generation=4,
+    )
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_clear_preserves_newer_failure_after_lookup_failure() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-retry-clear-after-lookup-failure")

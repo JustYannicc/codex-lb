@@ -541,7 +541,8 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -549,8 +550,10 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
@@ -561,6 +564,7 @@ class DurableBridgeRepository:
                 )
             )
             await self._session.commit()
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
     async def purge_retry_circuit(
         self,

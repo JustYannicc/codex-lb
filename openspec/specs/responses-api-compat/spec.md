@@ -268,14 +268,23 @@ cannot be erased.
 - **THEN** the request continues using any available local circuit state
 - **AND** the failure is logged and exposed through retry-circuit observability
 
-#### Scenario: durable clear lookup failure preserves a newer failure
+#### Scenario: durable retry-circuit clear is version and generation fenced
 
 - **GIVEN** a terminal success begins clearing a hard-key retry circuit
-- **AND** the durable lookup fails while a newer failure is committed
+- **AND** a successful durable lookup returns the persisted update version and admission generation
+- **WHEN** the terminal cleanup issues its durable clear
+- **THEN** the clear MUST atomically match both observed fences
+- **AND** a zero-row conditional clear MUST be treated as a newer durable state winning
+- **AND** the newer durable failure MUST remain authoritative
+- **AND** the local admission guard MUST remain available on the clearing replica
+
+#### Scenario: durable retry-circuit clear lookup failure preserves local state
+
+- **GIVEN** a terminal success begins clearing a hard-key retry circuit
+- **AND** the durable lookup fails
 - **WHEN** the terminal cleanup settles
-- **THEN** the proxy does not issue an unfenced durable clear
-- **AND** the newer durable failure remains authoritative
-- **AND** the local admission guard remains available on the clearing replica
+- **THEN** the proxy MUST NOT issue an unfenced durable clear
+- **AND** the local admission guard MUST remain available on the clearing replica
 
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.

@@ -3272,6 +3272,85 @@ async def test_durable_bridge_retry_circuit_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_clear_is_version_and_generation_fenced(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-clear-fence",
+        api_key_id="key-clear-fence",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+
+    observed = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-clear-fence",
+        api_key_id="key-clear-fence",
+    )
+    assert observed is not None
+    assert observed.updated_at_epoch == 1200.0
+    assert observed.admission_generation == 0
+
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-clear-fence",
+        api_key_id="key-clear-fence",
+        consecutive_failures=3,
+        cooldown_until_epoch=1400.0,
+        last_detail="stream_idle_timeout",
+        updated_at_epoch=1300.0,
+        base_updated_at_epoch=1200.0,
+    )
+
+    assert (
+        await coordinator.clear_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-clear-fence",
+            api_key_id="key-clear-fence",
+            expected_updated_at_epoch=1200.0,
+            expected_admission_generation=0,
+        )
+        is False
+    )
+    newer = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-clear-fence",
+        api_key_id="key-clear-fence",
+    )
+    assert newer is not None
+    assert newer.consecutive_failures == 3
+    assert newer.cooldown_until_epoch >= 1400.0
+    assert newer.last_detail == "stream_idle_timeout"
+    assert newer.updated_at_epoch == 1300.0
+    assert newer.admission_generation == 0
+
+    claimed = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-clear-fence",
+        api_key_id="key-clear-fence",
+        expected_updated_at_epoch=1300.0,
+        expected_admission_generation=0,
+        expected_consecutive_failures=3,
+        expected_cooldown_until_epoch=newer.cooldown_until_epoch,
+    )
+    assert claimed is not None
+    assert claimed.admission_generation == 1
+    assert (
+        await coordinator.clear_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-clear-fence",
+            api_key_id="key-clear-fence",
+            expected_updated_at_epoch=1300.0,
+            expected_admission_generation=0,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

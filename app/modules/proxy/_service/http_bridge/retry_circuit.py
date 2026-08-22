@@ -70,6 +70,7 @@ class _HTTPBridgeRetryCircuitState:
     last_detail: str | None = None
     last_touched_monotonic: float = 0.0
     persisted_updated_at_epoch: float = 0.0
+    persisted_admission_generation: int = 0
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     half_open_until: float = 0.0
@@ -137,13 +138,17 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_updated_at_epoch if state is not None else 0.0,
                 persisted.updated_at_epoch if persisted is not None else 0.0,
             )
+            persisted_admission_generation = max(
+                state.persisted_admission_generation if state is not None else 0,
+                persisted.admission_generation if persisted is not None else 0,
+            )
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
             last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
             local_cooldown_until = state.cooldown_until if state is not None else 0.0
             return True, _HTTPBridgeRetryCircuitGeneration(
-                admission_generation=persisted.admission_generation if persisted is not None else 0,
+                admission_generation=persisted_admission_generation,
                 persisted_updated_at_epoch=persisted_updated_at_epoch,
                 persisted_consecutive_failures=persisted_consecutive_failures,
                 durable_cooldown_until_epoch=durable_cooldown_until_epoch,
@@ -448,6 +453,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
                 state.last_detail = persisted.last_detail
+                state.persisted_admission_generation = max(0, persisted.admission_generation)
             else:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
                 state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
@@ -455,6 +461,10 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.last_detail = state.last_detail or persisted.last_detail
                 else:
                     state.last_detail = persisted.last_detail or state.last_detail
+                state.persisted_admission_generation = max(
+                    state.persisted_admission_generation,
+                    max(0, persisted.admission_generation),
+                )
             state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
@@ -511,6 +521,7 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.consecutive_failures = max(0, persisted.consecutive_failures)
                             state.cooldown_until = persisted_cooldown_until
                             state.last_detail = persisted.last_detail
+                            state.persisted_admission_generation = max(0, persisted.admission_generation)
                         else:
                             state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
                             state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
@@ -518,6 +529,10 @@ class _HTTPBridgeRetryCircuitMixin:
                                 state.last_detail = state.last_detail or persisted.last_detail
                             else:
                                 state.last_detail = persisted.last_detail or state.last_detail
+                            state.persisted_admission_generation = max(
+                                state.persisted_admission_generation,
+                                max(0, persisted.admission_generation),
+                            )
                         state.persisted_updated_at_epoch = max(
                             state.persisted_updated_at_epoch,
                             persisted.updated_at_epoch,
@@ -766,26 +781,36 @@ class _HTTPBridgeRetryCircuitMixin:
                     _hash_identifier(session.key.affinity_key),
                 )
                 return
-            state = self._http_bridge_retry_circuits.pop(session.key, None)
-            self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-            self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-            expected_updated_at_epoch = (
-                state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
-            )
+            expected_updated_at_epoch = state.persisted_updated_at_epoch if state is not None else 0.0
+            expected_admission_generation = state.persisted_admission_generation if state is not None else 0
         # A confirmed miss has no version fence to protect a row created
         # concurrently, so leave the durable row untouched when no state was
         # observed. A persisted state with an epoch is safe to clear because
         # the update is fenced below.
-        if state is None or expected_updated_at_epoch is None:
+        if state is None:
+            return
+        if expected_updated_at_epoch <= 0:
+            # A confirmed durable miss has nothing to clear. It is safe to
+            # discard the local marker, provided no newer local failure
+            # arrived while the lookup was in flight.
+            async with self._http_bridge_retry_circuit_lock:
+                current_state = self._http_bridge_retry_circuits.get(session.key)
+                if current_state is state and current_state.last_failure_monotonic <= lookup_started_monotonic:
+                    self._http_bridge_retry_circuits.pop(session.key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             return
         try:
-            # Clearing is idempotent and the observed epoch prevents a newer
-            # durable failure from being erased by this terminal response.
-            await self._durable_bridge.clear_retry_circuit(
+            # Clearing is idempotent and the observed version/generation
+            # prevents a newer durable failure from being erased by this
+            # terminal response. A false result means a newer row won the
+            # conditional update; retain local admission state in that case.
+            cleared = await self._durable_bridge.clear_retry_circuit(
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
                 expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
             )
         except Exception:
             logger.warning(
@@ -795,6 +820,27 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return
+        if cleared is not True:
+            logger.info(
+                "http_bridge_retry_circuit event=reset_deferred_newer_durable_state bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+            )
+            return
+        async with self._http_bridge_retry_circuit_lock:
+            current_state = self._http_bridge_retry_circuits.get(session.key)
+            if current_state is not state or current_state.last_failure_monotonic > lookup_started_monotonic:
+                # A local failure may have arrived after the durable CAS. Keep
+                # its admission guard until its own durable write is observed.
+                logger.info(
+                    "http_bridge_retry_circuit event=reset_deferred_newer_local_failure bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                )
+                return
+            self._http_bridge_retry_circuits.pop(session.key, None)
+            self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+            self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
             http_bridge_retry_circuit_total.labels(outcome="reset").inc()
         logger.info(
