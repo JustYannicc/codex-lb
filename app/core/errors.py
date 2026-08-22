@@ -235,10 +235,22 @@ def is_previous_response_not_found_public_shape(
     message, even when a non-canonical error carries malformed parameter
     metadata. Non-canonical shapes still use the strict recovery classifier for
     replay authorization without changing how their parameter metadata is
-    interpreted.
+    interpreted. A valid non-``previous_response_id`` parameter takes
+    precedence over an otherwise stale-looking message, because it identifies
+    a different invalid request.
     """
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
+    param_state = coerce_error_param(param)
+    if (
+        code == "invalid_request_error"
+        and param_state.present
+        and not param_state.malformed
+        and param_state.normalized != "previous_response_id"
+    ):
+        # A valid named parameter identifies a different invalid request even
+        # when its message happens to mention a missing previous response.
+        return False
     if code == "invalid_request_error" and (
         is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
     ):

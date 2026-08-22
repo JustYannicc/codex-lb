@@ -206,7 +206,7 @@ def test_previous_response_not_found_classifier_rejects_malformed_canonical_para
 
 
 def test_public_shape_masks_canonical_code_regardless_of_malformed_param():
-    for param in (None, "previous_response_id", *_MALFORMED_PARAMS):
+    for param in (None, "previous_response_id", "input", *_MALFORMED_PARAMS):
         assert is_previous_response_not_found_public_shape(
             code="previous_response_not_found",
             param=param,
@@ -266,6 +266,18 @@ def test_public_shape_does_not_claim_unrelated_params():
         param=None,
         message="Rate limit reached.",
     )
+
+
+def test_public_shape_does_not_claim_valid_non_previous_response_param_with_stale_message():
+    for message in (
+        "Previous response with id 'resp_unrelated' not found.",
+        "Invalid `previous_response_id`.",
+    ):
+        assert not is_previous_response_not_found_public_shape(
+            code="invalid_request_error",
+            param="input",
+            message=message,
+        )
 
 
 def test_previous_response_id_from_not_found_message_extracts_anchor():
