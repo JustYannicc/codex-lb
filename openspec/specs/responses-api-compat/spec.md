@@ -4040,12 +4040,17 @@ client MUST receive the normal upstream stream for that fresh turn and MUST NOT
 receive a bridge-specific recovery error.
 
 When the request is bound to a client-provided anchor that cannot be safely
-replayed as a fresh turn, the proxy MUST return the same OpenAI-compatible
-`previous_response_not_found` error shape and HTTP status used by the existing
-previous-response-not-found path. The proxy MUST NOT expose a
-`bridge_continuity_recovery_required` code to clients. The proxy MUST keep the
-existing retryable `stream_idle_timeout` semantics when the durable owner is
-current and the failure is ordinary transient upstream silence.
+replayed as a fresh turn, the proxy MUST fail closed with the applicable
+retryable owner-unavailable error: `previous_response_owner_unavailable` when
+the durable previous-response owner was resolved but is unavailable,
+`bridge_owner_unreachable` when the bridge owner cannot be reached, or
+`upstream_unavailable` when the owner lookup itself failed. It MUST NOT surface
+`previous_response_not_found` for this path because upstream never rejected the
+anchor, and MUST record a continuity reason distinct from a proven stale-anchor
+miss. The proxy MUST NOT expose a `bridge_continuity_recovery_required` code to
+clients. The proxy MUST keep the existing retryable `stream_idle_timeout`
+semantics when the durable owner is current and the failure is ordinary
+transient upstream silence.
 
 #### Scenario: Previous-process anchor with replayable context recovers automatically
 
@@ -4061,17 +4066,19 @@ current and the failure is ordinary transient upstream silence.
 - **AND** the response does not include `stream_idle_timeout` retry guidance or
   a bridge-specific recovery error
 
-#### Scenario: Unreplayable client anchor uses the standard not-found contract
+#### Scenario: Unreplayable client anchor uses the owner-unavailable contract
 
 - **GIVEN** a request is bound to a client-provided durable previous-response
   anchor
 - **AND** that durable row belongs to a dead owner
 - **AND** the payload does not have a safe fresh-turn replay proof
 - **WHEN** the bridge must fail closed
-- **THEN** the client receives the standard `previous_response_not_found`
-  error shape for `previous_response_id`
-- **AND** HTTP error collection uses the standard previous-response-not-found
-  status
+- **THEN** the client receives the applicable retryable owner-unavailable
+  error (`previous_response_owner_unavailable`, `bridge_owner_unreachable`, or
+  `upstream_unavailable`)
+- **AND** the error code is not `previous_response_not_found`
+- **AND** continuity failure metadata records an owner-unavailable reason
+  distinct from a proven stale-anchor miss
 - **AND** the response does not include a bridge-specific recovery code
 
 #### Scenario: Current-owner silence remains retryable
@@ -5024,7 +5031,7 @@ When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its 
 
 While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
 
-Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. A recovery-origin key supplied by a stale-anchor completion MUST be fenced by the exact quarantine generation observed when that recovery was authorized, for both the distinct-key and same-key shapes; when no generation was observed, that completion MUST NOT clear the recovery-origin key.
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and the quarantine marker and its detach decision MUST NOT mutate account health, account scoring, account eligibility, or durable ownership, or add a quarantine-specific health penalty. Detaching a quarantined session MAY release ordinary lifecycle resources, and the replacement request MUST use the existing normal account-selection path. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. A recovery-origin key supplied by a stale-anchor completion MUST be fenced by the exact quarantine generation observed when that recovery was authorized, for both the distinct-key and same-key shapes; when no generation was observed, that completion MUST NOT clear the recovery-origin key.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 

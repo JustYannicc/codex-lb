@@ -236,3 +236,17 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
   `upstream_unavailable` (never `previous_response_not_found`), and the
   retry-safety classifier asserts output-only rejection plus matched-call
   acceptance for all three tool-output item types.
+
+## 10. Exact-head review 5000900294
+
+- [x] 10.1 Correct the normative dead-owner fallback in the main
+  `responses-api-compat` spec: an unreplayable client anchor whose durable
+  owner is dead uses the applicable retryable owner-unavailable error and a
+  distinct owner-unavailable continuity reason, never
+  `previous_response_not_found`. The current implementation and its existing
+  regression test still emit/assert the old contract; no application or test
+  change is in scope for this docs-only review correction.
+- [x] 10.2 Align the main and change-delta quarantine requirements: quarantine
+  handling may detach a session and invoke ordinary account selection, but
+  MUST NOT itself mutate account health, routing score, eligibility, or durable
+  ownership or add a quarantine-specific health penalty.
