@@ -13864,7 +13864,9 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "operation-fence-unavailable",
         "spool-reset-unavailable",
         "spool-reset-raises",
+        "spool-reset-falsy",
         "local-rebind-spool-reset-raises",
+        "local-rebind-spool-reset-falsy",
         "prior-replay-ambiguous",
         "inactive-unknown-journal",
         "pending-tool-manifest",
@@ -13890,6 +13892,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "pending-tool-manifest",
         "account-neutral-newer-circuit-before-submit",
         "spool-reset-raises",
+        "spool-reset-falsy",
     }
     forwarded_receiver = replay_case.startswith("forwarded-")
     operation_fence_unavailable = replay_case == "operation-fence-unavailable"
@@ -13898,10 +13901,16 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
     # replacement is submitted, but must stay best-effort on the anchored
     # local rebind, which is not removing the anchor at all.
     spool_reset_raises = replay_case in {"spool-reset-raises", "local-rebind-spool-reset-raises"}
+    spool_reset_falsy = replay_case in {"spool-reset-falsy", "local-rebind-spool-reset-falsy"}
     local_rebind_spool_reset_raises = replay_case == "local-rebind-spool-reset-raises"
+    local_rebind_spool_reset_falsy = replay_case == "local-rebind-spool-reset-falsy"
+    spool_reset_fail_closed = (spool_reset_raises or spool_reset_falsy) and not (
+        local_rebind_spool_reset_raises or local_rebind_spool_reset_falsy
+    )
     raising_reset_operation_event_spool = AsyncMock(
         side_effect=RuntimeError("durable operation spool reset is unavailable")
     )
+    falsy_reset_operation_event_spool = AsyncMock(return_value=False)
     prior_replay_ambiguous = replay_case == "prior-replay-ambiguous"
     prior_replay_ambiguous_after_event = replay_case == "prior-replay-ambiguous-after-event"
     stale_rejection_after_event_first_attempt = replay_case == "stale-rejection-after-event-first-attempt"
@@ -14036,6 +14045,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
                 "reset_operation_event_spool",
                 raising_reset_operation_event_spool,
             )
+        if spool_reset_falsy:
+            monkeypatch.setattr(
+                service._durable_bridge,
+                "reset_operation_event_spool",
+                falsy_reset_operation_event_spool,
+            )
         if prior_replay_ambiguous or prior_replay_ambiguous_after_event:
             original_prepare_http_bridge_request = service._prepare_http_bridge_request
 
@@ -14156,6 +14171,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
                 "missing-prior-output",
                 "pending-tool-manifest",
                 "local-rebind-spool-reset-raises",
+                "local-rebind-spool-reset-falsy",
             }
             else [
                 {
@@ -14232,12 +14248,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert len(owner_upstream.sent_text) == 1
         assert alternate_upstream.sent_text == []
         return
-    if (
-        operation_fence_unavailable
-        or spool_reset_unavailable
-        or prior_replay_ambiguous
-        or (spool_reset_raises and not local_rebind_spool_reset_raises)
-    ):
+    if operation_fence_unavailable or spool_reset_unavailable or prior_replay_ambiguous or spool_reset_fail_closed:
         failed_response = await async_client.post(
             "/backend-api/codex/responses",
             json=second_payload,
@@ -14250,6 +14261,8 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert alternate_upstream.sent_text == []
         if spool_reset_raises:
             raising_reset_operation_event_spool.assert_awaited()
+        if spool_reset_falsy:
+            falsy_reset_operation_event_spool.assert_awaited()
         return
     if prior_replay_ambiguous_after_event or stale_rejection_after_event_first_attempt:
         failed_events = await _collect_sse_events(
@@ -14352,6 +14365,10 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             # reset must swallow the durable failure it just hit rather than
             # turning a recoverable local error into a hard 502.
             raising_reset_operation_event_spool.assert_awaited()
+        if local_rebind_spool_reset_falsy:
+            # A falsy best-effort reset must not turn an anchored local rebind
+            # into a hard continuity failure or remove its anchor.
+            falsy_reset_operation_event_spool.assert_awaited()
     if account_neutral:
         assert "previous_response_id" not in replay_payload
         assert replay_payload["input"] == expected_replay_input

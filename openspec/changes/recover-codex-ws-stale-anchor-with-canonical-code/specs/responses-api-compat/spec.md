@@ -85,7 +85,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** successful completion MUST clear independent bridge quarantine state for both the replacement key and original hard key
 - **AND** the request MUST NOT migrate to another account
 - **AND** durable operation identity and settlement MUST remain attached to the replacement attempt
-- **AND** a missing operation ledger, operation id, durable session id, owner epoch, or spool-reset capability MUST retain the anchor and fail closed
+- **AND** a missing operation ledger, operation id, durable session id, owner epoch, or missing, refused, or failed spool reset MUST retain the anchor and fail closed
 - **AND** delta-only or prefix-unverified requests MUST retain the existing fail-closed behavior
 - **AND** an eventless transport failure without an explicit stale-anchor rejection MUST NOT by itself authorize this replay
 - **AND** ordinary transport recovery without an explicit stale-anchor rejection MUST NOT bypass or clear the retry circuit
@@ -107,6 +107,13 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** successful replacement completion MUST clear the original-key quarantine only when it still matches the generation observed at recovery authorization
 - **AND** explicit stale-anchor rejection after any emitted response event or downstream-visible output MUST fail closed without anchored fallback dispatch
 - **AND** same-owner verified replay MUST use a unique internal key pinned to the proven owner rather than bypassing the original hard-key circuit
+
+#### Scenario: Anchored same-owner rebind treats spool reset as best effort
+- **GIVEN** an anchored HTTP-bridge continuity retry is locally rebound without removing its `previous_response_id`
+- **WHEN** the recovery spool reset capability is missing, returns a falsy result, or raises an exception
+- **THEN** the existing same-owner anchored rebind MUST continue without aborting on the spool-reset outcome
+- **AND** the original `previous_response_id` MUST remain anchored on the rebound request
+- **AND** the reset outcome MUST NOT produce a `bridge_continuity_persistence_failed` error or dispatch an unanchored replacement
 
 ### Requirement: Direct WebSocket previous-response misses never leak raw upstream errors
 When a direct Responses WebSocket request depends on `previous_response_id`, the service MUST NOT send the raw upstream `previous_response_not_found` error envelope or the missing upstream response id to the downstream client. On the Codex-native `/backend-api/codex/responses` route the service MUST surface the sanitized canonical `error.code = "previous_response_not_found"` (raw envelope and id removed) so an unmodified Codex client recovers; on public `/v1/responses` the service MUST rewrite the failure to a retryable `stream_incomplete` continuity error. This applies to both `/v1/responses` and `/backend-api/codex/responses` WebSocket clients.

@@ -2840,6 +2840,16 @@ class _HTTPBridgeStreamingMixin:
                             "HTTP response recovery operation fence is unavailable; retry the request.",
                         ),
                     )
+
+                def spool_reset_failure() -> ProxyResponseError:
+                    return ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery spool could not be reset; retry the request.",
+                        ),
+                    )
+
                 reset_operation_event_spool = getattr(self._durable_bridge, "reset_operation_event_spool", None)
                 if not callable(reset_operation_event_spool):
                     if not required:
@@ -2876,23 +2886,11 @@ class _HTTPBridgeStreamingMixin:
                             exc_info=True,
                         )
                         return
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "bridge_continuity_persistence_failed",
-                            "HTTP response recovery spool could not be reset; retry the request.",
-                        ),
-                    ) from spool_reset_exc
+                    raise spool_reset_failure() from spool_reset_exc
                 if not reset_ok:
                     if not required:
                         return
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "bridge_continuity_persistence_failed",
-                            "HTTP response recovery spool could not be reset; retry the request.",
-                        ),
-                    )
+                    raise spool_reset_failure()
 
             async def capture_verified_stale_anchor_circuit_generation(
                 recovery_session: "_HTTPBridgeSession",
