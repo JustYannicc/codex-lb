@@ -2811,12 +2811,26 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
         del request_state, api_key, client_send_lock, websocket
         return SimpleNamespace(id="acct_ws_lite_linkage"), fake_upstream
 
+    async def fake_select_websocket_connect_account(self, *args, **kwargs):
+        del self, args, kwargs
+        return SimpleNamespace(id="acct_ws_lite_linkage")
+
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_lite_linkage"),
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5009,6 +5023,11 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_prev"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5537,6 +5556,11 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_tool_output"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5645,6 +5669,11 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_v1_prev"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -6469,6 +6498,11 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(
         proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_prev_connect_failure"),
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
         "_select_websocket_connect_account",
         fake_select_websocket_connect_account,
     )
@@ -6811,7 +6845,7 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     ):
         del request_state
         del self, previous_response_id, api_key, session_id, surface
-        return None
+        return "acct_ws_prev_followup"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -6960,7 +6994,7 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
     ):
         del request_state
         del self, previous_response_id, api_key, session_id, surface
-        return None
+        return "acct_ws_chatgpt_prev_top_level"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -7070,6 +7104,11 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_pretty_prev_mask"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
 
     with TestClient(app_instance) as client:

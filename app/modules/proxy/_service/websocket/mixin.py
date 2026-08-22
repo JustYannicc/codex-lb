@@ -1976,6 +1976,27 @@ class _WebSocketMixin:
                             ("turn state", turn_state_owner_account_id),
                             ("previous response", previous_response_owner_account_id),
                         )
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and request_state.preferred_account_id is None
+                        ):
+                            message = "Previous response owner account is unavailable; retry later."
+                            _record_continuity_fail_closed(
+                                surface="websocket_connect",
+                                reason="owner_account_unavailable",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="owner_lookup_miss",
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "previous_response_owner_unavailable",
+                                    message,
+                                    error_type="server_error",
+                                ),
+                            )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
@@ -3483,7 +3504,7 @@ class _WebSocketMixin:
                 and request_state.preferred_account_id is not None
             )
             require_preferred_account = (
-                (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+                request_state.previous_response_id is not None
                 or request_state.replay_required_account_id is not None
                 or request_state.file_required_preferred_account
                 or turn_state_owner_required

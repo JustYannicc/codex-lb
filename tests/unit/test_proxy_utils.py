@@ -33542,6 +33542,70 @@ async def test_codex_responses_websocket_owner_lookup_failure_is_not_a_stale_anc
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_websocket_owner_miss_fails_closed_before_unpinned_dispatch(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selection_calls: list[dict[str, object]] = []
+    dispatch_calls: list[str] = []
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select(*args: object, **kwargs: object):
+        del args
+        selection_calls.append(dict(kwargs))
+        return _make_account("acc_unpinned_websocket")
+
+    async def dispatch(account: Account, *args: object, **kwargs: object):
+        del args, kwargs
+        dispatch_calls.append(account.id)
+        return None
+
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select)
+    monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", dispatch)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_missing_owner_direct_ws",
+        "stream": True,
+    }
+    downstream = _ScriptedDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.observability")
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_missing_owner_direct_ws"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert request_logs.lookup_calls == [("resp_missing_owner_direct_ws", None, "sid_missing_owner_direct_ws")]
+    assert selection_calls == []
+    assert dispatch_calls == []
+    assert len(downstream.sent_text) == 1
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "response.failed"
+    assert payload["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert payload["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_missing_owner_direct_ws" not in downstream.sent_text[0]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["account_id"] is None
+    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert "continuity_fail_closed surface=websocket_connect reason=owner_account_unavailable" in caplog.text
+    assert "upstream_error_code=owner_lookup_miss" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_websocket_masks_owner_lookup_previous_response_not_found(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
