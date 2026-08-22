@@ -441,6 +441,7 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
     return (
         getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         == "client_full_history_once"
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
@@ -454,6 +455,7 @@ def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequest
     return (
         getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
@@ -2170,6 +2172,7 @@ class _HTTPBridgeStreamingMixin:
                     switch_to_account_neutral_replay()
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
                     effective_payload.previous_response_id is not None
+                    and not request_state.previous_response_not_found_recovery_blocked
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
                 )
                 should_attempt_bootstrap_rebind = (
@@ -3196,6 +3199,7 @@ class _HTTPBridgeStreamingMixin:
             )
             should_attempt_previous_response_recovery = (
                 effective_payload.previous_response_id is not None
+                and not request_state.previous_response_not_found_recovery_blocked
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
             )
             previous_response_rejected_same_owner_full_resend = bool(
@@ -4555,10 +4559,17 @@ class _HTTPBridgeStreamingMixin:
                                 "Upstream websocket closed before response.completed",
                             ),
                         )
-                    raise ProxyResponseError(
+                    terminal_error = ProxyResponseError(
                         request_state.error_http_status_override,
                         _openai_error_envelope_from_response_failed_payload(block_payload),
                     )
+                    if request_state.previous_response_not_found_recovery_blocked:
+                        # The malformed raw ``param`` was deliberately
+                        # omitted from the public failed event.  Do not let
+                        # the resulting generic stream-incomplete envelope
+                        # enter any ambiguous or client-history replay loop.
+                        setattr(terminal_error, "http_bridge_durable_recovery_eligible", False)
+                    raise terminal_error
                 yield event_block
                 yielded_any = True
         finally:

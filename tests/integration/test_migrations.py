@@ -1923,6 +1923,15 @@ def _retry_circuit_columns(sync_conn):
     return {column["name"] for column in inspector.get_columns("http_bridge_retry_circuits")}
 
 
+def _retry_circuit_column(sync_conn, name: str):
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(sync_conn)
+    if not inspector.has_table("http_bridge_retry_circuits"):
+        return None
+    return next(column for column in inspector.get_columns("http_bridge_retry_circuits") if column["name"] == name)
+
+
 @pytest.mark.asyncio
 async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
@@ -1956,6 +1965,9 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
         )
         async with engine.connect() as conn:
             columns = await conn.run_sync(_retry_circuit_columns)
+            admission_generation_column = await conn.run_sync(
+                lambda sync_conn: _retry_circuit_column(sync_conn, "admission_generation")
+            )
             legacy_row = (
                 await conn.execute(
                     text(
@@ -1966,6 +1978,8 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
             ).one()
         assert columns is not None
         assert "admission_generation" in columns
+        assert admission_generation_column is not None
+        assert admission_generation_column["nullable"] is False
         assert legacy_row.admission_generation == 0
         assert legacy_row.consecutive_failures == 3
 
@@ -2035,8 +2049,13 @@ async def test_retry_circuit_admission_generation_fresh_upgrade_head_has_single_
     try:
         async with engine.connect() as conn:
             columns = await conn.run_sync(_retry_circuit_columns)
+            admission_generation_column = await conn.run_sync(
+                lambda sync_conn: _retry_circuit_column(sync_conn, "admission_generation")
+            )
         assert columns is not None
         assert "admission_generation" in columns
+        assert admission_generation_column is not None
+        assert admission_generation_column["nullable"] is False
 
         async with engine.begin() as conn:
             await conn.execute(

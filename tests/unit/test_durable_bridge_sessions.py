@@ -3342,6 +3342,7 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     )
     assert after_delayed_failure is not None
     assert after_delayed_failure.consecutive_failures == 3
+    assert after_delayed_failure.updated_at_epoch == 1200.0
     assert after_delayed_failure.admission_generation == 1
 
 

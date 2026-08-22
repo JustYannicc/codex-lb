@@ -47,6 +47,19 @@ class OpenAIErrorParam:
         return self.present and (self.normalized is None or not self.normalized)
 
 
+def normalize_public_error_param(param: OpenAIErrorParam | JsonValue) -> str | None:
+    """Return the only ``param`` representation safe for a client response.
+
+    Error parsing and recovery classification use :class:`OpenAIErrorParam`
+    so an explicitly supplied malformed value remains distinct from an
+    omitted field.  Public serializers must not expose that raw wire value;
+    they may emit only a non-empty, trimmed string.
+    """
+
+    normalized = _coerce_error_param(param).normalized
+    return normalized if normalized else None
+
+
 class OpenAIErrorDetail(TypedDict, total=False):
     message: str
     type: str
@@ -154,6 +167,26 @@ def _coerce_error_param(param: OpenAIErrorParam | JsonValue) -> OpenAIErrorParam
     if param is None:
         return OpenAIErrorParam.absent()
     return OpenAIErrorParam(True, param)
+
+
+def sanitize_public_error_detail(error: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Copy an OpenAI error detail with a client-safe ``param`` field.
+
+    This is intentionally a boundary helper.  Callers that still need to
+    classify or replay an upstream event must retain the original mapping and
+    its presence-aware :class:`OpenAIErrorParam` state instead of using this
+    sanitized copy.
+    """
+
+    normalized = dict(error)
+    if "param" not in normalized:
+        return normalized
+    public_param = normalize_public_error_param(OpenAIErrorParam.from_mapping(error))
+    if public_param is None:
+        normalized.pop("param", None)
+    else:
+        normalized["param"] = public_param
+    return normalized
 
 
 def is_previous_response_not_found_error(

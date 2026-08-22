@@ -14,7 +14,9 @@ This route already has a working transparent server-side replay for `previous_re
   after an explicit stale-anchor error.
 
 **Non-Goals:**
-- No client changes and no public `/v1` masking changes.
+- No client changes and no change to the public `/v1` stale-anchor masking
+  contract; the final repair still applies the shared public parameter
+  sanitizer there so malformed error metadata cannot escape.
 - `upstream_unavailable` and suppressed-duplicate `stream_incomplete` are out of scope (follow-up).
 - No account switch based only on a transport close with zero observed events;
   that send remains ambiguous and can have at-least-once side effects.
@@ -254,6 +256,30 @@ This is now confirmed from the official client's own source (`openai/codex`, `co
 - The client's own fallback message for this code, defined in its source, states the behavior directly: `"Previous response was not found. Retrying the full request."`
 
 This was traced by reading source rather than by running the compiled client against a live server. That describes the method, not a limit on the conclusion: the mechanism is structural (a one-shot channel that cannot be populated except by a successful completion), not a heuristic inferred from observed behavior, and it is corroborated independently by the wire-level retry classification, the retry loop's own full-history prompt rebuild, and the client's own source comment describing exactly this behavior. Source-level proof of a structural guarantee is treated as sufficient confirmation of this assumption. This is not a request for the maintainer to independently runtime-verify the official client before evaluating this change; the assumption is settled unless the evidence above is contradicted.
+
+## Final repair boundary
+
+The follow-up repair keeps one typed error state across the internal pipeline:
+`OpenAIErrorParam.present` and `.raw` remain authoritative for strict
+classification, anonymous request matching, and replay authorization. Public
+serialization is a separate boundary. It emits only a trimmed, non-empty
+string parameter and omits null, non-string, blank, and whitespace values. A
+canonical stale code with malformed metadata is therefore claimable for safe
+ownership/masking, but remains ineligible for reconnect, anchor removal, or
+full-history recovery. The public failure rewriter preserves a current
+downstream response id while removing the stale upstream id and raw envelope.
+
+The two concurrent cleanup paths use explicit ownership fences. Primary
+quarantine cleanup compares the completing session identity against the entry
+owner and leaves a newer replacement generation untouched; additional
+origin-key cleanup retains its existing generation comparison. Retry-circuit
+cleanup first requires a successful durable read and an observed update epoch.
+On lookup failure it keeps local state and does not issue an unfenced durable
+clear, so a newer durable failure remains visible to the next admission check.
+
+The migration contract is part of the same proof: `admission_generation` is
+non-nullable after both legacy and fresh upgrades, and delayed failure merges
+retain the exact durable `updated_at_epoch` captured by the newer write.
 
 ## Risks / Trade-offs
 

@@ -117,6 +117,38 @@ async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
 
 
 @pytest.mark.asyncio
+async def test_stream_proxy_error_omits_malformed_param_at_public_boundary():
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            400,
+            {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "Invalid request payload.",
+                    "type": "invalid_request_error",
+                    "param": {},
+                }
+            },
+        )
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = json.loads(events[0].split("data: ", 1)[1])
+    assert payload["response"]["error"].get("param") is None
+    assert '"param"' not in json.dumps(payload["response"]["error"])
+
+
+@pytest.mark.asyncio
 async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
     async def stream():
         if False:

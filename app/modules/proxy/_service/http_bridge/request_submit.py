@@ -255,6 +255,7 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
         request_state.propagate_http_errors
         and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         == "client_full_history_once"
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
@@ -266,6 +267,7 @@ def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequest
     return (
         getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0

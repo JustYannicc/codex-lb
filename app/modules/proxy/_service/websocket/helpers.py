@@ -48,6 +48,7 @@ from app.core.errors import (
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.exceptions import AppError
 from app.core.openai.models import OpenAIEvent
@@ -1147,6 +1148,51 @@ def _websocket_event_error_payload(
     return None
 
 
+def _sanitize_public_websocket_event_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Strip malformed error parameters at a client-facing event boundary.
+
+    Upstream parsing and continuity classification happen before this helper,
+    while the original mapping is still available.  Durable settlement keeps
+    that internal state; only the event copied into a downstream WebSocket or
+    HTTP-bridge queue is sanitized.
+    """
+
+    normalized = payload
+
+    def sanitize_mapping(mapping: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        sanitized = sanitize_public_error_detail(mapping)
+        return sanitized
+
+    event_type = payload.get("type")
+    if event_type == "error":
+        error_value = payload.get("error")
+        if isinstance(error_value, dict):
+            sanitized_error = sanitize_mapping(error_value)
+            if sanitized_error != error_value:
+                normalized = dict(normalized)
+                normalized["error"] = sanitized_error
+        elif "param" in payload:
+            sanitized_top_level = sanitize_mapping({"param": payload["param"]})
+            normalized = dict(normalized)
+            if "param" in sanitized_top_level:
+                normalized["param"] = sanitized_top_level["param"]
+            else:
+                normalized.pop("param", None)
+
+    response_value = payload.get("response")
+    if isinstance(response_value, dict):
+        error_value = response_value.get("error")
+        if isinstance(error_value, dict):
+            sanitized_error = sanitize_mapping(error_value)
+            if sanitized_error != error_value:
+                normalized_response = dict(response_value)
+                normalized_response["error"] = sanitized_error
+                normalized = dict(normalized)
+                normalized["response"] = normalized_response
+
+    return normalized
+
+
 def _websocket_event_incomplete_reason(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
@@ -1197,6 +1243,7 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         # still must not reach the client with the upstream code and raw param.
         should_rewrite = True
         reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+        request_state.previous_response_not_found_recovery_blocked = True
     if not should_rewrite:
         if request_state.previous_response_id is None:
             return event, payload, event_type, original_text
@@ -1485,6 +1532,8 @@ def _sanitize_websocket_previous_response_error(
         # bookkeeping that drives replay.
         should_rewrite = True
         reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+        if request_state is not None:
+            request_state.previous_response_not_found_recovery_blocked = True
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
@@ -1551,6 +1600,7 @@ def _sanitize_websocket_terminal_error_fields(
             upstream_error_code=normalized_code,
         )
     else:
+        request_state.previous_response_not_found_recovery_blocked = True
         _record_continuity_fail_closed(
             surface="websocket_terminal",
             reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
@@ -2010,7 +2060,13 @@ def _wrapped_websocket_error_event(
         )
         if not expose:
             payload = previous_response_stream_incomplete_error()
-    error_payload = cast(JsonValue, dict(payload["error"]))
+    # This helper is the final serializer for top-level websocket errors. Keep
+    # the presence-aware raw value in ``payload`` for classification above,
+    # then emit only a non-empty normalized string parameter to clients.
+    error_payload = cast(
+        JsonValue,
+        sanitize_public_error_detail(cast(Mapping[str, JsonValue], payload["error"])),
+    )
     event: dict[str, JsonValue] = {
         "type": "error",
         "status": status_code,

@@ -40,6 +40,7 @@ _HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON = "repeated_eventless_timeout"
 @dataclass(slots=True)
 class _HTTPBridgeQuarantineEntry:
     generation: int = 0
+    owner_identity: int | None = None
     quarantined_until: float = 0.0
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
@@ -135,6 +136,10 @@ def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
     entry.generation = _next_http_bridge_quarantine_generation(service, registry)
+    # Keep the session identity alongside the generation.  A detached
+    # predecessor can still finish a response after a replacement has reused
+    # this key; that completion must not clear the replacement's newer entry.
+    entry.owner_identity = id(session)
     entry.quarantined_until = max(entry.quarantined_until, now + _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS)
     entry.last_touched_monotonic = now
     entry.reason = reason
@@ -203,9 +208,28 @@ def _clear_http_bridge_quarantine(
 ) -> None:
     """A completed response disproves the current and recovery-origin wedges."""
     registry = _http_bridge_quarantine_registry(service)
-    session.quarantined = False
     keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
     for key in keys:
+        entry = registry.get(key)
+        active_sessions = getattr(service, "_http_bridge_sessions", None)
+        is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
+        if (
+            key == session.key
+            and entry is not None
+            and entry.owner_identity is not None
+            and entry.owner_identity != id(session)
+            and not is_current_primary_session
+        ):
+            # Only the session that created the primary-key entry may clear
+            # it.  A detached predecessor can finish after a replacement has
+            # reused the key, even if its per-session flag was already reset;
+            # the canonical registry fences that completion from popping the
+            # replacement's newer primary entry.  A healthy canonical
+            # replacement may still clear the key after its own response
+            # completes.
+            continue
+        if key == session.key:
+            session.quarantined = False
         entry = registry.pop(key, None)
         if (
             key == additional_key

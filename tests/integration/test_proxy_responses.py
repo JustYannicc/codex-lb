@@ -2099,6 +2099,70 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_error",
+    [
+        {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_http_stale' not found.",
+            "param": {},
+        },
+        {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+    ],
+    ids=["canonical-malformed-param", "parameterless-invalid-request"],
+)
+async def test_v1_responses_stream_masks_stale_errors_without_raw_fields(async_client, monkeypatch, upstream_error):
+    auth_json = _make_auth_json("acc_v1_stale_mask", "v1-stale-mask@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_http_current",
+                        "object": "response",
+                        "status": "failed",
+                        "error": upstream_error,
+                    },
+                },
+                separators=(",", ":"),
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "continue", "stream": True},
+    ) as streamed:
+        assert streamed.status_code == 200
+        lines = [line async for line in streamed.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    error = event["response"]["error"]
+    assert error["code"] == "stream_incomplete"
+    assert "param" not in error
+    assert "previous_response_not_found" not in json.dumps(event)
+    assert "resp_http_stale" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_terminal_disconnect_finalizes_settlement_and_success(
     async_client,
     app_instance,

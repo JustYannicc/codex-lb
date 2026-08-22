@@ -172,3 +172,21 @@ See `design.md`'s Implementation guidance for the verified scope proof and for w
 - [x] 8.44 Align every change artifact with the current replay safety model:
   original-key generation CAS is account-neutral only, while same-owner replay
   uses a unique owner-pinned key and does not consume that generation.
+- [x] 8.45 Keep `OpenAIErrorParam.present/raw` intact through internal parsing,
+  matching, and replay authorization, while normalizing or omitting malformed
+  `param` values at every client-facing Responses serializer.
+- [x] 8.46 Separate public stale-shape masking and anonymous request matching
+  from strict replay authorization; malformed canonical stale frames are
+  claimed and masked without reconnecting or authorizing recovery, including
+  multi-pending HTTP bridge and direct WebSocket cases.
+- [x] 8.47 Preserve the current downstream `response.failed` id when public
+  masking rewrites a stale upstream error, while removing stale ids and raw
+  upstream details.
+- [x] 8.48 Fence primary quarantine cleanup by completing-session identity and
+  the canonical session registry, preserving a newer replacement generation
+  when a detached predecessor completes.
+- [x] 8.49 Fail closed on durable retry-circuit lookup failure: retain local
+  admission state and skip an unfenced durable clear so a concurrent newer
+  failure survives.
+- [x] 8.50 Assert the retry-circuit migration's `admission_generation`
+  nullability and the delayed-failure `updated_at_epoch` contract.

@@ -215,7 +215,10 @@ has already loaded the key. A durable lookup or persistence failure MUST NOT
 crash the request; the proxy MUST continue using available local state and
 record the failure for observability. Rows older than one hour MUST be treated
 as expired and removed. A successful terminal response MUST clear the local
-and durable circuit state.
+and durable circuit state only after a successful durable read establishes the
+version fence. When that read fails, the proxy MUST retain local admission
+state and MUST skip any unfenced durable clear so a newer concurrent failure
+cannot be erased.
 
 #### Scenario: idle bridge retirement does not consume a circuit strike
 
@@ -264,6 +267,15 @@ and durable circuit state.
 - **WHEN** the proxy evaluates or records a retry-circuit event
 - **THEN** the request continues using any available local circuit state
 - **AND** the failure is logged and exposed through retry-circuit observability
+
+#### Scenario: durable clear lookup failure preserves a newer failure
+
+- **GIVEN** a terminal success begins clearing a hard-key retry circuit
+- **AND** the durable lookup fails while a newer failure is committed
+- **WHEN** the terminal cleanup settles
+- **THEN** the proxy does not issue an unfenced durable clear
+- **AND** the newer durable failure remains authoritative
+- **AND** the local admission guard remains available on the clearing replica
 
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
@@ -498,6 +510,41 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 - **WHEN** the upstream's first standard event is `response.failed` (no preceding `response.created`)
 - **THEN** the public stream MUST emit a synthesized `response.created` event derived from the failed event's `response` envelope before forwarding the `response.failed` event
 - **AND** an OpenAI Python SDK consumer iterating the stream MUST NOT raise `RuntimeError` from the parser's initial-response check
+
+### Requirement: Client-facing Responses error params are canonicalized
+
+The presence-aware raw `OpenAIErrorParam` state MUST remain available to
+internal classification, request matching, and replay authorization. At every
+client-facing Responses serialization boundary, however, an error `param` MUST
+be emitted only when its normalized value is a non-empty string; the emitted
+value MUST be trimmed. Explicit null, number, boolean, object, array, blank,
+and whitespace values MUST be omitted. Public masking MUST remain independent
+of replay authorization: a malformed present value MUST fail closed for
+recovery while a canonical stale-anchor error is still masked without exposing
+its raw value. When a masked `response.failed` already carries the current
+downstream response id, that id MUST be preserved while the stale upstream id
+and raw error details are removed.
+
+#### Scenario: malformed params cannot cross a Responses stream boundary
+
+- **GIVEN** an upstream `error` or `response.failed` carries a malformed present `param`
+- **WHEN** the event is serialized for `/v1/responses` or a Codex Responses client
+- **THEN** the client event omits `param`
+- **AND** the raw value is absent from the serialized event
+- **AND** the malformed value does not authorize replay or full-history recovery
+
+#### Scenario: valid params are trimmed at the public boundary
+
+- **GIVEN** an upstream error carries `param = "  input  "`
+- **WHEN** the event is serialized for a client
+- **THEN** the client event carries `param = "input"`
+
+#### Scenario: masked failure retains the current downstream id
+
+- **GIVEN** an upstream stale-anchor `response.failed` carries the current downstream response id
+- **WHEN** public masking rewrites the failure
+- **THEN** the rewritten failure retains that current id
+- **AND** it omits the stale upstream id and malformed parameter
 
 #### Scenario: Normal stream is not double-emitted
 - **WHEN** the upstream's first standard event is already `response.created`
@@ -4903,7 +4950,7 @@ When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its 
 
 While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
 
-Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection. A primary-key clear MUST be fenced by the quarantined session identity and canonical session registry, so a detached predecessor completion MUST NOT remove a newer replacement's quarantine entry. Additional recovery-origin keys MUST retain their existing generation fence.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 
@@ -4973,6 +5020,14 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 - **THEN** the quarantine (and its eventless strike counter) is cleared
 - **AND** a session that survived the quarantine window is reusable again instead of staying rejected forever
 - **AND** no durable row, janitor work, or account-health write was involved at any point
+
+#### Scenario: Detached predecessor cannot clear a replacement quarantine
+
+- **GIVEN** a predecessor session quarantined a primary bridge key
+- **AND** a replacement session reused that key and received a newer quarantine generation
+- **WHEN** the detached predecessor completes and runs quarantine cleanup
+- **THEN** the replacement's primary-key quarantine remains active
+- **AND** the replacement generation remains authoritative
 
 ### Requirement: Scoped operation identity
 

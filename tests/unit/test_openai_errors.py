@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    OpenAIErrorParam,
     is_previous_response_not_found_error,
     is_previous_response_not_found_public_shape,
+    normalize_public_error_param,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 
 # Raw malformed values used to be collapsed to an empty-string sentinel by
@@ -46,6 +49,22 @@ def test_response_failed_event_preserves_reset_hint():
     )
 
     assert event["response"]["error"].get("resets_at") == 1_700_003_600
+
+
+def test_public_error_param_normalization_omits_malformed_values():
+    for param in (None, 0, False, {}, [], "", "   ", "\t\n"):
+        assert normalize_public_error_param(param) is None
+        assert "param" not in sanitize_public_error_detail({"param": param})
+
+    assert normalize_public_error_param("  previous_response_id  ") == "previous_response_id"
+    assert sanitize_public_error_detail({"param": "  input  "}) == {"param": "input"}
+
+
+def test_public_error_param_sanitization_does_not_change_internal_presence_state():
+    malformed = OpenAIErrorParam(True, {})
+    assert malformed.present is True
+    assert malformed.malformed is True
+    assert normalize_public_error_param(malformed) is None
 
 
 def test_previous_response_not_found_classifier_covers_openai_shapes():

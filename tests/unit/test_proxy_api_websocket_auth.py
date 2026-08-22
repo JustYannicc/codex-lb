@@ -704,6 +704,104 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
     assert "resp_missing" not in json.dumps(normalized)
 
 
+def test_public_previous_response_failed_mask_preserves_current_response_id():
+    payload = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_current",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "message": "Previous response with id 'resp_stale' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "param": "previous_response_id",
+            },
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    response = cast(dict[str, object], normalized["response"])
+    assert response["id"] == "resp_current"
+    error = cast(dict[str, object], response["error"])
+    assert error == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+    assert "resp_stale" not in json.dumps(normalized)
+
+
+@pytest.mark.parametrize("param", [None, 0, False, {}, [], "", "   ", "\t\n"])
+def test_public_stream_drops_malformed_noncanonical_error_param(param: JsonValue):
+    payload = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_current",
+            "error": {
+                "message": "Invalid request payload.",
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+                "param": param,
+            },
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
+
+    assert violation_kind is None
+    assert normalized is not None
+    response = cast(dict[str, object], normalized["response"])
+    error = cast(dict[str, object], response["error"])
+    assert "param" not in error
+    assert response["id"] == "resp_current"
+
+
+def test_public_stream_trims_valid_error_param():
+    payload = {
+        "type": "error",
+        "error": {
+            "message": "Invalid request payload.",
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "param": "  input  ",
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert cast(dict[str, object], normalized["error"])["param"] == "input"
+
+
+def test_public_parameterless_previous_response_error_is_masked_without_raw_message_or_id():
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": "Invalid `previous_response_id`.",
+            "type": "invalid_request_error",
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    assert cast(dict[str, object], normalized["response"])["error"] == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+    assert "previous_response_id" not in json.dumps(normalized)
+
+
 @pytest.mark.asyncio
 async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
     closed = False

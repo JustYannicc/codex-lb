@@ -74,6 +74,29 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+@pytest.mark.parametrize("param", [None, 0, False, {}, [], "", "   ", "\t\n"])
+def test_error_event_omits_malformed_or_blank_param_at_chat_boundary(param: object):
+    lines = [
+        "data: "
+        + json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "message": "Invalid request payload.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "param": param,
+                },
+            }
+        )
+        + "\n\n"
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert "param" not in error_payload["error"]
+
+
 @pytest.mark.parametrize(
     "event_line",
     [

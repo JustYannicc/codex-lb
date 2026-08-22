@@ -6189,6 +6189,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
         ("previous_response_not_found", True, {}),
         ("previous_response_not_found", True, []),
         ("invalid_request_error", True, "previous_response_id"),
+        ("invalid_request_error", False, None),
     ],
     ids=[
         "canonical-absent",
@@ -6201,6 +6202,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
         "canonical-object",
         "canonical-array",
         "invalid-request-valid-param",
+        "parameterless-invalid-request",
     ],
 )
 def test_v1_responses_websocket_masks_previous_response_not_found_shapes_without_retry(
@@ -11311,13 +11313,17 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
     assert "resp_ws_proxy_injected_anchor" not in caplog.text
 
 
+@pytest.mark.parametrize("malformed_param", [False, True])
 def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_diagnostics(
     app_instance,
     monkeypatch,
     caplog,
+    malformed_param,
 ):
-    """One anonymous previous_response_not_found matching multiple same-anchor
-    pending requests must record stale-anchor diagnostics for each request.
+    """One anonymous stale-anchor error must settle every same-anchor request.
+
+    The strict shape records stale-anchor diagnostics; a malformed present
+    parameter still claims ownership for masking but remains fail-closed.
     """
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -11377,7 +11383,7 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
                                 "type": "invalid_request_error",
                                 "code": "previous_response_not_found",
                                 "message": "Previous response with id 'resp_ws_grouped_anchor' not found.",
-                                "param": "previous_response_id",
+                                "param": {} if malformed_param else "previous_response_id",
                             },
                         },
                         separators=(",", ":"),
@@ -11504,38 +11510,64 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
     assert created_3["response"]["id"] == "resp_ws_grouped_followup_b"
     assert failed_2["type"] == "response.failed"
     assert failed_3["type"] == "response.failed"
-    _assert_previous_response_not_found_error(failed_2["response"]["error"])
-    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert failed_2["response"]["id"] == "resp_ws_grouped_followup_a"
+    assert failed_3["response"]["id"] == "resp_ws_grouped_followup_b"
     assert "resp_ws_grouped_anchor" not in json.dumps(failed_2)
     assert "resp_ws_grouped_anchor" not in json.dumps(failed_3)
+    if malformed_param:
+        for failed in (failed_2, failed_3):
+            error = failed["response"]["error"]
+            assert error["code"] == "stream_incomplete"
+            assert error["message"] == "Upstream websocket closed before response.completed"
+            assert "param" not in error
+        # The malformed present value may claim ownership for masking, but it
+        # must never authorize reconnect/replay or leak an upstream field.
+        assert len(first_upstream.sent_text) == 3
+    else:
+        _assert_previous_response_not_found_error(failed_2["response"]["error"])
+        _assert_previous_response_not_found_error(failed_3["response"]["error"])
 
     error_logs = [call for call in log_calls if call.get("status") == "error"]
-    assert len(error_logs) == 2
-    for error_log in error_logs:
-        failure_detail = error_log["failure_detail"]
-        assert isinstance(failure_detail, str)
-        assert failure_detail.startswith("previous_response_not_found ")
-        assert "previous_response_source=client_supplied" in failure_detail
-        assert "fresh_replay_available=" in failure_detail
-        assert "owner_lookup_source=" in failure_detail
-        assert "owner_lookup_outcome=" in failure_detail
-        assert "previous_response_age_seconds=" in failure_detail
-        assert "same_session=" in failure_detail
-        assert "resp_ws_grouped_anchor" not in failure_detail
-        assert error_log["upstream_error_code"] == "previous_response_not_found"
-        assert error_log["failure_phase"] == "upstream"
+    if malformed_param:
+        assert len(error_logs) == 2
+        for error_log in error_logs:
+            failure_detail = error_log["failure_detail"]
+            assert failure_detail is None
+            assert error_log["upstream_error_code"] is None
+    else:
+        assert len(error_logs) == 2
+        for error_log in error_logs:
+            failure_detail = error_log["failure_detail"]
+            assert isinstance(failure_detail, str)
+            assert failure_detail.startswith("previous_response_not_found ")
+            assert "previous_response_source=client_supplied" in failure_detail
+            assert "fresh_replay_available=" in failure_detail
+            assert "owner_lookup_source=" in failure_detail
+            assert "owner_lookup_outcome=" in failure_detail
+            assert "previous_response_age_seconds=" in failure_detail
+            assert "same_session=" in failure_detail
+            assert "resp_ws_grouped_anchor" not in failure_detail
+            assert error_log["upstream_error_code"] == "previous_response_not_found"
+            assert error_log["failure_phase"] == "upstream"
 
     fail_closed = [
         record.getMessage()
         for record in caplog.records
         if "continuity_fail_closed" in record.getMessage()
-        and "reason=previous_response_not_found" in record.getMessage()
+        and (
+            "reason=previous_response_not_found_malformed_param" in record.getMessage()
+            if malformed_param
+            else "reason=previous_response_not_found" in record.getMessage()
+        )
     ]
-    assert len(fail_closed) >= 2
-    for message in fail_closed:
-        assert "surface=websocket_stream" in message
-        assert "previous_response_source=client_supplied" in message or "diagnostics=" in message
-        assert "resp_ws_grouped_anchor" not in message
+    if malformed_param:
+        assert fail_closed == []
+    else:
+        assert len(fail_closed) >= 2
+        for message in fail_closed:
+            assert "surface=websocket_stream" in message
+            assert "previous_response_source=client_supplied" in message or "diagnostics=" in message
+            assert "resp_ws_grouped_anchor" not in message
 
 
 @pytest.mark.parametrize("capability_carrier", ["handshake", "response_create"])

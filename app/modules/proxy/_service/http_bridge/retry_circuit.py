@@ -740,8 +740,32 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return
 
+        lookup_started_monotonic = time.monotonic()
         durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
+        if not durable_load_succeeded:
+            # A failed lookup cannot establish a version fence.  Do not drop
+            # the local state either: a newer failure may have landed while
+            # the read was in flight, and that local row is still the only
+            # admission guard on this replica.
+            logger.info(
+                "http_bridge_retry_circuit event=reset_deferred_lookup_failed bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+            )
+            return
         async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            if state is not None and state.last_failure_monotonic > lookup_started_monotonic:
+                # A failure recorded while the durable lookup was in flight
+                # belongs to a newer lineage. Keep its local admission guard
+                # and defer durable clearing until a later terminal response
+                # can observe a matching version fence.
+                logger.info(
+                    "http_bridge_retry_circuit event=reset_deferred_newer_local_failure bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                )
+                return
             state = self._http_bridge_retry_circuits.pop(session.key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
             self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
@@ -750,14 +774,13 @@ class _HTTPBridgeRetryCircuitMixin:
             )
         # A confirmed miss has no version fence to protect a row created
         # concurrently, so leave the durable row untouched when no state was
-        # observed. Preserve the existing best-effort clear on read failures,
-        # which is still useful for settling a row after a transient outage.
-        if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
+        # observed. A persisted state with an epoch is safe to clear because
+        # the update is fenced below.
+        if state is None or expected_updated_at_epoch is None:
             return
         try:
-            # Clearing is idempotent and must be attempted even when the
-            # preceding lookup failed; a successful request should settle
-            # a previously persisted circuit after a transient read error.
+            # Clearing is idempotent and the observed epoch prevents a newer
+            # durable failure from being erased by this terminal response.
             await self._durable_bridge.clear_retry_circuit(
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,

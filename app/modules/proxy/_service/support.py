@@ -1118,6 +1118,10 @@ class _WebSocketRequestState:
     last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
+    # A canonical stale-anchor code with a present malformed ``param`` may
+    # still be matched and masked, but it must never authorize any replay
+    # path after the public serializer omits that raw value.
+    previous_response_not_found_recovery_blocked: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
@@ -1760,8 +1764,13 @@ def _openai_error_envelope_from_response_failed_payload(
 
     envelope = openai_error(code, message, error_type)
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error_payload))
-    if param_state.present:
-        envelope["error"]["param"] = param_state.raw
+    # This envelope is constructed after the queued response.failed event has
+    # crossed the client-facing boundary.  Keep presence-aware raw state in the
+    # upstream parsing/matching paths, but never expose malformed JSON values
+    # through the public error envelope.  A valid string is trimmed once here;
+    # blank, null, and non-string values are omitted.
+    if param_state.normalized:
+        envelope["error"]["param"] = param_state.normalized
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:

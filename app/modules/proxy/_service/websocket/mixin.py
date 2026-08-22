@@ -64,8 +64,10 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
+    normalize_public_error_param,
     openai_error,
     response_failed_event,
 )
@@ -408,6 +410,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
     _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,
+    _sanitize_public_websocket_event_payload,
     _sanitize_websocket_connect_failure,
     _sanitize_websocket_previous_response_error,
     _sanitize_websocket_terminal_error_fields,
@@ -683,6 +686,17 @@ def _websocket_archive_request_state_for_payload(
         param=_websocket_event_error_param(event_type, payload),
         message=error_message,
     )
+    is_previous_response_not_found_matching_event = (
+        is_previous_response_not_found_event
+        or _facade()._is_previous_response_not_found_public_shape(
+            code=_normalize_error_code(
+                _websocket_event_error_code(event_type, payload),
+                _websocket_event_error_type(event_type, payload),
+            ),
+            param=_websocket_event_error_param(event_type, payload),
+            message=error_message,
+        )
+    )
     is_missing_tool_output_event = _facade()._is_missing_tool_output_error(
         code=_normalize_error_code(
             _websocket_event_error_code(event_type, payload),
@@ -693,10 +707,12 @@ def _websocket_archive_request_state_for_payload(
     )
     return _match_websocket_request_state_for_anonymous_event(
         pending_requests,
-        prefer_previous_response_not_found=is_previous_response_not_found_event or is_missing_tool_output_event,
+        prefer_previous_response_not_found=(
+            is_previous_response_not_found_matching_event or is_missing_tool_output_event
+        ),
         previous_response_id_hint=_facade()._previous_response_id_from_not_found_message(error_message),
         error_message=error_message,
-        allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+        allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
     )
 
 
@@ -5118,6 +5134,23 @@ class _WebSocketMixin:
             param=_websocket_event_error_param(event_type, payload),
             message=error_message,
         )
+        # Matching an anonymous terminal frame is a separate decision from
+        # authorizing a replay.  A canonical stale-anchor code still needs to
+        # claim the right pending request when its present ``param`` is
+        # malformed, otherwise a multiplexed socket can drop the raw frame or
+        # hand it to the wrong request.  Keep the strict classifier above for
+        # all replay/account-recovery decisions below.
+        is_previous_response_not_found_matching_event = (
+            is_previous_response_not_found_event
+            or _facade()._is_previous_response_not_found_public_shape(
+                code=_normalize_error_code(
+                    _websocket_event_error_code(event_type, payload),
+                    _websocket_event_error_type(event_type, payload),
+                ),
+                param=_websocket_event_error_param(event_type, payload),
+                message=error_message,
+            )
+        )
         is_missing_tool_output_event = _facade()._is_missing_tool_output_error(
             code=_normalize_error_code(
                 _websocket_event_error_code(event_type, payload),
@@ -5136,7 +5169,6 @@ class _WebSocketMixin:
             event_block=f"data: {text}\n\n",
             event=event,
         )
-
         async with pending_lock:
             request_state = None
             created_request_state = None
@@ -5152,11 +5184,11 @@ class _WebSocketMixin:
             elif response_id is None:
                 request_state = _match_websocket_request_state_for_anonymous_event(
                     pending_requests,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    prefer_previous_response_not_found=is_previous_response_not_found_matching_event
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
-                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                 )
                 release_create_gate = False
             else:
@@ -5234,11 +5266,11 @@ class _WebSocketMixin:
                     pending_requests,
                     response_id=response_id,
                     fallback_request_state=request_state,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    prefer_previous_response_not_found=is_previous_response_not_found_matching_event
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
-                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                     allow_precreated_terminal_fallback=event_type
                     in {
                         "response.failed",
@@ -5246,14 +5278,16 @@ class _WebSocketMixin:
                         "error",
                     },
                 )
-                if request_state is None and (is_previous_response_not_found_event or is_missing_tool_output_event):
+                if request_state is None and (
+                    is_previous_response_not_found_matching_event or is_missing_tool_output_event
+                ):
                     grouped_previous_response_request_states = _pop_matching_websocket_request_states(
                         pending_requests,
                         _matching_websocket_request_states_for_previous_response_error(
                             pending_requests,
                             previous_response_id_hint=previous_response_id_hint,
                             error_message=error_message,
-                            allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                            allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                         ),
                     )
                     if not grouped_previous_response_request_states and is_missing_tool_output_event:
@@ -5340,16 +5374,26 @@ class _WebSocketMixin:
             await proxy._touch_active_websocket_thread_affinity(request_state, account)
 
         if len(grouped_previous_response_request_states) > 1:
-            upstream_control.reconnect_requested = True
-            downstream_texts: list[str] = []
+            # Matching a canonical stale-anchor frame with malformed
+            # metadata is safe for ownership/masking only.  It must remain
+            # fail-closed and never turn into a replay/reconnect signal.
             grouped_error_reason = (
                 "previous_response_not_found"
                 if is_previous_response_not_found_event
+                else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+                if is_previous_response_not_found_matching_event
                 else "missing_tool_output"
                 if is_missing_tool_output_event
                 else "stream_incomplete"
             )
+            if grouped_error_reason != PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON:
+                upstream_control.reconnect_requested = True
+            downstream_texts: list[str] = []
             for grouped_request_state in grouped_previous_response_request_states:
+                if grouped_error_reason == PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON:
+                    # Safe anonymous ownership matching must not become a
+                    # replay grant for any request claimed by this frame.
+                    grouped_request_state.previous_response_not_found_recovery_blocked = True
                 if grouped_error_reason == "previous_response_not_found":
                     _record_websocket_stale_anchor_failure(
                         grouped_request_state,
@@ -5389,10 +5433,14 @@ class _WebSocketMixin:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
-            if is_previous_response_not_found_event:
-                upstream_control.reconnect_requested = True
+            if is_previous_response_not_found_matching_event:
+                malformed_param = not is_previous_response_not_found_event
+                if not malformed_param:
+                    upstream_control.reconnect_requested = True
                 fallback_error_code, fallback_error_message = _websocket_continuity_error_fields(
-                    reason="previous_response_not_found",
+                    reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+                    if malformed_param
+                    else "previous_response_not_found",
                     expose_stale_previous_response_classifier=codex_session_affinity,
                 )
                 downstream_text = json.dumps(
@@ -5411,6 +5459,10 @@ class _WebSocketMixin:
                 return downstream_text
             if is_missing_tool_output_event:
                 upstream_control.suppress_downstream_event = True
+            if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
+                public_payload = _sanitize_public_websocket_event_payload(payload)
+                if public_payload is not payload:
+                    text = json.dumps(public_payload, ensure_ascii=True, separators=(",", ":"))
             return text
 
         if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -5459,6 +5511,12 @@ class _WebSocketMixin:
                 upstream_control=upstream_control,
                 original_text=text,
             )
+        if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
+            public_payload = _sanitize_public_websocket_event_payload(payload)
+            if public_payload is not payload:
+                # Keep ``payload``/``event`` raw for matching and settlement;
+                # only the client-facing serialized text is sanitized.
+                downstream_text = json.dumps(public_payload, ensure_ascii=True, separators=(",", ":"))
         if retry_error_code is None:
             retry_error_code = _websocket_precreated_retry_error_code(
                 request_state,
@@ -6501,7 +6559,7 @@ class _WebSocketMixin:
                                 request_error_message,
                                 error_type=request_error_type,
                                 response_id=_websocket_downstream_response_id(request_state),
-                                error_param=request_error_param,
+                                error_param=normalize_public_error_param(request_error_param),
                             )
                         )
                     )
@@ -6670,7 +6728,10 @@ class _WebSocketMixin:
             error_message,
             error_type=error_type,
             response_id=_websocket_downstream_response_id(request_state),
-            error_param=error_param,
+            # Classification above consumes the presence-aware raw state;
+            # this is the direct WebSocket client boundary, so only a
+            # trimmed, non-empty string may cross it.
+            error_param=normalize_public_error_param(error_param),
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:

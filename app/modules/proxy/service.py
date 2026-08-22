@@ -683,6 +683,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _rewrite_websocket_downstream_response_id,  # noqa: F401
     _rewrite_websocket_previous_response_owner_unavailable_event,  # noqa: F401
     _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,  # noqa: F401
+    _sanitize_public_websocket_event_payload,  # noqa: F401
     _sanitize_websocket_connect_failure,  # noqa: F401
     _sanitize_websocket_previous_response_error,  # noqa: F401
     _sanitize_websocket_terminal_error_fields,  # noqa: F401
@@ -2307,7 +2308,7 @@ def _partial_output_proxy_error_event_block(
         error_message or default_message,
         error_type=(error.type if error and error.type else "server_error"),
         response_id=response_id,
-        error_param=error.param_state if error else OpenAIErrorParam.absent(),
+        error_param=(error.param_state.normalized or None) if error else None,
     )
     _apply_error_metadata(event["response"]["error"], error)
     return format_sse_event(event)
