@@ -26364,8 +26364,7 @@ async def test_process_upstream_websocket_text_records_code_for_matched_malforme
     )
 
     assert '"type":"response.failed"' in downstream_text
-    assert '"code":"stream_incomplete"' in downstream_text
-    assert "previous_response_not_found" not in downstream_text
+    assert '"code":"previous_response_not_found"' in downstream_text
     assert "upstream_error_code=previous_response_not_found" in caplog.text
     finalize_request_state.assert_awaited_once()
     handle_stream_error.assert_not_awaited()
