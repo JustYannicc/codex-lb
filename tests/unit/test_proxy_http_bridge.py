@@ -28266,6 +28266,95 @@ async def test_http_bridge_verified_stale_anchor_claim_times_out_and_releases_ci
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_timed_out_generation_claim_reconciles_before_suppressing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-timeout-reconciled")
+    claim_attempts = 0
+
+    async def stall_then_claim(**_kwargs: Any) -> Any:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            await asyncio.Event().wait()
+        return SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", stall_then_claim)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.01)
+
+    # The cancelled compare-and-set proves nothing about the durable row, so
+    # the timeout must reconcile against it instead of stranding the replay.
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+        is True
+    )
+    assert claim_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_timed_out_generation_claim_suppresses_when_durable_generation_is_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-timeout-consumed")
+    claim_attempts = 0
+
+    async def stall_then_refuse(**_kwargs: Any) -> Any:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            await asyncio.Event().wait()
+        return None
+
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", stall_then_refuse)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.01)
+
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+        is False
+    )
+    assert claim_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_timed_out_generation_claim_suppresses_when_reconciliation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-timeout-unreachable")
+    claim_attempts = 0
+
+    async def stall_then_raise(**_kwargs: Any) -> Any:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            await asyncio.Event().wait()
+        raise RuntimeError("durable retry circuit is unreachable")
+
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", stall_then_raise)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.01)
+
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+        is False
+    )
+    assert claim_attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_source_retry_circuit_cooldown_is_used_for_replacement_suppression(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

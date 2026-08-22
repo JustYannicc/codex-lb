@@ -132,6 +132,16 @@ This route already has a working transparent server-side replay for `previous_re
   point, eliminating the former lookup-to-send race without holding unrelated
   local keys behind durable I/O or hiding a delayed failure from a replica with
   a skewed wall clock.
+- **Reconcile a timed-out claim instead of assuming it lost.** The claim runs
+  under a timeout, and a cancelled compare-and-set says nothing about whether
+  the generation was consumed. Suppressing on the timeout alone strands the
+  request's one legitimate replay in the common case where the cancelled
+  attempt never committed at all. Because the coordinator opens a fresh session
+  per call, the reconciliation is simply re-running the identical
+  compare-and-set, fenced on `admission_generation`: it can only win while the
+  authorized generation is unconsumed, so it recovers the stranded replay
+  without ever admitting a second one. A refused or failed reconciliation stays
+  fail-closed and suppresses the replacement.
 - **Compare the original hard key, independent of cooldown.** The marker stores
   the source `_HTTPBridgeSessionKey` as well as its generation. Account-neutral
   admission claims durable/local state for that source key before considering

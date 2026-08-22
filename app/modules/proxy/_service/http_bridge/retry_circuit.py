@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -185,20 +186,29 @@ class _HTTPBridgeRetryCircuitMixin:
                 or state.cooldown_until > expected_local_cooldown
             ):
                 return False
+
+        async def run_durable_claim() -> Any:
+            return await claim_generation(
+                session_key_kind=key.affinity_kind,
+                session_key_value=key.affinity_key,
+                api_key_id=key.api_key_id,
+                expected_updated_at_epoch=(
+                    expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
+                ),
+                expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_persisted_failures,
+                expected_cooldown_until_epoch=expected_persisted_cooldown,
+            )
+
         try:
             claimed = await asyncio.wait_for(
-                claim_generation(
-                    session_key_kind=key.affinity_kind,
-                    session_key_value=key.affinity_key,
-                    api_key_id=key.api_key_id,
-                    expected_updated_at_epoch=(
-                        expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
-                    ),
-                    expected_admission_generation=expected_admission_generation,
-                    expected_consecutive_failures=expected_persisted_failures,
-                    expected_cooldown_until_epoch=expected_persisted_cooldown,
-                ),
+                run_durable_claim(),
                 timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
+                key=key,
+                run_durable_claim=run_durable_claim,
             )
         except Exception:
             logger.warning(
@@ -227,6 +237,46 @@ class _HTTPBridgeRetryCircuitMixin:
                 self._http_bridge_retry_circuit_loaded_keys.add(key)
                 self._http_bridge_retry_circuit_persisted_keys.add(key)
             return True
+
+    async def _reconcile_timed_out_retry_circuit_generation_claim(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        run_durable_claim: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Resolve a timed-out admission claim against durable state.
+
+        A claim timeout cancels the compare-and-set mid-flight, so it proves
+        nothing about whether the authorized generation was consumed. Treating
+        it as "not claimed" therefore strands this request's one legitimate
+        replay in the common case where the cancelled attempt never committed
+        at all. The coordinator opens a fresh session per call, so the
+        reconciliation is just re-running the identical compare-and-set: the
+        durable row fences it on ``admission_generation``, so it can only win
+        while the authorized generation is still unconsumed. A win recovers
+        the stranded replay; a miss stays fail-closed and keeps the
+        at-most-once guarantee without having to distinguish a committed
+        predecessor from a competing replica.
+        """
+        logger.warning(
+            "Timed out claiming HTTP bridge retry circuit generation; reconciling durable state "
+            "bridge_kind=%s bridge_key=%s",
+            key.affinity_kind,
+            _hash_identifier(key.affinity_key),
+        )
+        try:
+            return await asyncio.wait_for(
+                run_durable_claim(),
+                timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return None
 
     async def _http_bridge_retry_circuit_current_count(self: Any, session: _HTTPBridgeSession) -> int:
         async with self._http_bridge_retry_circuit_lock:

@@ -2854,12 +2854,35 @@ class _HTTPBridgeStreamingMixin:
                 assert recovery_request_state.operation_id is not None
                 assert recovery_session.durable_session_id is not None
                 assert recovery_session.durable_owner_epoch is not None
-                reset_ok = await reset_operation_event_spool(
-                    operation_id=recovery_request_state.operation_id,
-                    session_id=recovery_session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=recovery_session.durable_owner_epoch,
-                )
+                # A best-effort reset is housekeeping on a path that is not
+                # removing the anchor, so a durable outage must not convert an
+                # ordinary local rebind into a hard continuity failure. Only
+                # the required mode is a fail-closed gate before an unanchored
+                # replacement is submitted, and it reports the same typed error
+                # for a refused reset and for a raising one.
+                try:
+                    reset_ok = await reset_operation_event_spool(
+                        operation_id=recovery_request_state.operation_id,
+                        session_id=recovery_session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_session.durable_owner_epoch,
+                    )
+                except Exception as spool_reset_exc:
+                    if not required:
+                        logger.warning(
+                            "Best-effort HTTP bridge recovery spool reset failed request_id=%s operation_id=%s",
+                            recovery_request_state.request_id,
+                            recovery_request_state.operation_id,
+                            exc_info=True,
+                        )
+                        return
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery spool could not be reset; retry the request.",
+                        ),
+                    ) from spool_reset_exc
                 if not reset_ok:
                     if not required:
                         return

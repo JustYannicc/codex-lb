@@ -13863,6 +13863,8 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "transport-only",
         "operation-fence-unavailable",
         "spool-reset-unavailable",
+        "spool-reset-raises",
+        "local-rebind-spool-reset-raises",
         "prior-replay-ambiguous",
         "inactive-unknown-journal",
         "pending-tool-manifest",
@@ -13887,10 +13889,19 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "forwarded-account-neutral",
         "pending-tool-manifest",
         "account-neutral-newer-circuit-before-submit",
+        "spool-reset-raises",
     }
     forwarded_receiver = replay_case.startswith("forwarded-")
     operation_fence_unavailable = replay_case == "operation-fence-unavailable"
     spool_reset_unavailable = replay_case == "spool-reset-unavailable"
+    # A raising durable spool reset must fail closed before an unanchored
+    # replacement is submitted, but must stay best-effort on the anchored
+    # local rebind, which is not removing the anchor at all.
+    spool_reset_raises = replay_case in {"spool-reset-raises", "local-rebind-spool-reset-raises"}
+    local_rebind_spool_reset_raises = replay_case == "local-rebind-spool-reset-raises"
+    raising_reset_operation_event_spool = AsyncMock(
+        side_effect=RuntimeError("durable operation spool reset is unavailable")
+    )
     prior_replay_ambiguous = replay_case == "prior-replay-ambiguous"
     prior_replay_ambiguous_after_event = replay_case == "prior-replay-ambiguous-after-event"
     stale_rejection_after_event_first_attempt = replay_case == "stale-rejection-after-event-first-attempt"
@@ -14019,6 +14030,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             )
         if spool_reset_unavailable:
             monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", None)
+        if spool_reset_raises:
+            monkeypatch.setattr(
+                service._durable_bridge,
+                "reset_operation_event_spool",
+                raising_reset_operation_event_spool,
+            )
         if prior_replay_ambiguous or prior_replay_ambiguous_after_event:
             original_prepare_http_bridge_request = service._prepare_http_bridge_request
 
@@ -14134,7 +14151,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         ),
         *(
             []
-            if replay_case in {"missing-prior-output", "pending-tool-manifest"}
+            if replay_case
+            in {
+                "missing-prior-output",
+                "pending-tool-manifest",
+                "local-rebind-spool-reset-raises",
+            }
             else [
                 {
                     "type": "message",
@@ -14210,7 +14232,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert len(owner_upstream.sent_text) == 1
         assert alternate_upstream.sent_text == []
         return
-    if operation_fence_unavailable or spool_reset_unavailable or prior_replay_ambiguous:
+    if (
+        operation_fence_unavailable
+        or spool_reset_unavailable
+        or prior_replay_ambiguous
+        or (spool_reset_raises and not local_rebind_spool_reset_raises)
+    ):
         failed_response = await async_client.post(
             "/backend-api/codex/responses",
             json=second_payload,
@@ -14221,6 +14248,8 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert connected_account_ids == [owner_chatgpt_account_id]
         assert len(owner_upstream.sent_text) == 1
         assert alternate_upstream.sent_text == []
+        if spool_reset_raises:
+            raising_reset_operation_event_spool.assert_awaited()
         return
     if prior_replay_ambiguous_after_event or stale_rejection_after_event_first_attempt:
         failed_events = await _collect_sse_events(
@@ -14318,6 +14347,11 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             key.lower(): value for key, value in connect_headers_by_account[owner_chatgpt_account_id].items()
         }
         assert replay_payload["previous_response_id"] == first_response_id
+        if local_rebind_spool_reset_raises:
+            # The anchored rebind keeps its anchor, so the best-effort spool
+            # reset must swallow the durable failure it just hit rather than
+            # turning a recoverable local error into a hard 502.
+            raising_reset_operation_event_spool.assert_awaited()
     if account_neutral:
         assert "previous_response_id" not in replay_payload
         assert replay_payload["input"] == expected_replay_input

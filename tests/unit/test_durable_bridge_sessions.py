@@ -33,6 +33,7 @@ from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, Du
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
+    DurableBridgeRetryCircuitSnapshot,
     durable_bridge_hash,
     durable_bridge_operation_id,
 )
@@ -3342,6 +3343,93 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     assert after_delayed_failure is not None
     assert after_delayed_failure.consecutive_failures == 3
     assert after_delayed_failure.admission_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_generation_claim_reconciliation_is_at_most_once(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A timed-out claim is reconciled by re-running the identical compare-and-set.
+
+    The service cannot tell whether a cancelled claim committed, so it re-issues
+    the same statement. That is only safe because the durable row fences the
+    retry on ``admission_generation`` alone: a committed predecessor refuses the
+    retry even though every other fence field is untouched, and an uncommitted
+    one still grants it.
+    """
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-reconcile",
+        api_key_id="key-reconcile",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+
+    async def reconciling_claim() -> DurableBridgeRetryCircuitSnapshot | None:
+        return await coordinator.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-reconcile",
+            api_key_id="key-reconcile",
+            expected_updated_at_epoch=1200.0,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=1300.0,
+        )
+
+    # The generation is unconsumed, so the reconciling statement is granted.
+    claimed = await reconciling_claim()
+    assert claimed is not None
+    assert claimed.admission_generation == 1
+
+    unchanged = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-reconcile",
+        api_key_id="key-reconcile",
+    )
+    assert unchanged is not None
+    assert unchanged.updated_at_epoch == 1200.0
+    assert unchanged.consecutive_failures == 2
+    assert unchanged.cooldown_until_epoch == 1300.0
+
+    # Replaying the identical statement, as a timeout reconciliation does when
+    # the cancelled attempt actually committed, must not admit a second replay.
+    assert await reconciling_claim() is None
+
+    # A concurrent failure that moves the fence forward also refuses the
+    # reconciling retry, so a stale timeout cannot resurrect a dead generation.
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-reconcile-fenced",
+        api_key_id="key-reconcile",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-reconcile-fenced",
+        api_key_id="key-reconcile",
+        consecutive_failures=3,
+        cooldown_until_epoch=1400.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1250.0,
+        base_updated_at_epoch=1200.0,
+    )
+    assert (
+        await coordinator.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-reconcile-fenced",
+            api_key_id="key-reconcile",
+            expected_updated_at_epoch=1200.0,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=1300.0,
+        )
+        is None
+    )
 
 
 def _lookup_with_lease(lease_expires_at):
