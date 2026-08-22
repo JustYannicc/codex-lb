@@ -60,10 +60,13 @@ This route already has a working transparent server-side replay for `previous_re
   by the original hard session key and survives container replacement. An
   account-neutral replacement uses a unique internal key, but its authorization
   is still compare-and-set against the observed source-circuit generation. A
-  same-owner replacement uses a distinct owner-pinned internal key and therefore
-  never bypasses source-key admission. Neither path deletes the shared local or
-  durable circuit row. Eventless transport failures, delta-only requests, client
-  retries, and ordinary reconnects retain the existing circuit behavior.
+  same-owner replacement uses a distinct owner-pinned internal key and
+  intentionally does not consume the original generation; this is the bounded
+  admission exception for an explicitly rejected, proof-gated stale anchor, not
+  a deletion or mutation of the source circuit. Neither path deletes the shared
+  local or durable circuit row. Eventless transport failures, delta-only
+  requests, client retries, and ordinary reconnects retain the existing
+  source-key circuit behavior.
 - **Do not reuse the broad anchored-recovery predicate as replay proof.**
   `server_anchored_replay_once` intentionally treats eventless transport errors
   as eligible for an at-least-once anchored retry. Anchor removal is stricter:
@@ -179,13 +182,14 @@ This route already has a working transparent server-side replay for `previous_re
 - **Restore rebound ownership, not only state.** The transient rebound snapshot
   carries the prior session/account/model/parent fields. Pre-dispatch rollback
   restores those fields so an undispatched replacement cannot retain ownership.
-- **Avoid same-owner circuit bypass.** Same-owner stale recovery receives a
+- **Isolate same-owner circuit admission.** Same-owner stale recovery receives a
   unique `internal_request_parallel` key while remaining pinned to the proven
   owner. That internal key is preserved even when the incoming header contains a
   normal `http_turn_*` value. It neither captures nor consumes the original
-  hard-key generation. Account-neutral recovery keeps its unique key but still
-  uses the source-circuit CAS claim above. The original hard-key circuit is
-  preserved in both cases.
+  hard-key generation; the explicit stale-anchor proof authorizes this one
+  replacement without deleting or clearing the source circuit. Account-neutral
+  recovery keeps its unique key but still uses the source-circuit CAS claim
+  above. The original hard-key circuit is preserved in both cases.
 - **Centralize transport-only replay denial.** The pre-created retry selector
   rejects verified replacements and anchored safe-fresh candidates when no
   explicit typed replay reason exists. Clean-close, auth, and generic eventless
@@ -204,7 +208,7 @@ or change the upstream split plan.
 
 The mechanism this change touches is shared code, so this section exists to keep the change from growing beyond its intended scope. Each claim below was checked against the current codebase (and, where noted, against a failing test), not assumed.
 
-- **The core change is a two-constant rename+value swap in `app/core/errors.py:46-47`**: `PREVIOUS_RESPONSE_STALE_CODE`/`PREVIOUS_RESPONSE_STALE_MESSAGE` became `PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"` / `PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE`, not a rewrite of `_websocket_continuity_error_fields` (`app/modules/proxy/_service/websocket/helpers.py:1060`). That function already branches on a boolean (`expose_stale_previous_response_classifier`) and returns those two constants only when it is set; the branching logic itself is unchanged. Import sites requiring the rename: `service.py`, `streaming/mixin.py`, `streaming/helpers.py`, `websocket/helpers.py`.
+- **The canonical WebSocket signal portion is a two-constant rename+value swap in `app/core/errors.py:46-47`**: `PREVIOUS_RESPONSE_STALE_CODE`/`PREVIOUS_RESPONSE_STALE_MESSAGE` became `PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"` / `PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE`, not a rewrite of `_websocket_continuity_error_fields` (`app/modules/proxy/_service/websocket/helpers.py:1060`). That function already branches on a boolean (`expose_stale_previous_response_classifier`) and returns those two constants only when it is set; the branching logic itself is unchanged. Import sites requiring the rename: `service.py`, `streaming/mixin.py`, `streaming/helpers.py`, `websocket/helpers.py`. This statement is scoped to the canonical-signal portion; the combined candidate intentionally changes `http_bridge/` in the separate recovery-hardening sections below.
 - **A second, independent masking layer was missed by static analysis and only surfaced by running the tests: `_wrapped_websocket_error_event` (`websocket/helpers.py:1723`).** This function serializes every top-level `"type": "error"` frame (connect failures, pre-request-state parsing failures) and, on its own, re-classifies *any* payload it sees via `is_previous_response_not_found_error` and force-replaces it with `stream_incomplete` — regardless of whether the caller already sanitized it. Before this change that was harmless, because the already-sanitized code was `codex_previous_response_stale`, which this second check never matched. Once the sanitized code became the canonical `previous_response_not_found` itself, this independent safety net caught it and silently re-masked it back to `stream_incomplete`, defeating the fix for the connect-failure path specifically (`test_backend_responses_websocket_connect_failure_masks_previous_response_not_found` and its `..._logs_client_supplied_stale_anchor_metadata` sibling both failed this way during implementation). Fixed by adding `expose_stale_previous_response_classifier: bool = False` to `_wrapped_websocket_error_event` (default preserves today's behavior everywhere) and threading `request_state.expose_stale_previous_response_classifier` / `codex_session_affinity` through at its two call sites that follow a `_sanitize_websocket_*previous_response_error` call (`websocket/mixin.py` ~line 1015-1020 inside the connect-retry `ProxyResponseError` handler, and ~line 4615-4636 inside `_emit_websocket_connect_failure`). Its other call sites (malformed JSON, schema validation, "no active upstream session", generic `AppError`) build errors that can never classify as `previous_response_not_found`, so they correctly keep the default and are unaffected.
 - **The mid-stream (`response.failed`-shaped) path never had this second-layer problem.** `_sanitize_websocket_terminal_error_fields` (the third sanitizer, used for pending-request cleanup) and `_rewrite_websocket_continuity_corruption_event` (used for in-flight `previous_response_not_found` masking) both build their output via `response_failed_event(...)` directly and send it without passing through `_wrapped_websocket_error_event` at all — confirmed by all ~14 mid-stream tests passing on the first attempt, with only the two connect-failure tests failing. `_wrapped_websocket_error_event` is specific to the top-level `"type": "error"` wire shape used before a response/request is underway.
 - **The canonical WebSocket signal PR1 was scoped to the Codex-native route, not the public `/v1` or HTTP bridge.** `_websocket_continuity_error_fields` is shared: it is called from `websocket/helpers.py` and from `streaming/helpers.py:645` (`_build_stream_incomplete_terminal_event_for_request`), which is in turn called from `http_bridge/upstream_events.py` and `http_bridge/service_stubs.py`. Every call site passes `request_state.expose_stale_previous_response_classifier`, and that field has exactly three set-sites, all in `websocket/mixin.py`, all set to `codex_session_affinity` (default `False` per `support.py:803`). Tracing `codex_session_affinity` to its callers in `api.py` confirms that `True` is passed from exactly one place, the `responses_websocket` handler behind `@ws_router.websocket("/responses")` (`ws_router` prefix `/backend-api/codex`). The local combined candidate also contains separately reviewed HTTP bridge recovery changes; this route-scope claim applies only to the canonical WebSocket PR1 portion. The same fencing applies to the `_wrapped_websocket_error_event` fix above, since it is gated by the identical field/flag.

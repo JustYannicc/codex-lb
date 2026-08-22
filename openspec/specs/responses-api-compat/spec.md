@@ -214,11 +214,13 @@ row so a cooldown opened by another replica is observed even when this process
 has already loaded the key. A durable lookup or persistence failure MUST NOT
 crash the request; the proxy MUST continue using available local state and
 record the failure for observability. Rows older than one hour MUST be treated
-as expired and removed. A successful terminal response MUST clear the local
-and durable circuit state only after a successful durable read establishes the
-version fence. When that read fails, the proxy MUST retain local admission
-state and MUST skip any unfenced durable clear so a newer concurrent failure
-cannot be erased.
+as expired and removed. An ordinary successful terminal response MUST clear the
+local and durable circuit state only after a successful durable read establishes
+the version fence. An internally marked, verified stale-anchor replacement is
+not an ordinary success: its completion MUST retain the pre-existing source
+circuit while independently fenced quarantine cleanup may proceed. When the
+durable read fails, the proxy MUST retain local admission state and MUST skip
+any unfenced durable clear so a newer concurrent failure cannot be erased.
 
 #### Scenario: idle bridge retirement does not consume a circuit strike
 
@@ -4617,7 +4619,7 @@ record.
 - **WHEN** the request is rejected before upstream dispatch
 - **THEN** no recovery-journal record is created or refreshed
 
-### Requirement: Durable replay is limited to ambiguous transport outcomes
+### Requirement: Durable journal replay is limited to ambiguous transport outcomes
 
 The proxy MUST consume an `unknown` recovery-journal record for a fresh
 account-neutral replay only after an ambiguous transport outcome, represented
@@ -4625,6 +4627,11 @@ by `stream_incomplete`, `stream_idle_timeout`, or
 `upstream_request_timeout`, and only before any response event or downstream
 output. Explicit deterministic `response.failed` errors MUST settle normally
 and MUST NOT trigger a cross-account replay or consume the recovery fence.
+This requirement governs recovery-journal claims; it does not prohibit the
+separate explicit stale-anchor replacement path, which requires a confirmed
+stale-anchor rejection, a durable operation/owner fence, and the
+retry-circuit admission rules defined by the stale-anchor recovery
+requirements.
 
 #### Scenario: Transport ambiguity permits one replay
 

@@ -109,7 +109,7 @@ and the parameter-less ChatGPT backend report
 - None.
 
 ### Modified Capabilities
-- `responses-api-compat`: Redefines the sanitized signal for Codex-native WebSocket stale-anchor failures as the canonical `previous_response_not_found` code, and scopes the "never leak raw upstream errors" masking to the raw envelope and the missing response id rather than to the bare code.
+- `responses-api-compat`: Redefines the sanitized signal for Codex-native WebSocket stale-anchor failures as the canonical `previous_response_not_found` code, scopes the "never leak raw upstream errors" masking to the raw envelope and the missing response id rather than to the bare code, and hardens verified HTTP-bridge stale-anchor recovery with owner fencing, retry-circuit generation rules, quarantine cleanup, and fail-closed boundaries.
 
 ## Non-Goals
 
