@@ -35650,6 +35650,45 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
     assert rewritten_error_message == "Upstream websocket closed before response.completed"
 
 
+def test_sanitize_websocket_connect_failure_masks_raw_id_with_malformed_param():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_connect_failure_malformed_param",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_message = "Previous response with id 'resp_prev_anchor' not found."
+    original_payload = proxy_module.openai_error(
+        "invalid_request_error",
+        original_message,
+        error_type="invalid_request_error",
+    )
+    original_payload["error"]["param"] = {}
+
+    (
+        rewritten_status,
+        rewritten_payload,
+        rewritten_error_code,
+        rewritten_error_message,
+    ) = proxy_service._sanitize_websocket_connect_failure(
+        request_state=request_state,
+        status_code=400,
+        payload=original_payload,
+        error_code="invalid_request_error",
+        error_message=original_message,
+    )
+
+    assert rewritten_status == 502
+    assert rewritten_payload["error"]["code"] == "stream_incomplete"
+    assert rewritten_payload["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert rewritten_error_code == "stream_incomplete"
+    assert rewritten_error_message == "Upstream websocket closed before response.completed"
+    assert "resp_prev_anchor" not in json.dumps(rewritten_payload)
+
+
 def test_wrapped_websocket_error_event_masks_previous_response_not_found():
     payload = proxy_module.openai_error(
         "previous_response_not_found",
