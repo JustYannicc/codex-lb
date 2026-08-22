@@ -14044,13 +14044,26 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
         "retains_prior_output",
         "takeover_context_matches",
         "takeover_account_id",
+        "takeover_stored_count",
+        "owner_error_code_override",
+        "recovery_creation_error",
     ),
     [
-        pytest.param(False, True, True, "acc-1", id="local-create-safe-resend"),
-        pytest.param(True, True, True, "acc-1", id="owner-forward-safe-resend"),
-        pytest.param(True, False, True, "acc-1", id="owner-forward-unsafe-resend"),
-        pytest.param(True, False, True, "acc-2", id="owner-forward-refreshed-account"),
-        pytest.param(True, False, False, "acc-1", id="owner-forward-refreshed-prefix-mismatch"),
+        pytest.param(False, True, True, "acc-1", None, None, False, id="local-create-safe-resend"),
+        pytest.param(True, True, True, "acc-1", None, None, False, id="owner-forward-safe-resend"),
+        pytest.param(True, False, True, "acc-1", None, None, False, id="owner-forward-unsafe-resend"),
+        pytest.param(True, False, True, "acc-2", None, None, False, id="owner-forward-refreshed-account"),
+        pytest.param(True, False, False, "acc-1", None, None, False, id="owner-forward-refreshed-prefix-mismatch"),
+        pytest.param(
+            True,
+            True,
+            True,
+            "acc-1",
+            2,
+            "bridge_owner_unreachable",
+            True,
+            id="owner-forward-takeover-invalidates-resend-cache",
+        ),
     ],
 )
 async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
@@ -14059,6 +14072,9 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
     retains_prior_output: bool,
     takeover_context_matches: bool,
     takeover_account_id: str,
+    takeover_stored_count: int | None,
+    owner_error_code_override: str | None,
+    recovery_creation_error: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     prefix_items = [{"role": "user", "content": "one"}]
@@ -14115,13 +14131,25 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
             client_metadata=None,
         )
 
-    owner_error_code = "previous_response_owner_unavailable" if retains_prior_output else "bridge_owner_unreachable"
+    owner_error_code = owner_error_code_override or (
+        "previous_response_owner_unavailable" if retains_prior_output else "bridge_owner_unreachable"
+    )
     owner_unavailable = proxy_service.ProxyResponseError(
         502,
         {
             "error": {
                 "type": "server_error",
                 "code": owner_error_code,
+                "message": "Previous response owner account is unavailable; retry later.",
+            }
+        },
+    )
+    recovery_unavailable = proxy_service.ProxyResponseError(
+        502,
+        {
+            "error": {
+                "type": "server_error",
+                "code": "previous_response_owner_unavailable",
                 "message": "Previous response owner account is unavailable; retry later.",
             }
         },
@@ -14141,6 +14169,8 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
                     key=cast(proxy_service._HTTPBridgeSessionKey, args[0]),
                 )
             raise owner_unavailable
+        if get_or_create_calls == 2 and recovery_creation_error:
+            raise recovery_unavailable
         key = cast(proxy_service._HTTPBridgeSessionKey, args[0])
         recovery_session = _make_bridge_session(key=key, key_value=key.affinity_key)
         preferred_account_id = cast("str | None", kwargs.get("preferred_account_id"))
@@ -14206,21 +14236,32 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         latest_input_item_count=len(prefix_items),
         latest_input_full_fingerprint=proxy_service._fingerprint_input_items(payload_prefix_items),
     )
+    takeover_input_item_count = (
+        takeover_stored_count if takeover_stored_count is not None else durable_lookup.latest_input_item_count
+    )
+    takeover_input_fingerprint = (
+        proxy_service._fingerprint_input_items(
+            cast(list[proxy_service.JsonValue], payload.input)[:takeover_stored_count]
+        )
+        if takeover_stored_count is not None and takeover_context_matches
+        else durable_lookup.latest_input_full_fingerprint
+        if takeover_context_matches
+        else "f" * 64
+    )
     takeover_lookup = replace(
         durable_lookup,
         account_id=takeover_account_id,
         owner_instance_id=None,
         lease_expires_at=None,
-        latest_input_full_fingerprint=(
-            durable_lookup.latest_input_full_fingerprint if takeover_context_matches else "f" * 64
-        ),
+        latest_input_item_count=takeover_input_item_count,
+        latest_input_full_fingerprint=takeover_input_fingerprint,
     )
     monkeypatch.setattr(
         service._durable_bridge,
         "lookup_request_targets",
         AsyncMock(
             side_effect=[durable_lookup, takeover_lookup]
-            if forward_to_active_owner and not retains_prior_output
+            if forward_to_active_owner and (not retains_prior_output or takeover_stored_count is not None)
             else None,
             return_value=durable_lookup,
         ),
@@ -14264,6 +14305,14 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
             await collect_chunks()
         assert exc_info.value.payload["error"]["code"] == "bridge_owner_unreachable"
         assert get_or_create_calls == 1
+        return
+
+    if recovery_creation_error:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await collect_chunks()
+        assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+        assert get_or_create_calls == 2
+        assert forwarded_payloads == [payload]
         return
 
     chunks = await collect_chunks()
