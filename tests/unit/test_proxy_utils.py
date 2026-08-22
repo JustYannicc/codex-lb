@@ -35433,6 +35433,29 @@ def test_wrapped_websocket_error_event_masks_previous_response_not_found():
     assert "resp_prev_anchor" not in json.dumps(event)
 
 
+def test_sanitize_public_websocket_event_payload_uses_classified_type_for_typeless_error():
+    payload: dict[str, JsonValue] = {
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Malformed upstream error",
+            "param": {},
+        },
+    }
+
+    sanitized = websocket_helpers_module._sanitize_public_websocket_event_payload(payload, event_type="error")
+
+    assert sanitized == {
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Malformed upstream error",
+        },
+    }
+
+
 def test_app_error_websocket_event_preserves_error_param():
     event = websocket_helpers_module._app_error_to_websocket_event(
         ProxyReasoningEffortNotAllowed("Reasoning effort is not allowed", param="reasoning.effort")

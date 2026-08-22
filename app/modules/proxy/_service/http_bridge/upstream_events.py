@@ -2985,7 +2985,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         # malformed/non-string ``error.param`` values before putting it in a
         # downstream queue or operation spool.
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
-            public_payload = _sanitize_public_websocket_event_payload(payload)
+            public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
             if public_payload is not payload:
                 event_block = format_sse_event(public_payload)
 

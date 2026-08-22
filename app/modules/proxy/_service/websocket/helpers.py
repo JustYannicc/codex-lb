@@ -1152,7 +1152,11 @@ def _websocket_event_error_payload(
     return None
 
 
-def _sanitize_public_websocket_event_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _sanitize_public_websocket_event_payload(
+    payload: dict[str, JsonValue],
+    *,
+    event_type: str | None,
+) -> dict[str, JsonValue]:
     """Strip malformed error parameters at a client-facing event boundary.
 
     Upstream parsing and continuity classification happen before this helper,
@@ -1167,7 +1171,6 @@ def _sanitize_public_websocket_event_payload(payload: dict[str, JsonValue]) -> d
         sanitized = sanitize_public_error_detail(mapping)
         return sanitized
 
-    event_type = payload.get("type")
     if event_type == "error":
         error_value = payload.get("error")
         if isinstance(error_value, dict):

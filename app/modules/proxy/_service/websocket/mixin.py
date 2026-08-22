@@ -5479,7 +5479,7 @@ class _WebSocketMixin:
             if is_missing_tool_output_event:
                 upstream_control.suppress_downstream_event = True
             if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
-                public_payload = _sanitize_public_websocket_event_payload(payload)
+                public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
                 if public_payload is not payload:
                     text = json.dumps(public_payload, ensure_ascii=True, separators=(",", ":"))
             return text
@@ -5531,7 +5531,7 @@ class _WebSocketMixin:
                 original_text=text,
             )
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
-            public_payload = _sanitize_public_websocket_event_payload(payload)
+            public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
             if public_payload is not payload:
                 # Keep ``payload``/``event`` raw for matching and settlement;
                 # only the client-facing serialized text is sanitized.
