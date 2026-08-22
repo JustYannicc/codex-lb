@@ -5394,6 +5394,13 @@ class _WebSocketMixin:
                     # Safe anonymous ownership matching must not become a
                     # replay grant for any request claimed by this frame.
                     grouped_request_state.previous_response_not_found_recovery_blocked = True
+                    _record_continuity_fail_closed(
+                        surface="websocket_stream",
+                        reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+                        previous_response_id=grouped_request_state.previous_response_id,
+                        session_id=grouped_request_state.session_id,
+                        upstream_error_code="previous_response_not_found",
+                    )
                 if grouped_error_reason == "previous_response_not_found":
                     _record_websocket_stale_anchor_failure(
                         grouped_request_state,

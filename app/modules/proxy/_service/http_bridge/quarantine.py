@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,7 +41,12 @@ _HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON = "repeated_eventless_timeout"
 @dataclass(slots=True)
 class _HTTPBridgeQuarantineEntry:
     generation: int = 0
-    owner_identity: int | None = None
+    # Keep a weak lifetime token rather than the owning session's ``id()`` or
+    # a strong session reference. A detached session can finish after the key
+    # is reused, and CPython may recycle an old object's integer id before that
+    # completion arrives. The weak reference keeps the bounded quarantine
+    # registry from retaining a detached websocket session until TTL expiry.
+    owner_ref: weakref.ReferenceType[_HTTPBridgeSession] | None = None
     quarantined_until: float = 0.0
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
@@ -136,10 +142,10 @@ def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
     entry.generation = _next_http_bridge_quarantine_generation(service, registry)
-    # Keep the session identity alongside the generation.  A detached
+    # Keep a weak session identity alongside the generation. A detached
     # predecessor can still finish a response after a replacement has reused
     # this key; that completion must not clear the replacement's newer entry.
-    entry.owner_identity = id(session)
+    entry.owner_ref = weakref.ref(session)
     entry.quarantined_until = max(entry.quarantined_until, now + _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS)
     entry.last_touched_monotonic = now
     entry.reason = reason
@@ -211,13 +217,26 @@ def _clear_http_bridge_quarantine(
     keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
     for key in keys:
         entry = registry.get(key)
+        # A stale-anchor recovery records the generation it observed before
+        # retrying.  When its recovery key is also the primary key, that
+        # generation is the only proof that this completion may clear the
+        # entry: the same session/key can have been quarantined again while
+        # the retry was in flight.  Check before mutating the session marker or
+        # popping the registry entry.
+        if (
+            key == session.key
+            and additional_key == session.key
+            and additional_key_generation is not None
+            and (entry is None or entry.generation != additional_key_generation)
+        ):
+            continue
         active_sessions = getattr(service, "_http_bridge_sessions", None)
         is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
         if (
             key == session.key
             and entry is not None
-            and entry.owner_identity is not None
-            and entry.owner_identity != id(session)
+            and entry.owner_ref is not None
+            and entry.owner_ref() is not session
             and not is_current_primary_session
         ):
             # Only the session that created the primary-key entry may clear
@@ -230,15 +249,14 @@ def _clear_http_bridge_quarantine(
             continue
         if key == session.key:
             session.quarantined = False
-        entry = registry.pop(key, None)
         if (
             key == additional_key
             and key != session.key
-            and (additional_key_generation is None or entry is None or entry.generation != additional_key_generation)
+            and additional_key_generation is not None
+            and (entry is None or entry.generation != additional_key_generation)
         ):
-            if entry is not None:
-                registry[key] = entry
             continue
+        entry = registry.pop(key, None)
         if entry is None or entry.quarantined_until <= time.monotonic():
             continue
         _log_http_bridge_event(

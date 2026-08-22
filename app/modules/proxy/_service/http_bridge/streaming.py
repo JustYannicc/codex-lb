@@ -3334,13 +3334,6 @@ class _HTTPBridgeStreamingMixin:
                     owner_check_applied=True,
                 )
                 retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
-                retry_injected_input = _http_bridge_interrupted_tool_outputs_input(
-                    session,
-                    payload=retry_payload,
-                    request_id=request_id,
-                )
-                if retry_injected_input is not None:
-                    retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
                 retry_preferred_account_id = request_state.preferred_account_id or session.account.id
                 bridge_session_key = _HTTPBridgeSessionKey(
                     "internal_request_parallel",

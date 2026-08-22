@@ -11561,7 +11561,13 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
         )
     ]
     if malformed_param:
-        assert fail_closed == []
+        assert len(fail_closed) >= 2
+        for message in fail_closed:
+            assert "surface=websocket_stream" in message
+            assert "reason=previous_response_not_found_malformed_param" in message
+            assert "previous_response_id=sha256:" in message
+            assert "session_id=sha256:" in message
+            assert "resp_ws_grouped_anchor" not in message
     else:
         assert len(fail_closed) >= 2
         for message in fail_closed:

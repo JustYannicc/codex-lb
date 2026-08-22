@@ -683,7 +683,8 @@ def _normalize_http_bridge_error_event(
                 stripped = message_value.strip()
                 if stripped:
                     error_message_value = stripped
-            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
+            if not error_param_state.present:
+                error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
 
     if isinstance(payload, dict):
         raw_error = payload.get("error")
@@ -692,7 +693,8 @@ def _normalize_http_bridge_error_event(
             if isinstance(raw_error, dict) and "param" in payload:
                 raw_error = {**raw_error, "param": payload["param"]}
         if isinstance(raw_error, dict):
-            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
+            if not error_param_state.present:
+                error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
                 rate_limit_metadata["plan_type"] = plan_type

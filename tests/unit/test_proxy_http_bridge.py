@@ -20960,6 +20960,7 @@ async def test_process_http_bridge_upstream_text_masks_malformed_canonical_previ
 @pytest.mark.asyncio
 async def test_process_http_bridge_upstream_text_groups_anonymous_malformed_stale_error(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A malformed stale-anchor frame still claims every same-anchor request."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -21025,6 +21026,19 @@ async def test_process_http_bridge_upstream_text_groups_anonymous_malformed_stal
         assert "previous_response_not_found" not in json.dumps(payload)
         assert anchor not in json.dumps(payload)
         assert "param" not in error
+
+    fail_closed = [
+        record.getMessage()
+        for record in caplog.records
+        if "continuity_fail_closed" in record.getMessage()
+        and "reason=previous_response_not_found_malformed_param" in record.getMessage()
+    ]
+    assert len(fail_closed) >= 2
+    for message in fail_closed:
+        assert "surface=http_bridge" in message
+        assert "previous_response_id=sha256:" in message
+        assert "session_id=None" in message
+        assert anchor not in message
 
 
 @pytest.mark.asyncio
@@ -27979,7 +27993,11 @@ async def test_http_bridge_retirement_does_not_record_midstream_retry_circuit_fa
 @pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_backoff_is_scoped_to_repeated_hard_keys() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    persist_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_retry_circuit,
+    )
     hard_session = _make_bridge_session(key_value="bridge-circuit-hard")
     other_session = _make_bridge_session(key_value="bridge-circuit-other")
 
@@ -27987,6 +28005,7 @@ async def test_http_bridge_retry_circuit_backoff_is_scoped_to_repeated_hard_keys
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+    assert persist_retry_circuit.await_count == 2
 
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert await service._http_bridge_precreated_retry_allowed(other_session) is True
@@ -28544,6 +28563,7 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=time.time(),
+                admission_generation=0,
             )
         ),
         clear_retry_circuit=AsyncMock(),
@@ -28568,6 +28588,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=expired_updated_at,
+                admission_generation=0,
             )
         ),
         purge_retry_circuit=AsyncMock(),
@@ -28607,6 +28628,7 @@ async def test_http_bridge_retry_circuit_keeps_newer_local_failure_after_stale_p
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_idle_timeout",
                 updated_at_epoch=expired_updated_at,
+                admission_generation=0,
             )
         ),
         purge_retry_circuit=AsyncMock(),
@@ -28641,6 +28663,7 @@ async def test_http_bridge_retry_circuit_keeps_local_state_when_stale_purge_fail
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_idle_timeout",
                 updated_at_epoch=expired_updated_at,
+                admission_generation=0,
             )
         ),
         purge_retry_circuit=AsyncMock(side_effect=RuntimeError("durable purge unavailable")),
@@ -28660,6 +28683,7 @@ async def test_http_bridge_retry_circuit_refreshes_persisted_state_after_initial
         cooldown_until_epoch=time.time() + 60.0,
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
+        admission_generation=0,
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(side_effect=[None, persisted]),
@@ -28695,6 +28719,7 @@ async def test_http_bridge_retry_circuit_preserves_newer_local_failure_on_durabl
                 cooldown_until_epoch=time.time() + 1.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=time.time(),
+                admission_generation=0,
             )
         )
     )
@@ -28716,6 +28741,7 @@ async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear()
         cooldown_until_epoch=time.time() + 60.0,
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
+        admission_generation=0,
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(side_effect=[persisted, None]),
@@ -28738,6 +28764,7 @@ async def test_http_bridge_retry_circuit_clear_preserves_newer_failure_after_loo
         cooldown_until_epoch=1800.0,
         last_detail="stream_idle_timeout",
         updated_at_epoch=1200.0,
+        admission_generation=0,
     )
     lookup_started = asyncio.Event()
     release_lookup = asyncio.Event()
@@ -28845,6 +28872,7 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
         cooldown_until_epoch=0.0,
         last_detail=None,
         updated_at_epoch=now_epoch,
+        admission_generation=0,
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
@@ -28854,6 +28882,7 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
                     cooldown_until_epoch=now_epoch + 60.0,
                     last_detail="stream_incomplete",
                     updated_at_epoch=now_epoch - 1.0,
+                    admission_generation=0,
                 ),
                 reset,
             ]
@@ -28864,6 +28893,7 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
                 cooldown_until_epoch=0.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=now_epoch + 1.0,
+                admission_generation=0,
             )
         ),
     )
@@ -28886,12 +28916,14 @@ async def test_http_bridge_retry_circuit_refreshes_conflict_merged_persisted_sta
         cooldown_until_epoch=time.time() + 60.0,
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
+        admission_generation=0,
     )
     persisted = SimpleNamespace(
         consecutive_failures=2,
         cooldown_until_epoch=time.time() + 60.0,
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
+        admission_generation=0,
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=loaded),
@@ -28981,6 +29013,7 @@ async def test_http_bridge_retry_circuit_duplicate_waits_for_persisted_merge(
             cooldown_until_epoch=time.time() + 60.0,
             last_detail="stream_idle_timeout",
             updated_at_epoch=time.time(),
+            admission_generation=0,
         )
 
     service._durable_bridge = SimpleNamespace(
@@ -31613,6 +31646,56 @@ def test_http_bridge_quarantine_recovery_clear_rejects_generation_reused_after_p
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
 
 
+def test_http_bridge_quarantine_same_key_clear_requires_observed_generation() -> None:
+    """A stale same-key recovery cannot clear a newer quarantine generation."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-primary-generation-fence")
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    observed_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(
+        service,
+        session.key,
+    )
+    assert observed_generation is not None
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="repeated_eventless_timeout",
+    )
+    current_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(
+        service,
+        session.key,
+    )
+    assert current_generation is not None
+    assert current_generation != observed_generation
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        additional_key=session.key,
+        additional_key_generation=observed_generation,
+    )
+
+    assert session.quarantined is True
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.generation == current_generation
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        additional_key=session.key,
+        additional_key_generation=current_generation,
+    )
+    assert session.quarantined is False
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+
 def test_http_bridge_quarantine_clear_does_not_pop_newer_primary_session_entry() -> None:
     """A detached predecessor cannot clear a replacement's quarantine entry."""
     service = SimpleNamespace()
@@ -31656,6 +31739,39 @@ def test_http_bridge_quarantine_clear_does_not_pop_newer_primary_session_entry()
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, predecessor.key) is True
     entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[predecessor.key]
     assert entry.generation == replacement_generation
+
+
+def test_http_bridge_quarantine_owner_fence_survives_reused_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct session objects must not alias through a recycled integer id."""
+    service = SimpleNamespace()
+    predecessor = _make_bridge_session(key_value="quarantine-owner-token")
+    replacement = _make_bridge_session(key=predecessor.key)
+    service._http_bridge_sessions = {predecessor.key: replacement}
+
+    # This reproduces CPython id reuse deterministically for the old
+    # implementation, without relying on allocator timing or garbage
+    # collection.  The quarantine registry must compare object lifetimes.
+    monkeypatch.setattr(http_bridge_quarantine_module, "id", lambda _value: 1, raising=False)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        predecessor,
+        reason="reattach_missing_response_created",
+    )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        replacement,
+        reason="repeated_eventless_timeout",
+    )
+
+    predecessor.quarantined = False
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, predecessor)
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, predecessor.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[predecessor.key]
+    assert entry.owner_ref is not None
+    assert entry.owner_ref() is replacement
 
 
 def test_http_bridge_quarantine_expired_strike_is_not_resurrected() -> None:

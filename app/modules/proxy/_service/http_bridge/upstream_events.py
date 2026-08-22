@@ -131,6 +131,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _record_continuity_fail_closed as _record_continuity_fail_closed,
+)
+from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
 )
 from app.modules.proxy._service.observability import (
@@ -2044,6 +2047,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # Safe anonymous ownership matching must not become a
                     # replay grant for any request claimed by this frame.
                     grouped_request_state.previous_response_not_found_recovery_blocked = True
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+                        previous_response_id=grouped_request_state.previous_response_id,
+                        session_id=grouped_request_state.session_id,
+                        upstream_error_code="previous_response_not_found",
+                    )
                 (
                     _grouped_downstream_text,
                     grouped_event_block,

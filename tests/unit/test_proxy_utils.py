@@ -8579,6 +8579,36 @@ def test_normalize_http_bridge_error_event_preserves_explicit_error_code_from_pa
     assert error["message"] == "explicit"
 
 
+def test_normalize_http_bridge_error_event_preserves_event_param_state_over_payload() -> None:
+    def normalize(event_param_state: OpenAIErrorParam) -> dict[str, Any]:
+        event = SimpleNamespace(
+            error=SimpleNamespace(
+                code="invalid_request_error",
+                type="invalid_request_error",
+                message="Invalid request payload.",
+                param_state=event_param_state,
+            )
+        )
+        _line, payload, _parsed_event, _event_type = proxy_service._normalize_http_bridge_error_event(
+            event=cast(Any, event),
+            payload={
+                "type": "error",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": "Invalid request payload.",
+                    "param": "payload_param",
+                },
+            },
+            request_state=None,
+        )
+        assert payload is not None
+        return cast(dict[str, Any], cast(dict[str, Any], payload["response"])["error"])
+
+    assert normalize(OpenAIErrorParam(True, "event_param"))["param"] == "event_param"
+    assert normalize(OpenAIErrorParam.absent())["param"] == "payload_param"
+
+
 def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_overrides():
     original_error = {
         "type": "invalid_request_error",

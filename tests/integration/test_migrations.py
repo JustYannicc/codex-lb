@@ -1912,6 +1912,16 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
 
 _RETRY_CIRCUIT_PARENT_REVISION = "20260816_000000_add_model_source_embeddings"
 _RETRY_CIRCUIT_GENERATION_REVISION = "20260821_000000_add_retry_circuit_admission_generation"
+_RETRY_CIRCUIT_COLUMNS = {
+    "session_key_kind",
+    "session_key_hash",
+    "api_key_scope",
+    "consecutive_failures",
+    "cooldown_until_epoch",
+    "last_detail",
+    "updated_at_epoch",
+    "admission_generation",
+}
 
 
 def _retry_circuit_columns(sync_conn):
@@ -1971,17 +1981,26 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
             legacy_row = (
                 await conn.execute(
                     text(
-                        "SELECT admission_generation, consecutive_failures FROM http_bridge_retry_circuits "
-                        "WHERE session_key_hash = 'legacy_hash'"
+                        "SELECT session_key_kind, session_key_hash, api_key_scope, consecutive_failures, "
+                        "cooldown_until_epoch, last_detail, updated_at_epoch, admission_generation "
+                        "FROM http_bridge_retry_circuits WHERE session_key_hash = 'legacy_hash'"
                     )
                 )
             ).one()
         assert columns is not None
-        assert "admission_generation" in columns
+        assert columns == _RETRY_CIRCUIT_COLUMNS
         assert admission_generation_column is not None
         assert admission_generation_column["nullable"] is False
-        assert legacy_row.admission_generation == 0
-        assert legacy_row.consecutive_failures == 3
+        assert legacy_row == (
+            "hard",
+            "legacy_hash",
+            "scope_legacy",
+            3,
+            1000.0,
+            "stream_incomplete",
+            900.0,
+            0,
+        )
 
         # A row inserted after the migration without the column defaults to 0.
         async with engine.begin() as conn:
@@ -1994,42 +2013,66 @@ async def test_retry_circuit_admission_generation_migration_upgrade_and_downgrad
                 )
             )
         async with engine.connect() as conn:
-            fresh_generation = (
+            fresh_row = (
                 await conn.execute(
                     text(
-                        "SELECT admission_generation FROM http_bridge_retry_circuits "
-                        "WHERE session_key_hash = 'fresh_hash'"
+                        "SELECT session_key_kind, session_key_hash, api_key_scope, consecutive_failures, "
+                        "cooldown_until_epoch, last_detail, updated_at_epoch, admission_generation "
+                        "FROM http_bridge_retry_circuits WHERE session_key_hash = 'fresh_hash'"
                     )
                 )
-            ).scalar_one()
-        assert fresh_generation == 0
+            ).one()
+        assert fresh_row == (
+            "soft",
+            "fresh_hash",
+            "scope_fresh",
+            1,
+            0.0,
+            None,
+            1100.0,
+            0,
+        )
 
         await to_thread.run_sync(
             lambda: command.downgrade(_build_alembic_config(db_url), _RETRY_CIRCUIT_PARENT_REVISION)
         )
         async with engine.connect() as conn:
             columns = await conn.run_sync(_retry_circuit_columns)
-            surviving = (await conn.execute(text("SELECT COUNT(*) FROM http_bridge_retry_circuits"))).scalar_one()
+            surviving_rows = (
+                await conn.execute(
+                    text(
+                        "SELECT session_key_kind, session_key_hash, api_key_scope, consecutive_failures, "
+                        "cooldown_until_epoch, last_detail, updated_at_epoch "
+                        "FROM http_bridge_retry_circuits ORDER BY session_key_hash"
+                    )
+                )
+            ).all()
         assert columns is not None
         assert "admission_generation" not in columns
-        assert surviving == 2
+        assert surviving_rows == [
+            ("soft", "fresh_hash", "scope_fresh", 1, 0.0, None, 1100.0),
+            ("hard", "legacy_hash", "scope_legacy", 3, 1000.0, "stream_incomplete", 900.0),
+        ]
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             columns = await conn.run_sync(_retry_circuit_columns)
-            generations = (
-                (
-                    await conn.execute(
-                        text("SELECT admission_generation FROM http_bridge_retry_circuits ORDER BY session_key_hash")
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT session_key_kind, session_key_hash, api_key_scope, consecutive_failures, "
+                        "cooldown_until_epoch, last_detail, updated_at_epoch, admission_generation "
+                        "FROM http_bridge_retry_circuits ORDER BY session_key_hash"
                     )
                 )
-                .scalars()
-                .all()
-            )
+            ).all()
         assert columns is not None
-        assert "admission_generation" in columns
-        assert generations == [0, 0]
+        assert columns == _RETRY_CIRCUIT_COLUMNS
+        assert rows == [
+            ("soft", "fresh_hash", "scope_fresh", 1, 0.0, None, 1100.0, 0),
+            ("hard", "legacy_hash", "scope_legacy", 3, 1000.0, "stream_incomplete", 900.0, 0),
+        ]
     finally:
         await engine.dispose()
 
