@@ -1,10 +1,10 @@
 # Proposed PR split
 
-The upstream contribution remains split into the two PRs below. This local,
-immutable deployment candidate intentionally combines the selected coherent
-fixes into one reviewed rollout, with that combination explicitly authorized
-by the user for this deployment. The exception is local delivery scope only: it
-does not imply upstream maintainer approval or alter the upstream split plan.
+The upstream contribution remains split into the two PRs below. This repository
+candidate combines the selected coherent fixes into one reviewed rollout so
+their shared seams and recovery invariants are verified together. That delivery
+boundary applies only to this candidate; it does not imply upstream maintainer
+approval or alter the upstream split plan.
 
 ## PR 1: Canonical Codex WebSocket stale-anchor signal
 
