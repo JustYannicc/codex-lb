@@ -1979,7 +1979,6 @@ class _WebSocketMixin:
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None
-                            and request_state.preferred_account_id is None
                         ):
                             message = "Previous response owner account is unavailable; retry later."
                             _record_continuity_fail_closed(
