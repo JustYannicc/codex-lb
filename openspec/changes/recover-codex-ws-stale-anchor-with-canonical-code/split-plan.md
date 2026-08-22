@@ -45,9 +45,11 @@ Primary files/hunks:
 - `app/modules/proxy/_service/http_bridge/**`
 - HTTP-specific request-state fields in `app/modules/proxy/_service/support.py`
 - Durable operation snapshot/repository/coordinator changes
+- `app/db/models.py` and the `admission_generation` Alembic revision
 - `tests/unit/test_proxy_http_bridge.py`
 - `tests/unit/test_bridge_ring_lifecycle.py`
 - `tests/integration/test_http_responses_bridge.py`
+- `tests/integration/test_migrations.py`
 
 ## Overlap handling
 

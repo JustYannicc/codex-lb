@@ -63,6 +63,8 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** an UNKNOWN recovery journal on an inactive durable owner MUST fail closed without being claimed for anchor removal or account migration
 - **AND** explicit stale-anchor replacement MUST NOT depend on claiming the ambiguous-transport recovery journal
 - **AND** durable full-resend safety MAY be proven either by retained prior output or by an exact stored pending-tool-call manifest match
+- **AND** account-neutral replay admission MUST atomically claim the authorized original hard-key circuit generation
+- **AND** the account-neutral generation claim MUST use the original hard session key even though the replacement uses a new account-neutral key
 
 #### Scenario: Verified owner-bound HTTP full resend drops only the rejected anchor
 - **GIVEN** an HTTP-bridge continuation carries a prefix-verified, trim-safe full input history
@@ -71,7 +73,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **THEN** codex-lb MUST remove the rejected anchor and replay the retained full request at most once on the same owner
 - **AND** the replacement upstream request MUST NOT contain the rejected `previous_response_id`
 - **AND** same-owner replay MUST use a unique owner-pinned internal key instead of bypassing the older hard-key retry circuit
-- **AND** account-neutral replay admission MUST atomically claim the authorized original hard-key circuit generation
+- **AND** same-owner replay admission MUST atomically claim the authorized original hard-key circuit generation
 - **AND** local and durable retry-circuit state MUST NOT be deleted to authorize that replay
 - **AND** successful completion of that verified replay MUST NOT clear the pre-existing local or durable circuit state
 - **AND** successful completion MUST clear independent bridge quarantine state for both the replacement key and original hard key
@@ -87,9 +89,9 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** a present non-string or null `param` MUST NOT be treated as an absent parameter for stale-anchor classification
 - **AND** blank or whitespace-only parameter presence MUST survive every upstream event-normalization layer and MUST NOT be rewritten to the canonical continuity code
 - **AND** the verified replacement MUST NOT receive a clean-close or other transport-level resend after its first dispatch
-- **AND** account-neutral generation claim MUST apply only to the local/durable circuit generation observed when recovery was authorized
+- **AND** the generation claim MUST apply only to the local/durable circuit generation observed when recovery was authorized
 - **AND** a circuit generation that wins the durable compare-and-set first MUST suppress the replacement before submit
-- **AND** generation claim MUST use the original hard session key even when account-neutral recovery creates a new soft key
+- **AND** generation claim MUST use the original hard session key even when the replacement uses a new owner-pinned internal key
 - **AND** generation claim MUST run for absent, below-threshold, expired, half-open, and active circuit states
 - **AND** generation claim MUST use a monotonic field independent from failure observation time so delayed clock-skewed failures remain mergeable
 - **AND** verified replacement MUST NOT enter authentication replay

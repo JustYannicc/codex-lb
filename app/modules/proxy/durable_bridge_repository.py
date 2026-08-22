@@ -523,16 +523,18 @@ class DurableBridgeRepository:
                     )
                     .values(admission_generation=expected_admission_generation + 1)
                 )
-            result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            # Return the updated row from the compare-and-set statement itself.
+            # Reading it after commit created a cancellation window where the
+            # admission generation was consumed but the caller observed a
+            # timeout and suppressed the replay.  ``RETURNING`` makes the
+            # durable claim receipt part of the same atomic write operation.
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
                 await self._session.rollback()
                 return None
             await self._session.commit()
-        return await self.get_retry_circuit(
-            session_key_kind=session_key_kind,
-            session_key_value=session_key_value,
-            api_key_scope=api_key_scope,
-        )
+        return _to_retry_circuit_snapshot(row)
 
     async def delete_retry_circuit(
         self,

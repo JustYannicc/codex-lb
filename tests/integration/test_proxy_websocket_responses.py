@@ -6177,33 +6177,36 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
 
 
 @pytest.mark.parametrize(
-    ("param_present", "param"),
+    ("error_code", "param_present", "param"),
     [
-        (False, None),
-        (True, "previous_response_id"),
-        (True, ""),
-        (True, "   "),
-        (True, None),
-        (True, 0),
-        (True, False),
-        (True, {}),
-        (True, []),
+        ("previous_response_not_found", False, None),
+        ("previous_response_not_found", True, "previous_response_id"),
+        ("previous_response_not_found", True, ""),
+        ("previous_response_not_found", True, "   "),
+        ("previous_response_not_found", True, None),
+        ("previous_response_not_found", True, 0),
+        ("previous_response_not_found", True, False),
+        ("previous_response_not_found", True, {}),
+        ("previous_response_not_found", True, []),
+        ("invalid_request_error", True, "previous_response_id"),
     ],
     ids=[
-        "absent",
-        "valid",
-        "blank",
-        "whitespace",
-        "null",
-        "number",
-        "boolean",
-        "object",
-        "array",
+        "canonical-absent",
+        "canonical-valid",
+        "canonical-blank",
+        "canonical-whitespace",
+        "canonical-null",
+        "canonical-number",
+        "canonical-boolean",
+        "canonical-object",
+        "canonical-array",
+        "invalid-request-valid-param",
     ],
 )
-def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
+def test_v1_responses_websocket_masks_previous_response_not_found_shapes_without_retry(
     app_instance,
     monkeypatch,
+    error_code,
     param_present,
     param,
 ):
@@ -6241,8 +6244,12 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response was not found.",
+                                "code": error_code,
+                                "message": (
+                                    "Invalid previous_response_id."
+                                    if error_code == "invalid_request_error"
+                                    else "Previous response was not found."
+                                ),
                                 **({"param": param} if param_present else {}),
                             },
                         },

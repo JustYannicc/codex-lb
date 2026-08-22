@@ -2861,6 +2861,8 @@ class _HTTPBridgeStreamingMixin:
                     owner_epoch=recovery_session.durable_owner_epoch,
                 )
                 if not reset_ok:
+                    if not required:
+                        return
                     raise ProxyResponseError(
                         502,
                         openai_error(
@@ -3333,6 +3335,11 @@ class _HTTPBridgeStreamingMixin:
             else:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="local_previous_response_error").inc()
+                await reset_previous_response_recovery_operation_spool(
+                    session,
+                    request_state,
+                    required=False,
+                )
                 _log_http_bridge_event(
                     "previous_response_recover_local",
                     bridge_session_key,
@@ -3467,12 +3474,6 @@ class _HTTPBridgeStreamingMixin:
                     "local_previous_response_fresh_replay",
                     "local_previous_response_same_owner_fresh_replay",
                 }
-                if recovery_path == "local_previous_response_error":
-                    await reset_previous_response_recovery_operation_spool(
-                        session,
-                        request_state,
-                        required=False,
-                    )
                 # A recovery request is the one bounded server-side replay;
                 # prevent a second cooldown bypass if this fresh socket also
                 # fails before response.created.
