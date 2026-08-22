@@ -8724,14 +8724,14 @@ def _normalize_public_stream_payload(
     # they continue to forward unchanged.
     if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
-    if enforce_openai_sdk_contract and (event_type == "error" or event_type == "response.failed"):
+    if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
         if event_type == "error":
             parsed_error = _parse_event_error_envelope(payload)
         else:
             response = payload.get("response")
             nested_error = response.get("error") if isinstance(response, dict) else None
             parsed_error = _parse_event_error_envelope({"error": nested_error})
-        if _is_previous_response_not_found_public_error(parsed_error.error):
+        if enforce_openai_sdk_contract and _is_previous_response_not_found_public_error(parsed_error.error):
             response_id = _response_id_from_event_payload(payload) if event_type == "response.failed" else None
             return (
                 cast(
