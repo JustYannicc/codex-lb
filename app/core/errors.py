@@ -56,7 +56,7 @@ def normalize_public_error_param(param: OpenAIErrorParam | JsonValue) -> str | N
     they may emit only a non-empty, trimmed string.
     """
 
-    normalized = _coerce_error_param(param).normalized
+    normalized = coerce_error_param(param).normalized
     return normalized if normalized else None
 
 
@@ -159,8 +159,13 @@ def previous_response_id_from_not_found_message(message: str | None) -> str | No
     return response_id or None
 
 
-def _coerce_error_param(param: OpenAIErrorParam | JsonValue) -> OpenAIErrorParam:
-    """Normalize legacy raw values and the presence-aware wire state."""
+def coerce_error_param(param: OpenAIErrorParam | JsonValue) -> OpenAIErrorParam:
+    """Normalize legacy raw values and presence-aware wire state.
+
+    A raw ``None`` is the legacy shorthand for an omitted field. Callers that
+    parsed a mapping and need to preserve an explicit JSON ``null`` must pass
+    ``OpenAIErrorParam(True, None)`` (normally via :meth:`from_mapping`).
+    """
 
     if isinstance(param, OpenAIErrorParam):
         return param
@@ -195,7 +200,7 @@ def is_previous_response_not_found_error(
     param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    param_state = _coerce_error_param(param)
+    param_state = coerce_error_param(param)
     # A present blank, null, or non-string parameter is not equivalent to an
     # omitted parameter.  Preserve the raw JSON value while failing closed.
     if param_state.malformed:

@@ -73,6 +73,7 @@ from app.core.errors import (
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     ResponseFailedEvent,
+    coerce_error_param,
     is_previous_response_not_found_error,
     is_previous_response_not_found_message,
     openai_error,
@@ -2169,7 +2170,7 @@ def _is_missing_tool_output_error(
     param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    normalized_param = (param if isinstance(param, OpenAIErrorParam) else OpenAIErrorParam(True, param)).normalized
+    normalized_param = coerce_error_param(param).normalized
     return code == "invalid_request_error" and normalized_param == "input" and _is_missing_tool_output_message(message)
 
 

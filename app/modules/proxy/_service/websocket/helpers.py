@@ -45,6 +45,7 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
+    coerce_error_param,
     normalize_public_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
@@ -1581,12 +1582,7 @@ def _sanitize_websocket_terminal_error_fields(
     error_type: str,
     error_param: OpenAIErrorParam | JsonValue | None,
 ) -> tuple[str, str, str, OpenAIErrorParam | None]:
-    if isinstance(error_param, OpenAIErrorParam):
-        error_param_state = error_param
-    elif error_param is None:
-        error_param_state = OpenAIErrorParam.absent()
-    else:
-        error_param_state = OpenAIErrorParam(True, error_param)
+    error_param_state = coerce_error_param(error_param)
     normalized_code = _normalize_error_code(error_code, error_type)
     recoverable = _facade()._is_previous_response_not_found_error(
         code=normalized_code,

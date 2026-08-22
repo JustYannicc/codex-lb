@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorParam,
+    coerce_error_param,
     is_previous_response_not_found_error,
     is_previous_response_not_found_public_shape,
     normalize_public_error_param,
@@ -95,6 +96,14 @@ def test_public_error_param_sanitization_does_not_change_internal_presence_state
     assert malformed.present is True
     assert malformed.malformed is True
     assert normalize_public_error_param(malformed) is None
+
+
+def test_coerce_error_param_reuses_presence_aware_state():
+    assert coerce_error_param(None) == OpenAIErrorParam.absent()
+    assert coerce_error_param(" input ") == OpenAIErrorParam(True, " input ")
+
+    explicit_null = OpenAIErrorParam(True, None)
+    assert coerce_error_param(explicit_null) is explicit_null
 
 
 def test_previous_response_not_found_classifier_covers_openai_shapes():
