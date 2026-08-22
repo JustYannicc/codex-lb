@@ -12295,7 +12295,6 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     prepared_previous_response_ids: list[str | None] = []
     prepared_input_lengths: list[int] = []
     prepared_frames: list[dict[str, Any]] = []
-    prepare_call_count = 0
     real_prepare = service._prepare_http_bridge_request
 
     def fake_prepare(
@@ -12308,17 +12307,9 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         client_ip: str | None = None,
         **kwargs: Any,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        # The recovery journal fingerprint is prepared from the same payload
-        # before the request is sent. It is internal bookkeeping, not a
-        # second upstream dispatch, so keep it out of dispatch assertions.
-        nonlocal prepare_call_count
-        prepare_call_count += 1
-        record_dispatch = not (preserves_full_resend and prepare_call_count == 1)
-        if record_dispatch:
-            prepared_previous_response_ids.append(prepared_payload.previous_response_id)
+        prepared_previous_response_ids.append(prepared_payload.previous_response_id)
         inp = prepared_payload.input
-        if record_dispatch:
-            prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
+        prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
         _, text_data = real_prepare(
             prepared_payload,
             _headers,
@@ -12328,8 +12319,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
             client_ip=client_ip,
             **kwargs,
         )
-        if record_dispatch:
-            prepared_frames.append(json.loads(text_data))
+        prepared_frames.append(json.loads(text_data))
         request_state.previous_response_id = prepared_payload.previous_response_id
         return request_state, text_data
 
@@ -12384,7 +12374,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
                 owner_epoch=1,
                 lease_expires_at=(
                     datetime.now(timezone.utc) + timedelta(seconds=60)
-                    if forwardable_owner
+                    if forwardable_owner or preserves_full_resend
                     else datetime.now(timezone.utc)
                 ),
                 state=HttpBridgeSessionState.ACTIVE,
@@ -12403,6 +12393,8 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         "_http_bridge_payload_is_account_neutral_fresh_replay",
         account_neutral_classifier,
     )
+    lookup_recovery_attempt = AsyncMock(side_effect=RuntimeError("recovery journal unavailable"))
+    monkeypatch.setattr(service._durable_bridge, "lookup_recovery_attempt", lookup_recovery_attempt)
     get_or_create = AsyncMock(return_value=session)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(
@@ -12471,6 +12463,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         assert request_state.fresh_upstream_request_is_retry_safe is False
     if preserves_full_resend:
         account_neutral_classifier.assert_called_once()
+        lookup_recovery_attempt.assert_not_awaited()
     else:
         account_neutral_classifier.assert_not_called()
     create_call = get_or_create.await_args
