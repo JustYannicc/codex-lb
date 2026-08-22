@@ -14054,7 +14054,7 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
             "acc-1",
             2,
             "bridge_owner_unreachable",
-            True,
+            False,
             id="owner-forward-takeover-invalidates-resend-cache",
         ),
     ],
@@ -14312,8 +14312,14 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
 
     assert chunks == []
     if forward_to_active_owner and retains_prior_output:
-        assert prepared_previous_response_ids == [None, None]
+        if takeover_stored_count is None:
+            assert prepared_previous_response_ids == [None, None]
+        else:
+            assert prepared_previous_response_ids == ["resp_latest"]
         assert forwarded_payloads == [payload]
+        if takeover_stored_count is not None:
+            normalized_input = cast(list[proxy_service.JsonValue], payload.input)
+            assert prepared_inputs == [normalized_input[takeover_stored_count:]]
     elif forward_to_active_owner:
         assert prepared_previous_response_ids == [None, "resp_latest"]
         assert forwarded_payloads == [payload]
@@ -14323,10 +14329,23 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         assert prepared_previous_response_ids == [None]
         assert forwarded_payloads == []
     assert get_or_create_kwargs[-1]["allow_forward_to_owner"] is False
-    assert get_or_create_kwargs[-1]["exclude_account_ids"] == ({"acc-1"} if retains_prior_output else None)
-    assert get_or_create_kwargs[-1]["preferred_account_id"] == (None if retains_prior_output else takeover_account_id)
+    assert get_or_create_kwargs[-1]["exclude_account_ids"] == (
+        None if takeover_stored_count is not None else {"acc-1"} if retains_prior_output else None
+    )
+    assert get_or_create_kwargs[-1]["preferred_account_id"] == (
+        takeover_account_id
+        if takeover_stored_count is not None
+        else None
+        if retains_prior_output
+        else takeover_account_id
+    )
     assert get_or_create_kwargs[-1]["headers"] == (
-        {}
+        {
+            "x-codex-session-id": "session-shared-with-retired-owner",
+            "x-codex-turn-state": "http_turn_fresh",
+        }
+        if takeover_stored_count is not None
+        else {}
         if retains_prior_output
         else {
             "x-codex-session-id": "session-shared-with-retired-owner",
@@ -14334,12 +14353,19 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         }
     )
     assert request_states[-1].previous_response_id == (
-        "resp_latest" if forward_to_active_owner and not retains_prior_output else None
+        "resp_latest"
+        if forward_to_active_owner and (not retains_prior_output or takeover_stored_count is not None)
+        else None
     )
     assert request_states[-1].proxy_injected_previous_response_id is (
-        forward_to_active_owner and not retains_prior_output
+        forward_to_active_owner and (not retains_prior_output or takeover_stored_count is not None)
     )
-    if forward_to_active_owner and not retains_prior_output:
+    if forward_to_active_owner and (not retains_prior_output or takeover_stored_count is not None):
+        if takeover_stored_count is not None:
+            assert request_states[-1].proxy_injected_anchor_had_full_resend_payload is True
+            assert request_states[-1].input_full_fingerprint == proxy_service._fingerprint_input_items(
+                cast(list[proxy_service.JsonValue], payload.input)
+            )
         assert request_states[-1].fresh_upstream_request_is_retry_safe is False
         assert request_states[-1].input_item_count == len(input_items)
 
