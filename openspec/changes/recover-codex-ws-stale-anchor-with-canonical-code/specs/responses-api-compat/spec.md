@@ -178,3 +178,11 @@ Top-level error normalization MUST NOT treat the event discriminator `type: "err
 - **AND** the downstream payload does not contain the raw upstream error envelope
 - **AND** the downstream payload does not expose the missing previous response id
 - **AND** the downstream payload does not expose the `previous_response_not_found` code
+
+#### Scenario: top-level previous-response miss remains masked
+
+- **WHEN** a `/backend-api/codex/responses` or public `/v1/responses` WebSocket follow-up has `previous_response_id`
+- **AND** upstream emits a top-level `previous_response_not_found` wrapped-error frame using `status_code`
+- **THEN** the Codex-native downstream event carries the sanitized canonical `previous_response_not_found` code, while the public downstream event is a retryable `stream_incomplete` continuity failure
+- **AND** neither downstream payload contains the raw upstream error envelope or the missing previous response id
+- **AND** the public downstream payload does not expose the `previous_response_not_found` code
