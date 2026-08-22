@@ -252,7 +252,8 @@ def is_previous_response_not_found_public_shape(
         # when its message happens to mention a missing previous response.
         return False
     if code == "invalid_request_error" and (
-        is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
+        _is_invalid_previous_response_id_message(message)
+        or previous_response_id_from_not_found_message(message) is not None
     ):
         # A malformed ``param`` must not let a message that contains a raw
         # previous-response id pass through an unmasked public boundary.

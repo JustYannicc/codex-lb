@@ -232,6 +232,14 @@ def test_public_shape_masks_noncanonical_malformed_params_with_stale_message():
         )
 
 
+def test_public_shape_does_not_mask_parameterless_missing_tool_output_error():
+    assert not is_previous_response_not_found_public_shape(
+        code="invalid_request_error",
+        param=None,
+        message="A required tool output from the previous response was not found.",
+    )
+
+
 def test_public_shape_masks_raw_previous_response_id_with_malformed_param():
     assert is_previous_response_not_found_public_shape(
         code="invalid_request_error",
