@@ -76,7 +76,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 
 #### Scenario: ChatGPT backend omits param on an invalid previous response id
 - **GIVEN** a request depends on a `previous_response_id`
-- **WHEN** upstream returns `code = "invalid_request_error"` with the message `Invalid previous_response_id.`
+- **WHEN** upstream returns `code = "invalid_request_error"` with a message whose normalized form is exactly `Invalid previous_response_id.`
 - **AND** `param` is absent or equals `previous_response_id`
 - **THEN** codex-lb MUST classify the failure as stale-anchor continuity loss
 - **AND** the existing one-shot replay or sanitized canonical client signal MUST run

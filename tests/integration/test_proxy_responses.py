@@ -2117,6 +2117,10 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     ids=["canonical-malformed-param", "parameterless-invalid-request"],
 )
 async def test_v1_responses_stream_masks_stale_errors_without_raw_fields(async_client, monkeypatch, upstream_error):
+    if upstream_error.get("code") == "invalid_request_error":
+        normalized_message = " ".join(upstream_error["message"].replace("`", "").split())
+        assert normalized_message == "Invalid previous_response_id."
+
     auth_json = _make_auth_json("acc_v1_stale_mask", "v1-stale-mask@example.com")
     response = await async_client.post(
         "/api/accounts/import",
