@@ -49,6 +49,23 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
 }
 
 
+def _http_bridge_retry_circuit_claim_timeout_seconds(deadline: float | None) -> float | None:
+    """Clamp one durable claim attempt to the caller's remaining deadline.
+
+    The stale-anchor claim runs while the submitter holds ``lifecycle_lock``
+    and the response-create gate, so an unresponsive durable store would
+    otherwise pin the whole bridge for the claim timeout plus a second
+    reconciliation attempt. ``None`` means there is no budget left to spend,
+    which callers must treat as "not claimed" so the fail-closed path stands.
+    """
+    if deadline is None:
+        return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        return None
+    return min(_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS, remaining_seconds)
+
+
 def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
     """Map an eventless retry-circuit failure class to its anchor-poison detail.
 
@@ -163,8 +180,13 @@ class _HTTPBridgeRetryCircuitMixin:
         key: _HTTPBridgeSessionKey,
         captured: bool,
         generation: _HTTPBridgeRetryCircuitGeneration | None,
+        deadline: float | None = None,
     ) -> bool:
-        """Atomically linearize replay admission against the captured circuit."""
+        """Atomically linearize replay admission against the captured circuit.
+
+        ``deadline`` is the caller's monotonic request deadline; the durable
+        claim and its reconciliation are clamped to what is left of it.
+        """
         if not captured:
             return False
         expected_admission_generation = generation.admission_generation if generation is not None else 0
@@ -205,15 +227,25 @@ class _HTTPBridgeRetryCircuitMixin:
                 expected_cooldown_until_epoch=expected_persisted_cooldown,
             )
 
+        claim_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if claim_timeout_seconds is None:
+            logger.warning(
+                "No request budget left to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+            )
+            return False
+
         try:
             claimed = await asyncio.wait_for(
                 run_durable_claim(),
-                timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+                timeout=claim_timeout_seconds,
             )
         except TimeoutError:
             claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
                 key=key,
                 run_durable_claim=run_durable_claim,
+                deadline=deadline,
             )
         except Exception:
             logger.warning(
@@ -248,6 +280,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         key: _HTTPBridgeSessionKey,
         run_durable_claim: Callable[[], Awaitable[Any]],
+        deadline: float | None = None,
     ) -> Any:
         """Resolve a timed-out admission claim against durable state.
 
@@ -261,8 +294,19 @@ class _HTTPBridgeRetryCircuitMixin:
         while the authorized generation is still unconsumed. A win recovers
         the stranded replay; a miss stays fail-closed and keeps the
         at-most-once guarantee without having to distinguish a committed
-        predecessor from a competing replica.
+        predecessor from a competing replica. The retry only gets whatever is
+        left of the caller's deadline; with none left it stays fail-closed
+        rather than holding the bridge for a second full claim timeout.
         """
+        reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if reconcile_timeout_seconds is None:
+            logger.warning(
+                "Timed out claiming HTTP bridge retry circuit generation with no budget left to reconcile "
+                "bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+            )
+            return None
         logger.warning(
             "Timed out claiming HTTP bridge retry circuit generation; reconciling durable state "
             "bridge_kind=%s bridge_key=%s",
@@ -272,7 +316,7 @@ class _HTTPBridgeRetryCircuitMixin:
         try:
             return await asyncio.wait_for(
                 run_durable_claim(),
-                timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+                timeout=reconcile_timeout_seconds,
             )
         except Exception:
             logger.warning(

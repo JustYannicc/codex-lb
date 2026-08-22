@@ -107,6 +107,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **AND** that generation claim MUST use a monotonic field independent from failure observation time so delayed clock-skewed failures remain mergeable
 - **AND** a circuit generation that wins the durable compare-and-set first MUST suppress the account-neutral replacement before submit
 - **AND** a timed-out durable claim MUST reconcile against durable state before suppressing the replacement, and MUST suppress it unless that reconciliation proves the authorized generation was still unconsumed
+- **AND** the durable claim and its reconciliation MUST be bounded by the remaining request deadline, and MUST suppress the replacement without further durable I/O once that deadline is spent
 
 #### Scenario: Verified owner-bound HTTP full resend drops only the rejected anchor
 - **GIVEN** an HTTP-bridge continuation carries a prefix-verified, trim-safe full input history

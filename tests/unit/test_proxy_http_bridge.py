@@ -28688,6 +28688,142 @@ async def test_http_bridge_timed_out_generation_claim_suppresses_when_reconcilia
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_generation_claim_skips_durable_call_when_request_deadline_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-deadline-spent")
+    claim_generation = AsyncMock(return_value=SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1))
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", claim_generation)
+
+    # lifecycle_lock and the response-create gate are held here, so a request
+    # that has already burned its budget must fail closed instead of paying
+    # for durable I/O nobody is waiting for anymore.
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            deadline=time.monotonic() - 1.0,
+        )
+        is False
+    )
+    claim_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_generation_claim_bounds_reconciliation_by_remaining_deadline() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-deadline-bounded")
+    claim_attempts = 0
+
+    async def stall_forever(**_kwargs: Any) -> Any:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        await asyncio.Event().wait()
+
+    service._durable_bridge = cast(Any, SimpleNamespace(claim_retry_circuit_generation=stall_forever))
+
+    started = time.monotonic()
+    # The default claim timeout stays at 5s here on purpose: without the
+    # deadline clamp this stalled claim plus its reconciliation would pin the
+    # bridge for ~10s.
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            deadline=started + 0.05,
+        )
+        is False
+    )
+    assert time.monotonic() - started < 1.0
+    assert claim_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_generation_claim_still_reconciles_within_a_generous_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-deadline-generous")
+    claim_attempts = 0
+
+    async def stall_then_claim(**_kwargs: Any) -> Any:
+        nonlocal claim_attempts
+        claim_attempts += 1
+        if claim_attempts == 1:
+            await asyncio.Event().wait()
+        return SimpleNamespace(updated_at_epoch=time.time(), admission_generation=1)
+
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", stall_then_claim)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.01)
+
+    assert (
+        await service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            deadline=time.monotonic() + 60.0,
+        )
+        is True
+    )
+    assert claim_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_bounds_stale_anchor_claim_by_request_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="bridge-stale-anchor-claim-deadline")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-anchor-claim-deadline",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"replay"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    service._http_bridge_sessions[session.key] = session
+    request_state.bridge_request_deadline = time.monotonic() + 17.0
+    request_state.verified_stale_anchor_replay = True
+    request_state.verified_stale_anchor_retry_circuit_generation_captured = True
+    request_state.verified_stale_anchor_retry_circuit_key = session.key
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None)),
+    )
+    claim_kwargs: dict[str, Any] = {}
+
+    async def record_claim(**kwargs: Any) -> bool:
+        claim_kwargs.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", record_claim)
+
+    await service._submit_http_bridge_request(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+    )
+
+    assert claim_kwargs["deadline"] == request_state.bridge_request_deadline
+    send_text.assert_awaited_once_with(request_state.request_text)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_source_retry_circuit_cooldown_is_used_for_replacement_suppression(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

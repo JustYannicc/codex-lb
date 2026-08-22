@@ -85,6 +85,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_deadline,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
@@ -1903,12 +1904,17 @@ class _HTTPBridgeRequestSubmitMixin:
                         and request_state.verified_stale_anchor_retry_circuit_generation_captured
                     ):
                         circuit_key = request_state.verified_stale_anchor_retry_circuit_key
+                        # This claim runs holding lifecycle_lock and the
+                        # response-create gate, so an unresponsive durable
+                        # store must not pin the bridge past the deadline the
+                        # request would be abandoned at anyway.
                         generation_claimed = bool(
                             circuit_key is not None
                             and await self._claim_http_bridge_retry_circuit_generation(
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=_http_bridge_request_deadline(request_state, _service_get_settings()),
                             )
                         )
                         if not generation_claimed:
