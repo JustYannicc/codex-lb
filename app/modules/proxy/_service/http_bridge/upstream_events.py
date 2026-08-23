@@ -2532,11 +2532,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 if request_state.completed_delivery_scope is not completed_delivery_scope:
                                     continue
                                 event_queue = request_state.event_queue
-                                request_state.event_queue = None
-                                request_state.event_queue_revoked.set()
-                                discard = getattr(event_queue, "discard", None)
-                                if callable(discard):
-                                    discard()
+                                # If terminal persistence aborted before the
+                                # terminal event was published, an attached
+                                # consumer still owns this queue. Leave it live
+                                # so the stream's normal idle-timeout path can
+                                # emit a failure event; revoking it here would
+                                # turn the abort into a silent EOS. Pre-consumer
+                                # queues have no downstream owner and can be
+                                # released immediately.
+                                if completed_delivery_scope.terminal_enqueued or not getattr(
+                                    request_state,
+                                    "event_queue_consumer_started",
+                                    False,
+                                ):
+                                    request_state.event_queue = None
+                                    request_state.event_queue_revoked.set()
+                                    discard = getattr(event_queue, "discard", None)
+                                    if callable(discard):
+                                        discard()
 
                 cleanup_task = asyncio.create_task(
                     cleanup_completed_delivery_scope(),
@@ -2595,9 +2608,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event_queue = request_state.event_queue
                 if event_queue is not None:
                     discard = getattr(event_queue, "discard", None)
-                    if not getattr(request_state, "event_queue_consumer_started", False) and callable(discard):
-                        discard()
-                    else:
+                    if not getattr(request_state, "event_queue_consumer_started", False):
+                        if callable(discard):
+                            discard()
+                        else:
+                            _enqueue_http_bridge_abort_eos(request_state, event_queue)
+                    elif (
+                        request_state.completed_delivery_scope is None
+                        or request_state.completed_delivery_scope.terminal_enqueued
+                    ):
                         _enqueue_http_bridge_abort_eos(request_state, event_queue)
 
     async def _handle_or_defer_precreated_stream_health(
