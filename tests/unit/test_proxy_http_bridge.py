@@ -551,7 +551,13 @@ async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
     session = _make_bridge_session(key_value="finite-replay")
     session.durable_session_id = "durable-finite-replay"
     session.durable_owner_epoch = 3
-    live_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+    live_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    live_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=live_budget,
+    )
+    live_queue.put_nowait("stale-buffered-event")
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-finite-replay",
         model="gpt-5.4",
@@ -604,6 +610,9 @@ async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
     assert replay_queue.maxsize == len(replay_events) + 1
     assert [replay_queue.get_nowait() for _ in range(replay_queue.qsize())] == [*replay_events, None]
     assert request_state.operation_replay is True
+    assert live_queue.empty()
+    assert live_queue.queued_bytes == 0
+    assert live_budget.used_bytes == 0
 
 
 def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
