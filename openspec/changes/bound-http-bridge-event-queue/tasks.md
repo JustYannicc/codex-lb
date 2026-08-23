@@ -15,6 +15,8 @@
 
 - [x] 2.4 Prove resumed and paced delivery order, terminal end marker, disconnect cancellation, settlement, and task cleanup
 
+- [x] 2.5 Account retained live payload bytes in one fixed process-wide budget; revoke a queue when a reservation cannot be made and release bytes on dequeue
+
 
 ## 3. Verification
 
@@ -25,3 +27,5 @@
 - [x] 3.3 Run an actual-path async surface driver and record bounded-pressure plus resumed-delivery output
 
 - [x] 3.4 Review the committed diff for disconnect/cancellation, task ownership, terminal settlement, durable spool/replay, and async task leaks
+
+- [x] 3.5 Test cross-session budget pressure, byte release after dequeue, and fail-closed queue revocation without a new operator setting

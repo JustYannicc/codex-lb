@@ -5,7 +5,11 @@ An admitted HTTP-bridge Responses stream currently stores upstream events in an 
 ## What Changes
 
 - Bound each HTTP-bridge request's live downstream event queue with an internal capacity.
+- Apply a fixed process-wide byte budget to retained live-event payloads so many
+  concurrent sessions cannot multiply the per-queue envelope into worker OOM.
 - Make the existing awaited producer enqueue apply backpressure when that queue is full.
+- When the process budget is exhausted, fail closed for that queue and record the
+  pressure without adding an operator-configurable memory setting.
 - Preserve ordered event delivery, terminal settlement, durable spool/replay, disconnect cleanup, and paced-consumer behavior.
 - Add deterministic integration coverage for paused, resumed, and paced consumers without adding a user setting.
 
