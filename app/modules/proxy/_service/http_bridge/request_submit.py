@@ -426,6 +426,19 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             # exception that should take down the reader task.
             self.revoke()
 
+    def enqueue_best_effort_nowait(self, item: str) -> bool:
+        """Try one optional pre-consumer item without claiming delivery."""
+        if self._discarded or self._terminal_pending or self._revoked.is_set():
+            return False
+        try:
+            super().put_nowait(item)
+        except asyncio.QueueFull:
+            return False
+        except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
+            self.revoke()
+            return False
+        return True
+
     def discard(self) -> None:
         """Release unread payload credits after downstream ownership is gone.
 

@@ -158,3 +158,44 @@ async def test_best_effort_advisory_does_not_wait_for_preconsumer_capacity() -> 
 
     assert delivered is False
     assert event_queue.get_nowait() == "buffered-event"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_state", ["revoked", "terminal_pending", "budget_exhausted"])
+async def test_best_effort_advisory_reports_custom_queue_drop_without_leaking_budget(queue_state: str) -> None:
+    budget = http_bridge_request_submit._HTTPBridgeLiveEventQueueByteBudget(max_bytes=8)
+    event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    request_state = _make_claimed_request_state(event_queue)
+    request_state.event_queue_consumer_started = False
+
+    if queue_state == "revoked":
+        event_queue.revoke()
+    elif queue_state == "terminal_pending":
+        assert event_queue.enqueue_terminal_nowait() is True
+    else:
+        budget = http_bridge_request_submit._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1)
+        event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
+            maxsize=2,
+            revoked=asyncio.Event(),
+            byte_budget=budget,
+        )
+        request_state.event_queue = event_queue
+
+    delivered = await http_bridge_upstream_events._enqueue_http_bridge_event(
+        request_state,
+        event_queue,
+        "advisory",
+        nonblocking_preconsumer=True,
+    )
+
+    assert delivered is False
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    if queue_state == "terminal_pending":
+        assert await event_queue.get() is None
+    else:
+        assert event_queue.empty()
