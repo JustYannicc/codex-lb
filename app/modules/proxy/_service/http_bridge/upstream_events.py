@@ -421,6 +421,9 @@ async def _enqueue_http_bridge_event(
     if event_queue_revoked is not None and event_queue_revoked.is_set():
         return False
     if nonblocking_preconsumer and not getattr(request_state, "event_queue_consumer_started", False):
+        enqueue_best_effort = getattr(event_queue, "enqueue_best_effort_nowait", None)
+        if callable(enqueue_best_effort):
+            return bool(enqueue_best_effort(event_block))
         try:
             event_queue.put_nowait(event_block)
         except asyncio.QueueFull:
