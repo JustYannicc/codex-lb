@@ -30644,7 +30644,10 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
 ) -> None:
     """A session-injected anchor must not let the fresh replay switch accounts."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    prefix = {"role": "user", "content": [{"type": "input_text", "text": "first"}]}
+    prefix = cast(
+        dict[str, proxy_service.JsonValue],
+        {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+    )
     full_input = [
         prefix,
         {
