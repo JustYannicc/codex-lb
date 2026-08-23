@@ -206,6 +206,27 @@ async def test_http_bridge_abort_terminal_cancels_blocked_producer_after_buffere
     assert event_queue.empty()
 
 
+def test_http_bridge_plain_queue_terminal_delivery_does_not_duplicate_event() -> None:
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=2)
+    event_queue.put_nowait("buffered")
+    request_state = cast(Any, SimpleNamespace(event_queue=event_queue, event_queue_revoked=asyncio.Event()))
+    event_block = 'data: {"type":"response.completed"}\n\n'
+
+    assert (
+        http_bridge_upstream_events_module._enqueue_http_bridge_terminal_event(
+            request_state,
+            event_queue,
+            event_block,
+        )
+        is True
+    )
+    assert [event_queue.get_nowait(), event_queue.get_nowait(), event_queue.get_nowait()] == [
+        "buffered",
+        event_block,
+        None,
+    ]
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_event_queue_shares_a_process_byte_budget() -> None:
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
@@ -300,6 +321,65 @@ async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
     replacement_queue.put_nowait("replacement")
     assert replacement_queue.get_nowait() == "replacement"
     assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_completed_delivery_cleanup_releases_queue_after_racing_detach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-payload")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-completed-delivery-racing-detach",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="completed-delivery-racing-detach",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def process_event(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        completed_delivery_scope: proxy_support_module._HTTPBridgeCompletedDeliveryScope,
+        claimed_terminal_request_states: list[proxy_service._WebSocketRequestState],
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        request_state.completed_delivery_scope = completed_delivery_scope
+        completed_delivery_scope.active = True
+        claimed_terminal_request_states.append(request_state)
+        assert await service._detach_http_bridge_request(target_session, request_state=request_state) is True
+        assert completed_delivery_scope.detach_requested is True
+        completed_delivery_scope.terminal_enqueued = True
+
+    monkeypatch.setattr(service, "_process_parsed_http_bridge_upstream_event", process_event)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        '{"type":"response.completed","response":{"id":"resp-completed-delivery-racing-detach"}}',
+    )
+
+    assert request_state.event_queue is None
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    assert revoked.is_set()
 
 
 @pytest.mark.asyncio
@@ -567,6 +647,55 @@ async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_
     assert session.pending_requests == deque()
     assert send_text.await_count == 1
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("buffered-1")
+    event_queue.put_nowait("buffered-2")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reader-full-preconsumer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue._revoked,
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="reader-full-preconsumer",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await asyncio.wait_for(
+        service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code="upstream_request_timeout",
+            error_message="reader failed",
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        ),
+        timeout=0.2,
+    )
+
+    assert event_queue.get_nowait() == "buffered-1"
+    assert event_queue.get_nowait() == "buffered-2"
+    terminal = event_queue.get_nowait()
+    assert terminal is not None and "upstream_request_timeout" in terminal
+    assert event_queue.get_nowait() is None
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 
 pytestmark = pytest.mark.unit
@@ -91,6 +92,40 @@ async def test_aborted_terminal_settlement_unblocks_full_live_queue() -> None:
     assert not [
         task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_aborted_terminal_settlement_releases_unread_live_queue_credits() -> None:
+    budget = http_bridge_request_submit._HTTPBridgeLiveEventQueueByteBudget(max_bytes=64)
+    event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-aborted-payload")
+    request_state = _make_claimed_request_state(event_queue)
+
+    await _AbortEosService()._settle_aborted_http_bridge_terminal_states(
+        _make_session(),
+        [request_state],
+    )
+
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_revoked_discarded_live_queue_wakes_a_delayed_consumer() -> None:
+    event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("preconsumer-payload")
+    event_queue.revoke()
+    event_queue.discard()
+
+    assert await asyncio.wait_for(event_queue.get(), timeout=0.1) is None
 
 
 def test_abort_eos_respects_queue_revocation() -> None:

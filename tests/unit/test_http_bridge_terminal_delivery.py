@@ -35,6 +35,7 @@ def _request_state(event_queue: asyncio.Queue[str | None]) -> proxy_service._Web
         started_at=time.monotonic(),
         event_queue=event_queue,
         event_queue_revoked=cast(Any, event_queue)._revoked,
+        event_queue_consumer_started=True,
         operation_id="op-terminal-delivery",
         response_id="resp-terminal-delivery",
         transport="http",
