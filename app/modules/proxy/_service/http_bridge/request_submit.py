@@ -274,6 +274,19 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> None:
+    """Stop queue producers before fail-closed terminal cleanup.
+
+    A send can fail after upstream accepted the frame, before the downstream
+    stream has started consuming its queue.  If that queue is already full,
+    terminal cleanup must not wait for a consumer that will never start.
+    Revocation makes the finite queue's ``put`` operation a no-op and wakes any
+    producer that is waiting for capacity.
+    """
+
+    request_state.event_queue_revoked.set()
+
+
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeStaleGateSnapshot:
     pending_states: list[_WebSocketRequestState]
@@ -443,6 +456,12 @@ async def _settle_claimed_http_bridge_liveness_failure(
 
     if session.liveness_settlement_owner != "send":
         raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
+    # The send can fail before the downstream stream has started.  Revoke all
+    # live queues before the shared terminal funnel claims them so a full queue
+    # cannot leave settlement waiting for a consumer that will never run.
+    async with session.pending_lock:
+        for pending_request in session.pending_requests:
+            _revoke_http_bridge_event_queue(pending_request)
     async with session.lifecycle_lock:
         await service._fail_http_bridge_reader_and_maybe_retire(
             session,
@@ -2123,6 +2142,12 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=request_state.session_id,
                             upstream_error_code=error_code,
                         )
+                # This failure is handled before the downstream generator
+                # reaches its queue-consumer loop.  A late send may already
+                # have filled the finite queue from the upstream reader; make
+                # terminal cleanup fail closed instead of waiting forever for
+                # a consumer that will never start.
+                _revoke_http_bridge_event_queue(request_state)
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=request_state,
@@ -2194,6 +2219,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 return
 
             prewarm_started_at = _service_time().monotonic()
+            event_queue_revoked = asyncio.Event()
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
@@ -2204,7 +2230,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 awaiting_response_created=True,
-                event_queue=asyncio.Queue(),
+                event_queue=_HTTPBridgeLiveEventQueue(
+                    maxsize=_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE,
+                    revoked=event_queue_revoked,
+                ),
+                event_queue_revoked=event_queue_revoked,
                 transport=_REQUEST_TRANSPORT_HTTP,
                 request_text=warmup_text,
                 skip_request_log=True,
@@ -2249,6 +2279,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             model_class=_extract_model_class(session.request_model) if session.request_model else None,
                         )
                         session.prewarmed = False
+                        _revoke_http_bridge_event_queue(warmup_state)
                         await self._cleanup_http_bridge_submit_interruption(
                             session,
                             request_state=warmup_state,
@@ -2281,6 +2312,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.model,
                         )
                         session.prewarmed = False
+                        _revoke_http_bridge_event_queue(warmup_state)
                         try:
                             # The warmup request has already been sent upstream.  Close/reconnect the
                             # socket while the warmup state is still attached so any late warmup
@@ -2328,6 +2360,7 @@ class _HTTPBridgeRequestSubmitMixin:
             except ProxyResponseError as exc:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                _revoke_http_bridge_event_queue(warmup_state)
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=warmup_state,
@@ -2351,6 +2384,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 _record_http_bridge_prewarm_outcome(outcome="error")
                 raise
             except BaseException:
+                _revoke_http_bridge_event_queue(warmup_state)
                 if warmup_send_started:
                     session.closed = True
                     session.upstream_control.reconnect_requested = True
