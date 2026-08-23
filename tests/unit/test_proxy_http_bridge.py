@@ -410,6 +410,68 @@ async def test_http_bridge_completed_delivery_cleanup_releases_queue_after_racin
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_aborted_completed_delivery_discards_detached_attached_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-payload")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-aborted-completed-delivery",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        event_queue_consumer_started=True,
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="aborted-completed-delivery",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def process_event(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        completed_delivery_scope: proxy_support_module._HTTPBridgeCompletedDeliveryScope,
+        claimed_terminal_request_states: list[proxy_service._WebSocketRequestState],
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        request_state.completed_delivery_scope = completed_delivery_scope
+        completed_delivery_scope.active = True
+        claimed_terminal_request_states.append(request_state)
+        request_state.event_queue_revoked.set()
+        assert await service._detach_http_bridge_request(target_session, request_state=request_state) is True
+        assert completed_delivery_scope.detach_requested is True
+        raise RuntimeError("terminal delivery aborted")
+
+    monkeypatch.setattr(service, "_process_parsed_http_bridge_upstream_event", process_event)
+
+    with pytest.raises(RuntimeError, match="terminal delivery aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            '{"type":"response.completed","response":{"id":"resp-aborted-completed-delivery"}}',
+        )
+
+    assert request_state.event_queue is None
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    assert revoked.is_set()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_without_keepalives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

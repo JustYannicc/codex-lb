@@ -2551,10 +2551,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # turn the abort into a silent EOS. Pre-consumer
                                 # queues have no downstream owner and can be
                                 # released immediately.
-                                if completed_delivery_scope.terminal_enqueued or not getattr(
-                                    request_state,
-                                    "event_queue_consumer_started",
-                                    False,
+                                if (
+                                    completed_delivery_scope.terminal_enqueued
+                                    or not getattr(
+                                        request_state,
+                                        "event_queue_consumer_started",
+                                        False,
+                                    )
+                                    or request_state.event_queue_revoked.is_set()
                                 ):
                                     request_state.event_queue = None
                                     request_state.event_queue_revoked.set()
