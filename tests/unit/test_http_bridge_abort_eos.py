@@ -137,3 +137,24 @@ def test_abort_eos_respects_queue_revocation() -> None:
     assert http_bridge_upstream_events._enqueue_http_bridge_abort_eos(request_state, event_queue) is False
     assert event_queue.get_nowait() == "buffered-event"
     assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_best_effort_advisory_does_not_wait_for_preconsumer_capacity() -> None:
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+    event_queue.put_nowait("buffered-event")
+    request_state = _make_claimed_request_state(event_queue)
+    request_state.event_queue_consumer_started = False
+
+    delivered = await asyncio.wait_for(
+        http_bridge_upstream_events._enqueue_http_bridge_event(
+            request_state,
+            event_queue,
+            "advisory",
+            nonblocking_preconsumer=True,
+        ),
+        timeout=0.1,
+    )
+
+    assert delivered is False
+    assert event_queue.get_nowait() == "buffered-event"

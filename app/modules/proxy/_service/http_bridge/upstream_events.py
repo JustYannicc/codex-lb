@@ -412,6 +412,7 @@ async def _enqueue_http_bridge_event(
     event_block: str,
     *,
     terminal: bool = False,
+    nonblocking_preconsumer: bool = False,
 ) -> bool:
     """Deliver a bridge event with bounded pre-consumer terminal handling."""
     if terminal and not getattr(request_state, "event_queue_consumer_started", False):
@@ -419,6 +420,13 @@ async def _enqueue_http_bridge_event(
     event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
     if event_queue_revoked is not None and event_queue_revoked.is_set():
         return False
+    if nonblocking_preconsumer and not getattr(request_state, "event_queue_consumer_started", False):
+        try:
+            event_queue.put_nowait(event_block)
+        except asyncio.QueueFull:
+            logger.info("Dropping best-effort HTTP bridge advisory before downstream consumer attachment")
+            return False
+        return True
     await event_queue.put(event_block)
     if event_queue_revoked is not None and event_queue_revoked.is_set():
         return False
@@ -3110,6 +3118,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 account_id=session.account.id,
                             )
                         ),
+                        nonblocking_preconsumer=True,
                     )
                 if can_retry_security_work:
                     retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
