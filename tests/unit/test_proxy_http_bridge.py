@@ -245,6 +245,33 @@ async def test_http_bridge_event_queue_shares_a_process_byte_budget() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_queue_discard_releases_only_its_shared_budget_credit() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=10)
+    first_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    second_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+
+    first_queue.put_nowait("123456")
+    second_queue.put_nowait("abcd")
+    assert budget.used_bytes == 10
+
+    first_queue.discard()
+
+    assert first_queue.queued_bytes == 0
+    assert second_queue.queued_bytes == 4
+    assert budget.used_bytes == 4
+    assert second_queue.get_nowait() == "abcd"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_queue_discard_releases_retained_payloads() -> None:
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=16)
     revoked = asyncio.Event()
