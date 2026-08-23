@@ -4778,6 +4778,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 action="forward_original_security_work_error",
                             )
                         ),
+                        nonblocking_preconsumer=True,
                     )
             async with session.pending_lock:
                 if request_state in session.pending_requests:
