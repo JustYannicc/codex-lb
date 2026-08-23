@@ -15883,7 +15883,7 @@ async def test_http_bridge_live_event_queue_applies_backpressure(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_paused_consumer_keeps_terminal_and_eos_after_one_second(
+async def test_http_bridge_preconsumer_keeps_terminal_and_eos_after_terminal_abort(
     async_client,
     app_instance,
     monkeypatch: pytest.MonkeyPatch,
@@ -15977,9 +15977,8 @@ async def test_http_bridge_paused_consumer_keeps_terminal_and_eos_after_one_seco
     )
 
     await _wait_for_event(terminal_append_started)
-    await asyncio.sleep(1.1)
-    assert terminal_task.done() is False
-    assert request_state.event_queue_revoked.is_set() is False
+    await asyncio.wait_for(terminal_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert request_state.event_queue_revoked.is_set() is True
 
     delivered_types: list[str] = []
     while True:
