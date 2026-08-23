@@ -304,6 +304,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._byte_budget = byte_budget or _HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
         self._queued_bytes = 0
         self._budget_exceeded = asyncio.Event()
+        self._terminal_pending = False
 
     @property
     def queued_bytes(self) -> int:
@@ -314,6 +315,27 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         """Signal that this queue could not retain a live event."""
 
         return self._budget_exceeded
+
+    def enqueue_terminal_nowait(self) -> bool:
+        """Reserve an ordered end marker without growing the live queue.
+
+        A terminal marker is kept out of the finite live-event deque when the
+        deque is full.  The consumer receives it only after draining every
+        buffered event, so terminal cleanup never has to drop an event or wait
+        for a consumer that may not exist.  Revoking producers here also
+        prevents a producer that was already waiting on a full queue from
+        inserting an event after the marker.
+        """
+        if self._revoked.is_set():
+            return False
+        self._revoked.set()
+        if self._terminal_pending:
+            return True
+        if self.full():
+            self._terminal_pending = True
+            return True
+        self.put_nowait(None)
+        return True
 
     def _put(self, item: str | None) -> None:
         if self._revoked.is_set() and item is not None:
@@ -336,6 +358,8 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._queued_bytes += item_bytes
 
     def put_nowait(self, item: str | None) -> None:
+        if self._terminal_pending:
+            return
         try:
             super().put_nowait(item)
         except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
@@ -360,6 +384,18 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 self.get_nowait()
             except asyncio.QueueEmpty:
                 return
+
+    def get_nowait(self) -> str | None:
+        if self._terminal_pending and self.empty():
+            self._terminal_pending = False
+            return None
+        return super().get_nowait()
+
+    async def get(self) -> str | None:
+        if self._terminal_pending and self.empty():
+            self._terminal_pending = False
+            return None
+        return await super().get()
 
     def _get(self) -> str | None:
         item = super()._get()
@@ -591,11 +627,26 @@ async def _settle_claimed_http_bridge_liveness_failure(
 
     if session.liveness_settlement_owner != "send":
         raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
-    # This send failed before its downstream generator reached the queue
-    # consumer loop, so only this request is known to have no consumer. Older
-    # pending siblings can have attached, deliberately paused consumers; their
-    # queues must retain normal backpressure and ordered terminal delivery.
-    _revoke_http_bridge_event_queue(failed_request_state)
+    # The failed send is pre-consumer, but an older sibling may already have a
+    # genuinely attached (and paused) downstream consumer.  Snapshot that
+    # distinction under the same lock used by stream attachment and detach;
+    # only queues with no consumer can be revoked and discarded without losing
+    # buffered delivery or leaving terminal cleanup waiting forever.
+    async with session.pending_lock:
+        pending_requests = list(session.pending_requests)
+        if all(pending_request is not failed_request_state for pending_request in pending_requests):
+            pending_requests.append(failed_request_state)
+        for pending_request in pending_requests:
+            if pending_request is not failed_request_state and getattr(
+                pending_request,
+                "event_queue_consumer_started",
+                False,
+            ):
+                continue
+            _revoke_http_bridge_event_queue(pending_request)
+            discard = getattr(pending_request.event_queue, "discard", None)
+            if callable(discard):
+                discard()
     async with session.lifecycle_lock:
         await service._fail_http_bridge_reader_and_maybe_retire(
             session,

@@ -4065,6 +4065,13 @@ class _HTTPBridgeStreamingMixin:
                 request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
             assert event_queue is not None
+            # Submission and upstream delivery can run before this generator
+            # reaches its queue consumer. Publish attachment under the same
+            # pending lock used by liveness settlement so a full pre-consumer
+            # sibling can be discarded without revoking a paused consumer.
+            async with session.pending_lock:
+                if request_state.event_queue is event_queue and not request_state.event_queue_revoked.is_set():
+                    request_state.event_queue_consumer_started = True
 
             async def next_event_block(*, timeout: float | None) -> str | None:
                 """Read a live event while waking on process-budget failure."""
