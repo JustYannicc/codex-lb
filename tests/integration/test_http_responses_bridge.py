@@ -47,6 +47,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.load_balancer import (
     CONTINUITY_OWNER_UNAVAILABLE,
     AccountSelection,
@@ -15879,6 +15880,123 @@ async def test_http_bridge_live_event_queue_applies_backpressure(
     assert not [
         task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_paused_consumer_keeps_terminal_and_eos_after_one_second(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_slow_terminal",
+        "http-bridge-slow-terminal@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.4",
+        instructions="Return exactly OK.",
+        input="slow-terminal",
+        prompt_cache_key="slow-terminal",
+    )
+    request_state, _ = service._prepare_http_bridge_request(
+        payload,
+        {},
+        api_key=None,
+        api_key_reservation=None,
+        request_id="req_http_bridge_slow_terminal",
+    )
+    request_state.skip_request_log = True
+    session = _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("prompt_cache", "slow-terminal", None))
+    session.account = account
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+
+    for event in (
+        {
+            "type": "response.created",
+            "response": {"id": "resp_slow_terminal", "object": "response", "status": "in_progress"},
+        },
+        {
+            "type": "response.output_text.delta",
+            "response_id": "resp_slow_terminal",
+            "delta": "OK",
+        },
+    ):
+        await service._process_http_bridge_upstream_text(
+            session,
+            json.dumps(event, separators=(",", ":")),
+        )
+    assert event_queue.full()
+
+    request_state.operation_id = "op_slow_terminal"
+    session.durable_session_id = "durable_slow_terminal"
+    session.durable_owner_epoch = 1
+    terminal_append_started = asyncio.Event()
+    settle_terminal_event = AsyncMock()
+
+    async def append_terminal_event(**_: Any) -> TerminalOperationEventAppendResult:
+        terminal_append_started.set()
+        return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_operation_event_batcher",
+        SimpleNamespace(
+            append_terminal_event=append_terminal_event,
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    terminal_task = asyncio.create_task(
+        service._process_http_bridge_upstream_text(
+            session,
+            json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_slow_terminal",
+                        "object": "response",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens_details": {"reasoning_tokens": 0},
+                        },
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        )
+    )
+
+    await _wait_for_event(terminal_append_started)
+    await asyncio.sleep(1.1)
+    assert terminal_task.done() is False
+    assert request_state.event_queue_revoked.is_set() is False
+
+    delivered_types: list[str] = []
+    while True:
+        event_block = await asyncio.wait_for(event_queue.get(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+        if event_block is None:
+            break
+        event_payload = proxy_module.parse_sse_data_json(event_block)
+        assert event_payload is not None
+        delivered_types.append(cast(str, event_payload["type"]))
+
+    await asyncio.wait_for(terminal_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert delivered_types == [
+        "response.created",
+        "response.output_text.delta",
+        "response.completed",
+    ]
+    settle_terminal_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio
