@@ -9,6 +9,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
@@ -280,6 +281,15 @@ class _HTTPBridgeLiveEventQueueByteBudgetExceeded(RuntimeError):
     pass
 
 
+class _HTTPBridgeLiveEventQueueTerminalOutcome(StrEnum):
+    OPEN = "open"
+    CLEAN = "clean"
+    ABORTED = "aborted"
+    REVOKED = "revoked"
+    DISCARDED = "discarded"
+    BUDGET_EXCEEDED = "budget_exceeded"
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
@@ -308,6 +318,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._terminal_pending = False
         self._terminal_items: deque[str | None] = deque()
         self._discarded = False
+        self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.OPEN
 
     @property
     def queued_bytes(self) -> int:
@@ -331,12 +342,19 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
         return bool(self._terminal_items)
 
+    @property
+    def terminal_outcome(self) -> _HTTPBridgeLiveEventQueueTerminalOutcome:
+        """Why this queue reached end-of-stream."""
+
+        return self._terminal_outcome
+
     def _queue_terminal_items(self, items: tuple[str | None, ...]) -> bool:
         if self._terminal_pending:
             return True
         item_bytes = sum(_http_bridge_live_event_queue_item_bytes(item) for item in items)
         if not self._byte_budget.reserve(item_bytes):
             self._budget_exceeded.set()
+            self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.BUDGET_EXCEEDED
             logger.warning(
                 "HTTP bridge live event queue byte budget exhausted terminal_bytes=%s queue_bytes=%s budget_bytes=%s",
                 item_bytes,
@@ -363,10 +381,13 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._terminal_items.clear()
             self._terminal_pending = False
         self._revoked.set()
-        return self._queue_terminal_items((event_block, None))
+        enqueued = self._queue_terminal_items((event_block, None))
+        if enqueued:
+            self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.CLEAN
+        return enqueued
 
     def enqueue_terminal_nowait(self) -> bool:
-        """Reserve an ordered end marker without growing the live queue.
+        """Reserve an ordered abort marker without growing the live queue.
 
         A terminal marker is kept out of the finite live-event deque when the
         deque is full.  The consumer receives it only after draining every
@@ -380,7 +401,10 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         if self._terminal_pending:
             return True
         self._revoked.set()
-        return self._queue_terminal_items((None,))
+        enqueued = self._queue_terminal_items((None,))
+        if enqueued:
+            self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.ABORTED
+        return enqueued
 
     def _put(self, item: str | None) -> None:
         if self._revoked.is_set() and item is not None:
@@ -401,6 +425,8 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._byte_budget.release(item_bytes)
             raise
         self._queued_bytes += item_bytes
+        if item is None and self._terminal_outcome == _HTTPBridgeLiveEventQueueTerminalOutcome.OPEN:
+            self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.CLEAN
 
     def put_nowait(self, item: str | None) -> None:
         if self._terminal_pending:
@@ -439,6 +465,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
         self._revoked.set()
         self._discarded = True
+        self._terminal_outcome = _HTTPBridgeLiveEventQueueTerminalOutcome.DISCARDED
         while True:
             try:
                 # ``asyncio.Queue.get_nowait`` dispatches to this queue's
@@ -536,6 +563,12 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         """Stop producers while retaining queued bytes for their consumer."""
 
         self._revoked.set()
+        if self._terminal_outcome == _HTTPBridgeLiveEventQueueTerminalOutcome.OPEN:
+            self._terminal_outcome = (
+                _HTTPBridgeLiveEventQueueTerminalOutcome.BUDGET_EXCEEDED
+                if self._budget_exceeded.is_set()
+                else _HTTPBridgeLiveEventQueueTerminalOutcome.REVOKED
+            )
 
 
 def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> None:
@@ -2526,6 +2559,8 @@ class _HTTPBridgeRequestSubmitMixin:
             gate_acquired = False
             request_enqueued = False
             warmup_send_started = False
+            warmup_event_queue = warmup_state.event_queue
+            assert isinstance(warmup_event_queue, _HTTPBridgeLiveEventQueue)
             try:
                 event_queue = warmup_state.event_queue
                 assert event_queue is not None
@@ -2623,6 +2658,14 @@ class _HTTPBridgeRequestSubmitMixin:
                                 )
                         return
                     if event_block is None:
+                        if warmup_event_queue.terminal_outcome != _HTTPBridgeLiveEventQueueTerminalOutcome.CLEAN:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "upstream_unavailable",
+                                    "HTTP responses session bridge prewarm failed",
+                                ),
+                            )
                         break
                     payload = parse_sse_data_json(event_block)
                     event = parse_sse_event(event_block)

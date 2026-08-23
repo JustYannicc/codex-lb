@@ -8,6 +8,8 @@ Across all live HTTP-bridge queues, retained event payload bytes MUST remain wit
 
 Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
 
+An HTTP-bridge prewarm MUST classify end-of-stream as successful only when its live queue records ordered clean terminal delivery. Queue revocation, abort, discard, or process-budget rejection MUST fail the prewarm and MUST release pending warmup state, response-create admission, retained byte credits, and prewarmed session state.
+
 Completed durable transcript replay MUST remain byte-bounded by the durable spool contract and MUST use finite startup buffering that can hold the selected replay plus its end marker without waiting for a consumer that has not started yet.
 
 #### Scenario: Paused consumer backpressures the live relay
@@ -45,3 +47,22 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 - **THEN** only the affected queue revokes producers and does not retain the rejected payload
 - **AND** the retained payloads remain accounted until their queues dequeue them
 - **AND** settlement, persistence, logging, and cleanup continue without an operator-configurable memory knob
+
+#### Scenario: Prewarm budget failure cannot look like success
+
+- **GIVEN** an HTTP-bridge prewarm is waiting for its queue and an oversized
+  warmup event cannot reserve bytes from the process budget
+- **WHEN** queue revocation wakes the prewarm consumer with the terminal
+  `None` marker
+- **THEN** the prewarm MUST be classified as failed rather than successful
+- **AND** the warmup request MUST be removed from pending state
+- **AND** response-create admission, queue byte credits, and prewarmed session
+  state MUST all be released or reset
+
+#### Scenario: Aborted prewarm terminal settlement cannot look like success
+
+- **GIVEN** terminal processing has claimed a prewarm request from pending ownership
+- **WHEN** terminal processing aborts and settlement discards the preconsumer live queue
+- **THEN** the queue end marker MUST be classified as a failed prewarm rather than clean completion
+- **AND** the caller receives an HTTP 502 error
+- **AND** no warmup remains pending, response-create admission is unlocked, retained queue byte credits are zero, and the session is not marked prewarmed
