@@ -550,18 +550,18 @@ async def _settle_claimed_http_bridge_liveness_failure(
     service: Any,
     session: "_HTTPBridgeSession",
     *,
+    failed_request_state: _WebSocketRequestState,
     error_message: str,
 ) -> None:
     """Finish the pending-deque settlement claimed beside a failed send."""
 
     if session.liveness_settlement_owner != "send":
         raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
-    # The send can fail before the downstream stream has started.  Revoke all
-    # live queues before the shared terminal funnel claims them so a full queue
-    # cannot leave settlement waiting for a consumer that will never run.
-    async with session.pending_lock:
-        for pending_request in session.pending_requests:
-            _revoke_http_bridge_event_queue(pending_request)
+    # This send failed before its downstream generator reached the queue
+    # consumer loop, so only this request is known to have no consumer. Older
+    # pending siblings can have attached, deliberately paused consumers; their
+    # queues must retain normal backpressure and ordered terminal delivery.
+    _revoke_http_bridge_event_queue(failed_request_state)
     async with session.lifecycle_lock:
         await service._fail_http_bridge_reader_and_maybe_retire(
             session,
@@ -2192,6 +2192,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     _settle_claimed_http_bridge_liveness_failure(
                         self,
                         session,
+                        failed_request_state=request_state,
                         error_message=str(exc) or "Upstream websocket liveness failed",
                     ),
                     name="http-bridge-liveness-send-settlement",

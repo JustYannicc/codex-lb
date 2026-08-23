@@ -1826,6 +1826,15 @@ class _HTTPBridgeStreamingMixin:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
+            # Capture against an already-live canonical session before the
+            # ownership lookups below. Those awaits can otherwise let a
+            # sibling deny and prune this anchor before we reach submission.
+            http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
+            existing_session = (
+                http_bridge_sessions.get(bridge_session_key) if http_bridge_sessions is not None else None
+            )
+            if existing_session is not None:
+                capture_denied_anchor_generation(request_state, existing_session)
         elif (
             effective_payload.previous_response_id is not None
             and payload_looks_like_full_resend
@@ -2048,6 +2057,16 @@ class _HTTPBridgeStreamingMixin:
                 upstream_error_code="owner_lookup_miss",
             )
             raise owner_unavailable
+
+        # If the canonical local session already exists, capture its fence
+        # synchronously before session lookup/registration awaits. This closes
+        # the window where a sibling can deny and prune the anchor while this
+        # request is still waiting to enter ``_get_or_create``.
+        http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
+        if http_bridge_sessions is not None:
+            existing_session = http_bridge_sessions.get(bridge_session_key)
+            if existing_session is not None:
+                capture_denied_anchor_generation(request_state, existing_session)
 
         while True:
             try:

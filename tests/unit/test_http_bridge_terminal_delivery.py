@@ -57,14 +57,15 @@ def _live_queue(*, maxsize: int) -> asyncio.Queue[str | None]:
 
 
 @pytest.mark.asyncio
-async def test_terminal_delivery_times_out_on_full_queue_and_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_terminal_delivery_waits_for_attached_consumer_and_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     queue = _live_queue(maxsize=2)
     queue.put_nowait("buffered-1")
     queue.put_nowait("buffered-2")
     request_state = _request_state(queue)
     monkeypatch.setattr(proxy_service, "get_settings", _settings)
-    monkeypatch.setattr(upstream_events_module, "_HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS", 0.02)
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
     settle_terminal_event = AsyncMock()
     service._http_bridge_operation_event_batcher = cast(
         Any,
@@ -76,23 +77,29 @@ async def test_terminal_delivery_times_out_on_full_queue_and_settles(monkeypatch
         ),
     )
 
-    started = time.monotonic()
-    result = await upstream_events_module._persist_http_bridge_operation_event(
-        service,
-        _session(),
-        request_state,
-        'data: {"type":"response.failed"}\n\n',
-        terminal=True,
-        terminal_state="failed",
-        terminal_event_queue=queue,
+    terminal_event = 'data: {"type":"response.failed"}\n\n'
+    persist_task = asyncio.create_task(
+        upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            _session(),
+            request_state,
+            terminal_event,
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=queue,
+        )
     )
 
-    assert result is False
-    assert time.monotonic() - started < 0.5
+    await asyncio.sleep(0.05)
+    assert persist_task.done() is False
+    assert request_state.event_queue_revoked.is_set() is False
+    assert await queue.get() == "buffered-1"
+    assert await queue.get() == "buffered-2"
+    assert await queue.get() == terminal_event
+    assert await queue.get() is None
+
+    assert await asyncio.wait_for(persist_task, timeout=0.2) is True
     settle_terminal_event.assert_awaited_once()
-    assert request_state.terminal_delivery_timed_out is True
-    assert request_state.event_queue_revoked.is_set()
-    assert [queue.get_nowait(), queue.get_nowait()] == ["buffered-1", "buffered-2"]
     assert not [
         task
         for task in asyncio.all_tasks()
@@ -107,8 +114,7 @@ async def test_terminal_delivery_keeps_terminal_before_eos_when_queue_has_capaci
     queue = _live_queue(maxsize=2)
     request_state = _request_state(queue)
     monkeypatch.setattr(proxy_service, "get_settings", _settings)
-    monkeypatch.setattr(upstream_events_module, "_HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS", 0.2)
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
     settle_terminal_event = AsyncMock()
     service._http_bridge_operation_event_batcher = cast(
         Any,
@@ -133,19 +139,17 @@ async def test_terminal_delivery_keeps_terminal_before_eos_when_queue_has_capaci
     assert result is True
     assert [queue.get_nowait(), queue.get_nowait()] == ['data: {"type":"response.failed"}\n\n', None]
     settle_terminal_event.assert_awaited_once()
-    assert request_state.terminal_delivery_timed_out is False
 
 
 @pytest.mark.asyncio
-async def test_terminal_delivery_partial_put_is_closed_with_eos_before_settlement(
+async def test_terminal_delivery_preserves_buffered_event_terminal_and_eos_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue = _live_queue(maxsize=2)
     queue.put_nowait("buffered")
     request_state = _request_state(queue)
     monkeypatch.setattr(proxy_service, "get_settings", _settings)
-    monkeypatch.setattr(upstream_events_module, "_HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS", 0.02)
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
     settle_terminal_event = AsyncMock()
     service._http_bridge_operation_event_batcher = cast(
         Any,
@@ -157,33 +161,36 @@ async def test_terminal_delivery_partial_put_is_closed_with_eos_before_settlemen
         ),
     )
 
-    result = await upstream_events_module._persist_http_bridge_operation_event(
-        service,
-        _session(),
-        request_state,
-        'data: {"type":"response.failed"}\n\n',
-        terminal=True,
-        terminal_state="failed",
-        terminal_event_queue=queue,
+    terminal_event = 'data: {"type":"response.failed"}\n\n'
+    persist_task = asyncio.create_task(
+        upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            _session(),
+            request_state,
+            terminal_event,
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=queue,
+        )
     )
 
-    assert result is False
-    assert [queue.get_nowait(), queue.get_nowait()] == [
-        'data: {"type":"response.failed"}\n\n',
-        None,
-    ]
+    await asyncio.sleep(0)
+    assert persist_task.done() is False
+    assert await queue.get() == "buffered"
+    assert await queue.get() == terminal_event
+    assert await queue.get() is None
+    assert await asyncio.wait_for(persist_task, timeout=0.2) is True
     settle_terminal_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_terminal_delivery_preserves_cancellation_after_bounded_cleanup(
+async def test_terminal_delivery_preserves_cancellation_after_revoked_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue = _live_queue(maxsize=1)
     queue.put_nowait("buffered")
     request_state = _request_state(queue)
     monkeypatch.setattr(proxy_service, "get_settings", _settings)
-    monkeypatch.setattr(upstream_events_module, "_HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS", 0.02)
     append_started = asyncio.Event()
     release_append = asyncio.Event()
 
@@ -192,7 +199,7 @@ async def test_terminal_delivery_preserves_cancellation_after_bounded_cleanup(
         await release_append.wait()
         return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
 
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
     settle_terminal_event = AsyncMock()
     service._http_bridge_operation_event_batcher = cast(
         Any,
@@ -216,7 +223,51 @@ async def test_terminal_delivery_preserves_cancellation_after_bounded_cleanup(
     await asyncio.wait_for(append_started.wait(), timeout=1.0)
     persist_task.cancel()
     release_append.set()
+    await asyncio.sleep(0.05)
+    assert persist_task.done() is False
+    cast(Any, queue).revoke()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(persist_task, timeout=1.0)
     settle_terminal_event.assert_awaited_once()
-    assert request_state.terminal_delivery_timed_out is True
+    assert request_state.event_queue_revoked.is_set()
+
+
+@pytest.mark.asyncio
+async def test_revoked_terminal_delivery_settles_without_waiting_for_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = _live_queue(maxsize=1)
+    queue.put_nowait("buffered")
+    request_state = _request_state(queue)
+    monkeypatch.setattr(proxy_service, "get_settings", _settings)
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
+    settle_terminal_event = AsyncMock()
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=AsyncMock(
+                return_value=TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+            ),
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    persist_task = asyncio.create_task(
+        upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            _session(),
+            request_state,
+            'data: {"type":"response.failed"}\n\n',
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=queue,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert persist_task.done() is False
+    cast(Any, queue).revoke()
+
+    assert await asyncio.wait_for(persist_task, timeout=0.2) is False
+    settle_terminal_event.assert_awaited_once()
+    assert request_state.event_queue_revoked.is_set()
+    assert queue.get_nowait() == "buffered"

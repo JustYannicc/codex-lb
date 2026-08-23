@@ -26578,7 +26578,11 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
             )
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    sibling_queue_revoked = asyncio.Event()
+    sibling_queue: asyncio.Queue[str | None] = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=sibling_queue_revoked,
+    )
     sibling_state = proxy_service._WebSocketRequestState(
         request_id="req-bridge-liveness-race-sibling",
         model="gpt-5.4",
@@ -26588,10 +26592,15 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         started_at=time.monotonic(),
         response_id="resp-bridge-liveness-race-sibling",
         event_queue=sibling_queue,
+        event_queue_revoked=sibling_queue_revoked,
         transport="http",
         skip_request_log=True,
     )
-    request_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_queue_revoked = asyncio.Event()
+    request_queue: asyncio.Queue[str | None] = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=request_queue_revoked,
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-bridge-liveness-race",
         model="gpt-5.4",
@@ -26601,6 +26610,7 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         started_at=time.monotonic(),
         awaiting_response_created=True,
         event_queue=request_queue,
+        event_queue_revoked=request_queue_revoked,
         request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
         transport="http",
         skip_request_log=True,
@@ -26672,12 +26682,14 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
     assert failure_call is not None
     assert failure_call.kwargs["penalize_account"] is False
     retry_precreated.assert_not_awaited()
-    for event_queue in (sibling_queue, request_queue):
-        terminal_event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-        assert terminal_event is not None
-        assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
-        assert await asyncio.wait_for(event_queue.get(), timeout=0.1) is None
+    terminal_event = await asyncio.wait_for(sibling_queue.get(), timeout=0.1)
+    assert terminal_event is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
+    assert await asyncio.wait_for(sibling_queue.get(), timeout=0.1) is None
     assert request_state.replay_count == 0
+    assert sibling_state.event_queue_revoked.is_set() is False
+    assert request_state.event_queue_revoked.is_set() is True
+    assert request_queue.empty()
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0
     assert session.closed is True
