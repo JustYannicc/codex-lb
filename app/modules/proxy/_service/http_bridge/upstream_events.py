@@ -361,6 +361,40 @@ def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None
     }.get(event_type)
 
 
+def _enqueue_http_bridge_abort_eos(
+    request_state: "_WebSocketRequestState",
+    event_queue: asyncio.Queue[str | None],
+) -> bool:
+    """Publish an abort end marker without blocking a bounded live queue.
+
+    Terminal bookkeeping has lost the normal downstream producer path when it
+    aborts, so the stream must still receive an end marker.  Awaiting
+    ``put(None)`` here can hang forever when the queue is full and the client
+    has already stopped reading.  Drop the oldest buffered item to make room
+    instead; the aborted response is already fail-closed, and ending the
+    stream is safer than leaving the client waiting for its idle timeout.
+
+    Queue revocation and ownership are checked before the synchronous
+    operation.  There is no await between the check and enqueue, so a detach
+    cannot race this helper and no background producer task is left behind.
+    """
+    if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
+        return False
+    while True:
+        if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
+            return False
+        try:
+            event_queue.put_nowait(None)
+            return True
+        except asyncio.QueueFull:
+            try:
+                event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # A non-standard queue changed state without yielding.  Do
+                # not spin or await: the downstream detach path owns cleanup.
+                return False
+
+
 async def _persist_http_bridge_operation_event(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -2447,10 +2481,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # end-of-stream instead of waiting for its idle timeout.
                 event_queue = request_state.event_queue
                 if event_queue is not None:
-                    try:
-                        event_queue.put_nowait(None)
-                    except asyncio.QueueFull:
-                        pass
+                    _enqueue_http_bridge_abort_eos(request_state, event_queue)
 
     async def _handle_or_defer_precreated_stream_health(
         self: Any,
