@@ -281,6 +281,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _enqueue_http_bridge_event,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -6493,18 +6496,21 @@ class _WebSocketMixin:
                     )
             if request_state.event_queue is not None:
                 try:
-                    await request_state.event_queue.put(
-                        format_sse_event(
-                            response_failed_event(
-                                request_error_code,
-                                request_error_message,
-                                error_type=request_error_type,
-                                response_id=_websocket_downstream_response_id(request_state),
-                                error_param=request_error_param,
-                            )
+                    terminal_event = format_sse_event(
+                        response_failed_event(
+                            request_error_code,
+                            request_error_message,
+                            error_type=request_error_type,
+                            response_id=_websocket_downstream_response_id(request_state),
+                            error_param=request_error_param,
                         )
                     )
-                    await request_state.event_queue.put(None)
+                    await _enqueue_http_bridge_event(
+                        request_state,
+                        request_state.event_queue,
+                        terminal_event,
+                        terminal=True,
+                    )
                 except Exception:
                     _facade().logger.warning(
                         "Failed to publish websocket terminal queue event during cleanup request_id=%s",

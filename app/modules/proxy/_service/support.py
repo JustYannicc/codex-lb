@@ -857,6 +857,7 @@ class _RequestLogFailureMetadata:
 class _HTTPBridgeCompletedDeliveryScope:
     active: bool = False
     terminal_enqueued: bool = False
+    detach_requested: bool = False
 
 
 @dataclass(slots=True)

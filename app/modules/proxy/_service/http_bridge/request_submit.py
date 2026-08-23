@@ -130,6 +130,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _abandon_durable_http_bridge_continuity,
+    _enqueue_http_bridge_event,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -305,6 +306,8 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._queued_bytes = 0
         self._budget_exceeded = asyncio.Event()
         self._terminal_pending = False
+        self._terminal_items: deque[str | None] = deque()
+        self._discarded = False
 
     @property
     def queued_bytes(self) -> int:
@@ -316,6 +319,52 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
         return self._budget_exceeded
 
+    @property
+    def revoked(self) -> asyncio.Event:
+        """Signal that no more live events may be produced."""
+
+        return self._revoked
+
+    @property
+    def terminal_pending(self) -> bool:
+        """Whether an out-of-band terminal sequence remains to be read."""
+
+        return bool(self._terminal_items)
+
+    def _queue_terminal_items(self, items: tuple[str | None, ...]) -> bool:
+        if self._terminal_pending:
+            return True
+        item_bytes = sum(_http_bridge_live_event_queue_item_bytes(item) for item in items)
+        if not self._byte_budget.reserve(item_bytes):
+            self._budget_exceeded.set()
+            logger.warning(
+                "HTTP bridge live event queue byte budget exhausted terminal_bytes=%s queue_bytes=%s budget_bytes=%s",
+                item_bytes,
+                self._queued_bytes,
+                self._byte_budget.max_bytes,
+            )
+            self._revoked.set()
+            self._terminal_pending = True
+            self._terminal_items.append(None)
+            return False
+        self._terminal_pending = True
+        self._terminal_items.extend(items)
+        self._queued_bytes += item_bytes
+        return True
+
+    def enqueue_terminal_event_nowait(self, event_block: str) -> bool:
+        """Queue a terminal event and EOS without waiting for live capacity."""
+        if self._discarded:
+            return False
+        if self._revoked.is_set():
+            if self._terminal_pending and self._terminal_items != deque((None,)):
+                return False
+        if self._terminal_pending:
+            self._terminal_items.clear()
+            self._terminal_pending = False
+        self._revoked.set()
+        return self._queue_terminal_items((event_block, None))
+
     def enqueue_terminal_nowait(self) -> bool:
         """Reserve an ordered end marker without growing the live queue.
 
@@ -326,16 +375,12 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         prevents a producer that was already waiting on a full queue from
         inserting an event after the marker.
         """
-        if self._revoked.is_set():
+        if self._discarded:
             return False
-        self._revoked.set()
         if self._terminal_pending:
             return True
-        if self.full():
-            self._terminal_pending = True
-            return True
-        self.put_nowait(None)
-        return True
+        self._revoked.set()
+        return self._queue_terminal_items((None,))
 
     def _put(self, item: str | None) -> None:
         if self._revoked.is_set() and item is not None:
@@ -379,23 +424,63 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         harmless.
         """
 
+        self._revoked.set()
+        self._discarded = True
         while True:
             try:
-                self.get_nowait()
+                item = super().get_nowait()
             except asyncio.QueueEmpty:
-                return
+                break
+            item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+            self._queued_bytes = max(0, self._queued_bytes - item_bytes)
+            self._byte_budget.release(item_bytes)
+        while self._terminal_items:
+            item = self._terminal_items.popleft()
+            item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+            self._queued_bytes = max(0, self._queued_bytes - item_bytes)
+            self._byte_budget.release(item_bytes)
+        self._terminal_pending = True
+        self._terminal_items.append(None)
 
     def get_nowait(self) -> str | None:
         if self._terminal_pending and self.empty():
-            self._terminal_pending = False
-            return None
+            item = self._terminal_items.popleft()
+            if not self._terminal_items:
+                self._terminal_pending = False
+            item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+            self._queued_bytes = max(0, self._queued_bytes - item_bytes)
+            self._byte_budget.release(item_bytes)
+            return item
         return super().get_nowait()
 
     async def get(self) -> str | None:
-        if self._terminal_pending and self.empty():
-            self._terminal_pending = False
-            return None
-        return await super().get()
+        while True:
+            if self._terminal_pending and self.empty():
+                item = self._terminal_items.popleft()
+                if not self._terminal_items:
+                    self._terminal_pending = False
+                item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+                self._queued_bytes = max(0, self._queued_bytes - item_bytes)
+                self._byte_budget.release(item_bytes)
+                return item
+            if not self.empty():
+                return await super().get()
+            if self._revoked.is_set():
+                return None
+            get_task = asyncio.create_task(super().get(), name="http-bridge-event-get")
+            revoke_task = asyncio.create_task(self._revoked.wait(), name="http-bridge-event-revoke")
+            try:
+                done, _pending = await asyncio.wait(
+                    (get_task, revoke_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if get_task in done:
+                    return get_task.result()
+            finally:
+                for task in (get_task, revoke_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(get_task, revoke_task, return_exceptions=True)
 
     def _get(self) -> str | None:
         item = super()._get()
@@ -2523,6 +2608,9 @@ class _HTTPBridgeRequestSubmitMixin:
                             async with session.pending_lock:
                                 if warmup_state in session.pending_requests:
                                     session.pending_requests.remove(warmup_state)
+                            discard = getattr(warmup_state.event_queue, "discard", None)
+                            if callable(discard):
+                                discard()
                             self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
                             if gate_acquired:
                                 await _release_websocket_response_create_gate(
@@ -2899,15 +2987,22 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True
                 detached = True
-            # Queue revocation and pending ownership use the same lock. A
-            # completed handler that wins first keeps its local queue reference;
-            # a detach that wins first leaves no queue for that handler to claim.
-            orphaned_event_queue = request_state.event_queue
-            request_state.event_queue = None
-            request_state.event_queue_revoked.set()
-            discard = getattr(orphaned_event_queue, "discard", None)
-            if callable(discard):
-                discard()
+            # A completed handler that already claimed the request owns its
+            # queue until terminal event+EOS delivery finishes. Detachment
+            # must not revoke that local claim while bookkeeping is awaiting
+            # durable append/settlement work.
+            completed_scope = request_state.completed_delivery_scope
+            preserve_completed_delivery_queue = False
+            if completed_scope is not None and completed_scope.active and request_state.event_queue is not None:
+                completed_scope.detach_requested = True
+                preserve_completed_delivery_queue = True
+            if not preserve_completed_delivery_queue:
+                orphaned_event_queue = request_state.event_queue
+                request_state.event_queue = None
+                request_state.event_queue_revoked.set()
+                discard = getattr(orphaned_event_queue, "discard", None)
+                if callable(discard):
+                    discard()
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             if request_state.operation_replay:
@@ -3959,7 +4054,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
-                    await request_state.event_queue.put(
+                    await _enqueue_http_bridge_event(
+                        request_state,
+                        request_state.event_queue,
                         format_sse_event(
                             _security_work_advisory_event(
                                 code=_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
@@ -3967,7 +4064,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 action="forward_original_security_work_error",
                             )
-                        )
+                        ),
                     )
             async with session.pending_lock:
                 if request_state in session.pending_requests:
