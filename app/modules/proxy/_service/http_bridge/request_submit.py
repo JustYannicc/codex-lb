@@ -454,12 +454,13 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._discarded = True
         while True:
             try:
-                item = super().get_nowait()
+                # ``asyncio.Queue.get_nowait`` dispatches to this queue's
+                # ``_get`` override, which releases the item's own byte
+                # credit.  Do not release it again here: the budget is shared
+                # by every live queue in the process.
+                super().get_nowait()
             except asyncio.QueueEmpty:
                 break
-            item_bytes = _http_bridge_live_event_queue_item_bytes(item)
-            self._queued_bytes = max(0, self._queued_bytes - item_bytes)
-            self._byte_budget.release(item_bytes)
         while self._terminal_items:
             item = self._terminal_items.popleft()
             item_bytes = _http_bridge_live_event_queue_item_bytes(item)
