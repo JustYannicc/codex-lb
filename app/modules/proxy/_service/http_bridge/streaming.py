@@ -3881,6 +3881,11 @@ class _HTTPBridgeStreamingMixin:
 
         async def detach_downstream_request() -> None:
             with anyio.CancelScope(shield=True):
+                # The stream is no longer an owner once its generator is
+                # closing.  Mark the queue revoked before preserving a raced
+                # completed-delivery claim so terminal cleanup can discard
+                # unread bytes if terminal bookkeeping aborts.
+                request_state.event_queue_revoked.set()
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
                 await self._maybe_release_idle_http_bridge_session_lease(session)
