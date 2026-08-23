@@ -177,6 +177,55 @@ async def test_http_bridge_event_put_delivers_after_capacity_frees() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_queue_shares_a_process_byte_budget() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
+    first_revoked = asyncio.Event()
+    second_revoked = asyncio.Event()
+    first_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=first_revoked,
+        byte_budget=budget,
+    )
+    second_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=second_revoked,
+        byte_budget=budget,
+    )
+
+    first_queue.put_nowait("12345")
+    await second_queue.put("x")
+
+    assert budget.used_bytes == 5
+    assert first_queue.queued_bytes == 5
+    assert second_revoked.is_set()
+    assert second_queue.empty()
+    assert budget.used_bytes == 5
+
+    assert first_queue.get_nowait() == "12345"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_queue_revocation_releases_retained_payloads() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=16)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("payload")
+
+    event_queue.revoke()
+
+    assert revoked.is_set()
+    assert event_queue.queued_bytes == len("payload")
+    assert budget.used_bytes == len("payload")
+    assert event_queue.get_nowait() == "payload"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
     revoked = asyncio.Event()
     event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)

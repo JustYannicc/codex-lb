@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import random
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -230,6 +231,53 @@ _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
 # A local startup failure must enqueue its terminal frame and end marker before
 # the downstream consumer loop starts; the third unread live event backpressures.
 _HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE = 2
+# Keep queued SSE payloads bounded across all bridge sessions.  This is an
+# implementation safety envelope, not an operator tuning knob: a process with
+# many sessions must fail closed before queue retention turns into an OOM.
+_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _http_bridge_live_event_queue_item_bytes(item: str | None) -> int:
+    return len(item.encode("utf-8")) if isinstance(item, str) else 0
+
+
+class _HTTPBridgeLiveEventQueueByteBudget:
+    """Thread-safe process-wide accounting for live bridge queue payloads."""
+
+    def __init__(self, *, max_bytes: int) -> None:
+        self.max_bytes = max(0, max_bytes)
+        self._used_bytes = 0
+        self._lock = threading.Lock()
+
+    @property
+    def used_bytes(self) -> int:
+        with self._lock:
+            return self._used_bytes
+
+    def reserve(self, size: int) -> bool:
+        if size <= 0:
+            return True
+        with self._lock:
+            if self._used_bytes + size > self.max_bytes:
+                return False
+            self._used_bytes += size
+            return True
+
+    def release(self, size: int) -> None:
+        if size <= 0:
+            return
+        with self._lock:
+            self._used_bytes = max(0, self._used_bytes - size)
+
+
+_HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET = _HTTPBridgeLiveEventQueueByteBudget(
+    max_bytes=_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_BYTES,
+)
+
+
+class _HTTPBridgeLiveEventQueueByteBudgetExceeded(RuntimeError):
+    pass
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
@@ -244,9 +292,47 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
     """Finite live queue whose blocked producer exits when downstream detaches."""
 
-    def __init__(self, *, maxsize: int, revoked: asyncio.Event) -> None:
+    def __init__(
+        self,
+        *,
+        maxsize: int,
+        revoked: asyncio.Event,
+        byte_budget: _HTTPBridgeLiveEventQueueByteBudget | None = None,
+    ) -> None:
         super().__init__(maxsize=maxsize)
         self._revoked = revoked
+        self._byte_budget = byte_budget or _HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
+        self._queued_bytes = 0
+
+    @property
+    def queued_bytes(self) -> int:
+        return self._queued_bytes
+
+    def _put(self, item: str | None) -> None:
+        if self._revoked.is_set() and item is not None:
+            raise _HTTPBridgeLiveEventQueueByteBudgetExceeded
+        item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+        if not self._byte_budget.reserve(item_bytes):
+            logger.warning(
+                "HTTP bridge live event queue byte budget exhausted item_bytes=%s queue_bytes=%s budget_bytes=%s",
+                item_bytes,
+                self._queued_bytes,
+                self._byte_budget.max_bytes,
+            )
+            raise _HTTPBridgeLiveEventQueueByteBudgetExceeded
+        try:
+            super()._put(item)
+        except BaseException:
+            self._byte_budget.release(item_bytes)
+            raise
+        self._queued_bytes += item_bytes
+
+    def _get(self) -> str | None:
+        item = super()._get()
+        item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+        self._queued_bytes = max(0, self._queued_bytes - item_bytes)
+        self._byte_budget.release(item_bytes)
+        return item
 
     async def put(self, item: str | None) -> None:
         if self._revoked.is_set():
@@ -267,11 +353,20 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 if put_task in done:
                     put_task.result()
+            except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
+                self.revoke()
             finally:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+        except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
+            self.revoke()
+
+    def revoke(self) -> None:
+        """Stop producers while retaining queued bytes for their consumer."""
+
+        self._revoked.set()
 
 
 def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> None:
@@ -284,7 +379,12 @@ def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> No
     producer that is waiting for capacity.
     """
 
-    request_state.event_queue_revoked.set()
+    event_queue = request_state.event_queue
+    revoke = getattr(event_queue, "revoke", None)
+    if callable(revoke):
+        revoke()
+    else:
+        request_state.event_queue_revoked.set()
 
 
 @dataclass(frozen=True, slots=True)
