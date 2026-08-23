@@ -303,16 +303,24 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._revoked = revoked
         self._byte_budget = byte_budget or _HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
         self._queued_bytes = 0
+        self._budget_exceeded = asyncio.Event()
 
     @property
     def queued_bytes(self) -> int:
         return self._queued_bytes
+
+    @property
+    def budget_exceeded(self) -> asyncio.Event:
+        """Signal that this queue could not retain a live event."""
+
+        return self._budget_exceeded
 
     def _put(self, item: str | None) -> None:
         if self._revoked.is_set() and item is not None:
             raise _HTTPBridgeLiveEventQueueByteBudgetExceeded
         item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         if not self._byte_budget.reserve(item_bytes):
+            self._budget_exceeded.set()
             logger.warning(
                 "HTTP bridge live event queue byte budget exhausted item_bytes=%s queue_bytes=%s budget_bytes=%s",
                 item_bytes,
@@ -326,6 +334,32 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._byte_budget.release(item_bytes)
             raise
         self._queued_bytes += item_bytes
+
+    def put_nowait(self, item: str | None) -> None:
+        try:
+            super().put_nowait(item)
+        except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
+            # ``put_nowait`` is used by a few terminal cleanup paths.  A
+            # process-wide budget failure is a stream failure, not a producer
+            # exception that should take down the reader task.
+            self.revoke()
+
+    def discard(self) -> None:
+        """Release unread payload credits after downstream ownership is gone.
+
+        Revocation intentionally leaves buffered events available to an
+        attached consumer.  Once the consumer is detached, however, those
+        events are otherwise unreachable and their process-wide reservations
+        would remain charged forever.  ``get_nowait`` routes through
+        ``_get`` so each payload is released exactly once; repeated cleanup is
+        harmless.
+        """
+
+        while True:
+            try:
+                self.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     def _get(self) -> str | None:
         item = super()._get()
@@ -2534,6 +2568,16 @@ class _HTTPBridgeRequestSubmitMixin:
             if admission_waiter_registered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        if request_enqueued:
+            # Submit interruption is an irrevocable loss of downstream
+            # ownership: the stream generator never gets a chance to consume
+            # this queue. Revoke late producers and release any unread byte
+            # reservations before the request state becomes unreachable.
+            _revoke_http_bridge_event_queue(request_state)
+            event_queue = request_state.event_queue
+            discard = getattr(event_queue, "discard", None)
+            if callable(discard):
+                discard()
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_claimed
@@ -2791,6 +2835,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
     ) -> bool:
         detached = False
+        orphaned_event_queue: asyncio.Queue[str | None] | None = None
         async with session.pending_lock:
             if request_state in session.pending_requests and not request_state.draining_until_terminal:
                 request_state.draining_until_terminal = True
@@ -2802,8 +2847,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # Queue revocation and pending ownership use the same lock. A
             # completed handler that wins first keeps its local queue reference;
             # a detach that wins first leaves no queue for that handler to claim.
+            orphaned_event_queue = request_state.event_queue
             request_state.event_queue = None
             request_state.event_queue_revoked.set()
+            discard = getattr(orphaned_event_queue, "discard", None)
+            if callable(discard):
+                discard()
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             if request_state.operation_replay:
