@@ -302,6 +302,78 @@ async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed send must not wait for a consumer that never starts."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="late-send-full-queue")
+    send_text = AsyncMock(side_effect=RuntimeError("late send"))
+    close = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=close))
+    service._http_bridge_sessions[session.key] = session
+
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    event_queue.put_nowait("buffered-1")
+    event_queue.put_nowait("buffered-2")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-late-send-full-queue",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        request_text='{"type":"response.create","input":"late"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_stream_lease_locked", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock())
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await asyncio.wait_for(
+            service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            ),
+            timeout=1.0,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert revoked.is_set()
+    assert event_queue.qsize() == 2
+    assert session.pending_requests == deque()
+    assert send_text.await_count == 1
+    close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -22421,6 +22493,77 @@ async def test_prewarm_timeout_pins_only_account_neutral_recovery_session(
     reconnect_call = reconnect.await_args
     assert reconnect_call is not None
     assert reconnect_call.kwargs["require_same_account"] is expected_same_account
+
+
+@pytest.mark.asyncio
+async def test_prewarm_uses_finite_revocable_queue_and_revokes_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-finite-queue")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-finite-queue",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    captured: dict[str, proxy_service._WebSocketRequestState] = {}
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    async def send_warmup(
+        _session: proxy_service._HTTPBridgeSession,
+        state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        captured["warmup"] = state
+        assert state.event_queue is not None
+        state.event_queue.put_nowait("buffered-1")
+        state.event_queue.put_nowait("buffered-2")
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(http_bridge_request_submit_module, "_prewarm_response_timeout_seconds", lambda: 0.001)
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module, "_send_http_bridge_request_text_with_archive_id", send_warmup
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    await service._maybe_prewarm_http_bridge_session(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+
+    warmup_state = captured["warmup"]
+    assert isinstance(warmup_state.event_queue, http_bridge_request_submit_module._HTTPBridgeLiveEventQueue)
+    assert warmup_state.event_queue.maxsize == http_bridge_request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE
+    assert warmup_state.event_queue_revoked.is_set()
+    await warmup_state.event_queue.put("after-timeout")
+    assert warmup_state.event_queue.empty()
+    assert session.pending_requests == deque()
+    assert session.response_create_gate.locked() is False
+    reconnect.assert_awaited_once()
 
 
 @pytest.mark.asyncio
