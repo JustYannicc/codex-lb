@@ -1506,7 +1506,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.operation_fingerprint = operation_fingerprint
                             request_state.operation_registered = True
                             replay_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=len(replay_events) + 1)
+                            old_event_queue = request_state.event_queue
                             request_state.event_queue = replay_queue
+                            discard = getattr(old_event_queue, "discard", None)
+                            if callable(discard):
+                                discard()
                             for replay_event in replay_events:
                                 replay_queue.put_nowait(replay_event)
                             replay_queue.put_nowait(None)
