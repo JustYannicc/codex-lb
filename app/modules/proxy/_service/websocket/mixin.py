@@ -2021,6 +2021,41 @@ class _WebSocketMixin:
                             ("turn state", turn_state_owner_account_id),
                             ("previous response", previous_response_owner_account_id),
                         )
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and not request_state.source_route_excluded
+                        ):
+                            await self._resolve_cached_websocket_source_ownership(
+                                request_state,
+                                model=request_state.model,
+                                api_key=request_state.api_key or api_key,
+                            )
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and (
+                                request_state.source_route_excluded
+                                or request_state.source_model_ownership
+                                is ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+                            )
+                        ):
+                            message = "Previous response owner account is unavailable; retry later."
+                            _record_continuity_fail_closed(
+                                surface="websocket_connect",
+                                reason="owner_account_unavailable",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="owner_lookup_miss",
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "previous_response_owner_unavailable",
+                                    message,
+                                    error_type="server_error",
+                                ),
+                            )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
