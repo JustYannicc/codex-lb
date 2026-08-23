@@ -189,6 +189,24 @@ async def test_http_bridge_event_put_delivers_after_capacity_frees() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_abort_terminal_cancels_blocked_producer_after_buffered_events() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    event_queue.put_nowait("first")
+    event_queue.put_nowait("second")
+    blocked_put = asyncio.create_task(event_queue.put("late"))
+    request_state = cast(Any, SimpleNamespace(event_queue=event_queue, event_queue_revoked=revoked))
+
+    await asyncio.sleep(0)
+    assert http_bridge_upstream_events_module._enqueue_http_bridge_abort_eos(request_state, event_queue) is True
+    assert revoked.is_set()
+    assert [event_queue.get_nowait(), event_queue.get_nowait(), event_queue.get_nowait()] == ["first", "second", None]
+
+    await asyncio.wait_for(blocked_put, timeout=0.1)
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_queue_shares_a_process_byte_budget() -> None:
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
     first_revoked = asyncio.Event()
@@ -344,6 +362,12 @@ async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_wi
     stream_task = asyncio.create_task(anext(stream))
     try:
         await asyncio.wait_for(submitted.wait(), timeout=1.0)
+
+        async def wait_for_consumer_attachment() -> None:
+            while not request_state.event_queue_consumer_started:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_consumer_attachment(), timeout=1.0)
         await event_queue.put("too-large-for-budget")
         terminal_event = await asyncio.wait_for(stream_task, timeout=1.0)
         assert '"type":"response.failed"' in terminal_event
@@ -351,6 +375,7 @@ async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_wi
         assert event_queue.budget_exceeded.is_set()
         assert revoked.is_set()
         assert budget.used_bytes == 0
+        assert request_state.event_queue_consumer_started is True
     finally:
         stream_task.cancel()
         await asyncio.gather(stream_task, return_exceptions=True)
@@ -448,6 +473,7 @@ async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
 
         assert revoked.is_set()
         assert request_state.event_queue is None
+        assert request_state.event_queue_consumer_started is False
         assert request_state.draining_until_terminal is True
         assert request_state not in session.pending_requests
         assert session.queued_request_count == 0
@@ -541,6 +567,204 @@ async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_
     assert session.pending_requests == deque()
     assert send_text.await_count == 1
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_settlement_discards_preconsumer_full_sibling_queue() -> None:
+    """A sibling that never attached must not wedge shared liveness settlement."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    def live_state(
+        request_id: str,
+        event_queue: asyncio.Queue[str | None],
+    ) -> proxy_service._WebSocketRequestState:
+        return proxy_service._WebSocketRequestState(
+            request_id=request_id,
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=event_queue,
+            event_queue_revoked=cast(Any, event_queue)._revoked,
+            transport="http",
+            skip_request_log=True,
+        )
+
+    sibling_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    sibling_queue.put_nowait("buffered-1")
+    sibling_queue.put_nowait("buffered-2")
+    sibling_state = live_state("req-preconsumer-sibling", sibling_queue)
+    failed_state = live_state(
+        "req-liveness-failure",
+        http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+            maxsize=2,
+            revoked=asyncio.Event(),
+        ),
+    )
+    session = _make_bridge_session(
+        key_value="preconsumer-full-sibling",
+        pending_requests=deque([sibling_state, failed_state]),
+        queued_request_count=2,
+    )
+    session.liveness_settlement_owner = "send"
+
+    async def fail_reader(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        error_code: str,
+        error_message: str,
+        **kwargs: Any,
+    ) -> bool:
+        del kwargs
+        await service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        )
+        return True
+
+    service._fail_http_bridge_reader_and_maybe_retire = cast(Any, fail_reader)
+
+    await asyncio.wait_for(
+        http_bridge_request_submit_module._settle_claimed_http_bridge_liveness_failure(
+            service,
+            session,
+            failed_request_state=failed_state,
+            error_message="heartbeat expired",
+        ),
+        timeout=0.2,
+    )
+
+    assert sibling_state.event_queue_revoked.is_set()
+    assert sibling_queue.empty()
+    assert session.pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling_queue() -> None:
+    """An attached sibling keeps its buffered events ahead of terminal EOS."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    sibling_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    sibling_queue.put_nowait("buffered-1")
+    sibling_queue.put_nowait("buffered-2")
+    sibling_state = proxy_service._WebSocketRequestState(
+        request_id="req-attached-paused-sibling",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-attached-paused-sibling",
+        event_queue=sibling_queue,
+        event_queue_revoked=sibling_queue._revoked,
+        event_queue_consumer_started=True,
+        transport="http",
+        skip_request_log=True,
+    )
+    failed_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    failed_state = proxy_service._WebSocketRequestState(
+        request_id="req-attached-paused-failure",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=failed_queue,
+        event_queue_revoked=failed_queue._revoked,
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="attached-paused-sibling",
+        pending_requests=deque([sibling_state, failed_state]),
+        queued_request_count=2,
+    )
+    session.liveness_settlement_owner = "send"
+    fail_reader_started = asyncio.Event()
+
+    async def fail_reader(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        error_code: str,
+        error_message: str,
+        **kwargs: Any,
+    ) -> bool:
+        del kwargs
+        fail_reader_started.set()
+        await service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        )
+        return True
+
+    service._fail_http_bridge_reader_and_maybe_retire = cast(Any, fail_reader)
+    settlement_task = asyncio.create_task(
+        http_bridge_request_submit_module._settle_claimed_http_bridge_liveness_failure(
+            service,
+            session,
+            failed_request_state=failed_state,
+            error_message="heartbeat expired",
+        )
+    )
+    try:
+        await asyncio.wait_for(fail_reader_started.wait(), timeout=1.0)
+
+        async def wait_for_pending_claim() -> None:
+            while session.pending_requests:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_pending_claim(), timeout=1.0)
+        assert not settlement_task.done()
+
+        async def consume_sibling_events() -> list[str | None]:
+            events: list[str | None] = []
+            while True:
+                event = await sibling_queue.get()
+                events.append(event)
+                if event is None:
+                    return events
+
+        consumer_task = asyncio.create_task(consume_sibling_events())
+        events = await asyncio.wait_for(consumer_task, timeout=1.0)
+        await asyncio.wait_for(settlement_task, timeout=1.0)
+    finally:
+        if not settlement_task.done():
+            settlement_task.cancel()
+        await asyncio.gather(settlement_task, return_exceptions=True)
+
+    assert events[:2] == ["buffered-1", "buffered-2"]
+    assert events[2] is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in events[2]
+    assert events[3] is None
+    assert sibling_state.event_queue_revoked.is_set() is False
+    assert failed_state.event_queue_revoked.is_set() is True
+    assert session.pending_requests == deque()
 
 
 @pytest.mark.asyncio
@@ -28756,6 +28980,7 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         response_id="resp-bridge-liveness-race-sibling",
         event_queue=sibling_queue,
         event_queue_revoked=sibling_queue_revoked,
+        event_queue_consumer_started=True,
         transport="http",
         skip_request_log=True,
     )

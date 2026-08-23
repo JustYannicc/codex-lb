@@ -80,9 +80,13 @@ async def test_aborted_terminal_settlement_unblocks_full_live_queue() -> None:
         timeout=0.1,
     )
 
-    # The aborted response is fail-closed: retain the newest buffered event,
-    # then terminate immediately instead of waiting for stream idle timeout.
-    assert [event_queue.get_nowait(), event_queue.get_nowait()] == ["last-buffered-event", None]
+    # The terminal marker follows every buffered event instead of evicting the
+    # oldest one, and settlement still completes without waiting for a read.
+    assert [event_queue.get_nowait(), event_queue.get_nowait(), event_queue.get_nowait()] == [
+        "first-buffered-event",
+        "last-buffered-event",
+        None,
+    ]
     assert request_state.terminal_settlement_phase is None
     assert not [
         task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}

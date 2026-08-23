@@ -365,34 +365,37 @@ def _enqueue_http_bridge_abort_eos(
     request_state: "_WebSocketRequestState",
     event_queue: asyncio.Queue[str | None],
 ) -> bool:
-    """Publish an abort end marker without blocking a bounded live queue.
+    """Publish an abort end marker without dropping buffered live events.
 
     Terminal bookkeeping has lost the normal downstream producer path when it
-    aborts, so the stream must still receive an end marker.  Awaiting
-    ``put(None)`` here can hang forever when the queue is full and the client
-    has already stopped reading.  Drop the oldest buffered item to make room
-    instead; the aborted response is already fail-closed, and ending the
-    stream is safer than leaving the client waiting for its idle timeout.
-
-    Queue revocation and ownership are checked before the synchronous
-    operation.  There is no await between the check and enqueue, so a detach
-    cannot race this helper and no background producer task is left behind.
+    aborts, so the stream must still receive an end marker.  A live queue keeps
+    the marker as a bounded out-of-band terminal state when its event deque is
+    full; the consumer observes it only after draining every buffered event.
     """
     if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
         return False
-    while True:
-        if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
+    enqueue_terminal = getattr(event_queue, "enqueue_terminal_nowait", None)
+    if callable(enqueue_terminal):
+        return bool(enqueue_terminal())
+    try:
+        event_queue.put_nowait(None)
+    except asyncio.QueueFull:
+        # Plain asyncio queues are used by replay/test callers.  Reserve one
+        # terminal slot without evicting the oldest event; this remains a
+        # bounded, synchronous operation and keeps the marker after the
+        # buffered sequence.
+        maxsize = getattr(event_queue, "_maxsize", 0)
+        if maxsize <= 0:
             return False
+        queue_state = cast(Any, event_queue)
+        queue_state._maxsize = maxsize + 1
         try:
             event_queue.put_nowait(None)
-            return True
         except asyncio.QueueFull:
-            try:
-                event_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                # A non-standard queue changed state without yielding.  Do
-                # not spin or await: the downstream detach path owns cleanup.
-                return False
+            return False
+        finally:
+            queue_state._maxsize = maxsize
+    return True
 
 
 async def _enqueue_http_bridge_deferred_event(

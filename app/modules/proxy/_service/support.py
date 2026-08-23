@@ -971,6 +971,11 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     event_queue_revoked: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once the HTTP stream has reached its downstream queue-consumer loop.
+    # A request can be pending and already have buffered upstream events before
+    # that point; liveness settlement may discard only those pre-consumer
+    # queues, while an attached consumer must retain ordered backpressure.
+    event_queue_consumer_started: bool = False
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
