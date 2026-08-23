@@ -272,6 +272,12 @@ from app.modules.proxy.replay_safety import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+
+
+class _HTTPBridgeLiveEventQueueBudgetExceeded(RuntimeError):
+    """Raised to wake an attached stream when live queue retention fails."""
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
@@ -4711,6 +4717,44 @@ class _HTTPBridgeStreamingMixin:
                 request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
             assert event_queue is not None
+
+            async def next_event_block(*, timeout: float | None) -> str | None:
+                """Read a live event while waking on process-budget failure."""
+
+                budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                if budget_exceeded is None:
+                    if timeout is None:
+                        return await event_queue.get()
+                    return await asyncio.wait_for(event_queue.get(), timeout=timeout)
+
+                # A budget failure revokes producers.  Drain already-buffered
+                # events first so the failure does not reorder an upstream
+                # response; with no buffered event, fail immediately.
+                if budget_exceeded.is_set() and event_queue.empty():
+                    raise _HTTPBridgeLiveEventQueueBudgetExceeded
+
+                get_task = asyncio.create_task(event_queue.get(), name="http-bridge-event-consumer")
+                budget_task = asyncio.create_task(budget_exceeded.wait(), name="http-bridge-event-budget")
+                tasks: tuple[asyncio.Task[Any], ...] = (get_task, budget_task)
+                timeout_task: asyncio.Task[Any] | None = None
+                if timeout is not None:
+                    timeout_task = asyncio.create_task(asyncio.sleep(timeout), name="http-bridge-event-timeout")
+                    tasks += (timeout_task,)
+                try:
+                    done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    # If both become ready in one loop turn, preserve queue
+                    # order and consume the already-buffered event first.
+                    if get_task in done:
+                        return get_task.result()
+                    if budget_task in done:
+                        raise _HTTPBridgeLiveEventQueueBudgetExceeded
+                    raise asyncio.TimeoutError
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
             yielded_any = False
             keepalive_sent = False
             keepalive_count = 0
@@ -4737,8 +4781,12 @@ class _HTTPBridgeStreamingMixin:
                         # share this lock. Revoking the mutable queue here
                         # prevents a later completion from claiming an
                         # orphaned downstream consumer.
+                        orphaned_event_queue = request_state.event_queue
                         request_state.event_queue = None
                         request_state.event_queue_revoked.set()
+                        discard = getattr(orphaned_event_queue, "discard", None)
+                        if callable(discard):
+                            discard()
 
                 if completed_delivery_owns_queue and not completed_delivery_suppression_logged:
                     logger.info(
@@ -4774,6 +4822,27 @@ class _HTTPBridgeStreamingMixin:
                         )
                     )
                 return _codex_keepalive_frame()
+
+            async def budget_exhausted_terminal_event() -> str:
+                """Fail closed when live-event retention cannot continue."""
+
+                response_id = _websocket_downstream_response_id(request_state)
+                message = "HTTP bridge live event queue byte budget exhausted"
+                if propagate_http_errors:
+                    raise ProxyResponseError(
+                        503,
+                        openai_error("upstream_unavailable", message, error_type="server_error"),
+                    )
+                return format_sse_event(
+                    cast(
+                        Mapping[str, JsonValue],
+                        response_failed_event(
+                            "upstream_unavailable",
+                            message,
+                            response_id=response_id,
+                        ),
+                    )
+                )
 
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
@@ -4827,7 +4896,10 @@ class _HTTPBridgeStreamingMixin:
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
                     try:
-                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
+                        event_block = await next_event_block(timeout=wait_timeout)
+                    except _HTTPBridgeLiveEventQueueBudgetExceeded:
+                        yield await budget_exhausted_terminal_event()
+                        break
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
@@ -5213,7 +5285,11 @@ class _HTTPBridgeStreamingMixin:
                             yield keepalive_event
                         continue
                 else:
-                    event_block = await event_queue.get()
+                    try:
+                        event_block = await next_event_block(timeout=None)
+                    except _HTTPBridgeLiveEventQueueBudgetExceeded:
+                        yield await budget_exhausted_terminal_event()
+                        break
                 if event_block is None:
                     break
                 keepalive_count = 0
