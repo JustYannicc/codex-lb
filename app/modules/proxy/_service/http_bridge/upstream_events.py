@@ -1815,23 +1815,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                 claimed_request_state.terminal_settlement_phase = None
         finally:
             if completed_delivery_scope is not None:
-                async with session.pending_lock:
-                    completed_delivery_scope.active = False
-                    if completed_delivery_scope.detach_requested:
-                        # A downstream detach that raced terminal delivery
-                        # leaves the producer's claim intact until this
-                        # continuation finishes.  Once the scope is no
-                        # longer active, release the queue and its byte
-                        # reservations; no consumer can still own it.
-                        for request_state in claimed_terminal_request_states:
-                            if request_state.completed_delivery_scope is not completed_delivery_scope:
-                                continue
-                            event_queue = request_state.event_queue
-                            request_state.event_queue = None
-                            request_state.event_queue_revoked.set()
-                            discard = getattr(event_queue, "discard", None)
-                            if callable(discard):
-                                discard()
+                with anyio.CancelScope(shield=True):
+                    async with session.pending_lock:
+                        completed_delivery_scope.active = False
+                        if completed_delivery_scope.detach_requested:
+                            # A downstream detach that raced terminal delivery
+                            # leaves the producer's claim intact until this
+                            # continuation finishes.  Once the scope is no
+                            # longer active, release the queue and its byte
+                            # reservations; no consumer can still own it.
+                            for request_state in claimed_terminal_request_states:
+                                if request_state.completed_delivery_scope is not completed_delivery_scope:
+                                    continue
+                                event_queue = request_state.event_queue
+                                request_state.event_queue = None
+                                request_state.event_queue_revoked.set()
+                                discard = getattr(event_queue, "discard", None)
+                                if callable(discard):
+                                    discard()
 
     async def _settle_aborted_http_bridge_terminal_states(
         self: Any,
