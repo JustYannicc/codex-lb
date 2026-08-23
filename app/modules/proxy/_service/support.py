@@ -1134,6 +1134,10 @@ class _WebSocketRequestState:
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
+    # Terminal delivery timed out while the downstream queue was stalled.
+    # Settlement remains authoritative, but later caller fallbacks must not
+    # retry the same unbounded queue put.
+    terminal_delivery_timed_out: bool = False
     # Exactly-once reservation settlement for terminal HTTP bridge events
     # (issue #1594). "claimed" marks a request popped from pending ownership
     # whose in-flight terminal bookkeeping continuation exclusively owns

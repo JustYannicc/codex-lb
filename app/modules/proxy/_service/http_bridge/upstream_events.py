@@ -65,6 +65,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_deadline,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
@@ -335,6 +336,25 @@ def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None
     }.get(event_type)
 
 
+_HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS = 1.0
+
+
+def _http_bridge_terminal_delivery_deadline(request_state: Any) -> float:
+    """Return a bounded deadline for the downstream terminal pair."""
+
+    settings = _service_get_settings()
+    if hasattr(request_state, "bridge_request_deadline"):
+        request_deadline = _http_bridge_request_deadline(request_state, settings)
+    else:
+        request_deadline = float(
+            getattr(request_state, "started_at", time.monotonic())
+        ) + _http_bridge_request_budget_seconds(settings)
+    return min(
+        request_deadline,
+        time.monotonic() + _HTTP_BRIDGE_TERMINAL_DELIVERY_TIMEOUT_SECONDS,
+    )
+
+
 def _enqueue_http_bridge_abort_eos(
     request_state: "_WebSocketRequestState",
     event_queue: asyncio.Queue[str | None],
@@ -367,6 +387,44 @@ def _enqueue_http_bridge_abort_eos(
                 # A non-standard queue changed state without yielding.  Do
                 # not spin or await: the downstream detach path owns cleanup.
                 return False
+
+
+async def _enqueue_http_bridge_deferred_event_with_deadline(
+    request_state: Any,
+    event_queue: asyncio.Queue[str | None],
+    event_block: str,
+) -> bool:
+    """Bound optional deferred-event delivery before terminal handling."""
+
+    event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
+    if event_queue_revoked is not None and event_queue_revoked.is_set():
+        return False
+    queue_task = asyncio.create_task(
+        event_queue.put(event_block),
+        name="http-bridge-deferred-event-put",
+    )
+    deadline = _http_bridge_terminal_delivery_deadline(request_state)
+    remaining = max(0.0, deadline - time.monotonic())
+    try:
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(asyncio.shield(queue_task), timeout=remaining)
+        return True
+    except asyncio.CancelledError:
+        if not queue_task.done():
+            queue_task.cancel()
+        await asyncio.gather(queue_task, return_exceptions=True)
+        raise
+    except asyncio.TimeoutError:
+        if not queue_task.done():
+            queue_task.cancel()
+        await asyncio.gather(queue_task, return_exceptions=True)
+        _enqueue_http_bridge_abort_eos(request_state, event_queue)
+        request_state.terminal_delivery_timed_out = True
+        if event_queue_revoked is not None:
+            event_queue_revoked.set()
+        logger.info("HTTP bridge deferred event delivery timed out; settling without downstream delivery")
+        return False
 
 
 async def _persist_http_bridge_operation_event(
@@ -412,23 +470,78 @@ async def _persist_http_bridge_operation_event(
             expected_response_id = expected_response_ids[0] if expected_response_ids else None
             alternate_expected_response_id = expected_response_ids[1] if len(expected_response_ids) > 1 else None
             response_id = _websocket_downstream_response_id(request_state)
+            delivery_queue = cast(asyncio.Queue[str | None] | None, terminal_event_queue)
+            terminal_delivery_timed_out = False
+            terminal_event_queued = False
+            terminal_eos_queued = False
+
+            def mark_terminal_delivery_timed_out() -> None:
+                nonlocal terminal_delivery_timed_out
+                terminal_delivery_timed_out = True
+                # A later caller must not retry the same stalled queue.  The
+                # revocation also wakes producers using the live queue type;
+                # the state marker covers plain asyncio queues and replay
+                # paths where revocation is not observed by ``put``.
+                request_state.terminal_delivery_timed_out = True
+                event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
+                if event_queue_revoked is not None:
+                    event_queue_revoked.set()
+                logger.info("HTTP bridge terminal delivery timed out; settling without downstream delivery")
 
             async def enqueue_terminal_delivery() -> bool:
-                if terminal_event_queue is None:
+                nonlocal terminal_event_queued, terminal_eos_queued
+                if delivery_queue is None:
                     return False
-                await terminal_event_queue.put(event_block)
-                await terminal_event_queue.put(None)
+                event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
+                if event_queue_revoked is not None and event_queue_revoked.is_set():
+                    return False
+                await delivery_queue.put(event_block)
+                terminal_event_queued = True
+                if event_queue_revoked is not None and event_queue_revoked.is_set():
+                    return False
+                await delivery_queue.put(None)
+                terminal_eos_queued = True
+                if event_queue_revoked is not None and event_queue_revoked.is_set():
+                    return False
                 if terminal_delivery_scope is not None:
                     async with session.pending_lock:
                         terminal_delivery_scope.terminal_enqueued = True
                 return True
 
             async def enqueue_terminal_delivery_deferring_cancellation() -> tuple[bool, asyncio.CancelledError | None]:
+                if terminal_delivery_timed_out:
+                    return False, None
                 delivery_task = asyncio.create_task(
                     enqueue_terminal_delivery(),
                     name=f"http-bridge-terminal-delivery-{operation_id}",
                 )
-                return await _await_task_deferring_cancellation(delivery_task)
+                delivery_deadline = _http_bridge_terminal_delivery_deadline(request_state)
+                deferred_cancellation: asyncio.CancelledError | None = None
+                while True:
+                    remaining = max(0.0, delivery_deadline - time.monotonic())
+                    if remaining <= 0:
+                        if not delivery_task.done():
+                            delivery_task.cancel()
+                        await asyncio.gather(delivery_task, return_exceptions=True)
+                        if terminal_event_queued and not terminal_eos_queued and delivery_queue is not None:
+                            _enqueue_http_bridge_abort_eos(request_state, delivery_queue)
+                        mark_terminal_delivery_timed_out()
+                        return False, deferred_cancellation
+                    try:
+                        delivered = await asyncio.wait_for(asyncio.shield(delivery_task), timeout=remaining)
+                        return bool(delivered), deferred_cancellation
+                    except asyncio.CancelledError as exc:
+                        if delivery_task.cancelled():
+                            raise
+                        deferred_cancellation = deferred_cancellation or exc
+                    except asyncio.TimeoutError:
+                        if not delivery_task.done():
+                            delivery_task.cancel()
+                        await asyncio.gather(delivery_task, return_exceptions=True)
+                        if terminal_event_queued and not terminal_eos_queued and delivery_queue is not None:
+                            _enqueue_http_bridge_abort_eos(request_state, delivery_queue)
+                        mark_terminal_delivery_timed_out()
+                        return False, deferred_cancellation
 
             append_task = asyncio.create_task(
                 append_terminal_batch(
@@ -462,7 +575,7 @@ async def _persist_http_bridge_operation_event(
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
             if terminal_delivery_barrier is not None:
-                if not terminal_enqueued:
+                if not terminal_enqueued and not terminal_delivery_timed_out:
                     terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                     deferred_cancellation = deferred_cancellation or delivery_cancellation
                 await terminal_delivery_barrier()
@@ -498,7 +611,7 @@ async def _persist_http_bridge_operation_event(
                 _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
                 deferred_cancellation = deferred_cancellation or settlement_cancellation
             if deferred_cancellation is not None:
-                if not terminal_enqueued:
+                if not terminal_enqueued and not terminal_delivery_timed_out:
                     await enqueue_terminal_delivery_deferring_cancellation()
                 raise deferred_cancellation
             return terminal_enqueued
@@ -3004,7 +3117,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
         if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
             for deferred_text in matched_deferred_texts:
-                await matched_event_queue.put(deferred_text)
+                await _enqueue_http_bridge_deferred_event_with_deadline(
+                    matched_request_state,
+                    matched_event_queue,
+                    deferred_text,
+                )
         matched_terminal_enqueued = False
         if matched_request_state is not None and not suppress_downstream_event:
             matched_terminal_enqueued = await _persist_http_bridge_operation_event(
@@ -3022,6 +3139,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_event_queue is not None
             and not suppress_downstream_event
             and matched_terminal_enqueued is not True
+            and not matched_request_state.terminal_delivery_timed_out
         ):
             await matched_event_queue.put(event_block)
 
@@ -3044,7 +3162,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal=False,
                     )
                 if terminal_event_queue is not None:
-                    await terminal_event_queue.put(deferred_text)
+                    await _enqueue_http_bridge_deferred_event_with_deadline(
+                        terminal_request_state,
+                        terminal_event_queue,
+                        deferred_text,
+                    )
             if not suppress_downstream_event:
                 terminal_enqueued = await _persist_http_bridge_operation_event(
                     self,
@@ -3060,12 +3182,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                     terminal_event_queue=terminal_event_queue,
                     terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
                 )
-            if terminal_event_queue is not None and terminal_enqueued is not True:
+            if (
+                terminal_event_queue is not None
+                and terminal_enqueued is not True
+                and not terminal_request_state.terminal_delivery_timed_out
+            ):
                 await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
-            if terminal_enqueued is not True:
+            if terminal_enqueued is not True and not terminal_request_state.terminal_delivery_timed_out:
                 await terminal_event_queue.put(None)
-            if completed_event_queue_claimed and completed_delivery_scope is not None:
+            if (
+                completed_event_queue_claimed
+                and completed_delivery_scope is not None
+                and not terminal_request_state.terminal_delivery_timed_out
+            ):
                 async with session.pending_lock:
                     # Keep the completed claim authoritative after its producer
                     # returns. A concurrent timeout may still be finishing
