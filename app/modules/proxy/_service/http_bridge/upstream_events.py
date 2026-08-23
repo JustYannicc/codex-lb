@@ -2518,7 +2518,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 claimed_request_state.terminal_settlement_phase = None
         finally:
             if completed_delivery_scope is not None:
-                with anyio.CancelScope(shield=True):
+
+                async def cleanup_completed_delivery_scope() -> None:
                     async with session.pending_lock:
                         completed_delivery_scope.active = False
                         if completed_delivery_scope.detach_requested:
@@ -2536,6 +2537,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 discard = getattr(event_queue, "discard", None)
                                 if callable(discard):
                                     discard()
+
+                cleanup_task = asyncio.create_task(
+                    cleanup_completed_delivery_scope(),
+                    name="http-bridge-completed-delivery-cleanup",
+                )
+                _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
 
     async def _settle_aborted_http_bridge_terminal_states(
         self: Any,
