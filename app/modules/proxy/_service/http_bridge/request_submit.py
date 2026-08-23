@@ -80,6 +80,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
@@ -87,6 +88,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_deadline,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
@@ -606,6 +608,7 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
         request_state.propagate_http_errors
         and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         == "client_full_history_once"
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
@@ -617,6 +620,7 @@ def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequest
     return (
         getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
         in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and not request_state.previous_response_not_found_recovery_blocked
         and request_state.previous_response_id is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
@@ -1293,6 +1297,10 @@ class _HTTPBridgeRequestSubmitMixin:
         owned_unanchored_handoff: bool,
         recovery_turn_state: str | None = None,
     ) -> None:
+        if request_state.denied_proxy_injected_anchor_generation_at_prepare is None:
+            request_state.denied_proxy_injected_anchor_generation_at_prepare = (
+                session.denied_proxy_injected_anchor_generation
+            )
         recovery_attempt_consumed = False
         allow_operation_fenced_continuity_replay = False
         if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
@@ -1320,12 +1328,12 @@ class _HTTPBridgeRequestSubmitMixin:
             and request_state.response_event_count == 0
             and request_state.replay_count == 0
         )
-        allow_server_anchored_replay = _http_bridge_server_anchored_replay_enabled(request_state)
-        if not await self._http_bridge_precreated_retry_allowed(
+        retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
-            allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay or allow_server_anchored_replay,
+            allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
             allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
-        ):
+        )
+        if not retry_allowed:
             retry_after_seconds = max(
                 1,
                 math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
@@ -1545,6 +1553,9 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.request_text = text_data
                         request_state.previous_response_id = terminal_hard_turn_response_id
                         request_state.proxy_injected_previous_response_id = True
+                        request_state.denied_proxy_injected_anchor_generation_at_prepare = (
+                            session.denied_proxy_injected_anchor_generation
+                        )
                         request_state.hard_continuity_anchor = True
                         operation_parent_response_id = terminal_hard_turn_response_id
                         operation_fingerprint = durable_bridge_operation_fingerprint(
@@ -1595,6 +1606,9 @@ class _HTTPBridgeRequestSubmitMixin:
                                 request_state.request_text = text_data
                                 request_state.previous_response_id = completed_response_id
                                 request_state.proxy_injected_previous_response_id = True
+                                request_state.denied_proxy_injected_anchor_generation_at_prepare = (
+                                    session.denied_proxy_injected_anchor_generation
+                                )
                                 operation_parent_response_id = completed_response_id
                                 hard_turn_chain_advanced = True
                                 seen_hard_turn_response_ids.add(completed_response_id)
@@ -1674,7 +1688,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         "The recovery checkpoint was already consumed; retry the request.",
                     ),
                 )
-            if not operation.created:
+            if not operation.created and not getattr(operation, "rebound", False):
                 if operation.state in {"completed", "incomplete"}:
                     if getattr(operation, "event_spool_complete", False):
                         get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
@@ -1801,6 +1815,13 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_registered = True
             request_state.operation_rebind_required = False
             request_state.operation_created = operation.created
+            request_state.operation_rebound = getattr(operation, "rebound", False)
+            request_state.operation_rebound_from_session_id = getattr(operation, "rebound_from_session_id", None)
+            request_state.operation_rebound_from_account_id = getattr(operation, "rebound_from_account_id", None)
+            request_state.operation_rebound_from_model = getattr(operation, "rebound_from_model", None)
+            request_state.operation_rebound_from_parent_response_id = getattr(
+                operation, "rebound_from_parent_response_id", None
+            )
             request_state.operation_persisted_response_id = (
                 None if request_state.operation_recovery_claimed else getattr(operation, "response_id", None)
             )
@@ -1809,7 +1830,9 @@ class _HTTPBridgeRequestSubmitMixin:
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (
-                not request_state.operation_recovery_claimed and not request_state.operation_created
+                not request_state.operation_recovery_claimed
+                and not request_state.operation_created
+                and not request_state.operation_rebound
             ) or request_state.operation_dispatched:
                 return
             await self._cleanup_http_bridge_submit_interruption(
@@ -2274,6 +2297,81 @@ class _HTTPBridgeRequestSubmitMixin:
                                     "The recovery checkpoint was consumed before dispatch; retry the request.",
                                 ),
                             )
+                    if (
+                        request_state.verified_stale_anchor_replay
+                        and request_state.verified_stale_anchor_retry_circuit_generation_captured
+                    ):
+                        circuit_key = request_state.verified_stale_anchor_retry_circuit_key
+                        # This claim runs holding lifecycle_lock and the
+                        # response-create gate, so an unresponsive durable
+                        # store must not pin the bridge past the deadline the
+                        # request would be abandoned at anyway.
+                        generation_claimed = bool(
+                            circuit_key is not None
+                            and await self._claim_http_bridge_retry_circuit_generation(
+                                key=circuit_key,
+                                captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
+                                generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=_http_bridge_request_deadline(request_state, _service_get_settings()),
+                            )
+                        )
+                        if not generation_claimed:
+                            suppressed_retry_after_seconds = max(
+                                1,
+                                math.ceil(
+                                    await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
+                                        circuit_key or session.key,
+                                    )
+                                ),
+                            )
+                            _log_http_bridge_event(
+                                "stale_anchor_replay_generation_suppressed",
+                                circuit_key or session.key,
+                                account_id=session.account.id,
+                                model=session.request_model,
+                                detail="circuit_generation_advanced_before_dispatch_claim",
+                                cache_key_family=(circuit_key or session.key).affinity_kind,
+                                model_class=(
+                                    _extract_model_class(session.request_model) if session.request_model else None
+                                ),
+                            )
+                            raise ProxyResponseError(
+                                503,
+                                openai_error(
+                                    "upstream_request_timeout",
+                                    "HTTP responses session bridge is cooling down after repeated upstream "
+                                    "timeouts; retry shortly.",
+                                ),
+                                retry_after_seconds=suppressed_retry_after_seconds,
+                            )
+                    if (
+                        request_state.proxy_injected_previous_response_id
+                        and request_state.previous_response_id is not None
+                        and (
+                            request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                            or (
+                                request_state.denied_proxy_injected_anchor_generation_at_prepare is not None
+                                and request_state.denied_proxy_injected_anchor_generation_at_prepare
+                                < session.denied_proxy_injected_anchor_generation
+                                and session.last_completed_response_id != request_state.previous_response_id
+                            )
+                            or _http_bridge_denied_anchor_fence_advanced(self, request_state)
+                        )
+                    ):
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="denied_proxy_anchor_before_dispatch",
+                            previous_response_id=request_state.previous_response_id,
+                            session_id=request_state.session_id,
+                            upstream_error_code="previous_response_not_found",
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "stream_incomplete",
+                                "The previous response anchor was rejected upstream; retry the request.",
+                            ),
+                        )
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
@@ -2562,8 +2660,6 @@ class _HTTPBridgeRequestSubmitMixin:
             warmup_event_queue = warmup_state.event_queue
             assert isinstance(warmup_event_queue, _HTTPBridgeLiveEventQueue)
             try:
-                event_queue = warmup_state.event_queue
-                assert event_queue is not None
                 await self._acquire_request_state_response_create_admission(
                     warmup_state,
                     response_create_gate=session.response_create_gate,
@@ -2615,7 +2711,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 while True:
                     try:
                         event_block = await asyncio.wait_for(
-                            event_queue.get(),
+                            warmup_event_queue.get(),
                             timeout=_prewarm_response_timeout_seconds(),
                         )
                     except asyncio.TimeoutError:
@@ -2685,13 +2781,42 @@ class _HTTPBridgeRequestSubmitMixin:
             except ProxyResponseError as exc:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                await self._cleanup_http_bridge_submit_interruption(
-                    session,
-                    request_state=warmup_state,
-                    gate_acquired=gate_acquired,
-                    request_enqueued=request_enqueued,
-                    counted_in_queue=False,
-                )
+                _revoke_http_bridge_event_queue(warmup_state)
+                budget_exhausted = warmup_event_queue.budget_exceeded.is_set()
+                if warmup_send_started and budget_exhausted:
+                    try:
+                        # The warmup request was already sent on this socket.
+                        # Reconnect while its state is still pending so a late
+                        # response.created cannot be matched to a later real
+                        # request after this queue fails closed.
+                        await self._reconnect_http_bridge_session(
+                            session,
+                            request_state=request_state,
+                            restart_reader=True,
+                            require_same_account=is_http_bridge_account_neutral_replay(
+                                kind=session.key.affinity_kind,
+                                key=session.key.affinity_key,
+                            ),
+                        )
+                    except Exception:
+                        session.closed = True
+                        raise
+                    finally:
+                        await self._cleanup_http_bridge_submit_interruption(
+                            session,
+                            request_state=warmup_state,
+                            gate_acquired=gate_acquired,
+                            request_enqueued=request_enqueued,
+                            counted_in_queue=False,
+                        )
+                else:
+                    await self._cleanup_http_bridge_submit_interruption(
+                        session,
+                        request_state=warmup_state,
+                        gate_acquired=gate_acquired,
+                        request_enqueued=request_enqueued,
+                        counted_in_queue=False,
+                    )
                 if is_local_overload_error_code(code):
                     session.prewarmed = False
                     request_state.prewarm_latency_ms = int(
@@ -2823,7 +2948,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.operation_fingerprint = None
                 request_state.operation_parent_response_id = None
         elif (
-            request_state.operation_created
+            (request_state.operation_created or request_state.operation_rebound)
             and request_state.operation_registered
             and request_state.operation_id is not None
             and not request_state.operation_dispatched
@@ -2833,7 +2958,15 @@ class _HTTPBridgeRequestSubmitMixin:
             rollback_operation = getattr(self._durable_bridge, "rollback_operation_before_dispatch", None)
             if callable(rollback_operation):
                 try:
-                    rolled_back = await rollback_operation(
+                    rolled_back = await _call_with_supported_optional_kwargs(
+                        rollback_operation,
+                        optional_kwargs={
+                            "restore_rebound": request_state.operation_rebound,
+                            "rebound_from_session_id": request_state.operation_rebound_from_session_id,
+                            "rebound_from_account_id": request_state.operation_rebound_from_account_id,
+                            "rebound_from_model": request_state.operation_rebound_from_model,
+                            "rebound_from_parent_response_id": request_state.operation_rebound_from_parent_response_id,
+                        },
                         operation_id=request_state.operation_id,
                         session_id=session.durable_session_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -2849,9 +2982,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 if rolled_back:
                     request_state.operation_registered = False
                     request_state.operation_created = False
-                    request_state.operation_id = None
-                    request_state.operation_fingerprint = None
-                    request_state.operation_parent_response_id = None
+                    if request_state.operation_rebound:
+                        # The failed durable row was restored rather than
+                        # deleted. Preserve its identity so a capacity/gate
+                        # retry must rebind that exact fence before send.
+                        request_state.operation_rebind_required = True
+                        request_state.operation_rebound = False
+                    else:
+                        request_state.operation_id = None
+                        request_state.operation_fingerprint = None
+                        request_state.operation_parent_response_id = None
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:
@@ -3433,10 +3573,25 @@ class _HTTPBridgeRequestSubmitMixin:
         )
 
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
+            transport_only_unanchored_replay = bool(
+                request_state.precreated_replay_reason is None
+                and (
+                    request_state.verified_stale_anchor_replay
+                    or (
+                        request_state.previous_response_id is not None
+                        and not request_state.proxy_injected_previous_response_id
+                        and request_state.fresh_upstream_request_is_retry_safe
+                        and request_state.fresh_upstream_request_text
+                    )
+                )
+            )
+            if transport_only_unanchored_replay:
+                return False
             if _websocket_request_can_replay_before_visible_output(request_state):
                 return True
             if (
                 clean_close_retry_max_count <= 0
+                or request_state.verified_stale_anchor_replay
                 or request_state.replay_count != 1
                 or request_state.response_event_count != 0
                 or request_state.clean_close_replay_count >= clean_close_retry_max_count
@@ -3454,7 +3609,6 @@ class _HTTPBridgeRequestSubmitMixin:
 
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
-        server_anchored_replay_candidate = False
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -3479,13 +3633,10 @@ class _HTTPBridgeRequestSubmitMixin:
                         and candidate.response_event_count == 0
                         and candidate.replay_count == 0
                     )
-                    server_anchored_replay_candidate = _http_bridge_server_anchored_replay_enabled(candidate)
         if not await self._http_bridge_precreated_retry_allowed(
             session,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
-            allow_proof_gated_continuity_replay=(
-                proof_gated_continuity_replay_candidate or server_anchored_replay_candidate
-            ),
+            allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
         ):
             return False
 
