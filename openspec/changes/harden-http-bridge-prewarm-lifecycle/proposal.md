@@ -23,8 +23,8 @@ same socket and be matched to a later request.
 
 ## Dependencies
 
-This change is stacked on `fix/http-bridge-bounded-live-queues` at
-`ec48c02e175b0e119778d4928b14526133767823`. It relies on that branch's finite
+This change is stacked on `fix/http-bridge-bounded-queue-on-main` at
+`887ac635460beea1fc3767d89bef9e954c29082b`. It relies on that branch's finite
 queue, byte-budget, revocation, discard, and terminal delivery interfaces.
 
 ## Capabilities
