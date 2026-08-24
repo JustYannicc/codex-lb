@@ -10,6 +10,7 @@
 - [x] 1.6 Cover the sibling-advanced race and prove the denied id is still tombstoned while the newer current anchor is preserved.
 - [x] 1.7 Add a coordinated regression proving denial publication and prepared dispatch are lifecycle-serialized.
 - [x] 1.8 Add a product-path regression proving a detached predecessor fences a durable-anchor capture made before successor session creation, and a ledger-pruning regression proving active entries survive the bound.
+- [x] 1.9 Add regressions proving equal-generation durable recaptures after failed cleanup and owner-forward recovery injections retain an existing denial and fail closed before dispatch.
 
 ## 2. Anchor Retirement
 
@@ -21,6 +22,7 @@
 - [x] 2.6 Publish the tombstone before checking whether a sibling already advanced the current anchor, so that check cannot reopen the dispatch race.
 - [x] 2.7 Serialize tombstone publication with the submitter's final revalidation and send section.
 - [x] 2.8 Retain denied-id generations in a bounded process-local ledger and fail closed when a prepared request's captured generation is superseded, including when no canonical session existed at capture time.
+- [x] 2.9 Treat an already-recorded denial as a hard observation for later durable captures and owner-forward recovery injections, even when no generation advance is observed by the new request.
 
 ## 3. Recovery Provenance
 

@@ -487,6 +487,53 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_submit_rejects_a_stale_durable_anchor_after_process_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later absent-session capture must not reuse a denied durable id."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-equal-generation")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-equal-generation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied",
+        proxy_injected_previous_response_id=True,
+        denied_proxy_injected_anchor_fence_generation_at_prepare=1,
+        denied_proxy_injected_anchor_fence_was_already_denied=True,
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-denied-anchor-equal-generation",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    send_text.assert_not_awaited()
+    assert not session.pending_requests
+
+
+@pytest.mark.asyncio
 async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -16290,6 +16337,8 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
     *,
     durable_owner_account_id: str,
     recovery_account_id: str,
+    denied_anchor: bool = False,
+    captured_request_states: list[proxy_service._WebSocketRequestState] | None = None,
 ) -> list[proxy_service.ResponsesRequest]:
     """Drive owner-forward failure -> local rebind with a durable anchor available.
 
@@ -16300,6 +16349,8 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
     """
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    if denied_anchor:
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(service, "resp_durable_owner_1")
     started_at = time.monotonic()
     stored_items: list[dict[str, Any]] = [{"role": "user", "content": "first question"}]
     # Full resend whose suffix carries no prior assistant output, so the
@@ -16359,6 +16410,8 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
         queue_limit: int,
     ) -> None:
         del _session, text_data, queue_limit
+        if captured_request_states is not None:
+            captured_request_states.append(request_state)
         event_queue = request_state.event_queue
         assert event_queue is not None
         await event_queue.put('data: {"type":"response.completed"}\n\n')
@@ -16466,6 +16519,24 @@ async def test_stream_via_http_bridge_owner_forward_recovery_skips_cross_account
         {"role": "user", "content": "first question"},
         {"role": "user", "content": "second question"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_recovery_captures_a_prior_denial_on_injected_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[proxy_service._WebSocketRequestState] = []
+    prepared = await _run_owner_forward_recovery_durable_anchor_stream(
+        monkeypatch,
+        durable_owner_account_id="acc-1",
+        recovery_account_id="acc-1",
+        denied_anchor=True,
+        captured_request_states=captured,
+    )
+
+    assert prepared[-1].previous_response_id == "resp_durable_owner_1"
+    assert captured[-1].proxy_injected_previous_response_id is True
+    assert captured[-1].denied_proxy_injected_anchor_fence_was_already_denied is True
 
 
 @pytest.mark.asyncio

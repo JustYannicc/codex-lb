@@ -1013,6 +1013,10 @@ class _WebSocketRequestState:
     # is waiting for owner resolution; retain that generation through retries
     # so the successor's final dispatch fence still fails closed.
     denied_proxy_injected_anchor_fence_generation_at_prepare: int | None = None
+    # Generation equality alone cannot distinguish a request captured after a
+    # denial from one captured before it. Preserve the tombstone observation on
+    # the prepared request so a stale durable lookup cannot be redispatched.
+    denied_proxy_injected_anchor_fence_was_already_denied: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-

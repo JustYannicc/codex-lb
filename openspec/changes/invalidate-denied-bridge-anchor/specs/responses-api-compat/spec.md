@@ -10,6 +10,8 @@ Before awaiting durable cleanup, the proxy MUST publish the denied id to the liv
 
 The proxy MUST also retain the denied-id generation in a bounded process-local ledger independent of the canonical live-session registry. A request that captured the durable anchor before a live session existed MUST fail closed when that generation advances during owner lookup or successor session creation. Active requests MUST pin their ledger entries until finalization so pruning cannot remove a fence that is still needed.
 
+When a request captures a proxy-injected anchor after this process has already recorded a denial for that id, the request MUST retain that denial observation and fail closed before dispatch even when the captured generation equals the current denial generation. Owner-forward recovery that injects a durable anchor MUST perform the same capture and denial observation; it MUST NOT rely on provenance copied from an initially unanchored request.
+
 The proxy MUST NOT retire the anchor when:
 
 - the anchor was supplied by the client, because removing it changes the meaning of the client's own request;
@@ -88,6 +90,22 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **WHEN** successor session creation completes and the request reaches final dispatch
 - **THEN** the process-local denial generation MUST fail the request closed as `stream_incomplete`
 - **AND** the successor MUST NOT send the denied anchor upstream
+
+#### Scenario: A stale durable recapture remains fenced after cleanup failure
+
+- **GIVEN** a detached predecessor records a denial for a proxy-injected anchor
+- **AND** durable anchor cleanup fails, leaving the durable row unchanged
+- **WHEN** a later request captures that same durable anchor after the denial was recorded
+- **THEN** the request MUST retain the existing denial observation
+- **AND** it MUST fail closed as `stream_incomplete` before dispatch
+
+#### Scenario: Owner-forward recovery observes an existing denial
+
+- **GIVEN** owner-forward recovery injects a durable proxy anchor into a successor request
+- **AND** this process has already recorded a denial for that anchor
+- **WHEN** the recovery retry request state is prepared
+- **THEN** the retry MUST retain the denial observation
+- **AND** it MUST fail closed before sending the denied anchor upstream
 
 #### Scenario: Sibling response aliases survive retirement
 

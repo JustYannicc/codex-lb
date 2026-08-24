@@ -1893,6 +1893,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         and request_state.previous_response_id is not None
                         and (
                             request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                            or request_state.denied_proxy_injected_anchor_fence_was_already_denied
                             or _http_bridge_denied_anchor_fence_advanced(self, request_state)
                         )
                     ):

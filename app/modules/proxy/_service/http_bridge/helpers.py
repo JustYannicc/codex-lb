@@ -266,6 +266,12 @@ def _http_bridge_denied_anchor_fence_generation(service: Any, response_id: str) 
     return entry.generation if entry is not None else 0
 
 
+def _http_bridge_denied_anchor_fence_was_recorded(service: Any, response_id: str) -> bool:
+    """Return whether this process has already recorded a denial for an id."""
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
+    return bool(entry is not None and entry.generation > 0)
+
+
 def _retain_http_bridge_denied_anchor_fence(
     service: Any,
     response_id: str,
@@ -316,8 +322,13 @@ def _http_bridge_denied_anchor_fence_advanced(
     return bool(
         request_state.proxy_injected_previous_response_id
         and response_id is not None
-        and captured_generation is not None
-        and captured_generation < _http_bridge_denied_anchor_fence_generation(service, response_id)
+        and (
+            request_state.denied_proxy_injected_anchor_fence_was_already_denied
+            or (
+                captured_generation is not None
+                and captured_generation < _http_bridge_denied_anchor_fence_generation(service, response_id)
+            )
+        )
     )
 
 

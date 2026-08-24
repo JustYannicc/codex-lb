@@ -73,6 +73,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_denied_anchor_fence_was_recorded,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -1702,6 +1703,9 @@ class _HTTPBridgeStreamingMixin:
                     request_id,
                 )
             )
+            request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
+                _http_bridge_denied_anchor_fence_was_recorded(self, request_state.previous_response_id)
+            )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
         _apply_http_bridge_downstream_turn_state(
@@ -2443,6 +2447,8 @@ class _HTTPBridgeStreamingMixin:
                 recovery_payload = effective_payload
                 recovery_anchor_input_count: int | None = None
                 recovery_anchor_input_fingerprint: str | None = None
+                recovery_anchor_fence_generation: int | None = None
+                recovery_anchor_fence_was_already_denied = False
                 if (
                     not owner_forward_fresh_replay
                     # The quarantine skip (#1534) applies to the local recovery
@@ -2492,6 +2498,15 @@ class _HTTPBridgeStreamingMixin:
                                 "previous_response_id": durable_lookup.latest_response_id,
                                 "input": recovery_input[durable_full_resend_anchor_count:],
                             }
+                        )
+                        recovery_anchor_fence_generation = _retain_http_bridge_denied_anchor_fence(
+                            self,
+                            durable_lookup.latest_response_id,
+                            request_id,
+                        )
+                        recovery_anchor_fence_was_already_denied = _http_bridge_denied_anchor_fence_was_recorded(
+                            self,
+                            durable_lookup.latest_response_id,
                         )
                         if durable_lookup.latest_response_id != session.last_completed_response_id:
                             session.last_pending_tool_calls = {}
@@ -2562,7 +2577,13 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
                         retry_request_state.proxy_injected_previous_response_id = True
                         retry_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
-                            request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                            recovery_anchor_fence_generation
+                            if recovery_anchor_fence_generation is not None
+                            else request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                        )
+                        retry_request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
+                            recovery_anchor_fence_was_already_denied
+                            or request_state.denied_proxy_injected_anchor_fence_was_already_denied
                         )
                         # ``recovery_anchor_input_count`` is only set when
                         # ``durable_full_resend_anchor_count`` is not None,
@@ -2733,6 +2754,9 @@ class _HTTPBridgeStreamingMixin:
                         request_id,
                     )
                 )
+                request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
+                    _http_bridge_denied_anchor_fence_was_recorded(self, request_state.previous_response_id)
+                )
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a
             # single-item follow-up turn whose prior history is only
@@ -2828,6 +2852,9 @@ class _HTTPBridgeStreamingMixin:
                 request_state.proxy_injected_previous_response_id = True
                 request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
                     previous_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                )
+                request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
+                    previous_request_state.denied_proxy_injected_anchor_fence_was_already_denied
                 )
                 # Unlike ``fresh_upstream_request_is_retry_safe`` below, this
                 # flag only asks whether the client's payload looked like a
@@ -3490,6 +3517,11 @@ class _HTTPBridgeStreamingMixin:
                     request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
                     if retry_request_state.proxy_injected_previous_response_id
                     else None
+                )
+                retry_request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
+                    request_state.denied_proxy_injected_anchor_fence_was_already_denied
+                    if retry_request_state.proxy_injected_previous_response_id
+                    else False
                 )
                 # Carried with the flag above, not separately: the anchor's
                 # retirability depends on whether the payload it was injected
