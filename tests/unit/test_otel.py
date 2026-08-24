@@ -837,7 +837,11 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
 
 @pytest.mark.asyncio
-async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("dispose_failure", [False, True], ids=["clean-dispose", "failed-dispose"])
+async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    dispose_failure: bool,
+):
     import app.core.startup as startup_module
     import app.main as main
     from app.core.cache.invalidation import get_cache_invalidation_poller
@@ -859,7 +863,17 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     close_http_client = AsyncMock()
-    close_db = AsyncMock()
+    shutdown_events: list[str] = []
+
+    async def _close_db() -> None:
+        shutdown_events.append("close_db")
+        if dispose_failure:
+            raise RuntimeError("dispose failed")
+
+    def _mark_sqlite_shutdown_clean() -> None:
+        shutdown_events.append("mark_clean")
+
+    close_db = AsyncMock(side_effect=_close_db)
     register = AsyncMock()
 
     async def _register(instance_id: str, *, endpoint_base_url: str | None = None) -> None:
@@ -873,12 +887,20 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         heartbeat=AsyncMock(),
         list_active=AsyncMock(return_value=[]),
     )
+    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
         prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
+
+    class _AccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -892,6 +914,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "mark_sqlite_shutdown_clean", _mark_sqlite_shutdown_clean)
+    monkeypatch.setattr(main, "AccountsRepository", _AccountsRepository)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
@@ -906,10 +930,20 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
     )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: routing_availability_cache,
+    )
 
-    async with main.lifespan(main.app):
-        await asyncio.sleep(0)
-        assert startup_module._startup_complete is True
+    if dispose_failure:
+        with pytest.raises(RuntimeError, match="dispose failed"):
+            async with main.lifespan(main.app):
+                await asyncio.sleep(0)
+                assert startup_module._startup_complete is True
+    else:
+        async with main.lifespan(main.app):
+            await asyncio.sleep(0)
+            assert startup_module._startup_complete is True
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
     wait_for_reachable.assert_not_awaited()
@@ -922,6 +956,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
     ring_service.unregister.assert_not_called()
     cache_poller.stop.assert_awaited_once()
+    expected_events = ["close_db"] if dispose_failure else ["close_db", "mark_clean"]
+    assert shutdown_events == expected_events
     # Shutdown must clear the process-global poller so bump_cache_invalidation
     # is a no-op (not a call through this test's fake) after lifespan exit.
     assert get_cache_invalidation_poller() is None
