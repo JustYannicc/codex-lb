@@ -2651,15 +2651,13 @@ class _HTTPBridgeRequestSubmitMixin:
                             session.closed = True
                             raise
                         finally:
-                            async with session.pending_lock:
-                                if warmup_state in session.pending_requests:
-                                    session.pending_requests.remove(warmup_state)
-                            self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
-                            if gate_acquired:
-                                await _release_websocket_response_create_gate(
-                                    warmup_state,
-                                    session.response_create_gate,
-                                )
+                            await self._cleanup_http_bridge_submit_interruption(
+                                session,
+                                request_state=warmup_state,
+                                gate_acquired=gate_acquired,
+                                request_enqueued=request_enqueued,
+                                counted_in_queue=False,
+                            )
                         return
                     if event_block is None:
                         if warmup_event_queue.terminal_outcome != _HTTPBridgeLiveEventQueueTerminalOutcome.CLEAN:

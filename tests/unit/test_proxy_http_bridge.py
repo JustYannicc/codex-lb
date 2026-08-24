@@ -21251,6 +21251,7 @@ async def test_prewarm_uses_finite_revocable_queue_and_revokes_on_timeout(
     assert warmup_state.event_queue_revoked.is_set()
     await warmup_state.event_queue.put("after-timeout")
     assert warmup_state.event_queue.empty()
+    assert warmup_state.event_queue.queued_bytes == 0
     assert session.pending_requests == deque()
     assert session.response_create_gate.locked() is False
     reconnect.assert_awaited_once()
