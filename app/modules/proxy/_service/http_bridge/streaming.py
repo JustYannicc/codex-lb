@@ -72,8 +72,9 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _bind_http_bridge_proxy_injected_anchor,
+    _capture_http_bridge_denied_anchor_fence,
     _effective_http_bridge_idle_ttl_seconds,
-    _http_bridge_denied_anchor_fence_was_recorded,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -105,7 +106,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
-    _retain_http_bridge_denied_anchor_fence,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
@@ -1696,15 +1696,11 @@ class _HTTPBridgeStreamingMixin:
         if proxy_injected_previous_response_id and request_state.previous_response_id is not None:
             # Capture denial provenance before owner lookups below can suspend
             # while a detached predecessor rejects the same durable anchor.
-            request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
-                _retain_http_bridge_denied_anchor_fence(
-                    self,
-                    request_state.previous_response_id,
-                    request_id,
-                )
-            )
-            request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
-                _http_bridge_denied_anchor_fence_was_recorded(self, request_state.previous_response_id)
+            _bind_http_bridge_proxy_injected_anchor(
+                self,
+                request_state,
+                response_id=request_state.previous_response_id,
+                fence_request_id=request_id,
             )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
@@ -2449,6 +2445,7 @@ class _HTTPBridgeStreamingMixin:
                 recovery_anchor_input_fingerprint: str | None = None
                 recovery_anchor_fence_generation: int | None = None
                 recovery_anchor_fence_was_already_denied = False
+                recovery_anchor_fence_response_id: str | None = None
                 if (
                     not owner_forward_fresh_replay
                     # The quarantine skip (#1534) applies to the local recovery
@@ -2499,14 +2496,15 @@ class _HTTPBridgeStreamingMixin:
                                 "input": recovery_input[durable_full_resend_anchor_count:],
                             }
                         )
-                        recovery_anchor_fence_generation = _retain_http_bridge_denied_anchor_fence(
+                        recovery_anchor_fence_response_id = durable_lookup.latest_response_id
+                        assert recovery_anchor_fence_response_id is not None
+                        (
+                            recovery_anchor_fence_generation,
+                            recovery_anchor_fence_was_already_denied,
+                        ) = _capture_http_bridge_denied_anchor_fence(
                             self,
-                            durable_lookup.latest_response_id,
+                            recovery_anchor_fence_response_id,
                             request_id,
-                        )
-                        recovery_anchor_fence_was_already_denied = _http_bridge_denied_anchor_fence_was_recorded(
-                            self,
-                            durable_lookup.latest_response_id,
                         )
                         if durable_lookup.latest_response_id != session.last_completed_response_id:
                             session.last_pending_tool_calls = {}
@@ -2584,6 +2582,16 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
                             recovery_anchor_fence_was_already_denied
                             or request_state.denied_proxy_injected_anchor_fence_was_already_denied
+                        )
+                        retry_request_state.denied_proxy_injected_anchor_fence_response_id = (
+                            recovery_anchor_fence_response_id
+                            if recovery_anchor_fence_response_id is not None
+                            else request_state.denied_proxy_injected_anchor_fence_response_id
+                        )
+                        retry_request_state.denied_proxy_injected_anchor_fence_request_id = (
+                            request_id
+                            if recovery_anchor_fence_response_id is not None
+                            else request_state.denied_proxy_injected_anchor_fence_request_id
                         )
                         # ``recovery_anchor_input_count`` is only set when
                         # ``durable_full_resend_anchor_count`` is not None,
@@ -2747,15 +2755,11 @@ class _HTTPBridgeStreamingMixin:
             request_state.proxy_injected_anchor_had_full_resend_payload = session_level_payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             if request_state.previous_response_id is not None:
-                request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
-                    _retain_http_bridge_denied_anchor_fence(
-                        self,
-                        request_state.previous_response_id,
-                        request_id,
-                    )
-                )
-                request_state.denied_proxy_injected_anchor_fence_was_already_denied = (
-                    _http_bridge_denied_anchor_fence_was_recorded(self, request_state.previous_response_id)
+                _bind_http_bridge_proxy_injected_anchor(
+                    self,
+                    request_state,
+                    response_id=request_state.previous_response_id,
+                    fence_request_id=request_id,
                 )
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a
@@ -2850,6 +2854,12 @@ class _HTTPBridgeStreamingMixin:
                 request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
             if proxy_injected_previous_response_id:
                 request_state.proxy_injected_previous_response_id = True
+                request_state.denied_proxy_injected_anchor_fence_response_id = (
+                    previous_request_state.denied_proxy_injected_anchor_fence_response_id
+                )
+                request_state.denied_proxy_injected_anchor_fence_request_id = (
+                    previous_request_state.denied_proxy_injected_anchor_fence_request_id
+                )
                 request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
                     previous_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
                 )
@@ -3522,6 +3532,16 @@ class _HTTPBridgeStreamingMixin:
                     request_state.denied_proxy_injected_anchor_fence_was_already_denied
                     if retry_request_state.proxy_injected_previous_response_id
                     else False
+                )
+                retry_request_state.denied_proxy_injected_anchor_fence_response_id = (
+                    request_state.denied_proxy_injected_anchor_fence_response_id
+                    if retry_request_state.proxy_injected_previous_response_id
+                    else None
+                )
+                retry_request_state.denied_proxy_injected_anchor_fence_request_id = (
+                    request_state.denied_proxy_injected_anchor_fence_request_id
+                    if retry_request_state.proxy_injected_previous_response_id
+                    else None
                 )
                 # Carried with the flag above, not separately: the anchor's
                 # retirability depends on whether the payload it was injected

@@ -77,6 +77,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
+    _bind_http_bridge_proxy_injected_anchor,
     _build_http_bridge_prewarm_text,
     _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
@@ -1163,8 +1164,11 @@ class _HTTPBridgeRequestSubmitMixin:
                         hard_turn_chain_advanced = True
                         text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
                         request_state.request_text = text_data
-                        request_state.previous_response_id = terminal_hard_turn_response_id
-                        request_state.proxy_injected_previous_response_id = True
+                        _bind_http_bridge_proxy_injected_anchor(
+                            self,
+                            request_state,
+                            response_id=terminal_hard_turn_response_id,
+                        )
                         request_state.hard_continuity_anchor = True
                         operation_parent_response_id = terminal_hard_turn_response_id
                         operation_fingerprint = durable_bridge_operation_fingerprint(
@@ -1213,8 +1217,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
                                 text_data = _text_with_previous_response_id(text_data, completed_response_id)
                                 request_state.request_text = text_data
-                                request_state.previous_response_id = completed_response_id
-                                request_state.proxy_injected_previous_response_id = True
+                                _bind_http_bridge_proxy_injected_anchor(
+                                    self,
+                                    request_state,
+                                    response_id=completed_response_id,
+                                )
                                 operation_parent_response_id = completed_response_id
                                 hard_turn_chain_advanced = True
                                 seen_hard_turn_response_ids.add(completed_response_id)
@@ -2995,8 +3002,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_text_data,
                 )
                 if using_fresh_replay:
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
+                    _bind_http_bridge_proxy_injected_anchor(
+                        self,
+                        request_state,
+                        response_id=None,
+                        proxy_injected=False,
+                    )
                     request_state.request_text = retry_text_data
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
@@ -3555,8 +3566,12 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.deferred_reasoning_downstream_texts = []
         request_state.awaiting_response_created = True
         if retry_text != request_state.request_text:
-            request_state.previous_response_id = None
-            request_state.proxy_injected_previous_response_id = False
+            _bind_http_bridge_proxy_injected_anchor(
+                self,
+                request_state,
+                response_id=None,
+                proxy_injected=False,
+            )
             request_state.request_text = retry_text
 
         async with session.pending_lock:

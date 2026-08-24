@@ -441,6 +441,88 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
 
 
 @pytest.mark.asyncio
+async def test_submit_operation_ledger_revalidates_anchor_after_final_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denial recorded during ledger mutation must block the final send."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="operation-final-anchor-denial")
+    session.durable_session_id = "durable-operation-final-anchor-denial"
+    session.durable_owner_epoch = 4
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-operation-final-anchor-denial",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        hard_continuity_anchor=True,
+        request_text='{"type":"response.create","input":"same"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    operation_lookups = iter(
+        [
+            SimpleNamespace(state="completed", event_spool_complete=True, response_id="resp-final-anchor"),
+            None,
+        ]
+    )
+    record_operation = AsyncMock(
+        side_effect=lambda **_kwargs: (
+            http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(service, "resp-final-anchor"),
+            SimpleNamespace(
+                created=True,
+                operation_id="operation-final-anchor-denial",
+                state="submitted",
+                response_id=None,
+                event_spool_complete=False,
+            ),
+        )[1]
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(side_effect=lambda **_kwargs: next(operation_lookups)),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-operation-final-anchor-denial",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-operation-final-anchor-denial",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    record_operation.assert_awaited_once()
+    assert request_state.previous_response_id == "resp-final-anchor"
+    assert request_state.denied_proxy_injected_anchor_fence_response_id == "resp-final-anchor"
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -490,9 +572,33 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
 async def test_submit_rejects_a_stale_durable_anchor_after_process_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later absent-session capture must not reuse a denied durable id."""
+    """A later durable recapture must retain a failed-clear denial fence."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    session = _make_bridge_session(key_value="denied-anchor-equal-generation")
+    session = _denied_anchor_session(anchor="resp-denied")
+    session.key = proxy_service._HTTPBridgeSessionKey("session_header", "denied-anchor-equal-generation", None)
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            clear_live_session_response_anchor_if_matches=AsyncMock(return_value=None),
+        ),
+    )
+    service._unregister_http_bridge_previous_response_id = AsyncMock()
+    assert (
+        await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp-denied",
+        )
+        is False
+    )
+    assert "resp-denied" in session.denied_proxy_injected_anchor_ids
+    assert service._http_bridge_denied_anchor_fences["resp-denied"].generation == 1
+
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-denied-anchor-equal-generation",
         model="gpt-5.6",
@@ -500,18 +606,14 @@ async def test_submit_rejects_a_stale_durable_anchor_after_process_denial(
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
-        previous_response_id="resp-denied",
-        proxy_injected_previous_response_id=True,
-        denied_proxy_injected_anchor_fence_generation_at_prepare=1,
-        denied_proxy_injected_anchor_fence_was_already_denied=True,
         request_text='{"type":"response.create","input":"next"}',
         transport="http",
         skip_request_log=True,
     )
-    send_text = AsyncMock()
-    session.upstream = cast(
-        UpstreamWebSocket,
-        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id="resp-denied",
     )
     service._http_bridge_sessions[session.key] = session
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
@@ -531,6 +633,60 @@ async def test_submit_rejects_a_stale_durable_anchor_after_process_denial(
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
     send_text.assert_not_awaited()
     assert not session.pending_requests
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_a_denied_anchor_fenced_after_512_newer_denials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Denial tombstones cannot be evicted into a generation-zero recapture."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-fence-retention")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-fence-retention",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id="resp-denied-retained",
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(service, "resp-denied-retained")
+    for index in range(512):
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(service, f"resp-newer-{index}")
+
+    assert service._http_bridge_denied_anchor_fences["resp-denied-retained"].generation == 1
+    assert len(service._http_bridge_denied_anchor_fences) == 513
+
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-denied-anchor-fence-retention",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -16339,6 +16495,9 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
     recovery_account_id: str,
     denied_anchor: bool = False,
     captured_request_states: list[proxy_service._WebSocketRequestState] | None = None,
+    real_submit: bool = False,
+    propagate_http_errors: bool = False,
+    captured_send_text: list[AsyncMock] | None = None,
 ) -> list[proxy_service.ResponsesRequest]:
     """Drive owner-forward failure -> local rebind with a durable anchor available.
 
@@ -16393,6 +16552,15 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
     )
     recovery_session = _make_owner_forward_recovery_session()
     recovery_session.account = cast(Any, SimpleNamespace(id=recovery_account_id, status=AccountStatus.ACTIVE))
+    send_text = AsyncMock()
+    if real_submit:
+        recovery_session.upstream = cast(
+            UpstreamWebSocket,
+            SimpleNamespace(send_text=send_text, close=AsyncMock()),
+        )
+        service._http_bridge_sessions[recovery_session.key] = recovery_session
+        if captured_send_text is not None:
+            captured_send_text.append(send_text)
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
         del kwargs
@@ -16434,7 +16602,13 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
             ),
         ),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_operation_ledger_enabled=False if real_submit else True,
+        ),
+    )
     monkeypatch.setattr(
         service._durable_bridge,
         "lookup_request_targets",
@@ -16467,14 +16641,17 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
         AsyncMock(side_effect=[owner_forward, recovery_session]),
     )
     monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", fake_forward_http_bridge_request_to_owner)
-    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    if not real_submit:
+        monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    else:
+        monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
 
     async for _chunk in service._stream_via_http_bridge(
         payload,
         headers={"x-codex-session-id": "sid-recover"},
         codex_session_affinity=True,
-        propagate_http_errors=False,
+        propagate_http_errors=propagate_http_errors,
         openai_cache_affinity=False,
         api_key=None,
         api_key_reservation=None,
@@ -16537,6 +16714,30 @@ async def test_owner_forward_recovery_captures_a_prior_denial_on_injected_anchor
     assert prepared[-1].previous_response_id == "resp_durable_owner_1"
     assert captured[-1].proxy_injected_previous_response_id is True
     assert captured[-1].denied_proxy_injected_anchor_fence_was_already_denied is True
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_recovery_denied_anchor_reaches_real_submit_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner recovery must fail closed at the real dispatch boundary."""
+    captured_send_text: list[AsyncMock] = []
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await _run_owner_forward_recovery_durable_anchor_stream(
+            monkeypatch,
+            durable_owner_account_id="acc-1",
+            recovery_account_id="acc-1",
+            denied_anchor=True,
+            real_submit=True,
+            propagate_http_errors=True,
+            captured_send_text=captured_send_text,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert len(captured_send_text) == 1
+    captured_send_text[0].assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -31921,6 +32122,13 @@ def test_denied_anchor_fence_pruning_keeps_active_request_provenance() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     active_response_id = "resp-active-fence"
 
+    for index in range(10):
+        http_bridge_helpers_module._http_bridge_denied_anchor_fence_entry(
+            service,
+            f"resp-idle-capture-{index}",
+            create=True,
+        )
+
     assert (
         http_bridge_helpers_module._retain_http_bridge_denied_anchor_fence(
             service,
@@ -31937,7 +32145,9 @@ def test_denied_anchor_fence_pruning_keeps_active_request_provenance() -> None:
     assert active_fence is not None
     assert active_fence.generation == 1
     assert active_fence.active_request_ids == {"request-active-fence"}
-    assert len(service._http_bridge_denied_anchor_fences) == 512
+    assert len(service._http_bridge_denied_anchor_fences) == 514
+    assert "resp-idle-capture-0" not in service._http_bridge_denied_anchor_fences
+    assert "resp-idle-512" in service._http_bridge_denied_anchor_fences
 
     http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, "request-active-fence")
 

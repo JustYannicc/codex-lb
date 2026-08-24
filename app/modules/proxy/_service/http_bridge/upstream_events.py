@@ -61,6 +61,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
+    _forget_http_bridge_denied_anchor_fence,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
@@ -1085,6 +1086,8 @@ async def _invalidate_denied_http_bridge_anchor(
                 session.last_completed_input_count = 0
                 session.last_completed_input_prefix_fingerprint = None
                 session.last_pending_tool_calls.clear()
+    if cleared:
+        _forget_http_bridge_denied_anchor_fence(service, denied_response_id)
     return cleared
 
 
