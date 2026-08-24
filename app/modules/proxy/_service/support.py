@@ -1008,6 +1008,11 @@ class _WebSocketRequestState:
     # genuine delta-only client has no other way to convey prior context and
     # must stay anchored.
     proxy_injected_anchor_had_full_resend_payload: bool = False
+    # Process-local denial generation captured before any canonical session
+    # exists. A detached predecessor can reject the anchor while the request
+    # is waiting for owner resolution; retain that generation through retries
+    # so the successor's final dispatch fence still fails closed.
+    denied_proxy_injected_anchor_fence_generation_at_prepare: int | None = None
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-

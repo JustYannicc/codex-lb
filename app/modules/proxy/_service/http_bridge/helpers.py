@@ -205,6 +205,122 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # the configured stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
+# Keep the process-local denied-anchor ledger bounded. It bridges the short
+# interval in which a detached predecessor can deny an anchor after a request
+# captured its durable lookup and before the successor submits it.
+_HTTP_BRIDGE_DENIED_ANCHOR_FENCE_MAX_IDS = 512
+
+
+@dataclass
+class _HTTPBridgeDeniedAnchorFence:
+    generation: int
+    active_request_ids: set[str]
+
+
+def _http_bridge_denied_anchor_fence_entry(
+    service: Any,
+    response_id: str,
+    *,
+    create: bool = False,
+) -> _HTTPBridgeDeniedAnchorFence | None:
+    """Read process-local denial state, tolerating older service doubles."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        if not create:
+            return None
+        fences = {}
+        setattr(service, "_http_bridge_denied_anchor_fences", fences)
+    entry = fences.get(response_id)
+    if isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+        return entry
+    if isinstance(entry, int):
+        upgraded = _HTTPBridgeDeniedAnchorFence(entry, set())
+        fences[response_id] = upgraded
+        return upgraded
+    if not create:
+        return None
+    entry = _HTTPBridgeDeniedAnchorFence(0, set())
+    fences[response_id] = entry
+    return entry
+
+
+def _prune_http_bridge_denied_anchor_fences(service: Any) -> None:
+    """Drop idle entries without evicting an in-flight request's fence."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    while len(fences) > _HTTP_BRIDGE_DENIED_ANCHOR_FENCE_MAX_IDS:
+        idle_entries = [
+            (response_id, entry)
+            for response_id, entry in fences.items()
+            if isinstance(entry, _HTTPBridgeDeniedAnchorFence) and not entry.active_request_ids
+        ]
+        if not idle_entries:
+            return
+        oldest_response_id, _oldest_entry = min(idle_entries, key=lambda item: item[1].generation)
+        fences.pop(oldest_response_id, None)
+
+
+def _http_bridge_denied_anchor_fence_generation(service: Any, response_id: str) -> int:
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
+    return entry.generation if entry is not None else 0
+
+
+def _retain_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    request_id: str,
+) -> int:
+    """Pin a response-id fence for the lifetime of one bridge request."""
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
+    assert entry is not None
+    entry.active_request_ids.add(request_id)
+    _prune_http_bridge_denied_anchor_fences(service)
+    return entry.generation
+
+
+def _release_http_bridge_denied_anchor_fences(service: Any, request_id: str) -> None:
+    """Release all response-id fences captured by a completed bridge request."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    for response_id, entry in list(fences.items()):
+        if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+            continue
+        entry.active_request_ids.discard(request_id)
+        if entry.generation == 0 and not entry.active_request_ids:
+            fences.pop(response_id, None)
+    _prune_http_bridge_denied_anchor_fences(service)
+
+
+def _record_http_bridge_denied_anchor_fence(service: Any, response_id: str) -> int:
+    """Record a denial after a request may have captured the old generation."""
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
+    assert entry is not None
+    generation = getattr(service, "_http_bridge_denied_anchor_fence_generation", 0)
+    if not isinstance(generation, int):
+        generation = 0
+    generation += 1
+    setattr(service, "_http_bridge_denied_anchor_fence_generation", generation)
+    entry.generation = generation
+    _prune_http_bridge_denied_anchor_fences(service)
+    return generation
+
+
+def _http_bridge_denied_anchor_fence_advanced(
+    service: Any,
+    request_state: _WebSocketRequestState,
+) -> bool:
+    response_id = request_state.previous_response_id
+    captured_generation = request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+    return bool(
+        request_state.proxy_injected_previous_response_id
+        and response_id is not None
+        and captured_generation is not None
+        and captured_generation < _http_bridge_denied_anchor_fence_generation(service, response_id)
+    )
+
+
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"

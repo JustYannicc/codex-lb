@@ -78,6 +78,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
@@ -1890,7 +1891,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     if (
                         request_state.proxy_injected_previous_response_id
                         and request_state.previous_response_id is not None
-                        and request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                        and (
+                            request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                            or _http_bridge_denied_anchor_fence_advanced(self, request_state)
+                        )
                     ):
                         _record_continuity_fail_closed(
                             surface="http_bridge",

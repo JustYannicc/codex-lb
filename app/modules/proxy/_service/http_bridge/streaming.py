@@ -100,9 +100,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _release_http_bridge_denied_anchor_fences,
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
+    _retain_http_bridge_denied_anchor_fence,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
@@ -1047,7 +1049,7 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=request_scope_id,
                     )
 
-    async def _stream_via_http_bridge(
+    async def _stream_via_http_bridge_impl(
         self: Any,
         payload: ResponsesRequest,
         headers: Mapping[str, str],
@@ -1076,11 +1078,12 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_wait_event: asyncio.Event | None = None,
         capacity_startup_ready_event: asyncio.Event | None = None,
         deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
+        _denied_anchor_request_id: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         dead_owner_anchor = False
         dead_owner_process_epoch_mismatch = False
-        request_id = ensure_request_id()
+        request_id = _denied_anchor_request_id or ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
         if deferred_account_backoff_tracker is None:
@@ -1689,6 +1692,16 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
         request_state, text_data = prepare_bridge_request(effective_payload)
+        if proxy_injected_previous_response_id and request_state.previous_response_id is not None:
+            # Capture denial provenance before owner lookups below can suspend
+            # while a detached predecessor rejects the same durable anchor.
+            request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
+                _retain_http_bridge_denied_anchor_fence(
+                    self,
+                    request_state.previous_response_id,
+                    request_id,
+                )
+            )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
         _apply_http_bridge_downstream_turn_state(
@@ -2548,6 +2561,9 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.input_item_count = recovery_anchor_input_count
                         retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
                         retry_request_state.proxy_injected_previous_response_id = True
+                        retry_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
+                            request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                        )
                         # ``recovery_anchor_input_count`` is only set when
                         # ``durable_full_resend_anchor_count`` is not None,
                         # which itself requires the incoming payload to have
@@ -2709,6 +2725,14 @@ class _HTTPBridgeStreamingMixin:
             request_state.proxy_injected_previous_response_id = True
             request_state.proxy_injected_anchor_had_full_resend_payload = session_level_payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
+            if request_state.previous_response_id is not None:
+                request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
+                    _retain_http_bridge_denied_anchor_fence(
+                        self,
+                        request_state.previous_response_id,
+                        request_id,
+                    )
+                )
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a
             # single-item follow-up turn whose prior history is only
@@ -2802,6 +2826,9 @@ class _HTTPBridgeStreamingMixin:
                 request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
             if proxy_injected_previous_response_id:
                 request_state.proxy_injected_previous_response_id = True
+                request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
+                    previous_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                )
                 # Unlike ``fresh_upstream_request_is_retry_safe`` below, this
                 # flag only asks whether the client's payload looked like a
                 # full resend, which cannot change between the original
@@ -3459,6 +3486,11 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.proxy_injected_previous_response_id = (
                     request_state.proxy_injected_previous_response_id and retry_previous_response_id is not None
                 )
+                retry_request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = (
+                    request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+                    if retry_request_state.proxy_injected_previous_response_id
+                    else None
+                )
                 # Carried with the flag above, not separately: the anchor's
                 # retirability depends on whether the payload it was injected
                 # onto was full-resend shaped, and a retry that replays the
@@ -3537,6 +3569,23 @@ class _HTTPBridgeStreamingMixin:
                 await session_events.aclose()
             except Exception:
                 pass
+
+    async def _stream_via_http_bridge(
+        self: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Run one bridge request and release its process-level anchor pins."""
+        request_id = ensure_request_id()
+        try:
+            async for event_block in self._stream_via_http_bridge_impl(
+                *args,
+                _denied_anchor_request_id=request_id,
+                **kwargs,
+            ):
+                yield event_block
+        finally:
+            _release_http_bridge_denied_anchor_fences(self, request_id)
 
     async def _reset_http_bridge_session_after_local_terminal_error(
         self: Any,

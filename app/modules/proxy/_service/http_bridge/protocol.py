@@ -23,6 +23,8 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _http_bridge_owner_client: Any
     _http_bridge_sessions: Any
     _http_bridge_detached_sessions: Any
+    _http_bridge_denied_anchor_fences: Any
+    _http_bridge_denied_anchor_fence_generation: int
     _http_bridge_inflight_sessions: Any
     _http_bridge_turn_state_index: Any
     _http_bridge_previous_response_index: Any

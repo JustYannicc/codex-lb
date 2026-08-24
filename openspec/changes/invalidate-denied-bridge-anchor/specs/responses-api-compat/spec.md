@@ -8,6 +8,8 @@ When upstream answers an HTTP bridge request with a `previous_response_not_found
 
 Before awaiting durable cleanup, the proxy MUST publish the denied id to the live session. Publication MUST be serialized with the submitter's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. Immediately before dispatch, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
 
+The proxy MUST also retain the denied-id generation in a bounded process-local ledger independent of the canonical live-session registry. A request that captured the durable anchor before a live session existed MUST fail closed when that generation advances during owner lookup or successor session creation. Active requests MUST pin their ledger entries until finalization so pruning cannot remove a fence that is still needed.
+
 The proxy MUST NOT retire the anchor when:
 
 - the anchor was supplied by the client, because removing it changes the meaning of the client's own request;
@@ -78,6 +80,14 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **WHEN** denial publication acquires session lifecycle ownership before the prepared request's final send section
 - **THEN** the denied id is tombstoned before the prepared request revalidates
 - **AND** the prepared request fails closed without sending an upstream frame
+
+#### Scenario: A detached predecessor fences an absent-session capture
+
+- **GIVEN** a request captures a proxy-injected durable anchor before a canonical live session exists
+- **AND** a detached predecessor receives `previous_response_not_found` for that anchor while the request is resolving ownership
+- **WHEN** successor session creation completes and the request reaches final dispatch
+- **THEN** the process-local denial generation MUST fail the request closed as `stream_incomplete`
+- **AND** the successor MUST NOT send the denied anchor upstream
 
 #### Scenario: Sibling response aliases survive retirement
 

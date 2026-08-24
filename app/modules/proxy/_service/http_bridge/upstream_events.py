@@ -68,6 +68,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
+    _record_http_bridge_denied_anchor_fence,
     _record_http_bridge_stuck_retire,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
@@ -1050,6 +1051,10 @@ async def _invalidate_denied_http_bridge_anchor(
         # request must remain fenced even when there is no current anchor left
         # to clear.
         session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+        # Retain denial provenance after the session-local tombstone is retired.
+        # A request that began on an absent canonical session otherwise receives
+        # a successor with no local generation and can redispatch this id.
+        _record_http_bridge_denied_anchor_fence(service, denied_response_id)
         # Another request may have completed and advanced the anchor between
         # the denied dispatch and this frame. Only retire the id that was
         # refused.

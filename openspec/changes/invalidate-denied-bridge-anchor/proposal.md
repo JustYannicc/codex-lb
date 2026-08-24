@@ -18,6 +18,7 @@ The second half of this change is why the first half currently could not fire ev
 
 - Retire only the denied `previous_response_id` on the first explicit upstream denial when the proxy injected it, instead of waiting for a counter that this failure class never increments. The fenced durable write clears the four anchor-bound columns only while that id is still the durable latest response, deletes only that response alias, and preserves turn-state plus other response aliases. The in-memory carrier is cleared in a `finally` path even when alias unregistering fails. The retirement is skipped when a concurrent request has already advanced the anchor past the denied id.
 - Mark the denied id before the durable await and revalidate prepared requests immediately before dispatch. A request that already captured the denied proxy-injected id is failed closed without another upstream send, closing the retirement/dispatch race.
+- Retain denial provenance in a bounded process-local generation ledger. A request that captured the durable anchor before a canonical live session existed is still failed closed if a detached predecessor denies that id while owner lookup or successor session creation is suspended.
 - Carry `proxy_injected_previous_response_id` onto the anchored recovery retry state, so a denial of the replayed anchor is attributable, diagnostics report the real provenance, and the wedge classifier sees the reattach. Anchor-free recovery paths keep the flag false because they send no anchor.
 
 ## Capabilities
