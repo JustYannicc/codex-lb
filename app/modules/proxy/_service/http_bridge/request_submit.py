@@ -2508,7 +2508,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 return
 
             prewarm_started_at = _service_time().monotonic()
-            event_queue_revoked = asyncio.Event()
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
@@ -2519,11 +2518,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 awaiting_response_created=True,
-                event_queue=_HTTPBridgeLiveEventQueue(
-                    maxsize=_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE,
-                    revoked=event_queue_revoked,
-                ),
-                event_queue_revoked=event_queue_revoked,
+                event_queue=asyncio.Queue(),
                 transport=_REQUEST_TRANSPORT_HTTP,
                 request_text=warmup_text,
                 skip_request_log=True,
@@ -2568,7 +2563,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             model_class=_extract_model_class(session.request_model) if session.request_model else None,
                         )
                         session.prewarmed = False
-                        _revoke_http_bridge_event_queue(warmup_state)
                         await self._cleanup_http_bridge_submit_interruption(
                             session,
                             request_state=warmup_state,
@@ -2601,7 +2595,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.model,
                         )
                         session.prewarmed = False
-                        _revoke_http_bridge_event_queue(warmup_state)
                         try:
                             # The warmup request has already been sent upstream.  Close/reconnect the
                             # socket while the warmup state is still attached so any late warmup
@@ -2622,9 +2615,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             async with session.pending_lock:
                                 if warmup_state in session.pending_requests:
                                     session.pending_requests.remove(warmup_state)
-                            discard = getattr(warmup_state.event_queue, "discard", None)
-                            if callable(discard):
-                                discard()
                             self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
                             if gate_acquired:
                                 await _release_websocket_response_create_gate(
@@ -2652,7 +2642,6 @@ class _HTTPBridgeRequestSubmitMixin:
             except ProxyResponseError as exc:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                _revoke_http_bridge_event_queue(warmup_state)
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=warmup_state,
@@ -2676,7 +2665,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 _record_http_bridge_prewarm_outcome(outcome="error")
                 raise
             except BaseException:
-                _revoke_http_bridge_event_queue(warmup_state)
                 if warmup_send_started:
                     session.closed = True
                     session.upstream_control.reconnect_requested = True
