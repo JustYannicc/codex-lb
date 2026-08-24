@@ -4,10 +4,11 @@ import argparse
 import glob
 import logging
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from app.core.config.settings import get_settings
 from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
@@ -59,6 +60,30 @@ def _remove_sqlite_sidecars(db_path: Path) -> None:
         raise RuntimeError(f"failed to remove SQLite sidecars: {details}")
 
 
+@contextmanager
+def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
+    """Hold SQLite's exclusive lock across the replacement boundary.
+
+    Recovery renames the source file, so a writer that gets through after the
+    rename would keep writing the old inode instead of the installed database.
+    An immediate exclusive transaction makes that boundary fail closed for
+    active connections rather than letting them write into the renamed backup.
+    """
+    connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
+    acquired = False
+    try:
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            acquired = True
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(f"could not acquire exclusive SQLite recovery lock for {db_path}: {exc}") from exc
+        yield
+    finally:
+        if acquired:
+            connection.rollback()
+        connection.close()
+
+
 def _load_dump(source: Path) -> str:
     try:
         with sqlite_connection(source) as conn:
@@ -92,21 +117,25 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
         logger.info("SQLite integrity check OK. Proceeding with export/import.")
 
     dump = _load_dump(options.source)
-    _remove_sqlite_sidecars(options.output)
-    _write_dump(options.output, dump)
-    _remove_sqlite_sidecars(options.output)
-
     if options.replace:
-        _remove_sqlite_sidecars(options.source)
-        backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-        options.source.replace(backup)
-        options.output.replace(options.source)
+        with _sqlite_recovery_lock(options.source):
+            _remove_sqlite_sidecars(options.output)
+            _write_dump(options.output, dump)
+            _remove_sqlite_sidecars(options.output)
+            _remove_sqlite_sidecars(options.source)
+            backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
+            options.source.replace(backup)
+            options.output.replace(options.source)
         return RecoveryOutcome(
             source=backup,
             output=options.source,
             replaced=True,
             integrity=integrity,
         )
+
+    _remove_sqlite_sidecars(options.output)
+    _write_dump(options.output, dump)
+    _remove_sqlite_sidecars(options.output)
 
     return RecoveryOutcome(
         source=options.source,

@@ -27,7 +27,7 @@ class _TrackedConnection(sqlite3.Connection):
 def _track_connections(monkeypatch: pytest.MonkeyPatch) -> list[_TrackedConnection]:
     connections: list[_TrackedConnection] = []
 
-    def connect(database: str | Path) -> sqlite3.Connection:
+    def connect(database: str | Path, *_args: object, **_kwargs: object) -> sqlite3.Connection:
         connection = _TrackedConnection(str(database))
         connections.append(connection)
         return connection
@@ -150,6 +150,50 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
     finally:
         for connection in held_source_connections:
             connection.close()
+
+
+def test_recover_replace_blocks_writes_across_the_install_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active source connection cannot write while recovery replaces it."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    writer = sqlite3.connect(db_path, timeout=0, isolation_level=None)
+    write_attempts: list[str] = []
+    real_write_dump = recover_module._write_dump
+
+    def _write_dump_then_attempt_source_write(output: Path, dump: str) -> None:
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("INSERT INTO items (name) VALUES ('raced')")
+            writer.commit()
+            write_attempts.append("wrote")
+        except sqlite3.OperationalError as exc:
+            writer.rollback()
+            write_attempts.append(str(exc).lower())
+        real_write_dump(output, dump)
+
+    monkeypatch.setattr(recover_module, "_write_dump", _write_dump_then_attempt_source_write)
+
+    try:
+        recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        )
+    finally:
+        writer.close()
+
+    assert write_attempts == ["database is locked"]
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute("INSERT INTO items (name) VALUES ('after')")
+        assert connection.execute("SELECT name FROM items ORDER BY rowid").fetchall() == [
+            ("base",),
+            ("after",),
+        ]
 
 
 def test_recover_sidecar_cleanup_treats_wildcard_database_names_literally(tmp_path: Path) -> None:
