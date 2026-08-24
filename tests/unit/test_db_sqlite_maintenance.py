@@ -150,3 +150,17 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
     finally:
         for connection in held_source_connections:
             connection.close()
+
+
+def test_recover_sidecar_cleanup_treats_wildcard_database_names_literally(tmp_path: Path) -> None:
+    """A wildcard in the database name must not broaden master-journal cleanup."""
+    db_path = tmp_path / "store*.db"
+    target_master_journal = tmp_path / "store*.db-mj12345678"
+    unrelated_master_journal = tmp_path / "storeOTHER.db-mj12345678"
+    target_master_journal.write_bytes(b"target")
+    unrelated_master_journal.write_bytes(b"unrelated")
+
+    recover_module._remove_sqlite_sidecars(db_path)
+
+    assert not target_master_journal.exists()
+    assert unrelated_master_journal.read_bytes() == b"unrelated"

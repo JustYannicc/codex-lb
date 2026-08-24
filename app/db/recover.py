@@ -43,7 +43,7 @@ def _default_output_path(source: Path) -> Path:
 
 def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, ...]:
     fixed = tuple(db_path.with_name(f"{db_path.name}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
-    master = tuple(sorted(db_path.parent.glob(f"{db_path.name}-mj*")))
+    master = tuple(sorted(db_path.parent.glob(f"{glob.escape(db_path.name)}-mj*")))
     return (*fixed, *master)
 
 
