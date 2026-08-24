@@ -28347,6 +28347,34 @@ async def test_http_bridge_retry_circuit_elapsed_durable_cooldown_does_not_burn_
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_expiry_clears_loaded_local_deadline() -> None:
+    """A cooldown that expires after loading does not create a half-open lease."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-expiry-transition")
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=persisted),
+        persist_retry_circuit=AsyncMock(),
+        clear_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.cooldown_until > time.monotonic()
+
+    persisted.cooldown_until_epoch = time.time() - 120.0
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert state.cooldown_until == 0.0
+    assert state.half_open_until == 0.0
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-submit-cooldown")

@@ -281,7 +281,18 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.last_detail = persisted.last_detail
             else:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
-                state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                if (
+                    not local_failure_is_newer
+                    and persisted.updated_at_epoch >= state.persisted_updated_at_epoch
+                    and persisted_cooldown_until <= 0.0
+                ):
+                    # An equal-version durable reload can observe the same
+                    # row after its cooldown elapsed. Clear the old local
+                    # monotonic deadline instead of turning that expiry into
+                    # a half-open probe.
+                    state.cooldown_until = 0.0
+                else:
+                    state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
                 if local_failure_is_newer:
                     state.last_detail = state.last_detail or persisted.last_detail
                 else:
