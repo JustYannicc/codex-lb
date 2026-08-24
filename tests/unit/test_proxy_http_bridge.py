@@ -32381,6 +32381,46 @@ async def test_retire_denied_bridge_anchor_swallows_bookkeeping_failures():
     )
     assert session.last_completed_response_id is None
     assert session.last_completed_input_prefix_fingerprint is None
+    assert "resp_denied" in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+
+
+@pytest.mark.asyncio
+async def test_retry_denied_bridge_anchor_keeps_fence_until_alias_unregister_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+    session.denied_proxy_injected_anchor_ids.add("resp_denied")
+    service._unregister_http_bridge_previous_response_id = AsyncMock(
+        side_effect=[RuntimeError("registry down"), None],
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    await http_bridge_upstream_events_module._retry_denied_http_bridge_anchor_clear(
+        service,
+        session,
+        session_id=session.durable_session_id,
+        api_key_id=session.key.api_key_id,
+        instance_id="bridge-instance",
+        owner_epoch=session.durable_owner_epoch,
+        response_id="resp_denied",
+    )
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
+    assert service._unregister_http_bridge_previous_response_id.await_count == 2
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" not in service._http_bridge_denied_anchor_fences
 
 
 @pytest.mark.asyncio

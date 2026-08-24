@@ -638,6 +638,7 @@ async def _retry_denied_http_bridge_anchor_clear(
     response_id: str,
 ) -> None:
     """Retry a transient durable clear under the original owner fence."""
+    durable_cleared = False
     for delay_seconds in _HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS:
         if session.durable_session_id != session_id or session.durable_owner_epoch != owner_epoch:
             return
@@ -648,34 +649,38 @@ async def _retry_denied_http_bridge_anchor_clear(
             api_key_id=api_key_id,
             delay_seconds=delay_seconds,
         )
-        try:
-            cleared = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
-                session_id=session_id,
-                api_key_id=api_key_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                response_id=response_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Retrying denied HTTP bridge response-anchor clear after durable failure", exc_info=True)
-            continue
-        if cleared is not None:
+        if not durable_cleared:
             try:
-                await service._unregister_http_bridge_previous_response_id(session, response_id)
+                cleared = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+                    session_id=session_id,
+                    api_key_id=api_key_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    response_id=response_id,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.warning(
-                    "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
-                    exc_info=True,
-                )
-            async with session.lifecycle_lock:
-                session.denied_proxy_injected_anchor_ids.discard(response_id)
-                session.denied_proxy_injected_anchor_generation += 1
-            _forget_http_bridge_denied_anchor_fence(service, response_id)
-            return
+                logger.warning("Retrying denied HTTP bridge response-anchor clear after durable failure", exc_info=True)
+                continue
+            if cleared is None:
+                continue
+            durable_cleared = True
+        try:
+            await service._unregister_http_bridge_previous_response_id(session, response_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
+                exc_info=True,
+            )
+            continue
+        async with session.lifecycle_lock:
+            session.denied_proxy_injected_anchor_ids.discard(response_id)
+            session.denied_proxy_injected_anchor_generation += 1
+        _forget_http_bridge_denied_anchor_fence(service, response_id)
+        return
     logger.error(
         "Denied HTTP bridge response-anchor clear retry budget exhausted session_id=%s response_id=%s",
         _hash_identifier(session_id),
@@ -1194,6 +1199,7 @@ async def _invalidate_denied_http_bridge_anchor(
             _forget_http_bridge_denied_anchor_fence(service, denied_response_id)
         return False
     retry_durable_clear = False
+    unregister_succeeded = False
     unregister_error: BaseException | None = None
     durable_error: BaseException | None = None
     try:
@@ -1216,10 +1222,12 @@ async def _invalidate_denied_http_bridge_anchor(
                 if cleared or no_durable_owner:
                     try:
                         await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
+                        unregister_succeeded = True
                     except asyncio.CancelledError as exc:
                         unregister_error = exc
                     except Exception as exc:
                         unregister_error = exc
+                        retry_durable_clear = True
             finally:
                 async with session.lifecycle_lock:
                     if session.last_completed_response_id == denied_response_id:
@@ -1228,7 +1236,7 @@ async def _invalidate_denied_http_bridge_anchor(
                         session.last_completed_input_count = 0
                         session.last_completed_input_prefix_fingerprint = None
                         session.last_pending_tool_calls.clear()
-                    if cleared:
+                    if (cleared or no_durable_owner) and unregister_succeeded:
                         session.denied_proxy_injected_anchor_ids.discard(denied_response_id)
                         session.denied_proxy_injected_anchor_generation += 1
                 if retry_durable_clear:
@@ -1243,7 +1251,7 @@ async def _invalidate_denied_http_bridge_anchor(
                     )
     except asyncio.CancelledError as exc:
         durable_error = exc
-    if cleared or no_durable_owner:
+    if (cleared or no_durable_owner) and unregister_succeeded:
         _forget_http_bridge_denied_anchor_fence(service, denied_response_id)
     if unregister_error is not None:
         raise unregister_error
