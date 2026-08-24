@@ -1816,14 +1816,22 @@ class _HTTPBridgeUpstreamEventsMixin:
             # downstream detach backstop only settle requests still in
             # pending ownership, so an abort here would otherwise leak the
             # API-key reservation and its heartbeat forever (issue #1594).
-            await self._settle_aborted_http_bridge_terminal_states(
-                session,
-                claimed_terminal_request_states,
-            )
+            try:
+                await self._settle_aborted_http_bridge_terminal_states(
+                    session,
+                    claimed_terminal_request_states,
+                )
+            finally:
+                if completed_delivery_scope is not None:
+                    completed_delivery_scope.settlement_succeeded = False
+                    completed_delivery_scope.settlement_finished.set()
             raise
         else:
             for claimed_request_state in claimed_terminal_request_states:
                 claimed_request_state.terminal_settlement_phase = None
+            if completed_delivery_scope is not None:
+                completed_delivery_scope.settlement_succeeded = True
+                completed_delivery_scope.settlement_finished.set()
         finally:
             if completed_delivery_scope is not None:
 

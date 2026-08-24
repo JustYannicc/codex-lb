@@ -21514,6 +21514,117 @@ async def test_prewarm_aborted_terminal_settlement_fails_and_releases_state(
 
 
 @pytest.mark.asyncio
+async def test_prewarm_cancel_after_clean_terminal_delivery_does_not_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-cancel-after-terminal")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-cancel-after-terminal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    terminal_consumed = asyncio.Event()
+    settlement_started = asyncio.Event()
+    captured: dict[str, Any] = {}
+
+    async def blocked_finalization(*_args: Any, **_kwargs: Any) -> None:
+        settlement_started.set()
+        await asyncio.Event().wait()
+
+    async def send_warmup(
+        target_session: proxy_service._HTTPBridgeSession,
+        state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        assert target_session is session
+        event_queue = cast(Any, state.event_queue)
+        captured["warmup"] = state
+        original_get = event_queue.get
+
+        async def tracked_get() -> str | None:
+            event_block = await original_get()
+            if event_block is None:
+                terminal_consumed.set()
+            return event_block
+
+        event_queue.get = tracked_get
+        await service._process_http_bridge_upstream_text(
+            session,
+            '{"type":"response.created","response":{"id":"resp-prewarm-cancel-after-terminal"}}',
+        )
+        captured["terminal_task"] = asyncio.create_task(
+            service._process_http_bridge_upstream_text(
+                session,
+                '{"type":"response.completed","response":{"id":"resp-prewarm-cancel-after-terminal",'
+                '"usage":{"input_tokens":1,"output_tokens":0}}}',
+            )
+        )
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", blocked_finalization)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_send_http_bridge_request_text_with_archive_id",
+        send_warmup,
+    )
+
+    prewarm_task = asyncio.create_task(
+        service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        )
+    )
+    terminal_task: asyncio.Task[Any] | None = None
+    try:
+        await asyncio.wait_for(terminal_consumed.wait(), timeout=1.0)
+        await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+        terminal_task = cast(asyncio.Task[Any], captured["terminal_task"])
+        assert prewarm_task.done() is False
+        # The in-flight marker reserves this session for the warmup; it must
+        # be cleared when the claimed terminal settlement is cancelled.
+        assert session.prewarmed is True
+
+        terminal_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(terminal_task, timeout=1.0)
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await asyncio.wait_for(prewarm_task, timeout=1.0)
+
+        assert exc_info.value.status_code == 502
+        assert request_state.prewarm_status == "error"
+        assert session.prewarmed is False
+        assert session.pending_requests == deque()
+        assert session.response_create_gate.locked() is False
+        warmup_state = cast(proxy_service._WebSocketRequestState, captured["warmup"])
+        warmup_queue = cast(http_bridge_request_submit_module._HTTPBridgeLiveEventQueue, warmup_state.event_queue)
+        assert warmup_queue.terminal_outcome == (
+            http_bridge_request_submit_module._HTTPBridgeLiveEventQueueTerminalOutcome.DISCARDED
+        )
+        assert warmup_queue.queued_bytes == 0
+    finally:
+        for task in (terminal_task, prewarm_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (terminal_task, prewarm_task) if task is not None),
+            return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("terminal_mode", "expected_status"),
     [("clean", "success"), ("revoked", "error")],

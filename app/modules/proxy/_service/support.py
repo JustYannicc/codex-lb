@@ -858,6 +858,8 @@ class _HTTPBridgeCompletedDeliveryScope:
     active: bool = False
     terminal_enqueued: bool = False
     detach_requested: bool = False
+    settlement_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    settlement_succeeded: bool = False
 
 
 @dataclass(slots=True)

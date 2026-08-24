@@ -2534,11 +2534,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 _record_http_bridge_prewarm_outcome(outcome="skipped")
                 return
             warmup_text = _build_http_bridge_prewarm_text(text_data)
-            session.prewarmed = True
             if warmup_text is None:
                 request_state.prewarm_status = "skipped"
                 _record_http_bridge_prewarm_outcome(outcome="skipped")
                 return
+            # Reserve the prewarm slot while the warmup is in flight. The
+            # terminal completion below keeps this marker only after the
+            # queue and its settlement both report a clean outcome.
+            session.prewarmed = True
 
             prewarm_started_at = _service_time().monotonic()
             event_queue_revoked = asyncio.Event()
@@ -2668,6 +2671,20 @@ class _HTTPBridgeRequestSubmitMixin:
                                     "HTTP responses session bridge prewarm failed",
                                 ),
                             )
+                        completed_delivery_scope = warmup_state.completed_delivery_scope
+                        if completed_delivery_scope is not None:
+                            await completed_delivery_scope.settlement_finished.wait()
+                            if (
+                                not completed_delivery_scope.settlement_succeeded
+                                or warmup_event_queue.terminal_outcome != _HTTPBridgeLiveEventQueueTerminalOutcome.CLEAN
+                            ):
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "upstream_unavailable",
+                                        "HTTP responses session bridge prewarm failed",
+                                    ),
+                                )
                         break
                     payload = parse_sse_data_json(event_block)
                     event = parse_sse_event(event_block)
@@ -2680,6 +2697,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "HTTP responses session bridge prewarm failed",
                             ),
                         )
+                session.prewarmed = True
                 session.last_used_at = _service_time().monotonic()
                 request_state.prewarm_latency_ms = int(max(0.0, session.last_used_at - prewarm_started_at) * 1000)
                 request_state.prewarm_status = "success"
