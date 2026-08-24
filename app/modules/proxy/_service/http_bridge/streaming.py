@@ -3577,15 +3577,19 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncIterator[str]:
         """Run one bridge request and release its process-level anchor pins."""
         request_id = ensure_request_id()
+        inner_stream = self._stream_via_http_bridge_impl(
+            *args,
+            _denied_anchor_request_id=request_id,
+            **kwargs,
+        )
         try:
-            async for event_block in self._stream_via_http_bridge_impl(
-                *args,
-                _denied_anchor_request_id=request_id,
-                **kwargs,
-            ):
+            async for event_block in inner_stream:
                 yield event_block
         finally:
-            _release_http_bridge_denied_anchor_fences(self, request_id)
+            try:
+                await inner_stream.aclose()
+            finally:
+                _release_http_bridge_denied_anchor_fences(self, request_id)
 
     async def _reset_http_bridge_session_after_local_terminal_error(
         self: Any,
