@@ -16,8 +16,6 @@
 - [x] 2.4 Prove resumed and paced delivery order, terminal end marker, disconnect cancellation, settlement, and task cleanup
 
 - [x] 2.5 Account retained live payload bytes in one fixed process-wide budget; revoke a queue when a reservation cannot be made and release bytes on dequeue
-- [x] 2.6 Treat budget-revoked prewarm terminal wakeups as failures and complete pending, gate, byte-credit, and session-state cleanup
-- [x] 2.7 Distinguish clean queue end-of-stream from revocation, abort, and discard so prewarm cannot report success after aborted terminal settlement
 
 
 ## 3. Verification
@@ -31,4 +29,3 @@
 - [x] 3.4 Review the committed diff for disconnect/cancellation, task ownership, terminal settlement, durable spool/replay, and async task leaks
 
 - [x] 3.5 Test cross-session budget pressure, byte release after dequeue, and fail-closed queue revocation without a new operator setting
-- [x] 3.6 Drive the real claimed-terminal abort path and prove prewarm error status, pending-state cleanup, unlocked admission, zero byte credits, and clean-terminal success
