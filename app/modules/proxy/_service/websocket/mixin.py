@@ -101,8 +101,9 @@ from app.modules.api_keys.service import (
     ApiKeysService,
 )
 from app.modules.model_sources.selection import (
+    ResponsesModelSourceOwnership,
     effective_model_for_api_key,
-    responses_model_is_source_owned,
+    resolve_responses_model_source_ownership,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -1781,15 +1782,14 @@ class _WebSocketMixin:
                                     # backend. Only recorded account ownership,
                                     # resolved above, may bypass this guard.
                                     and request_state.previous_response_owner_account_id is None
-                                    and await responses_model_is_source_owned(
-                                        request_state.model,
-                                        request_state.api_key or api_key,
-                                        # The raw client model, before enforcement
-                                        # normalized aliases: an alias-only source
-                                        # (``gpt-5-high``) is invisible in the
-                                        # normalized ``request_state.model``.
-                                        raw_model=request_state.raw_source_model,
+                                    and (
+                                        await self._resolve_cached_websocket_source_ownership(
+                                            request_state,
+                                            model=request_state.model,
+                                            api_key=request_state.api_key or api_key,
+                                        )
                                     )
+                                    is ResponsesModelSourceOwnership.SOURCE_OWNED
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
                                     # response.create that switches to a source-owned model
@@ -3407,6 +3407,22 @@ class _WebSocketMixin:
             return None, selection.error_code, selection.error_message
         return selected_account, None, None
 
+    async def _resolve_cached_websocket_source_ownership(
+        self,
+        request_state: _WebSocketRequestState,
+        *,
+        model: str | None,
+        api_key: ApiKeyData | None,
+    ) -> ResponsesModelSourceOwnership:
+        """Resolve model-source ownership once for one ``response.create``."""
+        if request_state.source_model_ownership is None:
+            request_state.source_model_ownership = await resolve_responses_model_source_ownership(
+                model,
+                api_key,
+                raw_model=request_state.raw_source_model,
+            )
+        return request_state.source_model_ownership
+
     async def _connect_proxy_websocket(
         self,
         headers: dict[str, str],
@@ -3473,14 +3489,14 @@ class _WebSocketMixin:
         if (
             not request_state.source_route_excluded
             and request_state.previous_response_owner_account_id is None
-            and await responses_model_is_source_owned(
-                model,
-                request_state.api_key or api_key,
-                # ``model`` is the session loop's post-enforcement
-                # ``request_state.model``; the raw client alias captured at
-                # preparation is what an alias-only source is registered under.
-                raw_model=request_state.raw_source_model,
+            and (
+                await self._resolve_cached_websocket_source_ownership(
+                    request_state,
+                    model=model,
+                    api_key=request_state.api_key or api_key,
+                )
             )
+            is ResponsesModelSourceOwnership.SOURCE_OWNED
         ):
             source_model = request_state.raw_source_model or model
             message = (

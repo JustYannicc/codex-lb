@@ -27,7 +27,9 @@ import app.modules.model_sources.selection as source_selection
 import app.modules.proxy._service.websocket.mixin as ws_mixin
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.selection import (
+    ResponsesModelSourceOwnership,
     effective_model_for_api_key,
+    resolve_responses_model_source_ownership,
     responses_model_is_source_owned,
 )
 from app.modules.proxy import service as proxy_service
@@ -93,13 +95,17 @@ async def test_source_ownership_fails_open_when_resolution_raises(monkeypatch: p
 
     monkeypatch.setattr(source_selection, "select_responses_model_source", boom)
 
+    assert (
+        await resolve_responses_model_source_ownership("qwen3.8-max", None)
+        is ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE
+    )
     assert await responses_model_is_source_owned("qwen3.8-max", None) is False
 
 
 async def _run_connect_guard(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    is_source_owned: bool,
+    is_source_owned: ResponsesModelSourceOwnership,
     api_key: ApiKeyData | None = None,
     request_state_api_key: ApiKeyData | None = None,
 ):
@@ -127,7 +133,7 @@ async def _run_connect_guard(
     settings = _make_proxy_settings()
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", fake_is_source_owned)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", fake_is_source_owned)
     monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
 
@@ -152,7 +158,10 @@ async def _run_connect_guard(
 
 @pytest.mark.asyncio
 async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    account, upstream, emitted, selection_calls, _ = await _run_connect_guard(monkeypatch, is_source_owned=True)
+    account, upstream, emitted, selection_calls, _ = await _run_connect_guard(
+        monkeypatch,
+        is_source_owned=ResponsesModelSourceOwnership.SOURCE_OWNED,
+    )
 
     assert account is None
     assert upstream is None
@@ -164,7 +173,10 @@ async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_connect_guard_ignores_subscription_models(monkeypatch: pytest.MonkeyPatch) -> None:
-    account, _upstream, emitted, selection_calls, _ = await _run_connect_guard(monkeypatch, is_source_owned=False)
+    account, _upstream, emitted, selection_calls, _ = await _run_connect_guard(
+        monkeypatch,
+        is_source_owned=ResponsesModelSourceOwnership.NOT_SOURCE_OWNED,
+    )
 
     assert account is None  # the stubbed selector returns no account
     assert selection_calls >= 1, "subscription models must proceed to account selection"
@@ -184,12 +196,81 @@ async def test_connect_guard_uses_the_per_request_api_key(monkeypatch: pytest.Mo
 
     *_, seen_api_keys = await _run_connect_guard(
         monkeypatch,
-        is_source_owned=True,
+        is_source_owned=ResponsesModelSourceOwnership.SOURCE_OWNED,
         api_key=session_key,
         request_state_api_key=refreshed_key,
     )
 
     assert seen_api_keys == [refreshed_key]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_result", "later_result"),
+    [
+        (
+            ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE,
+            ResponsesModelSourceOwnership.SOURCE_OWNED,
+        ),
+        (
+            ResponsesModelSourceOwnership.NOT_SOURCE_OWNED,
+            ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE,
+        ),
+    ],
+)
+async def test_websocket_source_ownership_cache_keeps_first_catalog_result(
+    monkeypatch: pytest.MonkeyPatch,
+    first_result: ResponsesModelSourceOwnership,
+    later_result: ResponsesModelSourceOwnership,
+) -> None:
+    """Both connect attempts must obey the first ownership result for the request."""
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = _request_state("qwen3.8-max")
+    results = iter((first_result, later_result))
+    resolver_calls = 0
+    emitted: list[dict[str, object]] = []
+    selection_calls = 0
+
+    async def sequenced_resolver(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return next(results)
+
+    async def fake_emit(self, websocket, **kwargs):  # noqa: ANN001
+        emitted.append(kwargs)
+
+    async def fake_select(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", sequenced_resolver)
+    monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
+
+    for _ in range(2):
+        account, upstream = await service._connect_proxy_websocket(
+            {},
+            sticky_key=None,
+            sticky_kind=None,
+            prefer_earlier_reset=False,
+            routing_strategy="capacity_weighted",
+            model=request_state.model,
+            request_state=request_state,
+            api_key=None,
+            client_send_lock=anyio.Lock(),
+            websocket=AsyncMock(),
+        )
+        assert account is None
+        assert upstream is None
+
+    assert request_state.source_model_ownership is first_result
+    assert resolver_calls == 1
+    assert selection_calls == 2
+    assert emitted == []
 
 
 def _text_frame(payload: dict[str, object]) -> SimpleNamespace:
@@ -296,10 +377,10 @@ async def test_first_turn_reaches_connect_guard_not_the_reuse_guard(
         connect_called = True
         return account, upstream
 
-    async def always_source_owned(*args, **kwargs) -> bool:  # noqa: ANN002, ANN003
-        return True
+    async def always_source_owned(*args, **kwargs) -> ResponsesModelSourceOwnership:  # noqa: ANN002, ANN003
+        return ResponsesModelSourceOwnership.SOURCE_OWNED
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", always_source_owned)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", always_source_owned)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 
@@ -342,11 +423,15 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
 
     # Only the second turn's model is source-owned.
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
     released = AsyncMock()
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
@@ -724,9 +809,13 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
 
     # The second turn's model is source-owned, like the reuse-guard rejection test.
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 
@@ -777,9 +866,13 @@ async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
         return account, upstream
 
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 

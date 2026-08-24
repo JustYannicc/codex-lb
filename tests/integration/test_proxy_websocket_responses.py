@@ -44,6 +44,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
     LimitRuleInput,
 )
+from app.modules.model_sources.selection import ResponsesModelSourceOwnership
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.capability_routing import (
@@ -740,7 +741,11 @@ def test_backend_responses_websocket_preserves_recorded_previous_response_accoun
         "_resolve_websocket_previous_response_owner",
         recorded_owner,
     )
-    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", fail_if_source_guard_runs)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "resolve_responses_model_source_ownership",
+        fail_if_source_guard_runs,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -794,7 +799,11 @@ def test_backend_responses_websocket_canonical_source_previous_response_requires
     async def configured_source(source_model, api_key, *, raw_model=None):
         del api_key, raw_model
         source_checks.append(source_model)
-        return source_model == model
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if source_model == model
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
     async def fail_before_subscription_selection(*args, **kwargs):
         del args, kwargs
@@ -805,7 +814,11 @@ def test_backend_responses_websocket_canonical_source_previous_response_requires
         "_resolve_websocket_previous_response_owner",
         no_subscription_owner,
     )
-    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "resolve_responses_model_source_ownership",
+        configured_source,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
