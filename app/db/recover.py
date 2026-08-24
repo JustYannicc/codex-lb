@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from app.core.config.settings import get_settings
 from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
+
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
 @dataclass(slots=True)
@@ -36,6 +39,24 @@ def _timestamp() -> str:
 def _default_output_path(source: Path) -> Path:
     suffix = source.suffix or ".db"
     return source.with_name(f"{source.stem}.recover-{_timestamp()}{suffix}")
+
+
+def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, ...]:
+    fixed = tuple(db_path.with_name(f"{db_path.name}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
+    master = tuple(sorted(db_path.parent.glob(f"{db_path.name}-mj*")))
+    return (*fixed, *master)
+
+
+def _remove_sqlite_sidecars(db_path: Path) -> None:
+    failures: list[tuple[Path, OSError]] = []
+    for sidecar in _sqlite_sidecar_paths(db_path):
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append((sidecar, exc))
+    if failures:
+        details = "; ".join(f"{path}: {error}" for path, error in failures)
+        raise RuntimeError(f"failed to remove SQLite sidecars: {details}")
 
 
 def _load_dump(source: Path) -> str:
@@ -71,9 +92,12 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
         logger.info("SQLite integrity check OK. Proceeding with export/import.")
 
     dump = _load_dump(options.source)
+    _remove_sqlite_sidecars(options.output)
     _write_dump(options.output, dump)
+    _remove_sqlite_sidecars(options.output)
 
     if options.replace:
+        _remove_sqlite_sidecars(options.source)
         backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
         options.source.replace(backup)
         options.output.replace(options.source)

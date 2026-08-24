@@ -104,3 +104,49 @@ def test_recover_cli_closes_connections_before_replacing_database(
             assert connection.execute("SELECT name FROM items").fetchall() == [("alpha",)]
     finally:
         _close_connections(connections)
+
+
+def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source WAL must not attach to the recovered database after rename."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
+        (tmp_path / f"{output_path.name}{suffix}").write_bytes(b"stale output sidecar")
+
+    held_source_connections: list[sqlite3.Connection] = []
+    real_load_dump = recover_module._load_dump
+
+    def _load_dump_then_leave_source_wal(path: Path) -> str:
+        dump = real_load_dump(path)
+        connection = sqlite3.connect(path)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute("INSERT INTO items (name) VALUES ('stale-after-dump')")
+        connection.commit()
+        held_source_connections.append(connection)
+        return dump
+
+    monkeypatch.setattr(recover_module, "_load_dump", _load_dump_then_leave_source_wal)
+
+    try:
+        recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        )
+        held_source_connections[0].close()
+
+        with closing(sqlite3.connect(db_path)) as connection:
+            assert connection.execute("SELECT name FROM items").fetchall() == [("base",)]
+
+        for path in (db_path, output_path):
+            for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
+                assert not Path(f"{path}{suffix}").exists()
+    finally:
+        for connection in held_source_connections:
+            connection.close()
