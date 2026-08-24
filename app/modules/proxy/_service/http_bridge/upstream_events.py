@@ -1798,6 +1798,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
+        settlement_succeeded = False
         try:
             await self._process_parsed_http_bridge_upstream_event(
                 session,
@@ -1816,22 +1817,15 @@ class _HTTPBridgeUpstreamEventsMixin:
             # downstream detach backstop only settle requests still in
             # pending ownership, so an abort here would otherwise leak the
             # API-key reservation and its heartbeat forever (issue #1594).
-            try:
-                await self._settle_aborted_http_bridge_terminal_states(
-                    session,
-                    claimed_terminal_request_states,
-                )
-            finally:
-                if completed_delivery_scope is not None:
-                    completed_delivery_scope.settlement_succeeded = False
-                    completed_delivery_scope.settlement_finished.set()
+            await self._settle_aborted_http_bridge_terminal_states(
+                session,
+                claimed_terminal_request_states,
+            )
             raise
         else:
             for claimed_request_state in claimed_terminal_request_states:
                 claimed_request_state.terminal_settlement_phase = None
-            if completed_delivery_scope is not None:
-                completed_delivery_scope.settlement_succeeded = True
-                completed_delivery_scope.settlement_finished.set()
+            settlement_succeeded = True
         finally:
             if completed_delivery_scope is not None:
 
@@ -1871,13 +1865,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     if callable(discard):
                                         discard()
 
-                cleanup_task = asyncio.create_task(
-                    cleanup_completed_delivery_scope(),
-                    name="http-bridge-completed-delivery-cleanup",
-                )
-                _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
-                if deferred_cancellation is not None:
-                    raise deferred_cancellation
+                try:
+                    cleanup_task = asyncio.create_task(
+                        cleanup_completed_delivery_scope(),
+                        name="http-bridge-completed-delivery-cleanup",
+                    )
+                    _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
+                    if deferred_cancellation is not None:
+                        settlement_succeeded = False
+                        raise deferred_cancellation
+                except BaseException:
+                    settlement_succeeded = False
+                    raise
+                finally:
+                    completed_delivery_scope.settlement_succeeded = settlement_succeeded
+                    completed_delivery_scope.settlement_finished.set()
 
     async def _settle_aborted_http_bridge_terminal_states(
         self: Any,
