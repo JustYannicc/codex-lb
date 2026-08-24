@@ -21365,6 +21365,72 @@ async def test_prewarm_budget_exhaustion_cleans_up_warmup_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reconnect_failure", "expected_exception"),
+    [(RuntimeError("reconnect failed"), RuntimeError), (asyncio.CancelledError(), asyncio.CancelledError)],
+)
+async def test_prewarm_sent_budget_reconnect_failure_clears_success_state(
+    monkeypatch: pytest.MonkeyPatch,
+    reconnect_failure: BaseException,
+    expected_exception: type[BaseException],
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-budget-reconnect-failure")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-budget-reconnect-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=0)
+    captured: dict[str, proxy_service._WebSocketRequestState] = {}
+
+    async def send_warmup(
+        _session: proxy_service._HTTPBridgeSession,
+        state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        captured["warmup"] = state
+        assert isinstance(state.event_queue, http_bridge_request_submit_module._HTTPBridgeLiveEventQueue)
+        assert state.event_queue.enqueue_terminal_event_nowait("oversized warmup event") is False
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(http_bridge_request_submit_module, "_HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET", budget)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_send_http_bridge_request_text_with_archive_id",
+        send_warmup,
+    )
+    reconnect = AsyncMock(side_effect=reconnect_failure)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    with pytest.raises(expected_exception):
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        )
+
+    assert request_state.prewarm_status == "error"
+    assert session.prewarmed is False
+    assert session.pending_requests == deque()
+    assert session.response_create_gate.locked() is False
+    assert budget.used_bytes == 0
+    assert captured["warmup"].event_queue_revoked.is_set()
+    reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_prewarm_aborted_terminal_settlement_fails_and_releases_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2541,6 +2541,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 return
 
             prewarm_started_at = _service_time().monotonic()
+            event_queue_revoked = asyncio.Event()
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
@@ -2551,7 +2552,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 awaiting_response_created=True,
-                event_queue=asyncio.Queue(),
+                event_queue=_HTTPBridgeLiveEventQueue(
+                    maxsize=_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE,
+                    revoked=event_queue_revoked,
+                ),
+                event_queue_revoked=event_queue_revoked,
                 transport=_REQUEST_TRANSPORT_HTTP,
                 request_text=warmup_text,
                 skip_request_log=True,
@@ -2628,6 +2633,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.model,
                         )
                         session.prewarmed = False
+                        _revoke_http_bridge_event_queue(warmup_state)
                         try:
                             # The warmup request has already been sent upstream.  Close/reconnect the
                             # socket while the warmup state is still attached so any late warmup
@@ -2684,6 +2690,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 _revoke_http_bridge_event_queue(warmup_state)
+                session.prewarmed = False
                 budget_exhausted = warmup_event_queue.budget_exceeded.is_set()
                 if warmup_send_started and budget_exhausted:
                     try:
@@ -2700,8 +2707,13 @@ class _HTTPBridgeRequestSubmitMixin:
                                 key=session.key.affinity_key,
                             ),
                         )
-                    except Exception:
+                    except BaseException:
                         session.closed = True
+                        request_state.prewarm_latency_ms = int(
+                            max(0.0, _service_time().monotonic() - prewarm_started_at) * 1000
+                        )
+                        request_state.prewarm_status = "error"
+                        _record_http_bridge_prewarm_outcome(outcome="error")
                         raise
                     finally:
                         await self._cleanup_http_bridge_submit_interruption(
