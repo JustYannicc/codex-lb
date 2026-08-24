@@ -22,9 +22,15 @@ case and turns every deploy into a multi-minute outage.
 - Record how each process left the SQLite store in a `<db>.runstate`
   sidecar: `running` once startup has begun, `clean` after the engines are
   disposed during an orderly shutdown.
+- Acquire a persistent `<db>.runstate.lock` SQLite sentinel before reading the
+  sidecar, hold it for the process lifetime, and fail startup closed when
+  another process already owns it. Release it only after the clean transition;
+  SQLite releases it automatically if the process dies.
 - Skip the startup integrity scan only when the sidecar records a clean
   shutdown. A crash, an OOM kill, a power loss, a first run, and an upgrade
   from a build that never wrote a sidecar all still run the scan.
+- Use an exclusive randomized temporary file for each sidecar write so a
+  local symlink cannot redirect the write before the atomic replacement.
 - Announce the scan before it starts (path, mode, file size) and log its
   duration when it passes, so the stall is attributable when it does happen.
 
@@ -37,6 +43,9 @@ cannot inherit the previous file's clean record. Both the record and its
 directory entry are fsynced, so a power loss cannot keep an earlier `clean`
 while losing the `running` transition. `clean` is recorded only after the
 engines actually finished disposing.
+The lifetime lock makes that ownership rule process-wide: startup cannot trust
+another process's `clean` marker, and a clean marker cannot be written after
+the lock has been released.
 
 ## Capabilities
 
@@ -56,7 +65,7 @@ non-SQLite backends. The existing
 `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE` (`quick` / `full` / `off`)
 keeps its current meaning and default; this only removes redundant runs of
 the mode already selected. The added artifact is one small sidecar file next
-to the database.
+to the database plus one persistent SQLite lock sentinel next to it.
 
 Operators who want the scan on every start regardless can still get it: the
 sidecar only ever suppresses a scan after this process itself recorded a

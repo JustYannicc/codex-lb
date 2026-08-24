@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import tempfile
 import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -163,6 +164,49 @@ def sqlite_runstate_path(db_path: Path) -> Path:
     return db_path.with_name(f"{db_path.name}.runstate")
 
 
+def sqlite_runstate_lock_path(db_path: Path) -> Path:
+    """Persistent SQLite sentinel used to fence one process onto ``db_path``."""
+    return db_path.with_name(f"{db_path.name}.runstate.lock")
+
+
+class SqliteRunStateLockError(RuntimeError):
+    """The process could not obtain exclusive ownership of a SQLite store."""
+
+
+def acquire_sqlite_runstate_lock(db_path: Path) -> sqlite3.Connection:
+    """Hold an exclusive sentinel transaction for the lifetime of one process.
+
+    The sentinel is deliberately never unlinked. A ``BEGIN IMMEDIATE`` on its
+    own SQLite file is portable, vanishes automatically when the process dies,
+    and cannot be confused with the main database's application transactions.
+    """
+    lock_path = sqlite_runstate_lock_path(db_path)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(str(lock_path), timeout=0, isolation_level=None)
+        connection.execute("BEGIN IMMEDIATE")
+    except (OSError, sqlite3.Error) as exc:
+        if connection is not None:
+            connection.close()
+        raise SqliteRunStateLockError(
+            f"Could not acquire the SQLite lifetime lock {lock_path}; "
+            "another process may already be using this database"
+        ) from exc
+    return connection
+
+
+def release_sqlite_runstate_lock(connection: sqlite3.Connection) -> None:
+    """Release a lifetime sentinel lock without deleting its persistent file."""
+    try:
+        connection.rollback()
+    except sqlite3.Error:
+        # Closing still releases the lock when a rollback is interrupted or
+        # the underlying sentinel has become unavailable.
+        pass
+    finally:
+        connection.close()
+
+
 def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
     """Identify the database file well enough to detect that it was replaced.
 
@@ -233,7 +277,9 @@ def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
     A ``clean`` record is honoured only while the database file still matches
     the size and mtime captured when the record was written. Restoring a
     backup or swapping the file in by hand therefore reads back as unknown
-    rather than inheriting the previous file's clean record.
+    rather than inheriting the previous file's clean record. Startup callers
+    must acquire the matching lifetime lock before using this result to skip a
+    check.
     """
     try:
         raw = sqlite_runstate_path(db_path).read_text(encoding="utf-8")
@@ -263,13 +309,18 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     A failed write must never leave a stale ``clean`` sidecar behind, because
     that would tell the next startup to skip the integrity check for a store
     this process may have left mid-write. The fallback is to remove the
-    sidecar entirely, which reads back as unknown and forces the check.
+    sidecar entirely, which reads back as unknown and forces the check. The
+    caller is responsible for holding the lifetime lock around state changes.
     """
     target = sqlite_runstate_path(db_path)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp: Path | None = None
+    tmp_fd: int | None = None
     payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
     try:
-        with open(tmp, "w", encoding="utf-8") as handle:
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{target.name}.", suffix=".tmp", dir=target.parent)
+        tmp = Path(tmp_name)
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            tmp_fd = None
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -278,7 +329,14 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             raise OSError("could not sync the run-state directory entry")
         return True
     except OSError:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
         for cleanup in (tmp, target):
+            if cleanup is None:
+                continue
             try:
                 cleanup.unlink(missing_ok=True)
             except OSError:

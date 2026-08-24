@@ -23,7 +23,9 @@ from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteIntegrityCheckMode,
     SqliteRunState,
+    acquire_sqlite_runstate_lock,
     read_sqlite_runstate,
+    release_sqlite_runstate_lock,
     write_sqlite_runstate,
 )
 
@@ -1863,9 +1865,50 @@ def test_mark_sqlite_shutdown_clean_records_a_clean_close(monkeypatch, tmp_path)
         _FakeSettings(database_url=f"sqlite+aiosqlite:///{db_path}"),
     )
 
+    session_module._acquire_sqlite_lifetime_lock(db_path)
     session_module.mark_sqlite_shutdown_clean()
 
     assert read_sqlite_runstate(db_path) is SqliteRunState.CLEAN
+
+
+def test_mark_sqlite_shutdown_clean_releases_the_lifetime_lock(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.RUNNING)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{db_path}"),
+    )
+
+    session_module._acquire_sqlite_lifetime_lock(db_path)
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert session_module._sqlite_lifetime_lock is None
+    replacement = acquire_sqlite_runstate_lock(db_path)
+    release_sqlite_runstate_lock(replacement)
+
+
+@pytest.mark.asyncio
+async def test_init_db_fails_closed_when_another_process_holds_the_lifetime_lock(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    held = acquire_sqlite_runstate_lock(db_path)
+    try:
+        monkeypatch.setattr(
+            session_module,
+            "_settings",
+            _FakeSettings(
+                database_url=f"sqlite+aiosqlite:///{db_path}",
+                database_migrate_on_startup=False,
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="SQLite lifetime lock"):
+            await session_module.init_db()
+    finally:
+        release_sqlite_runstate_lock(held)
 
 
 def test_mark_sqlite_shutdown_clean_is_inert_for_non_sqlite_backends(monkeypatch, tmp_path) -> None:

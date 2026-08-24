@@ -121,6 +121,20 @@ def test_runstate_round_trips(tmp_path: Path) -> None:
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
 
 
+def test_runstate_lifetime_lock_is_exclusive_and_reusable(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    first = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    try:
+        with pytest.raises(sqlite_utils_module.SqliteRunStateLockError, match="lifetime lock"):
+            sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    finally:
+        sqlite_utils_module.release_sqlite_runstate_lock(first)
+
+    second = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    sqlite_utils_module.release_sqlite_runstate_lock(second)
+    assert sqlite_utils_module.sqlite_runstate_lock_path(db_path).exists()
+
+
 def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
     db_path = tmp_path / "store.db"
     sqlite_utils_module.sqlite_runstate_path(db_path).write_text("half-written", encoding="utf-8")
@@ -146,6 +160,23 @@ def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not available on all Windows test runners")
+def test_runstate_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    victim = tmp_path / "victim"
+    victim.write_text("keep me", encoding="utf-8")
+    predictable_tmp = sqlite_utils_module.sqlite_runstate_path(db_path).with_name(
+        f"{sqlite_utils_module.sqlite_runstate_path(db_path).name}.{os.getpid()}.tmp"
+    )
+    predictable_tmp.symlink_to(victim)
+    try:
+        assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is True
+        assert victim.read_text(encoding="utf-8") == "keep me"
+    finally:
+        predictable_tmp.unlink(missing_ok=True)
 
 
 def test_runstate_clean_is_ignored_after_the_database_file_changes(tmp_path: Path) -> None:
