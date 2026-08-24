@@ -32309,6 +32309,8 @@ async def test_invalidate_denied_bridge_anchor_drops_memory_even_when_the_durabl
     assert cleared is False
     assert session.last_completed_response_id is None
     assert session.last_completed_input_prefix_fingerprint is None
+    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    assert session.previous_response_ids == {"resp_old", "resp_denied"}
 
 
 def _denied_anchor_request_state(

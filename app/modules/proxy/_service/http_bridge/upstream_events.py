@@ -1213,11 +1213,13 @@ async def _invalidate_denied_http_bridge_anchor(
             logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
         finally:
             try:
-                await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
-            except asyncio.CancelledError as exc:
-                unregister_error = exc
-            except Exception as exc:
-                unregister_error = exc
+                if cleared or no_durable_owner:
+                    try:
+                        await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
+                    except asyncio.CancelledError as exc:
+                        unregister_error = exc
+                    except Exception as exc:
+                        unregister_error = exc
             finally:
                 async with session.lifecycle_lock:
                     if session.last_completed_response_id == denied_response_id:
