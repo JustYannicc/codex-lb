@@ -372,7 +372,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
     def enqueue_terminal_event_nowait(self, event_block: str) -> bool:
         """Queue a terminal event and EOS without waiting for live capacity."""
-        if self._discarded:
+        if self._discarded or self._terminal_outcome != _HTTPBridgeLiveEventQueueTerminalOutcome.OPEN:
             return False
         if self._revoked.is_set():
             if self._terminal_pending and self._terminal_items != deque((None,)):
@@ -396,7 +396,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         prevents a producer that was already waiting on a full queue from
         inserting an event after the marker.
         """
-        if self._discarded:
+        if self._discarded or self._terminal_outcome != _HTTPBridgeLiveEventQueueTerminalOutcome.OPEN:
             return False
         if self._terminal_pending:
             return True

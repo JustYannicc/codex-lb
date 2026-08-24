@@ -295,6 +295,28 @@ async def test_http_bridge_event_queue_discard_releases_retained_payloads() -> N
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_live_event_queue_does_not_overwrite_budget_failure_with_clean_terminal() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+
+    event_queue.put_nowait("123456")
+
+    assert (
+        event_queue.terminal_outcome
+        == http_bridge_request_submit_module._HTTPBridgeLiveEventQueueTerminalOutcome.BUDGET_EXCEEDED
+    )
+    assert event_queue.enqueue_terminal_event_nowait("x") is False
+    assert (
+        event_queue.terminal_outcome
+        == http_bridge_request_submit_module._HTTPBridgeLiveEventQueueTerminalOutcome.BUDGET_EXCEEDED
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
