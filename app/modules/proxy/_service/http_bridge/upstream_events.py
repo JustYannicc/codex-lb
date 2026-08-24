@@ -661,13 +661,16 @@ async def _retry_denied_http_bridge_anchor_clear(
         except Exception:
             logger.warning("Retrying denied HTTP bridge response-anchor clear after durable failure", exc_info=True)
             continue
-        try:
-            await service._unregister_http_bridge_previous_response_id(session, response_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Retrying denied HTTP bridge response-alias unregister after cleanup failure", exc_info=True)
         if cleared is not None:
+            try:
+                await service._unregister_http_bridge_previous_response_id(session, response_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
+                    exc_info=True,
+                )
             async with session.lifecycle_lock:
                 session.denied_proxy_injected_anchor_ids.discard(response_id)
                 session.denied_proxy_injected_anchor_generation += 1

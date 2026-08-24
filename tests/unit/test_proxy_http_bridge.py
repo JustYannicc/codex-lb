@@ -694,9 +694,31 @@ async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A denial that wins the lifecycle lock must fence the prepared send."""
+
+    class ObservedLifecycleLock:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+            self._waiters: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+
+        async def __aenter__(self) -> None:
+            if self._lock.locked():
+                waiter_started = asyncio.Event()
+                self._waiters.put_nowait(waiter_started)
+                waiter_started.set()
+            await self._lock.acquire()
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+            self._lock.release()
+
+        async def wait_for_waiter(self) -> None:
+            waiter_started = await asyncio.wait_for(self._waiters.get(), timeout=1.0)
+            await asyncio.wait_for(waiter_started.wait(), timeout=1.0)
+
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="denied-anchor-publication-race")
-    session.lifecycle_lock = cast(Any, asyncio.Lock())
+    lifecycle_lock = ObservedLifecycleLock()
+    session.lifecycle_lock = cast(Any, lifecycle_lock)
     session.durable_session_id = "durable-denied-anchor-publication-race"
     session.durable_owner_epoch = 4
     session.last_completed_response_id = "resp-denied"
@@ -737,7 +759,7 @@ async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
                 denied_response_id="resp-denied",
             )
         )
-        await asyncio.sleep(0)
+        await lifecycle_lock.wait_for_waiter()
         published_while_send_section_active = "resp-denied" in session.denied_proxy_injected_anchor_ids
         submit_task = asyncio.create_task(
             service._submit_http_bridge_request_with_handoff(
@@ -749,7 +771,7 @@ async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
                 owned_unanchored_handoff=False,
             )
         )
-        await asyncio.sleep(0)
+        await lifecycle_lock.wait_for_waiter()
 
     assert await invalidate_task is True
     with pytest.raises(ProxyResponseError) as exc_info:

@@ -984,7 +984,11 @@ class DurableBridgeRepository:
                     HttpBridgeSessionAlias.api_key_scope == api_key_scope,
                 )
             )
-            row = await self._session.get(HttpBridgeSessionRecord, session_id)
+            row = await self._session.get(
+                HttpBridgeSessionRecord,
+                session_id,
+                populate_existing=True,
+            )
             await self._session.commit()
         return _to_snapshot(row)
 
