@@ -8,14 +8,19 @@ not part of the dump, so they must be removed at each replacement boundary.
 
 - Remove `-wal`, `-shm`, and `-journal` by exact path.
 - Remove `-mj*` master journals by globbing an escaped database basename.
+- Hold `BEGIN EXCLUSIVE` on the source across final output import, sidecar
+  cleanup, and source replacement. A lock failure aborts before any rename,
+  so an active connection cannot write the old inode after installation.
 - Fail recovery rather than install an ambiguous replacement when sidecar
   removal reports an error.
 
 ## Proof seam
 
 Recovery tests hold a source WAL open across dump creation, seed output
-sidecars, and verify the installed database and both sidecar sets. A wildcard
-filename test proves unrelated master journals remain untouched.
+sidecars, and verify the installed database and both sidecar sets. A boundary
+test attempts a write while the exclusive lock is held and verifies that a
+fresh connection writes to the installed database. A wildcard filename test
+proves unrelated master journals remain untouched.
 
 ## Dependencies
 
