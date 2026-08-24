@@ -32152,6 +32152,59 @@ def test_denied_anchor_fence_pruning_keeps_active_request_provenance() -> None:
     http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, "request-active-fence")
 
 
+def test_forgetting_denied_anchor_fence_preserves_a_pinned_generation() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    response_id = "resp-pinned-forget"
+    request_state = _denied_anchor_request_state(previous_response_id=response_id)
+    request_state.request_id = "req-pinned-forget"
+
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id=response_id,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        response_id,
+        owner_key="owner-pinned-forget",
+    )
+    http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence(service, response_id)
+
+    entry = service._http_bridge_denied_anchor_fences[response_id]
+    assert entry.generation > 0
+    assert entry.superseded is True
+    assert http_bridge_helpers_module._http_bridge_denied_anchor_fence_advanced(service, request_state)
+
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, request_state.request_id)
+    assert response_id not in service._http_bridge_denied_anchor_fences
+
+
+def test_denied_anchor_owner_epoch_cleanup_does_not_clear_successor_slot() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor",
+        owner_key="durable-cross-session",
+        owner_epoch=9,
+    )
+
+    http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence_owner(
+        service,
+        "durable-cross-session",
+        owner_epoch=4,
+    )
+
+    assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")["durable-cross-session"] == "resp-successor"
+    assert "resp-successor" in service._http_bridge_denied_anchor_fences
+
+
 @pytest.mark.asyncio
 async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
     """An upstream denial of a proxy-injected anchor retires it on the first occurrence.

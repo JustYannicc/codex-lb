@@ -16,6 +16,7 @@ from app.core.metrics.prometheus import (
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
+    _forget_http_bridge_denied_anchor_fence_owner,
     _http_bridge_allow_durable_takeover,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
@@ -605,6 +606,20 @@ class _HTTPBridgeSessionRegistryMixin:
                         "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
                         error_type="server_error",
                     ),
+                )
+            previous_durable_session_id = session.durable_session_id
+            previous_durable_owner_epoch = session.durable_owner_epoch
+            next_owner_changed = (
+                previous_durable_session_id != lookup.session_id or previous_durable_owner_epoch != lookup.owner_epoch
+            )
+            if next_owner_changed:
+                previous_owner_key = (
+                    previous_durable_session_id if previous_durable_session_id is not None else f"local:{id(session)}"
+                )
+                _forget_http_bridge_denied_anchor_fence_owner(
+                    self,
+                    previous_owner_key,
+                    owner_epoch=previous_durable_owner_epoch,
                 )
             session.durable_session_id = lookup.session_id
             session.durable_owner_epoch = lookup.owner_epoch

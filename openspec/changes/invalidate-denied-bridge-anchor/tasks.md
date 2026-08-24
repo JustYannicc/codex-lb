@@ -23,6 +23,8 @@
 - [x] 2.7 Serialize tombstone publication with the submitter's final revalidation and send section.
 - [x] 2.8 Retain denied-id generations in a bounded process-local ledger and fail closed when a prepared request's captured generation is superseded, including when no canonical session existed at capture time.
 - [x] 2.9 Treat an already-recorded denial as a hard observation for later durable captures and owner-forward recovery injections, even when no generation advance is observed by the new request.
+- [x] 2.10 Preserve positive denial generations until the last active request pin releases, including after durable clear success or alias-unregister failure.
+- [x] 2.11 Retire no-durable-owner sibling-race slots and stale session/epoch owner slots without clearing a successor fence.
 
 ## 3. Recovery Provenance
 

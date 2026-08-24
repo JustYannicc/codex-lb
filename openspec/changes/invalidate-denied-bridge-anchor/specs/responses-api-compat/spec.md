@@ -123,11 +123,34 @@ The downstream error contract is unchanged: the denial is still reported to the 
 
 If alias unregistering raises after the durable clear, the same in-memory cleanup MUST still occur.
 
+The process-local denial fence MUST retain its positive generation while any
+request still pins the denied id, even after durable cleanup succeeds. Such a
+prepared request MUST remain fenced until its final pin is released; the fence
+may then be removed. Fence state MUST be bounded to one current denial slot per
+active durable or local owner plus active request pins, and a session close or
+durable-owner epoch change MUST retire the old owner's unpinned slot without
+clearing a successor epoch's slot.
+
 #### Scenario: A retirement failure cannot change the denial delivered downstream
 
 - **GIVEN** the bookkeeping performed while retiring a denied anchor raises
 - **WHEN** the denial is handled
 - **THEN** the error MUST NOT propagate into terminal-event handling
+
+#### Scenario: Durable cleanup preserves a prepared request's denial fence
+
+- **GIVEN** a request has pinned a proxy-injected anchor while another request receives `previous_response_not_found`
+- **WHEN** the durable clear succeeds
+- **THEN** the denied fence keeps its positive generation until the prepared request releases its pin
+- **AND** the prepared request remains fenced during that interval
+- **AND** the fence is removed after the final pin is released
+
+#### Scenario: A successor epoch survives predecessor fence cleanup
+
+- **GIVEN** a successor owns the same durable session id at a newer epoch
+- **WHEN** the predecessor closes or its durable clear completes
+- **THEN** cleanup removes only the predecessor's unpinned fence state
+- **AND** the successor's current denial slot remains active
 
 ### Requirement: Anchored recovery retries retain the provenance of the anchor they replay
 
