@@ -28315,6 +28315,38 @@ async def test_http_bridge_retry_circuit_counts_stuck_gate_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_elapsed_durable_cooldown_does_not_burn_half_open_probe() -> None:
+    """An already-elapsed durable cooldown is not a cooldown that just ended."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-elapsed-cooldown")
+    # ``persist_retry_circuit`` writes ``now_wall`` when the failure count is
+    # below the threshold, and a real cooldown simply elapses. Both leave a row
+    # whose ``cooldown_until_epoch`` is in the past.
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 120.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        persist_retry_circuit=AsyncMock(),
+        clear_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.cooldown_until == 0.0
+    assert state.half_open_until == 0.0
+    assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) == 0.0
+    # The decisive part: a key that was never cooling down must not lock every
+    # other request out behind a probe lease it never needed.
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-submit-cooldown")

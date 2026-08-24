@@ -258,7 +258,16 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-        persisted_cooldown_until = now_monotonic + cooldown_remaining
+        # ``cooldown_until`` is a monotonic deadline whose zero means "this key
+        # is not cooling down". A durable row whose cooldown already elapsed --
+        # or which never had one, because ``persist_retry_circuit`` writes
+        # ``now_wall`` for a below-threshold failure count -- must load as that
+        # zero. Loading it as ``now_monotonic`` instead makes it simultaneously
+        # non-zero and expired, which is exactly the condition
+        # ``_http_bridge_precreated_retry_allowed`` reads as "a cooldown just
+        # ended", so it burns a half-open probe lease on a key that was never
+        # cooling down and suppresses every other request for that lease.
+        persisted_cooldown_until = now_monotonic + cooldown_remaining if cooldown_remaining > 0.0 else 0.0
         async with self._http_bridge_retry_circuit_lock:
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
             state = self._http_bridge_retry_circuits.get(session.key)
