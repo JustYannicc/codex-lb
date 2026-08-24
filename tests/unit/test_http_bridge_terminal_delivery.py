@@ -25,7 +25,9 @@ def _settings() -> SimpleNamespace:
     )
 
 
-def _request_state(event_queue: asyncio.Queue[str | None]) -> proxy_service._WebSocketRequestState:
+def _request_state(
+    event_queue: request_submit_module._HTTPBridgeLiveEventQueue,
+) -> proxy_service._WebSocketRequestState:
     return proxy_service._WebSocketRequestState(
         request_id="req-terminal-delivery",
         model="gpt-5.6-sol",
@@ -34,7 +36,7 @@ def _request_state(event_queue: asyncio.Queue[str | None]) -> proxy_service._Web
         api_key_reservation=None,
         started_at=time.monotonic(),
         event_queue=event_queue,
-        event_queue_revoked=cast(Any, event_queue)._revoked,
+        event_queue_revoked=event_queue.revoked,
         event_queue_consumer_started=True,
         operation_id="op-terminal-delivery",
         response_id="resp-terminal-delivery",
@@ -53,7 +55,7 @@ def _session() -> Any:
     )
 
 
-def _live_queue(*, maxsize: int) -> asyncio.Queue[str | None]:
+def _live_queue(*, maxsize: int) -> request_submit_module._HTTPBridgeLiveEventQueue:
     return request_submit_module._HTTPBridgeLiveEventQueue(maxsize=maxsize, revoked=asyncio.Event())
 
 
@@ -226,7 +228,7 @@ async def test_terminal_delivery_preserves_cancellation_after_revoked_cleanup(
     release_append.set()
     await asyncio.sleep(0.05)
     assert persist_task.done() is False
-    cast(Any, queue).revoke()
+    queue.revoke()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(persist_task, timeout=1.0)
     settle_terminal_event.assert_awaited_once()
@@ -266,7 +268,7 @@ async def test_revoked_terminal_delivery_settles_without_waiting_for_idle_timeou
 
     await asyncio.sleep(0)
     assert persist_task.done() is False
-    cast(Any, queue).revoke()
+    queue.revoke()
 
     assert await asyncio.wait_for(persist_task, timeout=0.2) is False
     settle_terminal_event.assert_awaited_once()

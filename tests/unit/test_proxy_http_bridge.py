@@ -195,7 +195,7 @@ async def test_http_bridge_abort_terminal_cancels_blocked_producer_after_buffere
 
 
 def test_http_bridge_plain_queue_terminal_delivery_does_not_duplicate_event() -> None:
-    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=2)
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=3)
     event_queue.put_nowait("buffered")
     request_state = cast(Any, SimpleNamespace(event_queue=event_queue, event_queue_revoked=asyncio.Event()))
     event_block = 'data: {"type":"response.completed"}\n\n'
@@ -292,6 +292,50 @@ async def test_http_bridge_event_queue_discard_releases_retained_payloads() -> N
     assert event_queue.empty()
     assert event_queue.queued_bytes == 0
     assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event consumed after budget selection must still reach the stream."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    original_wait = asyncio.wait
+    race_triggered = False
+
+    async def wait_with_budget_race(
+        awaitables: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal race_triggered
+        tasks = tuple(awaitables)
+        result = await original_wait(tasks, *args, **kwargs)
+        task_names = {task.get_name() for task in tasks if isinstance(task, asyncio.Task)}
+        if (
+            not race_triggered
+            and "http-bridge-event-consumer" in task_names
+            and "http-bridge-event-budget" in task_names
+        ):
+            race_triggered = True
+            event_queue.put_nowait("raced-event")
+            event_queue.revoke()
+        return result
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", wait_with_budget_race)
+
+    async def trip_budget() -> None:
+        await asyncio.sleep(0)
+        event_queue.budget_exceeded.set()
+
+    budget_task = asyncio.create_task(trip_budget())
+    assert await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=None) == "raced-event"
+    await budget_task
+    assert event_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -743,7 +787,7 @@ async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue(
         api_key_reservation=None,
         started_at=time.monotonic(),
         event_queue=event_queue,
-        event_queue_revoked=event_queue._revoked,
+        event_queue_revoked=event_queue.revoked,
         transport="http",
         skip_request_log=True,
     )
@@ -783,7 +827,7 @@ async def test_http_bridge_liveness_settlement_discards_preconsumer_full_sibling
 
     def live_state(
         request_id: str,
-        event_queue: asyncio.Queue[str | None],
+        event_queue: http_bridge_request_submit_module._HTTPBridgeLiveEventQueue,
     ) -> proxy_service._WebSocketRequestState:
         return proxy_service._WebSocketRequestState(
             request_id=request_id,
@@ -793,7 +837,7 @@ async def test_http_bridge_liveness_settlement_discards_preconsumer_full_sibling
             api_key_reservation=None,
             started_at=time.monotonic(),
             event_queue=event_queue,
-            event_queue_revoked=cast(Any, event_queue)._revoked,
+            event_queue_revoked=event_queue.revoked,
             transport="http",
             skip_request_log=True,
         )
@@ -878,7 +922,7 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
         started_at=time.monotonic(),
         response_id="resp-attached-paused-sibling",
         event_queue=sibling_queue,
-        event_queue_revoked=sibling_queue._revoked,
+        event_queue_revoked=sibling_queue.revoked,
         event_queue_consumer_started=True,
         transport="http",
         skip_request_log=True,
@@ -895,7 +939,7 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
         api_key_reservation=None,
         started_at=time.monotonic(),
         event_queue=failed_queue,
-        event_queue_revoked=failed_queue._revoked,
+        event_queue_revoked=failed_queue.revoked,
         transport="http",
         skip_request_log=True,
     )

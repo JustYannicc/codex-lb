@@ -351,24 +351,12 @@ def _enqueue_http_bridge_abort_eos(
     enqueue_terminal = getattr(event_queue, "enqueue_terminal_nowait", None)
     if callable(enqueue_terminal):
         return bool(enqueue_terminal())
+    if event_queue.maxsize > 0 and event_queue.qsize() >= event_queue.maxsize:
+        return False
     try:
         event_queue.put_nowait(None)
     except asyncio.QueueFull:
-        # Plain asyncio queues are used by replay/test callers.  Reserve one
-        # terminal slot without evicting the oldest event; this remains a
-        # bounded, synchronous operation and keeps the marker after the
-        # buffered sequence.
-        maxsize = getattr(event_queue, "_maxsize", 0)
-        if maxsize <= 0:
-            return False
-        queue_state = cast(Any, event_queue)
-        queue_state._maxsize = maxsize + 1
-        try:
-            event_queue.put_nowait(None)
-        except asyncio.QueueFull:
-            return False
-        finally:
-            queue_state._maxsize = maxsize
+        return False
     return True
 
 
@@ -383,27 +371,17 @@ def _enqueue_http_bridge_terminal_event(
     enqueue_terminal = getattr(event_queue, "enqueue_terminal_event_nowait", None)
     if callable(enqueue_terminal):
         return bool(enqueue_terminal(event_block))
-    event_enqueued = False
+    if event_queue.maxsize > 0 and event_queue.qsize() + 2 > event_queue.maxsize:
+        return False
     try:
         event_queue.put_nowait(event_block)
-        event_enqueued = True
         event_queue.put_nowait(None)
         return True
     except asyncio.QueueFull:
-        maxsize = getattr(event_queue, "_maxsize", 0)
-        if maxsize <= 0:
-            return False
-        queue_state = cast(Any, event_queue)
-        queue_state._maxsize = maxsize + (1 if event_enqueued else 2)
-        try:
-            if not event_enqueued:
-                event_queue.put_nowait(event_block)
-            event_queue.put_nowait(None)
-            return True
-        except asyncio.QueueFull:
-            return False
-        finally:
-            queue_state._maxsize = maxsize
+        # The public queue API cannot append an ordered terminal sequence to a
+        # full plain queue without evicting data. Live queues provide the
+        # out-of-band terminal API above; plain queues fail closed here.
+        return False
 
 
 async def _enqueue_http_bridge_event(
