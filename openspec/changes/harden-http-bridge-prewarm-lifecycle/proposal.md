@@ -10,13 +10,16 @@ same socket and be matched to a later request.
 ## What Changes
 
 - Record the terminal outcome of each bounded live-event queue.
-- Treat prewarm end-of-stream as success only for an ordered clean terminal.
+- Treat prewarm end-of-stream as success only after the queue reports an
+  ordered clean terminal and terminal settlement reports success.
 - Fail closed and release pending warmup, gate, queue-credit, and session state
-  for revoked, aborted, discarded, or budget-exceeded outcomes.
+  for revoked, aborted, cancelled, discarded, or budget-exceeded outcomes. An
+  aborted or cancelled terminal settlement returns HTTP 502 to the prewarm
+  caller.
 - Reconnect an already-used bridge socket before cleaning up a budget-failed
   prewarm, so late warmup frames cannot contaminate a later request.
-- Add deterministic regression coverage for budget and claimed-terminal abort
-  paths.
+- Add deterministic regression coverage for budget, claimed-terminal abort,
+  and cancellation-after-clean-EOS paths.
 
 ## Dependencies
 
@@ -37,8 +40,11 @@ None.
 
 ## Impact
 
-- Affected code: HTTP-bridge prewarm submission in
-  `app/modules/proxy/_service/http_bridge/request_submit.py`.
+- Affected code: prewarm submission in
+  `app/modules/proxy/_service/http_bridge/request_submit.py`, terminal
+  settlement signaling in
+  `app/modules/proxy/_service/http_bridge/upstream_events.py`, and the
+  completed-delivery state in `app/modules/proxy/_service/support.py`.
 - Affected tests: focused prewarm lifecycle cases in
   `tests/unit/test_proxy_http_bridge.py`.
 - No API, setting, dependency, migration, dashboard, wire-format, or durable
