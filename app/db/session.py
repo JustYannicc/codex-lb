@@ -24,10 +24,12 @@ from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteIntegrityCheckMode,
     SqliteRunState,
+    acquire_sqlite_runstate_lock,
     check_sqlite_integrity,
     integrity_check_pragma_name,
     normalize_sqlite_url,
     read_sqlite_runstate,
+    release_sqlite_runstate_lock,
     sqlite_db_path_from_url,
     write_sqlite_runstate,
 )
@@ -346,6 +348,8 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 _background_engine: AsyncEngine | None = None
 _background_session_factory: async_sessionmaker[AsyncSession] | None = None
 _sqlite_writer_lock: anyio.Lock | None = None
+_sqlite_lifetime_lock: sqlite3.Connection | None = None
+_sqlite_lifetime_lock_path: Path | None = None
 
 _T = TypeVar("_T")
 
@@ -360,6 +364,25 @@ def _ensure_sqlite_dir(url: str) -> None:
         return
 
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _release_sqlite_lifetime_lock() -> None:
+    global _sqlite_lifetime_lock, _sqlite_lifetime_lock_path
+    connection = _sqlite_lifetime_lock
+    _sqlite_lifetime_lock = None
+    _sqlite_lifetime_lock_path = None
+    if connection is not None:
+        release_sqlite_runstate_lock(connection)
+
+
+def _acquire_sqlite_lifetime_lock(sqlite_path: Path) -> None:
+    global _sqlite_lifetime_lock, _sqlite_lifetime_lock_path
+    if _sqlite_lifetime_lock is not None and _sqlite_lifetime_lock_path == sqlite_path:
+        return
+    _release_sqlite_lifetime_lock()
+    connection = acquire_sqlite_runstate_lock(sqlite_path)
+    _sqlite_lifetime_lock = connection
+    _sqlite_lifetime_lock_path = sqlite_path
 
 
 def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None:
@@ -425,18 +448,32 @@ def _mark_sqlite_running(sqlite_path: Path) -> None:
 def mark_sqlite_shutdown_clean() -> None:
     """Record that this process closed the SQLite store cleanly.
 
-    Call this after the engines are disposed. The next startup reads it and
-    skips the integrity scan, which is what keeps an operator restart from
-    paying a whole-file read that grows with the store.
+    Call this after the engines are disposed while the process still owns the
+    SQLite lifetime lock. The next startup reads it and skips the integrity
+    scan, which is what keeps an operator restart from paying a whole-file read
+    that grows with the store.
     """
     sqlite_path = sqlite_db_path_from_url(normalize_sqlite_url(_settings.database_url))
     if sqlite_path is None:
         return
-    if not write_sqlite_runstate(sqlite_path, SqliteRunState.CLEAN):
+    if _sqlite_lifetime_lock is None or _sqlite_lifetime_lock_path != sqlite_path:
         logger.warning(
-            "Failed to record a clean SQLite shutdown path=%s; the next startup will run the integrity check",
+            "Cannot record a clean SQLite shutdown without the lifetime lock path=%s; "
+            "the next startup will run the integrity check",
             sqlite_path,
         )
+        return
+    try:
+        if not write_sqlite_runstate(sqlite_path, SqliteRunState.CLEAN):
+            logger.warning(
+                "Failed to record a clean SQLite shutdown path=%s; the next startup will run the integrity check",
+                sqlite_path,
+            )
+    finally:
+        # The clean transition is the last operation that needs ownership. A
+        # failed write remains unknown, but must not leave a process lock held
+        # after shutdown has completed.
+        _release_sqlite_lifetime_lock()
 
 
 async def _shielded(awaitable: Awaitable[object]) -> None:
@@ -913,7 +950,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         await close_session(session)
 
 
-async def init_db() -> None:
+async def _init_db() -> None:
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
     sqlite_path = sqlite_db_path_from_url(database_url)
@@ -1028,6 +1065,26 @@ async def init_db() -> None:
         logger.exception("Failed to apply database migrations")
         if _settings.database_migrations_fail_fast:
             raise
+
+
+async def init_db() -> None:
+    """Initialize the database while fencing one process onto file SQLite."""
+    database_url = normalize_sqlite_url(_settings.database_url)
+    _ensure_sqlite_dir(database_url)
+    sqlite_path = sqlite_db_path_from_url(database_url)
+    if sqlite_path is None:
+        _release_sqlite_lifetime_lock()
+        await _init_db()
+        return
+
+    _acquire_sqlite_lifetime_lock(sqlite_path)
+    try:
+        await _init_db()
+    except BaseException:
+        # A failed startup never owns a live application, so it must not leave
+        # this process's test/reload path holding the sentinel indefinitely.
+        _release_sqlite_lifetime_lock()
+        raise
 
 
 async def close_db() -> None:

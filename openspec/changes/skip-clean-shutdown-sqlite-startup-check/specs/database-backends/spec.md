@@ -16,6 +16,15 @@ after the database engines are disposed during an orderly shutdown. The
 `clean` record MUST NOT be reachable from a crash, a signal-killed process,
 or a failed startup.
 
+Before reading the run-state sidecar, startup MUST acquire an exclusive
+transaction on a persistent `<db>.runstate.lock` SQLite sentinel. Startup MUST
+fail closed when that lifetime lock cannot be acquired, rather than trusting a
+`clean` marker while another process may be using the database. The process
+MUST hold the lock through its database lifetime and MUST release it only after
+the `clean` transition has been attempted. SQLite's transaction semantics MUST
+release the lock when the process exits unexpectedly. A `clean` transition MUST
+be attempted only while the corresponding lifetime lock is held.
+
 Every state other than a recorded `clean` MUST run the check. A missing
 sidecar MUST read as unknown rather than clean, so a first run and an upgrade
 from a build that never wrote one both still scan. Sidecar content that cannot be read, cannot be
@@ -50,6 +59,11 @@ the open reports, because Windows refuses a directory handle with the same
 file can keep its size and modification time across a long run, so a lost
 transition would leave a `clean` record that still matches.
 
+Each run-state write MUST create its temporary file with an exclusive,
+unpredictable name in the target directory before writing, syncing, and
+atomically replacing the sidecar. A predictable temporary pathname MUST NOT be
+opened for writing.
+
 Recording `clean` MUST NOT be reachable unless the database engines actually
 finished disposing. A cancelled or failed disposal MUST leave the run state
 unclean.
@@ -63,6 +77,20 @@ requirement governs only whether the selected mode runs on a given startup.
 - **WHEN** the application starts with the check mode enabled
 - **THEN** no integrity check runs
 - **AND** the sidecar is updated to record that a process is running
+
+#### Scenario: A second process cannot trust or replace a live process's clean marker
+
+- **GIVEN** one process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** another process starts against the same SQLite file
+- **THEN** startup fails closed before it reads the clean marker
+- **AND** the second process does not run migrations or serve traffic
+
+#### Scenario: Clean shutdown releases ownership after the marker transition
+
+- **GIVEN** a process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** database disposal completes and shutdown records `clean`
+- **THEN** the sidecar records `clean` only while that lock is held
+- **AND** the lock is released after the write attempt
 
 #### Scenario: An unfinished previous process still scans
 

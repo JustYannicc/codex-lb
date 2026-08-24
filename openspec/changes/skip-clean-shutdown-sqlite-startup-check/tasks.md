@@ -16,6 +16,11 @@
   directory that cannot be opened, and skip the sync only on a platform that
   offers no directory handle at all (Windows), decided by platform rather
   than by the error the open reports.
+- [x] 1.8 Add a persistent `<db>.runstate.lock` SQLite sentinel transaction
+  that fences one process onto a file-backed database and releases on process
+  death.
+- [x] 1.9 Create sidecar temporary files with `tempfile.mkstemp` rather than a
+  predictable PID-derived pathname.
 
 ## 2. Startup
 
@@ -25,6 +30,8 @@
   `off`, so re-enabling the check cannot trust a state this build never wrote.
 - [x] 2.3 Log the scan before it starts with path, mode, and file size, and
   log its elapsed duration on success.
+- [x] 2.4 Acquire the lifetime lock before reading the sidecar and fail startup
+  closed when another process already owns it.
 
 ## 3. Shutdown
 
@@ -33,6 +40,8 @@
 - [x] 3.2 Extract `_close_db_and_record_clean_shutdown()` so the ordering is
   testable, and keep `mark_lifespan_completed()` in the unconditional
   `finally`.
+- [x] 3.3 Permit the clean transition only while the lifetime lock is held and
+  release that lock after the write attempt.
 
 ## 4. Verification
 
@@ -49,3 +58,5 @@
 - [x] 4.5 Unit-test that a raised or cancelled `close_db()` does not record a
   clean shutdown.
 - [x] 4.6 Run Ruff check/format and `ty`.
+- [x] 4.7 Test lock contention, clean-transition lock release, startup fail
+  closed on contention, and the symlink-safe temporary-file path.
