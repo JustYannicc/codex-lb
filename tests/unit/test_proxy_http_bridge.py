@@ -454,7 +454,7 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        started_at=time.monotonic(),
         previous_response_id="resp-denied",
         proxy_injected_previous_response_id=True,
         request_text='{"type":"response.create","input":"next"}',
@@ -466,6 +466,7 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
         UpstreamWebSocket,
         SimpleNamespace(send_text=send_text, close=AsyncMock()),
     )
+    service._http_bridge_sessions[session.key] = session
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
 
