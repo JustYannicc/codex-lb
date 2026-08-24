@@ -28375,6 +28375,37 @@ async def test_http_bridge_retry_circuit_expiry_clears_loaded_local_deadline() -
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_expiry_clears_lookup_failure_probe() -> None:
+    """An expired row clears a probe leased during a transient lookup failure."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-expiry-lookup-failure")
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 0.1,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    lookup_retry_circuit = AsyncMock(side_effect=[persisted, RuntimeError("temporary lookup failure"), persisted])
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=lookup_retry_circuit,
+        persist_retry_circuit=AsyncMock(),
+        clear_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    persisted.cooldown_until_epoch = time.time() - 120.0
+    await anyio.sleep(0.15)
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert state.half_open_until > time.monotonic()
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert state.cooldown_until == 0.0
+    assert state.half_open_until == 0.0
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-submit-cooldown")

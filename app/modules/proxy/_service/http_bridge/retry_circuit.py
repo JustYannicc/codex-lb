@@ -278,6 +278,8 @@ class _HTTPBridgeRetryCircuitMixin:
             if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
+                if persisted_cooldown_until <= 0.0:
+                    state.half_open_until = 0.0
                 state.last_detail = persisted.last_detail
             else:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
@@ -291,6 +293,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     # monotonic deadline instead of turning that expiry into
                     # a half-open probe.
                     state.cooldown_until = 0.0
+                    state.half_open_until = 0.0
                 else:
                     state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
                 if local_failure_is_newer:
