@@ -67,11 +67,15 @@ def _make_claimed_request_state(event_queue: asyncio.Queue[str | None]) -> proxy
 @pytest.mark.asyncio
 async def test_aborted_terminal_settlement_unblocks_full_live_queue() -> None:
     """An aborted terminal owner must publish EOS even when the live queue is full."""
-    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=2)
+    event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
     event_queue.put_nowait("first-buffered-event")
     event_queue.put_nowait("last-buffered-event")
     assert event_queue.full()
     request_state = _make_claimed_request_state(event_queue)
+    request_state.event_queue_consumer_started = True
 
     await asyncio.wait_for(
         _AbortEosService()._settle_aborted_http_bridge_terminal_states(

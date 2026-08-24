@@ -25,7 +25,14 @@ None.
 
 ## Impact
 
-- Affected code: HTTP-bridge request preparation in `app/modules/proxy/_service/http_bridge/request_submit.py`.
-- Affected tests: focused HTTP-bridge integration coverage in `tests/integration/test_http_responses_bridge.py`.
+- Affected code: HTTP-bridge request preparation, upstream event publication, streaming, shared request state, and
+  websocket lifecycle handling in `app/modules/proxy/_service/http_bridge/request_submit.py`,
+  `app/modules/proxy/_service/http_bridge/upstream_events.py`,
+  `app/modules/proxy/_service/http_bridge/streaming.py`,
+  `app/modules/proxy/_service/support.py`, and
+  `app/modules/proxy/_service/websocket/mixin.py`.
+- Affected tests: `tests/integration/test_http_responses_bridge.py`, `tests/unit/test_proxy_http_bridge.py`,
+  `tests/unit/test_http_bridge_abort_eos.py`, `tests/unit/test_http_bridge_cancel_drain.py`, and
+  `tests/unit/test_http_bridge_terminal_delivery.py`.
 - Affected contract: `openspec/specs/responses-api-compat/spec.md` through a change delta.
 - No API, setting, dependency, migration, dashboard, wire-format, or durable-storage change.
