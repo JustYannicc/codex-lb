@@ -30,6 +30,14 @@ class SqliteRunState(str, Enum):
     CLEAN = "clean"
 
 
+@dataclass(slots=True, frozen=True)
+class SqliteRunStateRecord:
+    """A run-state transition and the database identity captured with it."""
+
+    state: SqliteRunState
+    identity: dict[str, int] | None
+
+
 @contextmanager
 def sqlite_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(str(path))
@@ -275,24 +283,39 @@ def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
     one.
 
     A ``clean`` record is honoured only while the database file still matches
-    the size and mtime captured when the record was written. Restoring a
-    backup or swapping the file in by hand therefore reads back as unknown
-    rather than inheriting the previous file's clean record. Startup callers
-    must acquire the matching lifetime lock before using this result to skip a
-    check.
+    the device, inode, size, mtime, and ctime captured when the record was
+    written. Restoring a backup or swapping the file in by hand therefore
+    reads back as unknown rather than inheriting the previous file's clean
+    record. Startup callers must acquire the matching lifetime lock before
+    using this result to skip a check.
+    """
+    record = read_sqlite_runstate_record(db_path)
+    return record.state if record is not None else None
+
+
+def read_sqlite_runstate_record(db_path: Path) -> SqliteRunStateRecord | None:
+    """Read the run state and its captured database identity.
+
+    Startup uses the complete record to compare the prior ``clean`` identity
+    with the newly persisted ``running`` identity. A clean record without a
+    verifiable identity is unknown; a running record remains readable so the
+    startup decision can fail closed on a missing identity.
     """
     try:
         raw = sqlite_runstate_path(db_path).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return None
     try:
-        record = json.loads(raw)
-        state = SqliteRunState(record["state"])
-    except (ValueError, TypeError, KeyError):
+        payload = json.loads(raw)
+        state = SqliteRunState(payload["state"])
+        identity = payload.get("identity")
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return None
-    if state is SqliteRunState.CLEAN and record.get("identity") != _sqlite_file_identity(db_path):
-        return None
-    return state
+    if state is SqliteRunState.CLEAN:
+        current_identity = _sqlite_file_identity(db_path)
+        if identity is None or current_identity is None or identity != current_identity:
+            return None
+    return SqliteRunStateRecord(state=state, identity=identity)
 
 
 def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
@@ -315,6 +338,7 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     target = sqlite_runstate_path(db_path)
     tmp: Path | None = None
     tmp_fd: int | None = None
+    replaced = False
     payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
     try:
         tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{target.name}.", suffix=".tmp", dir=target.parent)
@@ -325,6 +349,7 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, target)
+        replaced = True
         if not _fsync_directory(target.parent):
             raise OSError("could not sync the run-state directory entry")
         return True
@@ -340,5 +365,16 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             try:
                 cleanup.unlink(missing_ok=True)
             except OSError:
+                pass
+        if replaced:
+            # The first directory sync failed after the replacement. The
+            # record must be removed, and that unlink needs its own directory
+            # sync so a later startup cannot recover the untrusted marker.
+            try:
+                _fsync_directory(target.parent)
+            except OSError:
+                # The write is already failed closed; a second sync error
+                # must not resurrect the exception as an unhandled startup
+                # failure.
                 pass
         return False

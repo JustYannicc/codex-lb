@@ -29,6 +29,10 @@ case and turns every deploy into a multi-minute outage.
 - Skip the startup integrity scan only when the sidecar records a clean
   shutdown. A crash, an OOM kill, a power loss, a first run, and an upgrade
   from a build that never wrote a sidecar all still run the scan.
+- Read the prior record and persist `running` before making that skip
+  decision. If the running transition cannot be recorded, startup takes the
+  scan path and a failed startup leaves `running` where the sidecar can be
+  written.
 - Use an exclusive randomized temporary file for each sidecar write so a
   local symlink cannot redirect the write before the atomic replacement.
 - Announce the scan before it starts (path, mode, file size) and log its
@@ -43,6 +47,10 @@ cannot inherit the previous file's clean record. Both the record and its
 directory entry are fsynced, so a power loss cannot keep an earlier `clean`
 while losing the `running` transition. `clean` is recorded only after the
 engines actually finished disposing.
+The clean identity, the newly persisted running identity, and the current
+database identity must all be present and equal at the final skip decision;
+replacement in any window forces the scan. If the directory fsync fails after
+the replacement, cleanup removes the sidecar and fsyncs the directory again.
 The lifetime lock makes that ownership rule process-wide: startup cannot trust
 another process's `clean` marker, and a clean marker cannot be written after
 the lock has been released.

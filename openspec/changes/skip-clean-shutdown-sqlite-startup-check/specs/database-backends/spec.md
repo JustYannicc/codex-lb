@@ -16,6 +16,13 @@ after the database engines are disposed during an orderly shutdown. The
 `clean` record MUST NOT be reachable from a crash, a signal-killed process,
 or a failed startup.
 
+Startup MUST read the prior run-state record before mutating it, then MUST
+persist `running` before deciding whether a prior `clean` record permits
+skipping the integrity check. If the `running` transition cannot be recorded,
+startup MUST run the configured check when enabled and MUST NOT trust the
+prior `clean` record. A failed startup MUST leave a durable `running` marker
+where the sidecar can be written.
+
 Before reading the run-state sidecar, startup MUST acquire an exclusive
 transaction on a persistent `<db>.runstate.lock` SQLite sentinel. Startup MUST
 fail closed when that lifetime lock cannot be acquired, rather than trusting a
@@ -42,7 +49,11 @@ was replaced, including its device and inode, not only its size and
 modification time: a restore that preserves timestamps (`tar -x`, `cp -p`,
 `rsync -a`) can reproduce both. A `clean` record MUST read as unknown once
 any captured attribute no longer matches. The fence applies only to `clean`;
-a `running` record stays readable while the process writes to the store.
+a `running` record stays readable while the process writes to the store. A
+clean identity, the newly persisted running identity, and the current database
+identity MUST all be non-null and equal before a clean skip. Startup MUST
+revalidate the running identity at the final decision seam, so replacement in
+any window forces the integrity check.
 
 Run-state transitions MUST be durable. The system MUST sync both the record's
 contents and the directory entry that names it, so a power loss cannot retain
@@ -58,6 +69,11 @@ the open reports, because Windows refuses a directory handle with the same
 `EACCES` an ordinary permission denial uses. The file fence cannot substitute for this: in WAL mode the main database
 file can keep its size and modification time across a long run, so a lost
 transition would leave a `clean` record that still matches.
+
+If the directory sync fails after a sidecar replacement, cleanup MUST remove
+the temporary and target entries and MUST sync the parent directory again so
+the removal itself is durable. A failure of that second sync MUST remain
+fail-closed.
 
 Each run-state write MUST create its temporary file with an exclusive,
 unpredictable name in the target directory before writing, syncing, and
@@ -77,6 +93,21 @@ requirement governs only whether the selected mode runs on a given startup.
 - **WHEN** the application starts with the check mode enabled
 - **THEN** no integrity check runs
 - **AND** the sidecar is updated to record that a process is running
+
+#### Scenario: An unrecordable running transition cannot skip the check
+
+- **GIVEN** a SQLite sidecar records `clean`
+- **AND** writing the current `running` transition fails
+- **WHEN** startup reaches the integrity-check decision
+- **THEN** the configured check runs
+- **AND** startup does not trust the prior `clean` record
+
+#### Scenario: A replacement around startup fencing still scans
+
+- **GIVEN** a SQLite sidecar records `clean` for database identity A
+- **WHEN** the database is replaced with identity B before or after the
+  `running` transition, or before the final skip decision
+- **THEN** the configured integrity check runs against identity B
 
 #### Scenario: A second process cannot trust or replace a live process's clean marker
 
