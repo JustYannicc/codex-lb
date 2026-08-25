@@ -983,46 +983,47 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
-                    selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                        model=payload.model,
-                        additional_limit_name=None,
-                        account_ids=None,
+                    # A response id is an account-scoped stored object. A
+                    # sole candidate is not proof that it owns an anchor that
+                    # has no recorded subscription owner; dispatching there
+                    # can leak a source-owned continuation to an unrelated
+                    # subscription account. The source route is resolved
+                    # before this subscription path, so every unresolved
+                    # owner here must fail closed.
+                    message = "Previous response owner account is unavailable; retry later."
+                    _record_continuity_fail_closed(
+                        surface="http_stream",
+                        reason="owner_account_unavailable",
+                        previous_response_id=payload.previous_response_id,
+                        session_id=previous_response_lookup_session_id,
+                        upstream_error_code="owner_lookup_miss",
                     )
-                    if len(selection_inputs.accounts) != 1:
-                        message = "Previous response owner account is unavailable; retry later."
-                        _record_continuity_fail_closed(
-                            surface="http_stream",
-                            reason="owner_account_unavailable",
-                            previous_response_id=payload.previous_response_id,
-                            session_id=previous_response_lookup_session_id,
-                            upstream_error_code="owner_lookup_miss",
-                        )
-                        event = response_failed_event(
-                            "previous_response_owner_unavailable",
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
-                        await proxy._write_request_log(
-                            account_id=None,
-                            api_key=api_key,
-                            request_id=request_id,
-                            model=payload.model,
-                            latency_ms=int((time.monotonic() - start) * 1000),
-                            status="error",
-                            error_code="previous_response_owner_unavailable",
-                            error_message=message,
-                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                            transport=request_transport,
-                            upstream_transport=upstream_stream_transport,
-                            service_tier=payload.service_tier,
-                            requested_service_tier=payload.service_tier,
-                            useragent=useragent,
-                            useragent_group=useragent_group,
-                            conversation_id=conversation_id,
-                            client_ip=client_ip,
-                        )
-                        return
+                    event = response_failed_event(
+                        "previous_response_owner_unavailable",
+                        message,
+                        response_id=request_id,
+                    )
+                    yield format_sse_event(event)
+                    await proxy._write_request_log(
+                        account_id=None,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=payload.model,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        status="error",
+                        error_code="previous_response_owner_unavailable",
+                        error_message=message,
+                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
+                        service_tier=payload.service_tier,
+                        requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
+                        conversation_id=conversation_id,
+                        client_ip=client_ip,
+                    )
+                    return
             # File and previous-response ownership are peers, not fallback
             # preferences. Resolve both before selection so a conflict cannot
             # be hidden by whichever source happened to run first. A hard turn

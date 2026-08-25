@@ -13355,12 +13355,11 @@ async def test_compact_responses_does_not_infer_previous_response_id_from_sessio
 
 
 @pytest.mark.asyncio
-async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypatch):
+async def test_compact_owner_miss_fails_closed_even_with_one_scoped_candidate(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_compact_scoped_owner_miss")
-    seen_account_ids: list[list[str] | None] = []
 
     api_key = ApiKeyData(
         id="key_compact_scope",
@@ -13382,16 +13381,8 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
 
-    async def fake_load_selection_inputs(**kwargs):
-        seen_account_ids.append(kwargs.get("account_ids"))
-        return SimpleNamespace(accounts=[account])
-
-    monkeypatch.setattr(service._load_balancer, "_load_selection_inputs", fake_load_selection_inputs)
-    monkeypatch.setattr(
-        service._load_balancer,
-        "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
-    )
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
@@ -13410,11 +13401,13 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
         }
     )
 
-    result = await service.compact_responses(payload, {"session_id": "turn_compact_scope"}, api_key=api_key)
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "turn_compact_scope"}, api_key=api_key)
 
-    assert result.object == "response.compaction"
-    assert result.model_extra == {"output": []}
-    assert seen_account_ids == [[account.id]]
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert exc_info.value.payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    select_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -37170,7 +37163,11 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
 
 
 @pytest.mark.asyncio
-async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_selection(monkeypatch):
+@pytest.mark.parametrize("candidate_count", [1, 2])
+async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_selection(
+    monkeypatch,
+    candidate_count: int,
+):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -37189,10 +37186,13 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    candidates = [account_other]
+    if candidate_count == 2:
+        candidates.append(_make_account("acc_second_stream"))
     monkeypatch.setattr(
         service._load_balancer,
         "_load_selection_inputs",
-        AsyncMock(return_value=SimpleNamespace(accounts=[account_other, _make_account("acc_second_stream")])),
+        AsyncMock(return_value=SimpleNamespace(accounts=candidates)),
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_other))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
