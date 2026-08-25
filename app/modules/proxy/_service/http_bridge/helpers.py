@@ -348,14 +348,24 @@ def _bind_http_bridge_proxy_injected_anchor(
         )
 
 
-def _forget_http_bridge_denied_anchor_fence(service: Any, response_id: str) -> None:
+def _forget_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    *,
+    owner_key: str | None = None,
+    owner_epoch: int | None = None,
+) -> bool:
     """Release a denial tombstone once durable cleanup has been confirmed."""
     fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
     if not isinstance(fences, dict):
-        return
+        return False
     entry = fences.get(response_id)
     if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
-        return
+        return False
+    if owner_key is not None and entry.owner_key != owner_key:
+        return False
+    if owner_epoch is not None and entry.owner_epoch != owner_epoch:
+        return False
     current = _http_bridge_denied_anchor_fence_current_map(service)
     if entry.owner_key is not None and current.get(entry.owner_key) == response_id:
         current.pop(entry.owner_key, None)
@@ -366,6 +376,7 @@ def _forget_http_bridge_denied_anchor_fence(service: Any, response_id: str) -> N
     else:
         fences.pop(response_id, None)
     _prune_http_bridge_denied_anchor_fences(service)
+    return True
 
 
 def _forget_http_bridge_denied_anchor_fence_owner(

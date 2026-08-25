@@ -32487,6 +32487,67 @@ async def test_scheduled_denied_anchor_retry_reuses_a_successful_durable_clear(
 
 
 @pytest.mark.asyncio
+async def test_denied_anchor_retry_aborts_when_owner_rebinds_during_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    assert session.durable_session_id is not None
+    assert session.durable_owner_epoch is not None
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+    session.denied_proxy_injected_anchor_ids.add("resp_denied")
+    service._unregister_http_bridge_previous_response_id = AsyncMock()
+    backoff_entered = asyncio.Event()
+    release_backoff = asyncio.Event()
+
+    async def wait_for_backoff(*_args: Any, **_kwargs: Any) -> None:
+        backoff_entered.set()
+        await release_backoff.wait()
+
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_for_http_bridge_recovery_settlement_retry",
+        wait_for_backoff,
+    )
+    retry_task = asyncio.create_task(
+        http_bridge_upstream_events_module._retry_denied_http_bridge_anchor_clear(
+            service,
+            session,
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id="bridge-instance",
+            owner_epoch=session.durable_owner_epoch,
+            response_id="resp_denied",
+            durable_cleared=True,
+        )
+    )
+    await asyncio.wait_for(backoff_entered.wait(), timeout=1.0)
+
+    async with session.lifecycle_lock:
+        session.durable_owner_epoch = 5
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            service,
+            "resp_denied",
+            owner_key=session.durable_session_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+    release_backoff.set()
+    await asyncio.wait_for(retry_task, timeout=1.0)
+
+    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    assert "resp_denied" in session.previous_response_ids
+    assert "resp_denied" in session.denied_proxy_injected_anchor_ids
+    entry = service._http_bridge_denied_anchor_fences["resp_denied"]
+    assert entry.owner_key == session.durable_session_id
+    assert entry.owner_epoch == 5
+
+
+@pytest.mark.asyncio
 async def test_retire_denied_bridge_anchor_leaves_a_delta_only_anchor_alone():
     session = _denied_anchor_session()
     service = _denied_anchor_service()

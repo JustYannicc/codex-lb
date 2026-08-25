@@ -666,21 +666,39 @@ async def _retry_denied_http_bridge_anchor_clear(
             if cleared is None:
                 continue
             durable_cleared = True
-        try:
-            await service._unregister_http_bridge_previous_response_id(session, response_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning(
-                "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
-                exc_info=True,
-            )
-            continue
+        # Owner rebinding can happen while the lease-renewal backoff is
+        # sleeping. Serialize the final ownership check with rebinders before
+        # touching the alias or the process-local denial fence.
         async with session.lifecycle_lock:
+            if session.durable_session_id != session_id or session.durable_owner_epoch != owner_epoch:
+                return
+            try:
+                unregister_succeeded = await service._unregister_http_bridge_previous_response_id(
+                    session,
+                    response_id,
+                    expected_durable_session_id=session_id,
+                    expected_durable_owner_epoch=owner_epoch,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
+                    exc_info=True,
+                )
+                continue
+            if unregister_succeeded is False:
+                return
+            if not _forget_http_bridge_denied_anchor_fence(
+                service,
+                response_id,
+                owner_key=session_id,
+                owner_epoch=owner_epoch,
+            ):
+                return
             session.denied_proxy_injected_anchor_ids.discard(response_id)
             session.denied_proxy_injected_anchor_generation += 1
-        _forget_http_bridge_denied_anchor_fence(service, response_id)
-        return
+            return
     logger.error(
         "Denied HTTP bridge response-anchor clear retry budget exhausted session_id=%s response_id=%s",
         _hash_identifier(session_id),

@@ -433,9 +433,19 @@ class _HTTPBridgeSessionRegistryMixin:
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,
         response_id: str,
-    ) -> None:
+        *,
+        expected_durable_session_id: str | None = None,
+        expected_durable_owner_epoch: int | None = None,
+    ) -> bool:
         async with self._http_bridge_lock:
+            if (
+                expected_durable_session_id is not None and session.durable_session_id != expected_durable_session_id
+            ) or (
+                expected_durable_owner_epoch is not None and session.durable_owner_epoch != expected_durable_owner_epoch
+            ):
+                return False
             self._unregister_http_bridge_previous_response_id_locked(session, response_id)
+        return True
 
     def _detach_http_bridge_session_locked(
         self: _HTTPBridgeServiceProtocol,
@@ -621,8 +631,9 @@ class _HTTPBridgeSessionRegistryMixin:
                     previous_owner_key,
                     owner_epoch=previous_durable_owner_epoch,
                 )
-            session.durable_session_id = lookup.session_id
-            session.durable_owner_epoch = lookup.owner_epoch
+            async with session.lifecycle_lock:
+                session.durable_session_id = lookup.session_id
+                session.durable_owner_epoch = lookup.owner_epoch
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
             if (
                 PROMETHEUS_AVAILABLE

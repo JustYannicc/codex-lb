@@ -112,7 +112,10 @@ class _HTTPBridgeServiceProtocol(Protocol):
         self,
         session: _HTTPBridgeSession,
         response_id: str,
-    ) -> None: ...
+        *,
+        expected_durable_session_id: str | None = None,
+        expected_durable_owner_epoch: int | None = None,
+    ) -> bool: ...
     def _schedule_http_bridge_session_closes(
         self,
         sessions: list[_HTTPBridgeSession],
