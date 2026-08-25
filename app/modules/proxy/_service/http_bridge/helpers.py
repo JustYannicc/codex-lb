@@ -420,6 +420,14 @@ def _record_http_bridge_denied_anchor_fence(
             if not prior_entry.active_request_ids:
                 fences.pop(prior_response_id, None)
     if owner_key is not None and current is not None:
+        # A session can first deny an anchor while it has only a process-local
+        # owner and later rebind that same denial to its durable owner. The
+        # fence entry has one authoritative owner, so retire any stale alias
+        # for the same response before publishing the new owner mapping.
+        for prior_owner_key, prior_response_id_for_owner in tuple(current.items()):
+            if prior_owner_key != owner_key and prior_response_id_for_owner == response_id:
+                current.pop(prior_owner_key, None)
+    if owner_key is not None and current is not None:
         current[owner_key] = response_id
     entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
     assert entry is not None

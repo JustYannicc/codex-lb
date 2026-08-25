@@ -636,9 +636,9 @@ async def _retry_denied_http_bridge_anchor_clear(
     instance_id: str,
     owner_epoch: int,
     response_id: str,
+    durable_cleared: bool = False,
 ) -> None:
     """Retry a transient durable clear under the original owner fence."""
-    durable_cleared = False
     for delay_seconds in _HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS:
         if session.durable_session_id != session_id or session.durable_owner_epoch != owner_epoch:
             return
@@ -697,6 +697,7 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
     api_key_id: str | None = None,
     instance_id: str | None = None,
     owner_epoch: int | None = None,
+    durable_cleared: bool = False,
 ) -> None:
     cleanup_tasks = getattr(service, "_background_cleanup_tasks", None)
     if cleanup_tasks is None:
@@ -718,6 +719,7 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             response_id=response_id,
+            durable_cleared=durable_cleared,
         ),
         name=f"http-bridge-denied-anchor-clear-{_hash_identifier(response_id)}",
     )
@@ -1248,6 +1250,7 @@ async def _invalidate_denied_http_bridge_anchor(
                         api_key_id=durable_api_key_id,
                         instance_id=durable_instance_id,
                         owner_epoch=durable_owner_epoch,
+                        durable_cleared=cleared,
                     )
     except asyncio.CancelledError as exc:
         durable_error = exc

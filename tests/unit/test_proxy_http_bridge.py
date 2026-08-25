@@ -32227,6 +32227,34 @@ def test_denied_anchor_owner_epoch_cleanup_does_not_clear_successor_slot() -> No
     assert "resp-successor" in service._http_bridge_denied_anchor_fences
 
 
+def test_denied_anchor_owner_rebind_drops_the_stale_local_owner_mapping() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    response_id = "resp-local-to-durable"
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        response_id,
+        owner_key="local:session-object",
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        response_id,
+        owner_key="durable-session",
+        owner_epoch=4,
+    )
+
+    current = getattr(service, "_http_bridge_denied_anchor_fence_current")
+    assert "local:session-object" not in current
+    assert current["durable-session"] == response_id
+
+    http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence_owner(
+        service,
+        "local:session-object",
+    )
+    assert response_id in service._http_bridge_denied_anchor_fences
+    assert service._http_bridge_denied_anchor_fences[response_id].owner_key == "durable-session"
+
+
 @pytest.mark.asyncio
 async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
     """An upstream denial of a proxy-injected anchor retires it on the first occurrence.
@@ -32406,6 +32434,8 @@ async def test_retry_denied_bridge_anchor_keeps_fence_until_alias_unregister_suc
         "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
         (0.0, 0.0),
     )
+    assert session.durable_session_id is not None
+    assert session.durable_owner_epoch is not None
 
     await http_bridge_upstream_events_module._retry_denied_http_bridge_anchor_clear(
         service,
@@ -32416,6 +32446,39 @@ async def test_retry_denied_bridge_anchor_keeps_fence_until_alias_unregister_suc
         owner_epoch=session.durable_owner_epoch,
         response_id="resp_denied",
     )
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
+    assert service._unregister_http_bridge_previous_response_id.await_count == 2
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" not in service._http_bridge_denied_anchor_fences
+
+
+@pytest.mark.asyncio
+async def test_scheduled_denied_anchor_retry_reuses_a_successful_durable_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    service._background_cleanup_tasks = set()
+    service._unregister_http_bridge_previous_response_id = AsyncMock(
+        side_effect=[RuntimeError("registry down"), None],
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    with pytest.raises(RuntimeError, match="registry down"):
+        await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp_denied",
+        )
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
 
     service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
     assert service._unregister_http_bridge_previous_response_id.await_count == 2
