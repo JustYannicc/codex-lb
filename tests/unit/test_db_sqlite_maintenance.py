@@ -188,6 +188,29 @@ def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_runstate_write_syncs_directory_after_replace_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Cleanup of an old clean marker is durable even when replace fails."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    directory_syncs: list[Path] = []
+
+    def _replace_failure(*_args: object, **_kwargs: object) -> None:
+        raise OSError("replace failed")
+
+    def _record_directory_sync(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return True
+
+    monkeypatch.setattr(os, "replace", _replace_failure)
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _record_directory_sync)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    assert directory_syncs == [db_path.parent]
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation is not available on all Windows test runners")
 def test_runstate_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
     db_path = tmp_path / "store.db"
