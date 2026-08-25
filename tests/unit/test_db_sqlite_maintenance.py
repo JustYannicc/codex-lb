@@ -142,6 +142,32 @@ def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
 
 
+@pytest.mark.parametrize("db_exists", [True, False], ids=["database-present", "database-missing"])
+def test_runstate_clean_with_null_identity_is_unknown(tmp_path: Path, db_exists: bool) -> None:
+    """A legacy or hand-written null identity must never certify a clean close."""
+    db_path = tmp_path / "store.db"
+    if db_exists:
+        db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text(
+        '{"state": "clean", "identity": null}', encoding="utf-8"
+    )
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_recursive_json_is_unknown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text("{}", encoding="utf-8")
+
+    def _raise_recursion_error(_raw: str) -> object:
+        raise RecursionError("run-state JSON nesting is too deep")
+
+    monkeypatch.setattr(sqlite_utils_module.json, "loads", _raise_recursion_error)
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
 def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A store left mid-write must never read back as cleanly closed."""
     db_path = tmp_path / "store.db"
@@ -270,6 +296,26 @@ def test_runstate_write_fails_closed_when_the_directory_sync_fails(
     monkeypatch.undo()
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_syncs_directory_again_after_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A failed post-replace sync must durably fence the cleanup unlink."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    directory_syncs: list[Path] = []
+    outcomes = iter([False, True])
+
+    def _sync(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return next(outcomes)
+
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _sync)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    assert directory_syncs == [db_path.parent, db_path.parent]
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not list(tmp_path.glob("*.tmp"))
 
 

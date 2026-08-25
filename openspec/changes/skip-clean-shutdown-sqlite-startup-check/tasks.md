@@ -21,6 +21,8 @@
   death.
 - [x] 1.9 Create sidecar temporary files with `tempfile.mkstemp` rather than a
   predictable PID-derived pathname.
+- [x] 1.10 Treat recursive or malformed JSON and a clean record with a null
+  identity as unknown.
 
 ## 2. Startup
 
@@ -32,6 +34,10 @@
   log its elapsed duration on success.
 - [x] 2.4 Acquire the lifetime lock before reading the sidecar and fail startup
   closed when another process already owns it.
+- [x] 2.5 Read the prior record, persist `running`, and require a successful
+  running transition before a clean skip; failed transitions force the scan.
+- [x] 2.6 Require matching non-null prior/running/current identities and
+  revalidate at the final decision seam so replacement races force the scan.
 
 ## 3. Shutdown
 
@@ -60,3 +66,6 @@
 - [x] 4.6 Run Ruff check/format and `ty`.
 - [x] 4.7 Test lock contention, clean-transition lock release, startup fail
   closed on contention, and the symlink-safe temporary-file path.
+- [x] 4.8 Test failed running transitions, failed-check retries, all
+  replacement windows, null identities, recursive JSON, and the second
+  directory fsync after post-replace cleanup.

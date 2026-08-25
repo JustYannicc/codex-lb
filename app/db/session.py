@@ -24,11 +24,12 @@ from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteIntegrityCheckMode,
     SqliteRunState,
+    _sqlite_file_identity,
     acquire_sqlite_runstate_lock,
     check_sqlite_integrity,
     integrity_check_pragma_name,
     normalize_sqlite_url,
-    read_sqlite_runstate,
+    read_sqlite_runstate_record,
     release_sqlite_runstate_lock,
     sqlite_db_path_from_url,
     write_sqlite_runstate,
@@ -391,7 +392,14 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
     return SqliteIntegrityCheckMode(raw_mode)
 
 
-def _sqlite_startup_check_required(sqlite_path: Path, *, mode: SqliteIntegrityCheckMode) -> bool:
+def _sqlite_startup_check_required(
+    sqlite_path: Path,
+    *,
+    mode: SqliteIntegrityCheckMode,
+    previous_state: SqliteRunState | None,
+    running_recorded: bool,
+    running_identity: dict[str, int] | None,
+) -> bool:
     """Decide whether this startup has to scan the whole SQLite file.
 
     The scan reads every page, so its cost grows with the store and the
@@ -401,7 +409,15 @@ def _sqlite_startup_check_required(sqlite_path: Path, *, mode: SqliteIntegrityCh
     (a crash, an OOM kill, a power loss, a first run, or an upgrade from a
     build that never wrote the sidecar) still pays for the scan.
     """
-    if read_sqlite_runstate(sqlite_path) is not SqliteRunState.CLEAN:
+    # The prior state is captured before startup marks this process RUNNING.
+    # A clean sidecar is not evidence for this startup if that transition was
+    # not durably recorded.
+    if not running_recorded or previous_state is not SqliteRunState.CLEAN:
+        return True
+    # Revalidate at the decision seam. A recovery replacement can happen
+    # between the earlier sidecar reads and this final branch.
+    current_identity = _sqlite_file_identity(sqlite_path)
+    if running_identity is None or current_identity is None or running_identity != current_identity:
         return True
     logger.info(
         "Skipping SQLite startup %s after a recorded clean shutdown path=%s",
@@ -437,12 +453,14 @@ def _run_startup_sqlite_check(sqlite_path: Path, *, mode: SqliteIntegrityCheckMo
     return integrity
 
 
-def _mark_sqlite_running(sqlite_path: Path) -> None:
-    if not write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING):
+def _mark_sqlite_running(sqlite_path: Path) -> bool:
+    recorded = write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING)
+    if not recorded:
         logger.warning(
             "Failed to record the SQLite run state path=%s; the next startup will re-run the integrity check",
             sqlite_path,
         )
+    return recorded
 
 
 def mark_sqlite_shutdown_clean() -> None:
@@ -955,8 +973,40 @@ async def _init_db() -> None:
     _ensure_sqlite_dir(database_url)
     sqlite_path = sqlite_db_path_from_url(database_url)
     if sqlite_path is not None:
+        # Read the prior transition first, then fence this process as RUNNING
+        # before deciding whether a prior CLEAN record permits skipping the
+        # startup scan. A failed startup therefore leaves RUNNING where the
+        # sidecar can be written instead of resurrecting stale CLEAN state.
+        previous_record = read_sqlite_runstate_record(sqlite_path)
+        previous_state = previous_record.state if previous_record is not None else None
+        previous_clean_identity = (
+            previous_record.identity
+            if previous_record is not None and previous_record.state is SqliteRunState.CLEAN
+            else None
+        )
+        running_recorded = _mark_sqlite_running(sqlite_path)
+        running_record = read_sqlite_runstate_record(sqlite_path) if running_recorded else None
+        running_identity = running_record.identity if running_record is not None else None
+        current_identity = _sqlite_file_identity(sqlite_path)
+        if previous_state is SqliteRunState.CLEAN and (
+            previous_clean_identity is None
+            or running_identity is None
+            or current_identity is None
+            or previous_clean_identity != running_identity
+            or running_identity != current_identity
+        ):
+            # The database may have been replaced on either side of the
+            # running fence. The prior clean identity no longer describes the
+            # file that this startup is about to use, so force the scan.
+            previous_state = None
         check_mode = _startup_sqlite_check_mode(_settings.database_sqlite_startup_check_mode)
-        if check_mode is not None and _sqlite_startup_check_required(sqlite_path, mode=check_mode):
+        if check_mode is not None and _sqlite_startup_check_required(
+            sqlite_path,
+            mode=check_mode,
+            previous_state=previous_state,
+            running_recorded=running_recorded,
+            running_identity=running_identity,
+        ):
             integrity = _run_startup_sqlite_check(sqlite_path, mode=check_mode)
             if not integrity.ok:
                 details = integrity.details or "unknown error"
@@ -981,10 +1031,6 @@ async def _init_db() -> None:
                         "or restore a backup from the same directory."
                     )
                 raise RuntimeError(message)
-        # Record the run state even when the check is disabled, so turning it
-        # back on cannot trust a sidecar this build never maintained.
-        _mark_sqlite_running(sqlite_path)
-
     try:
         inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()
     except ModuleNotFoundError as exc:
