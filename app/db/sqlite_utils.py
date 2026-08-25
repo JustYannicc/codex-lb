@@ -338,7 +338,6 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     target = sqlite_runstate_path(db_path)
     tmp: Path | None = None
     tmp_fd: int | None = None
-    replaced = False
     payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
     try:
         tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{target.name}.", suffix=".tmp", dir=target.parent)
@@ -349,7 +348,6 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, target)
-        replaced = True
         if not _fsync_directory(target.parent):
             raise OSError("could not sync the run-state directory entry")
         return True
@@ -366,15 +364,13 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
                 cleanup.unlink(missing_ok=True)
             except OSError:
                 pass
-        if replaced:
-            # The first directory sync failed after the replacement. The
-            # record must be removed, and that unlink needs its own directory
-            # sync so a later startup cannot recover the untrusted marker.
-            try:
-                _fsync_directory(target.parent)
-            except OSError:
-                # The write is already failed closed; a second sync error
-                # must not resurrect the exception as an unhandled startup
-                # failure.
-                pass
+        # The target cleanup can remove an older clean marker even when the
+        # replacement itself failed. Sync the directory after every cleanup
+        # path so that invalidation is durable before the caller continues.
+        try:
+            _fsync_directory(target.parent)
+        except OSError:
+            # The write is already failed closed; a cleanup sync error must
+            # not resurrect the exception as an unhandled startup failure.
+            pass
         return False
