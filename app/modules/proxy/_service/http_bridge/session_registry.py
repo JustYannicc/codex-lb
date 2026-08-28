@@ -617,21 +617,24 @@ class _HTTPBridgeSessionRegistryMixin:
                         error_type="server_error",
                     ),
                 )
-            previous_durable_session_id = session.durable_session_id
-            previous_durable_owner_epoch = session.durable_owner_epoch
-            next_owner_changed = (
-                previous_durable_session_id != lookup.session_id or previous_durable_owner_epoch != lookup.owner_epoch
-            )
-            if next_owner_changed:
-                previous_owner_key = (
-                    previous_durable_session_id if previous_durable_session_id is not None else f"local:{id(session)}"
-                )
-                _forget_http_bridge_denied_anchor_fence_owner(
-                    self,
-                    previous_owner_key,
-                    owner_epoch=previous_durable_owner_epoch,
-                )
             async with session.lifecycle_lock:
+                previous_durable_session_id = session.durable_session_id
+                previous_durable_owner_epoch = session.durable_owner_epoch
+                next_owner_changed = (
+                    previous_durable_session_id != lookup.session_id
+                    or previous_durable_owner_epoch != lookup.owner_epoch
+                )
+                if next_owner_changed:
+                    previous_owner_key = (
+                        previous_durable_session_id
+                        if previous_durable_session_id is not None
+                        else f"local:{id(session)}"
+                    )
+                    _forget_http_bridge_denied_anchor_fence_owner(
+                        self,
+                        previous_owner_key,
+                        owner_epoch=previous_durable_owner_epoch,
+                    )
                 session.durable_session_id = lookup.session_id
                 session.durable_owner_epoch = lookup.owner_epoch
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)

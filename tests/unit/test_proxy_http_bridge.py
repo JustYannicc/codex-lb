@@ -49,6 +49,7 @@ from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_mo
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
+from app.modules.proxy._service.http_bridge import session_registry as http_bridge_session_registry_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
@@ -20947,6 +20948,57 @@ async def test_claim_durable_http_bridge_session_propagates_claim_failure(
 
     with pytest.raises(RuntimeError, match="db unavailable"):
         await service._claim_durable_http_bridge_session(session, allow_takeover=True)
+
+
+@pytest.mark.asyncio
+async def test_claim_durable_http_bridge_session_forgets_previous_owner_fence_under_lifecycle_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _denied_anchor_session()
+    settings = _make_app_settings()
+    lookup = DurableBridgeLookup(
+        session_id="durable-next-owner",
+        canonical_kind=session.key.affinity_kind,
+        canonical_key=session.key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id=session.account.id,
+        owner_instance_id=settings.http_responses_session_bridge_instance_id,
+        owner_epoch=5,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+    )
+    service._durable_bridge.claim_live_session = AsyncMock(return_value=lookup)
+    service._durable_bridge.register_session_header = AsyncMock()
+    monkeypatch.setattr(http_bridge_session_registry_module, "_service_get_settings", lambda: settings)
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+    original_forget_owner = http_bridge_session_registry_module._forget_http_bridge_denied_anchor_fence_owner
+    lock_states: list[bool] = []
+
+    def forget_previous_owner(*args: Any, **kwargs: Any) -> None:
+        lock_states.append(session.lifecycle_lock.locked())
+        original_forget_owner(*args, **kwargs)
+
+    monkeypatch.setattr(
+        http_bridge_session_registry_module,
+        "_forget_http_bridge_denied_anchor_fence_owner",
+        forget_previous_owner,
+    )
+
+    await service._claim_durable_http_bridge_session(session, allow_takeover=True)
+
+    assert lock_states == [True]
+    assert session.durable_session_id == "durable-next-owner"
+    assert session.durable_owner_epoch == 5
+    assert "resp_denied" not in service._http_bridge_denied_anchor_fences
 
 
 @pytest.mark.asyncio
