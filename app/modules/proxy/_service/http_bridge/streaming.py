@@ -268,12 +268,14 @@ async def _next_http_bridge_event_block(
             return await event_queue.get()
         return await asyncio.wait_for(event_queue.get(), timeout=timeout)
     revoked = getattr(event_queue, "revoked", None)
+    terminal_ready = getattr(event_queue, "terminal_ready", None)
     if revoked is not None and revoked.is_set() and event_queue.empty():
         if budget_exceeded.is_set():
             raise _HTTPBridgeLiveEventQueueBudgetExceeded
-        if getattr(event_queue, "terminal_pending", False):
+        if getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set()):
             return await event_queue.get()
-        return None
+        if terminal_ready is None:
+            return None
 
     # A budget failure revokes producers. Drain already-buffered events first
     # so the failure does not reorder an upstream response; with no buffered
@@ -285,7 +287,7 @@ async def _next_http_bridge_event_block(
     budget_task = asyncio.create_task(budget_exceeded.wait(), name="http-bridge-event-budget")
     tasks: tuple[asyncio.Task[Any], ...] = (get_task, budget_task)
     revoked_task: asyncio.Task[Any] | None = None
-    if revoked is not None:
+    if revoked is not None and terminal_ready is None:
         revoked_task = asyncio.create_task(revoked.wait(), name="http-bridge-event-revoke")
         tasks += (revoked_task,)
     timeout_task: asyncio.Task[Any] | None = None
@@ -311,7 +313,9 @@ async def _next_http_bridge_event_block(
                 return event_block
             raise _HTTPBridgeLiveEventQueueBudgetExceeded
         if revoked_task is not None and revoked_task in done:
-            if getattr(event_queue, "terminal_pending", False):
+            if getattr(event_queue, "terminal_pending", False) or (
+                terminal_ready is not None and terminal_ready.is_set()
+            ):
                 return await event_queue.get()
             return None
         raise asyncio.TimeoutError

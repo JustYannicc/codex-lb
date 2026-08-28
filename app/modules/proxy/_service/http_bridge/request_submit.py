@@ -311,6 +311,11 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._budget_exceeded = asyncio.Event()
         self._terminal_pending = False
         self._terminal_items: deque[str | None] = deque()
+        # Producer revocation stops live writes, but is not itself an end of
+        # stream.  Terminal publication or explicit downstream discard sets
+        # this second signal so a delayed consumer cannot observe bare EOS
+        # while terminal bookkeeping is still in flight.
+        self._terminal_ready = asyncio.Event()
         self._discarded = False
 
     @property
@@ -335,6 +340,12 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
         return bool(self._terminal_items)
 
+    @property
+    def terminal_ready(self) -> asyncio.Event:
+        """Signal that terminal event/EOS or explicit discard is published."""
+
+        return self._terminal_ready
+
     def _queue_terminal_items(self, items: tuple[str | None, ...]) -> bool:
         if self._terminal_pending:
             return True
@@ -350,10 +361,12 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._revoked.set()
             self._terminal_pending = True
             self._terminal_items.append(None)
+            self._terminal_ready.set()
             return False
         self._terminal_pending = True
         self._terminal_items.extend(items)
         self._queued_bytes += item_bytes
+        self._terminal_ready.set()
         return True
 
     def enqueue_terminal_event_nowait(self, event_block: str) -> bool:
@@ -459,6 +472,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._byte_budget.release(item_bytes)
         self._terminal_pending = True
         self._terminal_items.append(None)
+        self._terminal_ready.set()
 
     def get_nowait(self) -> str | None:
         if self._terminal_pending and self.empty():
@@ -483,8 +497,37 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 return item
             if not self.empty():
                 return await super().get()
-            if self._revoked.is_set():
+            # The stream-level reader owns budget-failure classification.  A
+            # queue get must return its ordinary EOS sentinel here so the
+            # reader can turn the already-set budget signal into its terminal
+            # failure event without leaking this module's private exception
+            # type across the streaming boundary.
+            if self._budget_exceeded.is_set():
                 return None
+            if self._revoked.is_set():
+                if self._terminal_ready.is_set():
+                    return None
+                terminal_ready_task = asyncio.create_task(
+                    self._terminal_ready.wait(),
+                    name="http-bridge-event-terminal-ready",
+                )
+                budget_task = asyncio.create_task(
+                    self._budget_exceeded.wait(),
+                    name="http-bridge-event-budget",
+                )
+                try:
+                    done, _pending = await asyncio.wait(
+                        (terminal_ready_task, budget_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if budget_task in done and terminal_ready_task not in done:
+                        return None
+                finally:
+                    for task in (terminal_ready_task, budget_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(terminal_ready_task, budget_task, return_exceptions=True)
+                continue
             get_task = asyncio.create_task(super().get(), name="http-bridge-event-get")
             revoke_task = asyncio.create_task(self._revoked.wait(), name="http-bridge-event-revoke")
             try:
@@ -774,6 +817,19 @@ async def _settle_claimed_http_bridge_liveness_failure(
             penalize_account=False,
             force_retire=True,
         )
+    # The failed sender returns a 502 before its stream consumer can attach,
+    # so no downstream actor can ever drain this queue.  Keep pre-consumer
+    # sibling queues available for their delayed consumers, but detach and
+    # discard only this sender-owned queue after terminal finalization has
+    # published its failure event and EOS.
+    async with session.pending_lock:
+        failed_event_queue = failed_request_state.event_queue
+        if failed_event_queue is not None and not getattr(failed_request_state, "event_queue_consumer_started", False):
+            failed_request_state.event_queue = None
+            failed_request_state.event_queue_revoked.set()
+            discard = getattr(failed_event_queue, "discard", None)
+            if callable(discard):
+                discard()
 
 
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:

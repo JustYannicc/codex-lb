@@ -41,6 +41,7 @@ from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
@@ -15799,6 +15800,8 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
     account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
     upstream = _LivenessFailOnSecondSendUpstreamWebSocket()
+    live_event_budget = http_bridge_request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
+    baseline_budget_bytes = live_event_budget.used_bytes
 
     async def fake_select_account_with_budget(
         self,
@@ -15860,8 +15863,11 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
 
     first_submit_released = asyncio.Event()
     first_consumer_release = asyncio.Event()
+    terminal_finalize_started = asyncio.Event()
+    release_terminal_finalize = asyncio.Event()
     submit_calls = 0
     original_submit = service._submit_http_bridge_request
+    original_fail_pending = service._fail_pending_websocket_requests
 
     async def gated_submit(
         session,
@@ -15886,6 +15892,14 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
 
     monkeypatch.setattr(service, "_submit_http_bridge_request", gated_submit)
 
+    async def gated_fail_pending(*args: Any, **kwargs: Any) -> bool:
+        if kwargs.get("error_code") == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+            terminal_finalize_started.set()
+            await release_terminal_finalize.wait()
+        return await original_fail_pending(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", gated_fail_pending)
+
     first_event_processed = asyncio.Event()
     original_process = service._process_http_bridge_upstream_text
 
@@ -15896,6 +15910,8 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
 
     monkeypatch.setattr(service, "_process_http_bridge_upstream_text", record_first_event)
 
+    second_task: asyncio.Task[Any] | None = None
+    first_events: list[dict[str, Any]] = []
     first_task = asyncio.create_task(
         _collect_sse_events(
             async_client,
@@ -15914,7 +15930,7 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
         await asyncio.wait_for(upstream.first_response_queued.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
         await asyncio.wait_for(first_event_processed.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
-        second_response = await asyncio.wait_for(
+        second_task = asyncio.create_task(
             async_client.post(
                 "/v1/responses",
                 json={
@@ -15924,22 +15940,33 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_delayed_consu
                     "prompt_cache_key": "liveness-queue-regression",
                     "stream": True,
                 },
-            ),
-            timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
         )
-        assert second_response.status_code == 502
-        assert second_response.json()["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+        await asyncio.wait_for(terminal_finalize_started.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
         first_consumer_release.set()
+        await asyncio.sleep(0.05)
+        assert first_task.done() is False
+
+        release_terminal_finalize.set()
+        second_response = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+        assert second_response.status_code == 502
+        assert second_response.json()["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
         first_events = await asyncio.wait_for(first_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     finally:
         first_consumer_release.set()
+        release_terminal_finalize.set()
+        if second_task is not None and not second_task.done():
+            second_task.cancel()
+        if second_task is not None:
+            await asyncio.gather(second_task, return_exceptions=True)
         if not first_task.done():
             first_task.cancel()
         await asyncio.gather(first_task, return_exceptions=True)
 
     assert [event["type"] for event in first_events] == ["response.created", "response.failed"]
     assert first_events[-1]["response"]["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert live_event_budget.used_bytes == baseline_budget_bytes
 
 
 @pytest.mark.asyncio
