@@ -2316,6 +2316,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             ) = await self._http_bridge_precreated_retry_block_for_key(
                                 circuit_key or session.key,
                                 assume_remote_half_open_lease=remote_probe_holds_lease,
+                                deadline=request_state.bridge_request_deadline,
                             )
                             suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(

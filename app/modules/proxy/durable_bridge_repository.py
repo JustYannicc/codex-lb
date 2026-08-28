@@ -924,13 +924,8 @@ class DurableBridgeRepository:
             )
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
-            if expected_admission_generation is not None:
-                # A replay claim advances only the admission generation and
-                # leaves the timestamp untouched; without this fence a
-                # stale-row purge racing the claim would delete the active
-                # claimed generation and a later recovery could dispatch a
-                # second replay beside the first.
-                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
             result = await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
             await self._session.commit()
@@ -3576,6 +3571,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.admission_generation,
                 )
                 .where(stale_predicate)
                 .limit(batch_size)
@@ -3585,12 +3581,13 @@ class DurableBridgeRepository:
                 return deleted_count
             batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope in keys:
+                for session_key_kind, session_key_hash, api_key_scope, admission_generation in keys:
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.admission_generation == admission_generation)
                         .where(stale_predicate)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )

@@ -182,6 +182,62 @@ class _HTTPBridgeRetryCircuitState:
     owed_poison_detail: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitBoundedCall:
+    """Outcome of a deadline-bounded durable retry-circuit operation."""
+
+    completed: bool
+    cancellation_settled: bool
+    value: Any = None
+
+
+def _consume_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is not None:
+        abandoned_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        result = task.result()
+    except BaseException as exc:
+        logger.debug(
+            "Abandoned HTTP bridge retry-circuit operation finished with an error label=%s error=%r",
+            label,
+            exc,
+        )
+    else:
+        logger.info(
+            "Abandoned HTTP bridge retry-circuit operation completed after timeout label=%s result_present=%s",
+            label,
+            result is not None,
+        )
+
+
+def _track_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is None:
+        abandoned_tasks = set()
+        service._http_bridge_retry_circuit_abandoned_tasks = abandoned_tasks
+    abandoned_tasks.add(task)
+    task.add_done_callback(
+        lambda completed_task: _consume_abandoned_http_bridge_retry_circuit_task(
+            service,
+            completed_task,
+            label=label,
+        )
+    )
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitKeyProbe:
     """Key-scoped stand-in for the planning-time first-touch load.
@@ -208,6 +264,7 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
+    service._http_bridge_retry_circuit_abandoned_tasks = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
     service._http_bridge_retry_circuit_key_locks = {}
     # A settlement pops the state object, taking its stale-load watermark
@@ -321,6 +378,43 @@ class _HTTPBridgeRetryCircuitMixin:
             and current_generation.local_cooldown_until <= generation.local_cooldown_until
         )
 
+    async def _await_http_bridge_retry_circuit_call(
+        self: Any,
+        awaitable: Awaitable[Any],
+        *,
+        timeout: float,
+        label: str,
+    ) -> _HTTPBridgeRetryCircuitBoundedCall:
+        """Run one durable operation without awaiting cancellation cleanup."""
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                if not task.done():
+                    _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            else:
+                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            raise
+        if task in done:
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=True, cancellation_settled=True, value=task.result())
+
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if not task.done():
+                _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            else:
+                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            raise
+        if not task.done():
+            _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=False)
+        _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+        return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=True)
+
     async def _claim_http_bridge_retry_circuit_generation(
         self: Any,
         *,
@@ -389,16 +483,27 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
                 return False
             try:
-                claimed = await asyncio.wait_for(
+                first_claim = await self._await_http_bridge_retry_circuit_call(
                     run_durable_claim(),
                     timeout=claim_timeout_seconds,
+                    label="claim",
                 )
-            except TimeoutError:
-                claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
-                    key=key,
-                    run_durable_claim=run_durable_claim,
-                    deadline=deadline,
-                )
+                if first_claim.completed:
+                    claimed = first_claim.value
+                elif not first_claim.cancellation_settled:
+                    logger.warning(
+                        "Timed out claiming HTTP bridge retry circuit generation; durable operation still draining "
+                        "bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                    return False
+                else:
+                    claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
+                        key=key,
+                        run_durable_claim=run_durable_claim,
+                        deadline=deadline,
+                    )
             except Exception:
                 logger.warning(
                     "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
@@ -428,7 +533,21 @@ class _HTTPBridgeRetryCircuitMixin:
         if reconcile_timeout_seconds is None:
             return None
         try:
-            return await asyncio.wait_for(run_durable_claim(), timeout=reconcile_timeout_seconds)
+            reconciliation = await self._await_http_bridge_retry_circuit_call(
+                run_durable_claim(),
+                timeout=reconcile_timeout_seconds,
+                label="claim-reconciliation",
+            )
+            if not reconciliation.completed:
+                if not reconciliation.cancellation_settled:
+                    logger.warning(
+                        "Timed out reconciling HTTP bridge retry circuit generation; durable operation still draining "
+                        "bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                return None
+            return reconciliation.value
         except Exception:
             logger.warning(
                 "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",
@@ -1490,6 +1609,7 @@ class _HTTPBridgeRetryCircuitMixin:
         key: _HTTPBridgeSessionKey,
         *,
         assume_remote_half_open_lease: bool = False,
+        deadline: float | None = None,
     ) -> tuple[float, str]:
         """Return ``(seconds_blocked, reason)`` for a suppressed replacement.
 
@@ -1523,7 +1643,7 @@ class _HTTPBridgeRetryCircuitMixin:
             )
         cooldown_remaining = max(
             local_cooldown_remaining,
-            await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key),
+            await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key, deadline=deadline),
         )
         if cooldown_remaining <= 0.0 and half_open_remaining <= 0.0:
             if assume_remote_half_open_lease:
@@ -1548,9 +1668,24 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_cooldown_seconds_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
+        *,
+        deadline: float | None = None,
     ) -> float:
-        """Return the source-key cooldown used to suppress a replacement."""
-        load_succeeded, generation = await self._http_bridge_retry_circuit_generation_for_key(key)
+        """Return a deadline-bounded source-key cooldown hint."""
+        lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if lookup_timeout_seconds is None:
+            return 0.0
+        lookup = await self._await_http_bridge_retry_circuit_call(
+            self._http_bridge_retry_circuit_generation_for_key(key),
+            timeout=lookup_timeout_seconds,
+            label="cooldown-lookup",
+        )
+        if not lookup.completed:
+            return 0.0
+        load_succeeded, generation = cast(
+            tuple[bool, _HTTPBridgeRetryCircuitGeneration | None],
+            lookup.value,
+        )
         if not load_succeeded or generation is None:
             return 0.0
         return max(

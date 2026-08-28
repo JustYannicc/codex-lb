@@ -30823,6 +30823,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=expired_updated_at,
+                admission_generation=3,
             )
         ),
         purge_retry_circuit=AsyncMock(),
@@ -30834,7 +30835,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
         session_key_value=hard_session.key.affinity_key,
         api_key_id=hard_session.key.api_key_id,
         expected_updated_at_epoch=expired_updated_at,
-        expected_admission_generation=0,
+        expected_admission_generation=3,
         expected_consecutive_failures=2,
         fence_last_detail=True,
         expected_last_detail="stream_incomplete",

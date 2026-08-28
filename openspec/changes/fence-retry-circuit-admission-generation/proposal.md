@@ -20,7 +20,8 @@ explicitly generation-fenced.
 - Claim the captured generation with a dialect-guarded SQLite/PostgreSQL
   `RETURNING` compare-and-set so the claim receipt is part of the write.
 - Bound the claim and one timeout reconciliation attempt by the caller's
-  remaining request deadline; an unresolved reconciliation stays fail-closed.
+  remaining request deadline; cancellation-resistant durable calls are
+  detached at that bound and remain fail-closed without a concurrent retry.
 - Recheck local state both before and after the durable CAS so a same-key local
   failure wins over a delayed replay claim.
 - Carry the independent `admission_generation` through local loads and delayed
@@ -28,6 +29,8 @@ explicitly generation-fenced.
 - Clear a circuit only with the captured timestamp and generation, retain local
   admission state on lookup/CAS failure, and report whether the durable clear
   actually matched.
+- Fence stale retry-circuit purges on the captured admission generation so a
+  claim cannot be deleted and reinserted with a reset generation.
 
 ## Scope and non-goals
 
