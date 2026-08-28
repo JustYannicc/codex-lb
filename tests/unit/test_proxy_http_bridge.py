@@ -33057,6 +33057,56 @@ async def test_invalidate_denied_bridge_anchor_drops_memory_even_when_the_durabl
     assert session.previous_response_ids == {"resp_old", "resp_denied"}
 
 
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_does_not_retry_a_clean_durable_no_match():
+    """A fenced no-match is terminal and must not create background retry work."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service(cleared=False)
+    service._background_cleanup_tasks = set()
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
+    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    assert service._background_cleanup_tasks == set()
+    assert "resp_denied" in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+
+
+@pytest.mark.asyncio
+async def test_retry_denied_bridge_anchor_stops_on_a_clean_durable_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that discovers a fenced no-match must stop without budget noise."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service(cleared=False)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    assert session.durable_session_id is not None
+    assert session.durable_owner_epoch is not None
+    await http_bridge_upstream_events_module._retry_denied_http_bridge_anchor_clear(
+        service,
+        session,
+        session_id=session.durable_session_id,
+        api_key_id=session.key.api_key_id,
+        instance_id="bridge-instance",
+        owner_epoch=session.durable_owner_epoch,
+        response_id="resp_denied",
+    )
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
+    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+
+
 def _denied_anchor_request_state(
     *,
     previous_response_id: str | None = "resp_denied",
@@ -33276,6 +33326,8 @@ async def test_retire_denied_bridge_anchor_leaves_a_delta_only_anchor_alone():
 
     service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
     assert session.last_completed_response_id == "resp_denied"
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_settlement(
     monkeypatch: pytest.MonkeyPatch,

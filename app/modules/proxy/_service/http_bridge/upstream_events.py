@@ -703,7 +703,12 @@ async def _retry_denied_http_bridge_anchor_clear(
                 logger.warning("Retrying denied HTTP bridge response-anchor clear after durable failure", exc_info=True)
                 continue
             if cleared is None:
-                continue
+                # A clean no-match means the captured owner fence or denied
+                # response is already gone.  It is a terminal bookkeeping
+                # outcome, not a transient durable failure; keep the local
+                # alias and denial fence because ownership may have advanced,
+                # but do not spend the remaining retry budget on it.
+                return
             durable_cleared = True
         # Owner rebinding can happen while the lease-renewal backoff is
         # sleeping. Serialize the final ownership check with rebinders before
@@ -1272,7 +1277,11 @@ async def _invalidate_denied_http_bridge_anchor(
                     response_id=denied_response_id,
                 )
                 cleared = lookup is not None
-                retry_durable_clear = not cleared
+                # ``None`` is a clean fenced no-match (the owner epoch or
+                # latest response changed), not a durable failure.  Preserve
+                # the local alias and tombstone for the newer owner, but do
+                # not schedule background retries; raised failures below are
+                # the retryable case.
         except Exception:
             retry_durable_clear = True
             logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
