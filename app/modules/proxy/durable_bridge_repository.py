@@ -722,7 +722,9 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
+        expected_admission_generation: int | None = None,
     ) -> None:
+        """Delete a stale retry row only when every captured fence matches."""
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -730,6 +732,8 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
             await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
             await self._session.commit()
@@ -2988,6 +2992,7 @@ class DurableBridgeRepository:
         *,
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
     ) -> int:
+        """Delete expired retry rows without racing a generation claim."""
         deleted_count = 0
         while True:
             result = await self._session.execute(
@@ -2995,6 +3000,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.admission_generation,
                 )
                 .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
                 .limit(batch_size)
@@ -3004,12 +3010,13 @@ class DurableBridgeRepository:
                 return deleted_count
             batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope in keys:
+                for session_key_kind, session_key_hash, api_key_scope, admission_generation in keys:
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.admission_generation == admission_generation)
                         .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )

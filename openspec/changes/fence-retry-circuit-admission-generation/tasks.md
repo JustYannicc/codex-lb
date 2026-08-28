@@ -24,3 +24,13 @@
 - [x] 3.3 Run focused retry-circuit/durable bridge tests plus lint, format,
   type, architecture, and strict OpenSpec validation where the environment
   provides the CLI.
+
+## 4. Review follow-ups
+
+- [x] 4.1 Keep failed-claim cooldown diagnostics within the caller's remaining
+  request deadline, including cancellation-resistant durable lookups.
+- [x] 4.2 Detach cancellation-resistant claim operations at the deadline and
+  suppress concurrent reconciliation while the original write is still
+  running.
+- [x] 4.3 Fence per-key and batch stale purges on `admission_generation` and
+  cover the claim-versus-purge race.

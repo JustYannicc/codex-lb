@@ -28,10 +28,19 @@ durable operation. The claim MUST use a dialect-guarded SQLite/PostgreSQL
 #### Scenario: A timed-out claim is reconciled within the request budget
 
 - **GIVEN** the first durable claim attempt times out
-- **WHEN** the request still has budget remaining
+- **WHEN** the request still has budget remaining and the first operation has
+  settled cancellation
 - **THEN** the service MAY retry the identical conditional claim once
 - **AND** a committed first claim MUST make that retry refuse through the generation fence
 - **AND** a second timeout, store error, refusal, or expired deadline MUST remain fail-closed
+
+#### Scenario: A cancellation-resistant claim cannot extend the request budget
+
+- **GIVEN** a durable claim ignores cancellation after its time bound
+- **WHEN** the claim timeout elapses
+- **THEN** the request MUST stop waiting at that bound
+- **AND** it MUST NOT issue a concurrent reconciliation write
+- **AND** the replay MUST remain fail-closed even if the detached operation later commits
 
 ### Requirement: Retry-circuit settlement is generation-fenced
 
@@ -58,3 +67,16 @@ independent `admission_generation`.
 - **WHEN** durable lookup raises during successful-response settlement
 - **THEN** settlement MUST leave the local circuit and marker sets intact
 - **AND** the request MUST not claim that the circuit was cleared
+
+### Requirement: Retry-circuit stale purges are generation-fenced
+
+Expired retry-circuit purges MUST compare the captured `updated_at_epoch` and
+`admission_generation` in their delete predicate. A purge that loses a
+generation race MUST leave the newer row intact.
+
+#### Scenario: A claim survives a stale purge
+
+- **GIVEN** a cleanup read captured an expired retry row at generation `g`
+- **WHEN** a replay claim advances that row to generation `g + 1` before cleanup deletes it
+- **THEN** the cleanup delete MUST match no row
+- **AND** the claimed row MUST remain available for later generation-fenced settlement

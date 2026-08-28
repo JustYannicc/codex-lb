@@ -3366,6 +3366,121 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     assert after_delayed_failure.admission_generation == 1
 
 
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_stale_purge_is_generation_fenced(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    updated_at_epoch = 1200.0
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-purge-race",
+        api_key_id="key-purge-race",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=updated_at_epoch,
+    )
+
+    claimed = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-purge-race",
+        api_key_id="key-purge-race",
+        expected_updated_at_epoch=updated_at_epoch,
+        expected_admission_generation=0,
+        expected_consecutive_failures=2,
+        expected_cooldown_until_epoch=1300.0,
+    )
+    assert claimed is not None
+    assert claimed.admission_generation == 1
+
+    # The stale loader selected generation zero before the claim. Its delete
+    # must lose the generation race instead of deleting the claimed row.
+    await coordinator.purge_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-purge-race",
+        api_key_id="key-purge-race",
+        expected_updated_at_epoch=updated_at_epoch,
+        expected_admission_generation=0,
+    )
+
+    remaining = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-purge-race",
+        api_key_id="key-purge-race",
+    )
+    assert remaining is not None
+    assert remaining.admission_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_batch_purge_is_generation_fenced(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    updated_at_epoch = 1200.0
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-batch-purge-race",
+        api_key_id="key-batch-purge-race",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=updated_at_epoch,
+    )
+
+    class _BlockedSelectSession:
+        def __init__(self, inner: AsyncSession) -> None:
+            self._inner = inner
+            self.selected = asyncio.Event()
+            self.release_delete = asyncio.Event()
+            self._blocked_once = False
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        async def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+            result = await self._inner.execute(statement, *args, **kwargs)
+            if getattr(statement, "is_select", False) and not self._blocked_once:
+                self._blocked_once = True
+                # Release the read transaction so the competing claim can
+                # commit before this stale batch reaches its DELETE.
+                await self._inner.rollback()
+                self.selected.set()
+                await self.release_delete.wait()
+            return result
+
+    async with async_session_factory() as purge_session:
+        blocked_session = _BlockedSelectSession(purge_session)
+        repository = DurableBridgeRepository(cast(AsyncSession, blocked_session))
+        purge_task = asyncio.create_task(
+            repository.purge_retry_circuits_before(updated_at_epoch + 1.0),
+        )
+        await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
+
+        claimed = await coordinator.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-batch-purge-race",
+            api_key_id="key-batch-purge-race",
+            expected_updated_at_epoch=updated_at_epoch,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=1300.0,
+        )
+        assert claimed is not None
+        assert claimed.admission_generation == 1
+
+        blocked_session.release_delete.set()
+        assert await asyncio.wait_for(purge_task, timeout=1.0) == 0
+
+    remaining = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-batch-purge-race",
+        api_key_id="key-batch-purge-race",
+    )
+    assert remaining is not None
+    assert remaining.admission_generation == 1
+
+
 def _lookup_with_lease(lease_expires_at):
     from app.db.models import HttpBridgeSessionState
     from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup

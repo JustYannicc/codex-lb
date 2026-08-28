@@ -24,9 +24,12 @@ absence (`generation == 0`).
 
 If the first bounded claim times out, cancellation does not prove whether the
 database committed. One identical compare-and-set may be retried within the
-remaining request deadline. A committed first claim rejects the retry through
-the incremented generation; an uncommitted one can be recovered. Refusal,
-store errors, a second timeout, or an expired deadline all remain fail-closed.
+remaining request deadline when the first operation has settled cancellation.
+A cancellation-resistant first operation is detached and no concurrent retry
+is issued; its eventual commit is therefore fail-closed for this request. A
+committed first claim rejects a settled reconciliation through the incremented
+generation; an uncommitted one can be recovered. Refusal, store errors, a
+second timeout, or an expired deadline all remain fail-closed.
 After a successful receipt, the local state is checked again under the lock;
 any intervening same-key failure or cooldown suppresses the replay.
 
@@ -40,6 +43,12 @@ update matching both its observed timestamp and admission generation. A false
 row-count result means a newer durable writer won and the local state is kept.
 Only after a successful CAS does the local state get removed, and a local
 failure that arrived after the lookup still wins the post-CAS check.
+
+Expired-row purges compare both the observed timestamp and
+``admission_generation``. The per-key loader and the batch cleanup scheduler
+carry the generation selected by their read into the delete predicate, so a
+claim that advances the generation cannot be deleted by a stale purge and
+later recreated from generation zero.
 
 ## Delayed failure merge
 

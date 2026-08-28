@@ -1970,6 +1970,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 math.ceil(
                                     await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
                                         circuit_key or session.key,
+                                        deadline=request_state.bridge_request_deadline,
                                     )
                                 ),
                             )

@@ -93,13 +93,70 @@ class _HTTPBridgeRetryCircuitState:
     half_open_until: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitBoundedCall:
+    """Outcome of a deadline-bounded durable retry-circuit operation."""
+
+    completed: bool
+    cancellation_settled: bool
+    value: Any = None
+
+
 def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
     if reset_transient_cache is not None:
         reset_transient_cache()
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
+    service._http_bridge_retry_circuit_abandoned_tasks = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
+
+
+def _consume_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is not None:
+        abandoned_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        result = task.result()
+    except BaseException as exc:
+        logger.debug(
+            "Abandoned HTTP bridge retry-circuit operation finished with an error label=%s error=%r",
+            label,
+            exc,
+        )
+    else:
+        logger.info(
+            "Abandoned HTTP bridge retry-circuit operation completed after timeout label=%s result_present=%s",
+            label,
+            result is not None,
+        )
+
+
+def _track_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is None:
+        abandoned_tasks = set()
+        service._http_bridge_retry_circuit_abandoned_tasks = abandoned_tasks
+    abandoned_tasks.add(task)
+    task.add_done_callback(
+        lambda completed_task: _consume_abandoned_http_bridge_retry_circuit_task(
+            service,
+            completed_task,
+            label=label,
+        )
+    )
 
 
 def _record_http_bridge_retry_circuit_duplicate_suppressed(
@@ -174,6 +231,54 @@ class _HTTPBridgeRetryCircuitMixin:
                 local_cooldown_until=local_cooldown_until,
             )
 
+    async def _await_http_bridge_retry_circuit_call(
+        self: Any,
+        awaitable: Awaitable[Any],
+        *,
+        timeout: float,
+        label: str,
+    ) -> _HTTPBridgeRetryCircuitBoundedCall:
+        """Run one durable operation without awaiting cancellation cleanup.
+
+        ``asyncio.wait_for`` waits for a cancellation-resistant coroutine to
+        unwind after its timeout, so a database driver can pin the bridge past
+        the request deadline. Waiting on a task leaves that unwind detached
+        once the bound expires. A task that accepts cancellation is reported
+        as settled so the caller may perform its one allowed reconciliation;
+        a task that ignores cancellation is fail-closed with no second write.
+        """
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                if not task.done():
+                    _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            else:
+                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            raise
+        if task in done:
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=True, cancellation_settled=True, value=task.result())
+
+        # The timeout is authoritative. Request cancellation, but never wait
+        # for an operation whose driver ignores it. One scheduling turn is
+        # enough for ordinary asyncio database calls to settle cancellation.
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if not task.done():
+                _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            else:
+                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            raise
+        if not task.done():
+            _track_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=False)
+        _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+        return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=True)
+
     async def _claim_http_bridge_retry_circuit_generation(
         self: Any,
         *,
@@ -238,16 +343,30 @@ class _HTTPBridgeRetryCircuitMixin:
             return False
 
         try:
-            claimed = await asyncio.wait_for(
+            first_claim = await self._await_http_bridge_retry_circuit_call(
                 run_durable_claim(),
                 timeout=claim_timeout_seconds,
+                label="claim",
             )
-        except TimeoutError:
-            claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
-                key=key,
-                run_durable_claim=run_durable_claim,
-                deadline=deadline,
-            )
+            if first_claim.completed:
+                claimed = first_claim.value
+            elif not first_claim.cancellation_settled:
+                # A cancellation-resistant durable operation is still
+                # running. It may commit after this request's budget expires,
+                # so do not issue a concurrent reconciliation write.
+                logger.warning(
+                    "Timed out claiming HTTP bridge retry circuit generation; durable operation still draining "
+                    "bridge_kind=%s bridge_key=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                )
+                return False
+            else:
+                claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
+                    key=key,
+                    run_durable_claim=run_durable_claim,
+                    deadline=deadline,
+                )
         except Exception:
             logger.warning(
                 "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
@@ -285,19 +404,18 @@ class _HTTPBridgeRetryCircuitMixin:
     ) -> Any:
         """Resolve a timed-out admission claim against durable state.
 
-        A claim timeout cancels the compare-and-set mid-flight, so it proves
-        nothing about whether the authorized generation was consumed. Treating
-        it as "not claimed" therefore strands this request's one legitimate
-        replay in the common case where the cancelled attempt never committed
-        at all. The coordinator opens a fresh session per call, so the
-        reconciliation is just re-running the identical compare-and-set: the
-        durable row fences it on ``admission_generation``, so it can only win
-        while the authorized generation is still unconsumed. A win recovers
-        the stranded replay; a miss stays fail-closed and keeps the
-        at-most-once guarantee without having to distinguish a committed
-        predecessor from a competing replica. The retry only gets whatever is
-        left of the caller's deadline; with none left it stays fail-closed
-        rather than holding the bridge for a second full claim timeout.
+        A claim timeout leaves uncertainty about whether the authorized
+        generation was consumed. When the first task has settled cancellation,
+        the coordinator opens a fresh session and reconciliation re-runs the
+        identical compare-and-set: the durable row fences it on
+        ``admission_generation``, so it can only win while the authorized
+        generation is still unconsumed. A win recovers a stranded replay; a
+        miss stays fail-closed and keeps the at-most-once guarantee without
+        having to distinguish a committed predecessor from a competing
+        replica. A cancellation-resistant first task is not reconciled while
+        it is still running. The retry only gets whatever is left of the
+        caller's deadline; with none left it stays fail-closed rather than
+        holding the bridge for a second full claim timeout.
         """
         reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
         if reconcile_timeout_seconds is None:
@@ -315,10 +433,21 @@ class _HTTPBridgeRetryCircuitMixin:
             _hash_identifier(key.affinity_key),
         )
         try:
-            return await asyncio.wait_for(
+            reconciliation = await self._await_http_bridge_retry_circuit_call(
                 run_durable_claim(),
                 timeout=reconcile_timeout_seconds,
+                label="claim-reconciliation",
             )
+            if not reconciliation.completed:
+                if not reconciliation.cancellation_settled:
+                    logger.warning(
+                        "Timed out reconciling HTTP bridge retry circuit generation; durable operation still draining "
+                        "bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                return None
+            return reconciliation.value
         except Exception:
             logger.warning(
                 "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",
@@ -459,6 +588,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
                     expected_updated_at_epoch=persisted.updated_at_epoch,
+                    expected_admission_generation=getattr(persisted, "admission_generation", 0),
                 )
             except Exception:
                 logger.warning(
@@ -700,9 +830,24 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_cooldown_seconds_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
+        *,
+        deadline: float | None = None,
     ) -> float:
-        """Return the source-key cooldown used to suppress a replacement."""
-        load_succeeded, generation = await self._http_bridge_retry_circuit_generation_for_key(key)
+        """Return a deadline-bounded source-key cooldown hint."""
+        lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if lookup_timeout_seconds is None:
+            return 0.0
+        lookup = await self._await_http_bridge_retry_circuit_call(
+            self._http_bridge_retry_circuit_generation_for_key(key),
+            timeout=lookup_timeout_seconds,
+            label="cooldown-lookup",
+        )
+        if not lookup.completed:
+            return 0.0
+        load_succeeded, generation = cast(
+            tuple[bool, _HTTPBridgeRetryCircuitGeneration | None],
+            lookup.value,
+        )
         if not load_succeeded or generation is None:
             return 0.0
         return max(
