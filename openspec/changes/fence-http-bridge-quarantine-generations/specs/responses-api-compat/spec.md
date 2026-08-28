@@ -10,10 +10,15 @@ session that armed it, so the bounded registry cannot retain detached websocket
 sessions until TTL expiry.
 
 A primary-key completion MAY clear quarantine only when its completing session
-is the entry's live owner or is the current canonical session for that key in
-the service's primary session registry. A detached predecessor MUST NOT clear a
-replacement session's newer primary-key quarantine entry, regardless of a
-mutable per-session marker or recycled object id.
+is the current canonical session for a registered key, or when no canonical
+primary is registered and the entry's weak owner is the completing session. If
+the key is registered to a different session, the canonical registry wins and a
+detached predecessor MUST NOT clear any entry or first-strike evidence for that
+key, regardless of a mutable per-session marker or recycled object id. The
+completion MUST capture the primary-key quarantine generation, including an
+observed absence, before any await that can arm a replacement entry. Only the
+exact captured generation MAY be cleared; an observed absence or generation
+mismatch MUST leave a raced entry active.
 
 A stale-anchor recovery MUST capture the quarantine generation for its
 recovery-origin key before authorization. A matching generation MAY be cleared
@@ -35,6 +40,15 @@ circuit. TTL and size-cap pruning MUST remain bounded and self-recovering.
 - **WHEN** the detached predecessor completes and runs primary-key cleanup
 - **THEN** the replacement's quarantine remains active
 - **AND** the replacement generation remains authoritative
+
+#### Scenario: Primary completion cannot clear a first strike recorded during settlement
+
+- **GIVEN** a primary completion observes no active quarantine for its key
+- **WHEN** retry-circuit settlement yields and another request records the first
+  eventless strike for that key before completion cleanup resumes
+- **THEN** the completion leaves that inactive first-strike evidence in the
+  registry
+- **AND** the next eventless timeout can still observe it as the prior strike
 
 #### Scenario: TTL pruning and key reuse do not recycle a generation
 
