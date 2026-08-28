@@ -6,7 +6,7 @@ import inspect
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -3438,7 +3438,7 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_generation_fenced(
         def __getattr__(self, name: str) -> object:
             return getattr(self._inner, name)
 
-        async def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
             result = await self._inner.execute(statement, *args, **kwargs)
             if getattr(statement, "is_select", False) and not self._blocked_once:
                 self._blocked_once = True
