@@ -18,7 +18,7 @@ The proxy MUST NOT retire the anchor when:
 - the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
 - the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
 
-When the durable clear cannot be confirmed, the proxy MUST NOT report the anchor as retired, and MUST still clear the in-memory anchor, which strictly removes one carrier that could re-inject the denied id. A durable record that survives re-injects the id on a later turn, which is denied in turn and re-enters this path, so the clear is re-attempted rather than lost.
+When a durable clear raises, the proxy MUST NOT report the anchor as retired, MUST still clear the in-memory anchor, and MUST retain the bounded cleanup retry so a transient failure is not lost. When the durable clear returns no matching row, the proxy MUST treat that no-match as a terminal fenced outcome for this cleanup attempt and MUST NOT spend the retry budget on it; it MUST preserve the local alias and denial fence because the durable owner or latest anchor may have advanced. A durable record that still carries the denied id can then be retired by the matching owner rather than by a stale epoch.
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
