@@ -68,3 +68,13 @@ untrimmed input. A genuine delta-only continuation MUST retain access to its
 durable anchor, because quarantine does not erase durable context and the
 request has no equivalent replacement context source. This distinction MUST
 not mutate account health, routing, or durable ownership.
+
+#### Scenario: Quarantine preserves durable context for delta-only requests
+
+- **GIVEN** a live bridge session is quarantined and its durable anchor is
+  available
+- **WHEN** a genuine delta-only continuation arrives for that session key
+- **THEN** the quarantined live session is excluded from local reuse and
+  full-resend anchor injection
+- **AND** the request still resolves and receives its durable anchor
+- **AND** no account health, routing, or durable ownership state changes
