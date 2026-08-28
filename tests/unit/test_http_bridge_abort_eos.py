@@ -50,7 +50,11 @@ def _make_session() -> proxy_service._HTTPBridgeSession:
     )
 
 
-def _make_claimed_request_state(event_queue: asyncio.Queue[str | None]) -> proxy_service._WebSocketRequestState:
+def _make_claimed_request_state(
+    event_queue: asyncio.Queue[str | None],
+    *,
+    event_queue_revoked: asyncio.Event | None = None,
+) -> proxy_service._WebSocketRequestState:
     return proxy_service._WebSocketRequestState(
         request_id="req-abort-eos",
         model="gpt-5.5",
@@ -59,6 +63,7 @@ def _make_claimed_request_state(event_queue: asyncio.Queue[str | None]) -> proxy
         api_key_reservation=None,
         started_at=0.0,
         event_queue=event_queue,
+        event_queue_revoked=event_queue_revoked or asyncio.Event(),
         terminal_settlement_phase="claimed",
         transport="http",
     )
@@ -74,7 +79,7 @@ async def test_aborted_terminal_settlement_unblocks_full_live_queue() -> None:
     event_queue.put_nowait("first-buffered-event")
     event_queue.put_nowait("last-buffered-event")
     assert event_queue.full()
-    request_state = _make_claimed_request_state(event_queue)
+    request_state = _make_claimed_request_state(event_queue, event_queue_revoked=event_queue.revoked)
     request_state.event_queue_consumer_started = True
 
     await asyncio.wait_for(
@@ -107,7 +112,7 @@ async def test_aborted_terminal_settlement_preserves_preconsumer_queue_until_con
         byte_budget=budget,
     )
     event_queue.put_nowait("unread-aborted-payload")
-    request_state = _make_claimed_request_state(event_queue)
+    request_state = _make_claimed_request_state(event_queue, event_queue_revoked=event_queue.revoked)
 
     await _AbortEosService()._settle_aborted_http_bridge_terminal_states(
         _make_session(),
@@ -175,7 +180,7 @@ async def test_best_effort_advisory_reports_custom_queue_drop_without_leaking_bu
         revoked=asyncio.Event(),
         byte_budget=budget,
     )
-    request_state = _make_claimed_request_state(event_queue)
+    request_state = _make_claimed_request_state(event_queue, event_queue_revoked=event_queue.revoked)
     request_state.event_queue_consumer_started = False
 
     if queue_state == "revoked":
@@ -190,6 +195,7 @@ async def test_best_effort_advisory_reports_custom_queue_drop_without_leaking_bu
             byte_budget=budget,
         )
         request_state.event_queue = event_queue
+        request_state.event_queue_revoked = event_queue.revoked
 
     delivered = await http_bridge_upstream_events._enqueue_http_bridge_event(
         request_state,
