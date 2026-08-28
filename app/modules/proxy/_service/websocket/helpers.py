@@ -1163,14 +1163,15 @@ def _sanitize_public_websocket_event_payload(
             if sanitized_error != error_value:
                 normalized = dict(normalized)
                 normalized["error"] = sanitized_error
-        elif "param" in payload:
-            sanitized = dict(payload)
+        if "param" in payload:
+            sanitized = dict(normalized)
             public_param = normalize_public_error_param(OpenAIErrorParam(True, payload["param"]))
             if public_param is None:
                 sanitized.pop("param", None)
             else:
                 sanitized["param"] = public_param
-            normalized = sanitized
+            if sanitized != normalized:
+                normalized = sanitized
 
     response_value = payload.get("response")
     if isinstance(response_value, dict):

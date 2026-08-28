@@ -26,6 +26,9 @@ the strict classifier, while masking code consumes the public-shape classifier.
   sanitized envelope.
 - A nested `response.failed` error may be masked without dropping the outer
   response id used by clients to correlate the terminal event.
+- The WebSocket and HTTP Responses serializers retain their native event
+  envelopes; the Chat Completions adapter deliberately emits its own
+  `{"error": ...}` wire shape and only carries over the sanitized error detail.
 
 ## Operational notes
 
