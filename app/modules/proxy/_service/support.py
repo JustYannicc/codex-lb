@@ -17,7 +17,10 @@ import anyio
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+    UpstreamWebSocket,
+)
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
@@ -36,6 +39,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
@@ -56,7 +60,13 @@ _TTFT_EVENT_TYPES = frozenset(
         "response.reasoning_text.delta",
     }
 )
-_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset(
+    {
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+        "response.custom_tool_call_input.delta",
+    }
+)
 _TTFT_REASONING_EVENT_TYPES = frozenset(
     {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
@@ -232,10 +242,16 @@ def _ttft_event_visible_at(
     if event_type in _TTFT_EVENT_TYPES:
         delta = payload.get("delta") if payload is not None else None
         return now if isinstance(delta, str) and bool(delta) else None
-    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+    if event_type not in {"response.output_item.added", "response.output_item.done"} or not isinstance(payload, dict):
         return None
     item = payload.get("item")
-    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+    if not isinstance(item, dict) or item.get("type") not in _TTFT_OUTPUT_ITEM_TYPES:
+        return None
+    if item.get("type") == "custom_tool_call":
+        meaningful = any(isinstance(item.get(key), str) and bool(item[key]) for key in ("input", "arguments"))
+    else:
+        meaningful = any(item.get(key) not in (None, "", {}) for key in ("operation", "patch", "input"))
+    return now if meaningful else None
 
 
 def _is_ttft_event(
@@ -872,6 +888,15 @@ class _DeferredAccountBackoffTracker:
     current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
 
 
+@dataclass(slots=True)
+class _DeferredKeyedStreamHealthPenalty:
+    """Classified account-health write deferred until reservation settlement."""
+
+    account: Account
+    error: UpstreamError
+    code: str
+
+
 @dataclass(eq=False, slots=True)
 class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
@@ -956,14 +981,10 @@ class _WebSocketRequestState:
     # ``_prepare_websocket_response_create_request`` (replays, archives),
     # which keeps those on the normalized-model check.
     raw_source_model: str | None = None
-    # True when the HTTP route would exclude this request from model-source
-    # routing (``responses_source_route_excluded``: a terminal compaction
-    # trigger, or ``input_file`` references pinned to the uploading
-    # subscription account). The WebSocket source-ownership guards skip such
-    # requests so the owner-routing logic can dispatch them to a subscription
-    # account, exactly like HTTP. ``False`` on request states that were not
-    # built by ``_prepare_websocket_response_create_request``, which keeps
-    # the guards active for those.
+    # True when the Codex HTTP route structurally excludes this request from
+    # model-source routing: a terminal compaction trigger or ``input_file``
+    # references pinned to the uploading subscription account. Previous
+    # response ownership is recorded separately after continuity lookup.
     source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -1019,6 +1040,18 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Set only on the internally constructed one-shot request that replaces an
+    # explicitly rejected stale anchor with a verified full-history payload.
+    # It may bypass an older hard-key retry circuit without deleting that
+    # circuit or weakening admission for ordinary client retries.
+    verified_stale_anchor_replay: bool = False
+    # Snapshot of the hard-key circuit observed when the stale-anchor replay
+    # was authorized. ``captured=True`` with ``generation=None`` proves that no
+    # circuit existed; a newer local/durable failure must suppress submit.
+    verified_stale_anchor_retry_circuit_generation_captured: bool = False
+    verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
+    verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
+    verified_stale_anchor_quarantine_generation: int | None = None
     # Stable fingerprint used by the durable recovery-attempt journal. It is
     # populated only for a proof-gated fresh replay candidate.
     recovery_attempt_fingerprint: str | None = None
@@ -1049,6 +1082,11 @@ class _WebSocketRequestState:
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
     operation_created: bool = False
+    operation_rebound: bool = False
+    operation_rebound_from_session_id: str | None = None
+    operation_rebound_from_account_id: str | None = None
+    operation_rebound_from_model: str | None = None
+    operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
     # Immutable durable attempt generation. Recovery claims increment the
@@ -1089,6 +1127,10 @@ class _WebSocketRequestState:
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
     previous_response_owner_session_id: str | None = None
+    # Subscription account proven to own ``previous_response_id`` by the
+    # continuity index/request-log lookup. Identifier syntax is never used as
+    # an ownership signal, so ``None`` leaves configured source routing intact.
+    previous_response_owner_account_id: str | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -1118,6 +1160,11 @@ class _WebSocketRequestState:
     useragent: str | None = None
     useragent_group: str | None = None
     conversation_id: str | None = None
+    # The Responses payload's own ``conversation``, distinct from the client
+    # log's ``conversation_id`` above. It is account-scoped continuity with no
+    # dedicated owner index, so the raw path cannot prove the bridge session's
+    # owner for it.
+    payload_conversation_bound: bool = False
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
@@ -1128,6 +1175,12 @@ class _WebSocketRequestState:
     deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
     deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
     deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+    # Classified health writes (mark_rate_limit / mark_quota_exceeded /
+    # record_error) deferred by keyed pre-created retry branches until this
+    # request's API-key reservation settles or its fallback release commits
+    # (settlement-ordering invariant). Entries drop unapplied when neither
+    # confirms.
+    deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
@@ -1727,8 +1780,8 @@ def _openai_error_envelope_from_response_failed_payload(
 
     envelope = openai_error(code, message, error_type)
     param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
+    if "param" in error_payload:
+        envelope["error"]["param"] = param_value.strip() if isinstance(param_value, str) else ""
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:
@@ -1740,3 +1793,61 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(resets_in, int | float):
         error_detail["resets_in_seconds"] = resets_in
     return envelope
+
+
+# --- Upstream websocket transport health -----------------------------------
+#
+# Codex clients only switch to the HTTP transport when the websocket
+# handshake is rejected with HTTP 426 (codex-rs checks
+# ``StatusCode::UPGRADE_REQUIRED`` on connect; in-band error events never
+# trigger the transport fallback). This per-instance marker remembers a
+# recent connect-phase upstream websocket transport failure so the websocket
+# routes can deny the next handshake with 426 and the HTTP paths can pin the
+# upstream transport to HTTP until the websocket upstream proves healthy
+# again.
+
+UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS = 60.0
+_upstream_ws_transport_failure_at: float | None = None
+
+
+def mark_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = time.monotonic()
+
+
+def clear_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = None
+
+
+def websocket_connect_transport_failure_code(
+    exc: ProxyResponseError,
+    *,
+    confirmed_pre_dispatch: bool,
+) -> str | None:
+    """Code of a host-scoped upstream websocket transport failure, else ``None``.
+
+    The discriminator is the provenance the direct upstream open stamps, not
+    the sanitized error code. Codes cannot carry it in either direction: the
+    responses policy preserves the upstream handshake body, so a direct 5xx
+    upgrade rejection surfaces as ``upstream_error`` or whatever the edge
+    returned, while OAuth refresh transport errors, routed-proxy handshakes,
+    TLS verification failures and host-wide network loss all share the
+    ``upstream_unavailable`` envelope and must keep their
+    classify-penalize-failover handling.
+    """
+
+    if confirmed_pre_dispatch or exc.failure_phase != "connect":
+        return None
+    if exc.failure_detail != UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL:
+        return None
+    connect_error = _parse_openai_error(exc.payload)
+    return _normalize_error_code(
+        connect_error.code if connect_error else None,
+        connect_error.type if connect_error else None,
+    )
+
+
+def upstream_websocket_transport_recently_failed() -> bool:
+    marked_at = _upstream_ws_transport_failure_at
+    return marked_at is not None and time.monotonic() - marked_at < UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS
