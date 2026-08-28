@@ -33068,15 +33068,24 @@ async def test_submit_http_bridge_request_passes_request_deadline_to_generation_
 
     monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", record_claim)
 
-    await service._submit_http_bridge_request(
-        session,
-        request_state=request_state,
-        text_data=request_state.request_text or "{}",
-        queue_limit=8,
-    )
+    try:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
 
-    assert claim_kwargs["deadline"] == request_state.bridge_request_deadline
-    send_text.assert_awaited_once_with(request_state.request_text)
+        assert claim_kwargs["deadline"] == request_state.bridge_request_deadline
+        send_text.assert_awaited_once_with(request_state.request_text)
+    finally:
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=True,
+            request_enqueued=True,
+            counted_in_queue=True,
+        )
 
 
 @pytest.mark.asyncio
