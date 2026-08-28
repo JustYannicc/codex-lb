@@ -1230,6 +1230,8 @@ async def _invalidate_denied_http_bridge_anchor(
         return False
     sibling_advanced = False
     async with session.lifecycle_lock:
+        if session.closed:
+            return False
         # Serialize publication with the submitter's final tombstone check and
         # upstream send. A sibling completion can advance the current carrier
         # while an already-prepared request still holds the denied id; that
@@ -1264,6 +1266,7 @@ async def _invalidate_denied_http_bridge_anchor(
         return False
     retry_durable_clear = False
     unregister_succeeded = False
+    owner_matches_for_cleanup = False
     unregister_error: BaseException | None = None
     durable_error: BaseException | None = None
     try:
@@ -1288,14 +1291,25 @@ async def _invalidate_denied_http_bridge_anchor(
         finally:
             try:
                 if cleared or no_durable_owner:
-                    try:
-                        await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
-                        unregister_succeeded = True
-                    except asyncio.CancelledError as exc:
-                        unregister_error = exc
-                    except Exception as exc:
-                        unregister_error = exc
-                        retry_durable_clear = True
+                    async with session.lifecycle_lock:
+                        owner_matches_for_cleanup = (
+                            session.durable_session_id == durable_session_id
+                            and session.durable_owner_epoch == durable_owner_epoch
+                        )
+                        if owner_matches_for_cleanup:
+                            try:
+                                unregister_result = await service._unregister_http_bridge_previous_response_id(
+                                    session,
+                                    denied_response_id,
+                                    expected_durable_session_id=durable_session_id,
+                                    expected_durable_owner_epoch=durable_owner_epoch,
+                                )
+                                unregister_succeeded = unregister_result is not False
+                            except asyncio.CancelledError as exc:
+                                unregister_error = exc
+                            except Exception as exc:
+                                unregister_error = exc
+                                retry_durable_clear = True
             finally:
                 async with session.lifecycle_lock:
                     if session.last_completed_response_id == denied_response_id:
@@ -1304,9 +1318,15 @@ async def _invalidate_denied_http_bridge_anchor(
                         session.last_completed_input_count = 0
                         session.last_completed_input_prefix_fingerprint = None
                         session.last_pending_tool_calls.clear()
-                    if (cleared or no_durable_owner) and unregister_succeeded:
+                    if owner_matches_for_cleanup and (cleared or no_durable_owner) and unregister_succeeded:
                         session.denied_proxy_injected_anchor_ids.discard(denied_response_id)
                         session.denied_proxy_injected_anchor_generation += 1
+                        _forget_http_bridge_denied_anchor_fence(
+                            service,
+                            denied_response_id,
+                            owner_key=durable_session_id if durable_session_id is not None else f"local:{id(session)}",
+                            owner_epoch=durable_owner_epoch,
+                        )
                 if retry_durable_clear:
                     _schedule_denied_http_bridge_anchor_clear_retry(
                         service,
@@ -1320,8 +1340,6 @@ async def _invalidate_denied_http_bridge_anchor(
                     )
     except asyncio.CancelledError as exc:
         durable_error = exc
-    if (cleared or no_durable_owner) and unregister_succeeded:
-        _forget_http_bridge_denied_anchor_fence(service, denied_response_id)
     if unregister_error is not None:
         raise unregister_error
     if durable_error is not None:

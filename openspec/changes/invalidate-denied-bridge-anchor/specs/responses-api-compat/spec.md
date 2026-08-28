@@ -129,7 +129,10 @@ prepared request MUST remain fenced until its final pin is released; the fence
 may then be removed. Fence state MUST be bounded to one current denial slot per
 active durable or local owner plus active request pins, and a session close or
 durable-owner epoch change MUST retire the old owner's unpinned slot without
-clearing a successor epoch's slot.
+clearing a successor epoch's slot. A close MAY retain an otherwise unpinned
+durable denial slot while that session still records an unresolved durable
+cleanup, so a stale row cannot be recaptured; the slot MUST be retired when
+cleanup succeeds or the durable row is confirmed absent.
 
 #### Scenario: A retirement failure cannot change the denial delivered downstream
 

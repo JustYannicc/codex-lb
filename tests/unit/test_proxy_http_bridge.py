@@ -32843,8 +32843,10 @@ def _denied_anchor_service(*, cleared: bool = True) -> Any:
     async def unregister_previous_response_id(
         session: proxy_service._HTTPBridgeSession,
         response_id: str,
-    ) -> None:
+        **_kwargs: Any,
+    ) -> bool:
         session.previous_response_ids.discard(response_id)
+        return True
 
     return SimpleNamespace(
         _durable_bridge=SimpleNamespace(
@@ -32972,6 +32974,193 @@ def test_denied_anchor_owner_rebind_drops_the_stale_local_owner_mapping() -> Non
 
 
 @pytest.mark.asyncio
+async def test_closing_http_bridge_session_retires_unpinned_owner_fence() -> None:
+    """A successful close drops the closed owner's unpinned denial slot."""
+    session = _denied_anchor_session()
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(
+            release_live_session=AsyncMock(
+                return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+            )
+        ),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+    )
+
+    assert "resp_denied" not in service._http_bridge_denied_anchor_fences
+    assert session.durable_session_id not in service._http_bridge_denied_anchor_fence_current
+    service._durable_bridge.release_live_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_durable_session", [True, False])
+async def test_closing_http_bridge_session_keeps_fence_after_durable_release_failure_or_retention(
+    release_durable_session: bool,
+) -> None:
+    """Failed or deliberately retained durable ownership keeps its fence."""
+    session = _denied_anchor_session()
+    release_live_session = AsyncMock()
+    if release_durable_session:
+        release_live_session.side_effect = RuntimeError("durable store unavailable")
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+        release_durable_session=release_durable_session,
+    )
+
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+    assert service._http_bridge_denied_anchor_fence_current[session.durable_session_id] == "resp_denied"
+    if release_durable_session:
+        release_live_session.assert_awaited_once()
+    else:
+        release_live_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closing_http_bridge_session_keeps_fence_for_a_fenced_release() -> None:
+    """A successor snapshot must not let a predecessor drop its fence."""
+    session = _denied_anchor_session()
+    assert session.durable_owner_epoch is not None
+    release_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id="bridge-successor",
+            owner_epoch=session.durable_owner_epoch + 1,
+        )
+    )
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+    )
+
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+    assert service._http_bridge_denied_anchor_fence_current[session.durable_session_id] == "resp_denied"
+    release_live_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_closing_http_bridge_session_keeps_fence_when_release_leaves_denial_pending() -> None:
+    """A lease release cannot retire an anchor whose durable clear failed."""
+    session = _denied_anchor_session()
+    session.denied_proxy_injected_anchor_ids.add("resp_denied")
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(
+            release_live_session=AsyncMock(
+                return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+            )
+        ),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=session.durable_session_id,
+        owner_epoch=session.durable_owner_epoch,
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+    )
+
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+    assert service._http_bridge_denied_anchor_fence_current[session.durable_session_id] == "resp_denied"
+
+
+@pytest.mark.asyncio
+async def test_initial_denied_anchor_cleanup_skips_alias_unregister_after_owner_epoch_rebind() -> None:
+    """A predecessor cleanup must not unregister a successor epoch's alias."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    clear_started = asyncio.Event()
+    allow_clear = asyncio.Event()
+
+    async def clear_after_rebind(**_kwargs: Any) -> SimpleNamespace:
+        clear_started.set()
+        await allow_clear.wait()
+        return SimpleNamespace()
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches = AsyncMock(
+        side_effect=clear_after_rebind,
+    )
+    cleanup_task = asyncio.create_task(
+        http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp_denied",
+        )
+    )
+    await asyncio.wait_for(clear_started.wait(), timeout=1.0)
+
+    async with session.lifecycle_lock:
+        session.durable_owner_epoch = 5
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            service,
+            "resp_successor",
+            owner_key=session.durable_session_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+    allow_clear.set()
+    await asyncio.wait_for(cleanup_task, timeout=1.0)
+
+    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    assert "resp_denied" in session.previous_response_ids
+    successor = service._http_bridge_denied_anchor_fences["resp_successor"]
+    assert successor.owner_epoch == 5
+
+
+@pytest.mark.asyncio
 async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
     """An upstream denial of a proxy-injected anchor retires it on the first occurrence.
 
@@ -32993,7 +33182,12 @@ async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
     assert clear_kwargs["session_id"] == "durable-denied-anchor"
     assert clear_kwargs["owner_epoch"] == 4
     assert clear_kwargs["response_id"] == "resp_denied"
-    service._unregister_http_bridge_previous_response_id.assert_awaited_once_with(session, "resp_denied")
+    service._unregister_http_bridge_previous_response_id.assert_awaited_once_with(
+        session,
+        "resp_denied",
+        expected_durable_session_id="durable-denied-anchor",
+        expected_durable_owner_epoch=4,
+    )
     assert session.previous_response_ids == {"resp_old"}
     assert session.last_completed_response_id is None
     assert session.last_completed_response_account_id is None

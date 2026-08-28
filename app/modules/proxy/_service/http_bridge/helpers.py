@@ -384,6 +384,7 @@ def _forget_http_bridge_denied_anchor_fence_owner(
     owner_key: str,
     *,
     owner_epoch: int | None = None,
+    preserve_response_ids: Sequence[str] = (),
 ) -> None:
     """Drop unpinned fence slots for a closed or superseded owner epoch."""
     fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
@@ -392,9 +393,16 @@ def _forget_http_bridge_denied_anchor_fence_owner(
     for response_id, entry in tuple(fences.items()):
         if not isinstance(entry, _HTTPBridgeDeniedAnchorFence) or entry.owner_key != owner_key:
             continue
+        if response_id in preserve_response_ids:
+            continue
         if owner_epoch is not None and entry.owner_epoch not in (None, owner_epoch):
             continue
-        _forget_http_bridge_denied_anchor_fence(service, response_id)
+        _forget_http_bridge_denied_anchor_fence(
+            service,
+            response_id,
+            owner_key=owner_key,
+            owner_epoch=entry.owner_epoch,
+        )
 
 
 def _release_http_bridge_denied_anchor_fences(service: Any, request_id: str) -> None:
@@ -1259,6 +1267,9 @@ async def _close_http_bridge_session_resources(
     release_durable_session: bool = True,
 ) -> None:
     session.closed = True
+    durable_session_id = getattr(session, "durable_session_id", None)
+    durable_owner_epoch = getattr(session, "durable_owner_epoch", None)
+    durable_release_allowed = release_durable_session and _http_bridge_durable_release_allowed(service, session)
     if turn_state_lock_held:
         service._unregister_http_bridge_turn_states_locked(session)
         service._unregister_http_bridge_previous_response_ids_locked(session)
@@ -1272,16 +1283,39 @@ async def _close_http_bridge_session_resources(
         logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
     finally:
         session.account_lease = None
-    if release_durable_session and _http_bridge_durable_release_allowed(service, session):
+    durable_release_succeeded = durable_owner_epoch is None
+    release_result_was_missing = False
+    if durable_release_allowed:
         try:
-            await service._durable_bridge.release_live_session(
-                session_id=session.durable_session_id,
+            released = await service._durable_bridge.release_live_session(
+                session_id=durable_session_id,
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=session.durable_owner_epoch,
+                owner_epoch=durable_owner_epoch,
                 draining=shutdown_state.is_bridge_drain_active(),
             )
+            # Fenced releases return the current owner snapshot, while a
+            # missing row returns None. Only an ownerless snapshot (or a
+            # missing row) means this generation no longer owns a durable lease.
+            release_result_was_missing = released is None
+            durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
         except Exception:
             logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
+    # Closing a generation retires its process-local denial slot as well as
+    # its routing aliases. Keep pinned requests fenced; the owner helper marks
+    # those entries superseded and lets their final pin release remove them.
+    # A deliberately retained lease or a failed/fenced release still belongs
+    # to a live durable owner, so its fence must remain for a successor.
+    if durable_release_succeeded:
+        owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
+        pending_denied_response_ids = (
+            () if release_result_was_missing else tuple(getattr(session, "denied_proxy_injected_anchor_ids", ()))
+        )
+        _forget_http_bridge_denied_anchor_fence_owner(
+            service,
+            owner_key,
+            owner_epoch=durable_owner_epoch,
+            preserve_response_ids=pending_denied_response_ids,
+        )
     upstream_reader = session.upstream_reader
     if upstream_reader is not None:
         if upstream_reader is asyncio.current_task():
