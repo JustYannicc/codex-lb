@@ -208,6 +208,20 @@ _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
+# Provenance marker for bridge failures raised strictly before the current
+# request dispatched upstream. Only exceptions carrying this attribute are
+# safe for the streaming wrapper's raw-HTTP replay.
+_HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
+# Provenance for a bridge failure whose prepared payload carried a continuity
+# anchor the incoming payload does not, making a raw-HTTP replay of the
+# incoming payload continuity-incomplete.
+_HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
+# Provenance for a bridge retry-circuit cooldown suppression proved replay-safe
+# at the pre-dispatch submission gate. It cannot be inferred from the error
+# code: ``_raise_proxy_budget_exhausted`` emits the same
+# ``upstream_request_timeout`` for an ordinary pre-submit budget exhaustion,
+# which is overload or host-network evidence and must not be replayed.
+_HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR = "http_bridge_cooldown_suppression"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
@@ -677,15 +691,16 @@ def _normalize_http_bridge_error_event(
                     error_message_value = stripped
             param_value = payload_error.get("param")
             if isinstance(param_value, str):
-                stripped = param_value.strip()
-                if stripped:
-                    error_param_value = stripped
+                error_param_value = param_value.strip()
 
     if isinstance(payload, dict):
         raw_error = payload.get("error")
         if not isinstance(raw_error, dict):
             raw_error = _websocket_top_level_error_payload(payload)
         if isinstance(raw_error, dict):
+            if "param" in raw_error:
+                raw_param = raw_error.get("param")
+                error_param_value = raw_param.strip() if isinstance(raw_param, str) else ""
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
                 rate_limit_metadata["plan_type"] = plan_type
@@ -2795,7 +2810,32 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_indefinite_recovery",
         }
     param_value = error.get("param")
-    param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
+    if "param" in error and not isinstance(param_value, str):
+        return False
+    param = param_value.strip() if isinstance(param_value, str) else None
+    message_value = error.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
+    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+
+
+def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    code_value = error.get("code")
+    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
+    type_value = error.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    code = _normalize_error_code(raw_code, error_type)
+    if code == "bridge_previous_response_not_found":
+        return True
+    param_value = error.get("param")
+    if "param" in error and not isinstance(param_value, str):
+        return False
+    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param, message=message)
@@ -3131,6 +3171,7 @@ for _helper_name in (
     "_http_bridge_continuity_lost_error_envelope",
     "_http_bridge_owner_lookup_unavailable_error_envelope",
     "_http_bridge_should_attempt_local_previous_response_recovery",
+    "_http_bridge_is_explicit_previous_response_rejection",
     "_http_bridge_is_previous_response_owner_unavailable",
     "_http_bridge_should_attempt_soft_affinity_reroute",
     "_http_bridge_is_context_overflow_error",

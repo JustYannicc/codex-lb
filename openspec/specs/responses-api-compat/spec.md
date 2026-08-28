@@ -3675,7 +3675,6 @@ lookup failure into `previous_response_owner_unavailable`.
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
-
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 
 - **GIVEN** a source is also configured for the requested model
@@ -3714,7 +3713,6 @@ lookup failure into `previous_response_owner_unavailable`.
 - **THEN** the proxy preserves the existing subscription account-selection path
 - **AND** the request is forwarded to the selected subscription upstream
 - **AND** the proxy does not emit `previous_response_owner_unavailable`
-
 ### Requirement: Source-routed chat payloads are sanitized before forwarding
 
 Source-routed `/v1/chat/completions` requests SHALL forward the client's

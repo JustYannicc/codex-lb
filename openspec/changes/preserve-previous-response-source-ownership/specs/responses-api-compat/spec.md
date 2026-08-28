@@ -41,7 +41,6 @@ lookup failure into `previous_response_owner_unavailable`.
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
-
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 
 - **GIVEN** a source is also configured for the requested model
