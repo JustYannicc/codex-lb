@@ -1961,6 +1961,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=request_state.bridge_request_deadline,
                             )
                         )
                         if not generation_claimed:

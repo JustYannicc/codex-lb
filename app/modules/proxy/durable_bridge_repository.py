@@ -646,18 +646,16 @@ class DurableBridgeRepository:
             "admission_generation": 1,
         }
         dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
+        if expected_updated_at_epoch is None and expected_admission_generation != 0:
+            return None
         async with sqlite_writer_section():
             if expected_updated_at_epoch is None:
-                if expected_admission_generation != 0:
-                    return None
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
-                elif dialect == "sqlite":
-                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 else:
-                    raise RuntimeError(
-                        f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
-                    )
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
             else:
                 statement = (
                     update(HttpBridgeRetryCircuit)
@@ -672,16 +670,18 @@ class DurableBridgeRepository:
                     )
                     .values(admission_generation=expected_admission_generation + 1)
                 )
-            result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            # Return the updated row from the compare-and-set statement itself.
+            # Reading it after commit creates a cancellation window where the
+            # admission generation is consumed but the caller observes a
+            # timeout and suppresses the replay. RETURNING makes the durable
+            # claim receipt part of the same atomic write operation.
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
                 await self._session.rollback()
                 return None
             await self._session.commit()
-        return await self.get_retry_circuit(
-            session_key_kind=session_key_kind,
-            session_key_value=session_key_value,
-            api_key_scope=api_key_scope,
-        )
+        return _to_retry_circuit_snapshot(row)
 
     async def delete_retry_circuit(
         self,
@@ -690,7 +690,8 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -698,8 +699,10 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
@@ -710,6 +713,7 @@ class DurableBridgeRepository:
                 )
             )
             await self._session.commit()
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
     async def purge_retry_circuit(
         self,
