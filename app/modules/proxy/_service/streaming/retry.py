@@ -21,7 +21,12 @@ from app.core.clients.proxy import (
     is_confirmed_pre_dispatch_transport_error,
     pop_stream_timeout_overrides,
 )
-from app.core.errors import openai_error, response_failed_event
+from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
+    openai_error,
+    response_failed_event,
+)
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
@@ -1086,47 +1091,62 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
-                    # A response id is an account-scoped stored object. A
-                    # sole candidate is not proof that it owns an anchor that
-                    # has no recorded subscription owner; dispatching there
-                    # can leak a source-owned continuation to an unrelated
-                    # subscription account. The source route is resolved
-                    # before this subscription path, so every unresolved
-                    # owner here must fail closed.
-                    message = "Previous response owner account is unavailable; retry later."
-                    _record_continuity_fail_closed(
-                        surface="http_stream",
-                        reason="owner_account_unavailable",
-                        previous_response_id=payload.previous_response_id,
-                        session_id=previous_response_lookup_session_id,
-                        upstream_error_code="owner_lookup_miss",
-                    )
-                    event = response_failed_event(
-                        "previous_response_owner_unavailable",
-                        message,
-                        response_id=request_id,
-                    )
-                    yield format_sse_event(event)
-                    await proxy._write_request_log(
-                        account_id=None,
-                        api_key=api_key,
-                        request_id=request_id,
-                        model=payload.model,
-                        latency_ms=int((time.monotonic() - start) * 1000),
-                        status="error",
-                        error_code="previous_response_owner_unavailable",
-                        error_message=message,
-                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                        transport=request_transport,
-                        upstream_transport=upstream_stream_transport,
-                        service_tier=payload.service_tier,
-                        requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
-                        conversation_id=conversation_id,
-                        client_ip=client_ip,
-                    )
-                    return
+                    # A file pin is structural ownership evidence, so it stays
+                    # strict even when the subscription pool has one candidate.
+                    if rewritten_file_account_id is not None:
+                        selection_candidates: tuple[Account, ...] = ()
+                    else:
+                        # Preserve the compatibility fallback for an owner miss
+                        # when exactly one eligible subscription account remains.
+                        # An account-scoped API key narrows the candidate set before
+                        # the count; an unscoped key uses the normal model pool. A
+                        # missing owner with multiple or zero candidates still fails
+                        # closed because selection would otherwise guess an account.
+                        selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                            model=payload.model,
+                            service_tier=payload.service_tier,
+                            additional_limit_name=None,
+                            account_ids=(
+                                api_key.assigned_account_ids
+                                if api_key is not None and api_key.account_assignment_scope_enabled
+                                else None
+                            ),
+                        )
+                    if len(selection_candidates) != 1:
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
+                        _record_continuity_fail_closed(
+                            surface="http_stream",
+                            reason="owner_account_unavailable",
+                            previous_response_id=payload.previous_response_id,
+                            session_id=previous_response_lookup_session_id,
+                            upstream_error_code="owner_lookup_miss",
+                        )
+                        event = response_failed_event(
+                            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        await proxy._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+                            error_message=message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            conversation_id=conversation_id,
+                            client_ip=client_ip,
+                        )
+                        return
             # File and previous-response ownership are peers, not fallback
             # preferences. Resolve both before selection so a conflict cannot
             # be hidden by whichever source happened to run first. A hard turn
@@ -1513,8 +1533,8 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "no_accounts"
                         if selection.error_code == "continuity_owner_conflict":
@@ -1664,8 +1684,8 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "upstream_unavailable"
                         if selection.error_code == "continuity_owner_conflict":
