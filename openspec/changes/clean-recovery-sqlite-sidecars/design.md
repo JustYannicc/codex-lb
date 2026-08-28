@@ -13,9 +13,15 @@ not part of the dump, so they must be removed at each replacement boundary.
   rename because Windows rejects file mutations with an open SQLite handle.
   The exclusive transaction remains the pre-replacement race/ownership fence:
   active writers fail closed while the replacement is prepared, and a lock
-  failure aborts before any rename.
+  failure aborts before any rename. Closing the probe necessarily leaves a
+  bounded post-probe window before the operator CLI's renames; this is the
+  accepted Windows trade-off, while all preparation work remains fenced.
 - Fail recovery rather than install an ambiguous replacement when sidecar
   removal reports an error.
+- Treat the two filesystem renames as a small transaction: if installing the
+  output fails after the source moved to its backup, restore the backup to the
+  source path and report the original failure. If restoration also fails,
+  include both errors so the operator can recover the preserved backup.
 
 ## Proof seam
 
@@ -24,8 +30,9 @@ sidecars, and verify the installed database and both sidecar sets. A boundary
 test attempts a write while the exclusive lock is held and verifies that a
 fresh connection writes to the installed database. A rename seam asserts that
 every tracked recovery connection is closed before each file mutation. Partial
-cleanup and busy-source failures prove no replacement is installed, and a
-wildcard filename test proves unrelated master journals remain untouched.
+cleanup, busy-source, and second-rename failures prove the replacement fails
+closed, and a wildcard filename test proves unrelated master journals remain
+untouched.
 
 ## Dependencies
 

@@ -130,7 +130,6 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
     for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
         (tmp_path / f"{output_path.name}{suffix}").write_bytes(b"stale output sidecar")
 
-    held_source_connections: list[sqlite3.Connection] = []
     real_load_dump = recover_module._load_dump
 
     def _load_dump_then_leave_source_wal(path: Path) -> str:
@@ -140,26 +139,22 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("INSERT INTO items (name) VALUES ('stale-after-dump')")
         connection.commit()
-        held_source_connections.append(connection)
+        source_sidecars = {suffix: Path(f"{path}{suffix}").read_bytes() for suffix in ("-wal", "-shm")}
+        connection.close()
+        for suffix, contents in source_sidecars.items():
+            Path(f"{path}{suffix}").write_bytes(contents)
         return dump
 
     monkeypatch.setattr(recover_module, "_load_dump", _load_dump_then_leave_source_wal)
 
-    try:
-        recover_module.recover_sqlite_db(
-            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
-        )
-        held_source_connections[0].close()
+    recover_module.recover_sqlite_db(recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True))
 
-        with closing(sqlite3.connect(db_path)) as connection:
-            assert connection.execute("SELECT name FROM items").fetchall() == [("base",)]
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute("SELECT name FROM items").fetchall() == [("base",)]
 
-        for path in (db_path, output_path):
-            for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
-                assert not Path(f"{path}{suffix}").exists()
-    finally:
-        for connection in held_source_connections:
-            connection.close()
+    for path in (db_path, output_path):
+        for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
+            assert not Path(f"{path}{suffix}").exists()
 
 
 def test_recover_replace_blocks_writes_across_the_install_boundary(
@@ -267,6 +262,39 @@ def test_recover_replace_fails_closed_when_source_is_busy(tmp_path: Path) -> Non
     assert db_path.exists()
     assert not output_path.exists()
     assert not list(tmp_path.glob("store.db.corrupt-*"))
+
+
+def test_recover_replace_restores_source_when_install_rename_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed output rename must restore the original source path."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    path_type = type(db_path)
+    real_replace = path_type.replace
+
+    def fail_output_install(path: Path, target: str | Path) -> Path:
+        if path == output_path and target == db_path:
+            raise PermissionError("simulated output rename failure")
+        return real_replace(path, target)
+
+    monkeypatch.setattr(path_type, "replace", fail_output_install)
+
+    with pytest.raises(RuntimeError, match="failed to install recovered SQLite database"):
+        recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        )
+
+    assert db_path.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))
+    assert output_path.exists()
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute("SELECT name FROM items").fetchall() == [("base",)]
 
 
 def test_recover_sidecar_cleanup_treats_wildcard_database_names_literally(tmp_path: Path) -> None:

@@ -52,6 +52,14 @@ MUST fail without moving the source or installing the output.
 - **THEN** recovery MUST fail before moving the source or installing the output
 - **AND** the source MUST remain at its original path
 
+#### Scenario: Output installation failure restores the source
+
+- **GIVEN** the source has moved to its corrupt backup
+- **AND** moving the recovered output into the source path fails
+- **WHEN** recovery handles the replacement error
+- **THEN** recovery MUST restore the corrupt backup to the original source path
+- **AND** recovery MUST report the installation failure
+
 #### Scenario: Wildcard names do not broaden cleanup
 
 - **GIVEN** the database basename contains a glob metacharacter
