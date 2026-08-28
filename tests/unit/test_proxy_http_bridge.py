@@ -33217,6 +33217,50 @@ async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already
 
 
 @pytest.mark.asyncio
+async def test_sibling_advanced_local_cleanup_does_not_clear_a_rebound_owner_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local sibling-race cleanup must not erase a successor durable fence."""
+    session = _denied_anchor_session(anchor="resp_completed_meanwhile")
+    session.durable_session_id = None
+    session.durable_owner_epoch = None
+    service = _denied_anchor_service()
+    original_forget = http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence
+
+    def rebind_before_forget(
+        target_service: Any,
+        response_id: str,
+        **kwargs: Any,
+    ) -> bool:
+        session.durable_session_id = "durable-successor"
+        session.durable_owner_epoch = 7
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            target_service,
+            response_id,
+            owner_key=session.durable_session_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+        return original_forget(target_service, response_id, **kwargs)
+
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_forget_http_bridge_denied_anchor_fence",
+        rebind_before_forget,
+    )
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    entry = service._http_bridge_denied_anchor_fences["resp_denied"]
+    assert entry.owner_key == "durable-successor"
+    assert entry.owner_epoch == 7
+
+
+@pytest.mark.asyncio
 async def test_invalidate_denied_bridge_anchor_ignores_a_missing_anchor():
     session = _denied_anchor_session()
     service = _denied_anchor_service()

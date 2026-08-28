@@ -1262,7 +1262,12 @@ async def _invalidate_denied_http_bridge_anchor(
     no_durable_owner = durable_session_id is None or durable_owner_epoch is None
     if sibling_advanced:
         if no_durable_owner:
-            _forget_http_bridge_denied_anchor_fence(service, denied_response_id)
+            _forget_http_bridge_denied_anchor_fence(
+                service,
+                denied_response_id,
+                owner_key=owner_key,
+                owner_epoch=durable_owner_epoch,
+            )
         return False
     retry_durable_clear = False
     unregister_succeeded = False
