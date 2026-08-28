@@ -62,12 +62,11 @@ def _remove_sqlite_sidecars(db_path: Path) -> None:
 
 @contextmanager
 def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
-    """Hold SQLite's exclusive lock across the replacement boundary.
+    """Fence recovery preparation with SQLite's exclusive lock.
 
-    Recovery renames the source file, so a writer that gets through after the
-    rename would keep writing the old inode instead of the installed database.
-    An immediate exclusive transaction makes that boundary fail closed for
-    active connections rather than letting them write into the renamed backup.
+    The lock blocks active writers while the recovered file and its sidecars
+    are prepared. The connection is closed when this context exits, before any
+    filesystem rename, because Windows rejects renames with an open handle.
     """
     connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
     acquired = False
@@ -75,7 +74,7 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
         try:
             connection.execute("BEGIN EXCLUSIVE")
             acquired = True
-        except sqlite3.OperationalError as exc:
+        except sqlite3.Error as exc:
             raise RuntimeError(f"could not acquire exclusive SQLite recovery lock for {db_path}: {exc}") from exc
         yield
     finally:
@@ -123,9 +122,9 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
             _write_dump(options.output, dump)
             _remove_sqlite_sidecars(options.output)
             _remove_sqlite_sidecars(options.source)
-            backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-            options.source.replace(backup)
-            options.output.replace(options.source)
+        backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
+        options.source.replace(backup)
+        options.output.replace(options.source)
         return RecoveryOutcome(
             source=backup,
             output=options.source,

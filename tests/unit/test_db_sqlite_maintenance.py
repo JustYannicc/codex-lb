@@ -80,6 +80,15 @@ def test_recover_cli_closes_connections_before_replacing_database(
         connection.execute("INSERT INTO items (name) VALUES ('alpha')")
 
     connections = _track_connections(monkeypatch)
+    rename_checks: list[bool] = []
+    path_type = type(db_path)
+    real_replace = path_type.replace
+
+    def replace_without_open_sqlite_handles(path: Path, target: str | Path) -> Path:
+        rename_checks.append(all(connection.closed for connection in connections))
+        return real_replace(path, target)
+
+    monkeypatch.setattr(path_type, "replace", replace_without_open_sqlite_handles)
 
     try:
         exit_code = recover_module.main(
@@ -99,6 +108,7 @@ def test_recover_cli_closes_connections_before_replacing_database(
         assert not output_path.exists()
         assert connections
         assert all(connection.closed for connection in connections)
+        assert rename_checks == [True, True]
 
         with closing(sqlite3.connect(db_path)) as connection:
             assert connection.execute("SELECT name FROM items").fetchall() == [("alpha",)]
@@ -194,6 +204,69 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
             ("base",),
             ("after",),
         ]
+
+
+def test_recover_replace_fails_closed_on_partial_sidecar_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sidecar removal error must not move either database."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    blocked_sidecar = tmp_path / "store.db-mj12345678"
+    blocked_sidecar.write_bytes(b"unremovable")
+    for suffix in ("-wal", "-shm", "-journal"):
+        (tmp_path / f"store.db{suffix}").write_bytes(b"stale")
+
+    real_unlink = type(blocked_sidecar).unlink
+
+    def unlink_with_partial_failure(path: Path, *, missing_ok: bool = False) -> None:
+        if path == blocked_sidecar:
+            raise PermissionError("simulated sidecar cleanup failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(blocked_sidecar), "unlink", unlink_with_partial_failure)
+
+    with pytest.raises(RuntimeError, match="failed to remove SQLite sidecars"):
+        recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        )
+
+    assert db_path.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))
+    assert output_path.exists()
+    assert blocked_sidecar.exists()
+    assert not (tmp_path / "store.db-wal").exists()
+    assert not (tmp_path / "store.db-shm").exists()
+    assert not (tmp_path / "store.db-journal").exists()
+
+
+def test_recover_replace_fails_closed_when_source_is_busy(tmp_path: Path) -> None:
+    """A conflicting source writer must prevent replacement before any rename."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    writer = sqlite3.connect(db_path, timeout=0, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(RuntimeError, match="could not acquire exclusive SQLite recovery lock"):
+            recover_module.recover_sqlite_db(
+                recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+            )
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert db_path.exists()
+    assert not output_path.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))
 
 
 def test_recover_sidecar_cleanup_treats_wildcard_database_names_literally(tmp_path: Path) -> None:
