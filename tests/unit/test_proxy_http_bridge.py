@@ -6632,7 +6632,7 @@ async def test_ordinary_completed_alias_rejection_preserves_successful_response(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_completion_preserves_quarantine_armed_during_retry_settlement(
+async def test_http_bridge_completion_preserves_first_strike_recorded_during_retry_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A completion cannot clear a quarantine armed while settlement yields."""
