@@ -3010,6 +3010,20 @@ class _HTTPBridgeRequestSubmitMixin:
                                 )
                         return
                     if event_block is None:
+                        budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                        if budget_exceeded is not None and budget_exceeded.is_set():
+                            # A budget-revoked prewarm queue uses the normal
+                            # EOS sentinel to cross the queue boundary. Treat
+                            # it as the same startup failure as any other
+                            # prewarm transport error so interruption cleanup
+                            # removes the warmup state and releases its queue.
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "upstream_unavailable",
+                                    "HTTP responses session bridge prewarm failed",
+                                ),
+                            )
                         break
                     payload = parse_sse_data_json(event_block)
                     event = parse_sse_event(event_block)

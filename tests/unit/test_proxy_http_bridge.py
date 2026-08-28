@@ -23257,6 +23257,83 @@ async def test_prewarm_uses_finite_revocable_queue_and_revokes_on_timeout(
 
 
 @pytest.mark.asyncio
+async def test_prewarm_budget_failure_is_not_treated_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-budget-failure")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-budget-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=0)
+    captured: dict[str, proxy_service._WebSocketRequestState] = {}
+
+    async def send_warmup(
+        _session: proxy_service._HTTPBridgeSession,
+        warmup_state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        captured["warmup"] = warmup_state
+        assert warmup_state.event_queue is not None
+        warmup_state.event_queue.put_nowait("budget-rejected")
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET",
+        budget,
+    )
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_send_http_bridge_request_text_with_archive_id",
+        send_warmup,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert request_state.prewarm_status == "error"
+    assert session.pending_requests == deque()
+    assert session.response_create_gate.locked() is False
+    warmup_queue = captured["warmup"].event_queue
+    assert warmup_queue is not None
+    assert warmup_queue.empty()
+    assert warmup_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_prewarm_send_cancellation_retires_before_admitted_request_can_reuse_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
