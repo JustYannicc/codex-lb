@@ -2975,6 +2975,16 @@ class _HTTPBridgeStreamingMixin:
                             "HTTP response recovery operation fence is unavailable; retry the request.",
                         ),
                     )
+
+                def spool_reset_failure() -> ProxyResponseError:
+                    return ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery spool could not be reset; retry the request.",
+                        ),
+                    )
+
                 reset_operation_event_spool = getattr(self._durable_bridge, "reset_operation_event_spool", None)
                 if not callable(reset_operation_event_spool):
                     if not required:
@@ -2989,20 +2999,27 @@ class _HTTPBridgeStreamingMixin:
                 assert recovery_request_state.operation_id is not None
                 assert recovery_session.durable_session_id is not None
                 assert recovery_session.durable_owner_epoch is not None
-                reset_ok = await reset_operation_event_spool(
-                    operation_id=recovery_request_state.operation_id,
-                    session_id=recovery_session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=recovery_session.durable_owner_epoch,
-                )
-                if not reset_ok:
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "bridge_continuity_persistence_failed",
-                            "HTTP response recovery spool could not be reset; retry the request.",
-                        ),
+                try:
+                    reset_ok = await reset_operation_event_spool(
+                        operation_id=recovery_request_state.operation_id,
+                        session_id=recovery_session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_session.durable_owner_epoch,
                     )
+                except Exception as reset_exc:
+                    if not required:
+                        logger.warning(
+                            "Best-effort HTTP bridge recovery spool reset failed request_id=%s operation_id=%s",
+                            recovery_request_state.request_id,
+                            recovery_request_state.operation_id,
+                            exc_info=True,
+                        )
+                        return
+                    raise spool_reset_failure() from reset_exc
+                if not reset_ok:
+                    if not required:
+                        return
+                    raise spool_reset_failure()
 
             async def capture_verified_stale_anchor_circuit_generation(
                 recovery_session: "_HTTPBridgeSession",
@@ -3468,6 +3485,11 @@ class _HTTPBridgeStreamingMixin:
             else:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="local_previous_response_error").inc()
+                await reset_previous_response_recovery_operation_spool(
+                    session,
+                    request_state,
+                    required=False,
+                )
                 _log_http_bridge_event(
                     "previous_response_recover_local",
                     bridge_session_key,
@@ -3602,12 +3624,6 @@ class _HTTPBridgeStreamingMixin:
                     "local_previous_response_fresh_replay",
                     "local_previous_response_same_owner_fresh_replay",
                 }
-                if recovery_path == "local_previous_response_error":
-                    await reset_previous_response_recovery_operation_spool(
-                        session,
-                        request_state,
-                        required=False,
-                    )
                 # A recovery request is the one bounded server-side replay;
                 # prevent a second cooldown bypass if this fresh socket also
                 # fails before response.created.
