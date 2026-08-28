@@ -5226,6 +5226,25 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
     register_previous = AsyncMock()
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
+    # Keep this regression focused on the pre-created-terminal fallback.  A
+    # successful durable miss/clear models the normal retry-circuit lifecycle;
+    # lookup-failure retention is covered separately below.
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            lookup_retry_circuit=AsyncMock(return_value=None),
+            persist_retry_circuit=AsyncMock(
+                return_value=SimpleNamespace(
+                    consecutive_failures=1,
+                    cooldown_until_epoch=time.time() + 60.0,
+                    last_detail="stream_incomplete",
+                    updated_at_epoch=time.time(),
+                    admission_generation=0,
+                )
+            ),
+            clear_retry_circuit=AsyncMock(return_value=True),
+        ),
+    )
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-precreated-completed",
