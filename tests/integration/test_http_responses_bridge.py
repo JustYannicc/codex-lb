@@ -16181,6 +16181,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
         headers=headers,
     )
     assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
 
     third = await async_client.post(
         "/backend-api/codex/responses",
