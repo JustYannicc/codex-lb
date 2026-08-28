@@ -123,7 +123,7 @@ async def test_control_plane_drains_are_failure_isolated(
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
-        await _drain_detached_control_plane_tasks(1)
+        assert await _drain_detached_control_plane_tasks(1) is False
 
     assert fleet_drained.is_set()
     assert "Failed to drain audit log tasks during shutdown" in caplog.text
@@ -178,7 +178,7 @@ async def test_control_plane_drain_requires_stable_clean_pass(
     monkeypatch.setattr(app_main, "drain_audit_log_tasks", drain_audit)
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
-    await _drain_detached_control_plane_tasks(1)
+    assert await _drain_detached_control_plane_tasks(1) is True
 
     assert audit_calls == 2
     assert fleet_calls == 2
@@ -207,7 +207,7 @@ async def test_release_leader_lease_within_returns_when_release_wedged(
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    await _release_leader_lease_within(0.2)
+    assert await _release_leader_lease_within(0.2) is False
     elapsed = loop.time() - start
 
     assert 0.2 <= elapsed < 1.0
@@ -232,7 +232,7 @@ async def test_release_leader_lease_within_awaits_quick_release(
     election = _FastElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
 
-    await _release_leader_lease_within(5)
+    assert await _release_leader_lease_within(5) is True
 
     assert election.released is True
 
@@ -247,8 +247,9 @@ async def test_release_leader_lease_within_swallows_release_error(
 
     monkeypatch.setattr(app_main, "get_leader_election", lambda: _BrokenElection())
 
-    # Must not raise: a failed release must never fail shutdown.
-    await _release_leader_lease_within(5)
+    # Must not raise: a failed release must never fail shutdown, but it must
+    # suppress the clean marker because the database-owning drain failed.
+    assert await _release_leader_lease_within(5) is False
 
 
 @pytest.fixture(autouse=True)
@@ -1106,8 +1107,9 @@ async def test_clean_shutdown_is_recorded_after_successful_disposal(
 ) -> None:
     order: list[str] = []
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         order.append("close_db")
+        return True
 
     monkeypatch.setattr(app_main, "close_db", _close_db)
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", lambda: order.append("mark_clean"))
@@ -1115,6 +1117,53 @@ async def test_clean_shutdown_is_recorded_after_successful_disposal(
     await app_main._close_db_and_record_clean_shutdown()
 
     assert order == ["close_db", "mark_clean"]
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_not_recorded_when_wedged_teardown_is_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return False
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    await app_main._close_db_and_record_clean_shutdown()
+
+    assert marked is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ("database", "leader"))
+async def test_clean_shutdown_is_not_recorded_when_database_drain_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: str,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return True
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    if gate == "database":
+        await app_main._close_db_and_record_clean_shutdown(database_tasks_drained=False)
+    else:
+        await app_main._close_db_and_record_clean_shutdown(leader_lease_release_completed=False)
+
+    assert marked is False
 
 
 @pytest.mark.asyncio
@@ -1133,7 +1182,7 @@ async def test_clean_shutdown_is_not_recorded_when_disposal_does_not_complete(
     """An incomplete teardown is exactly what the next startup's scan is for."""
     marked = False
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         raise failure
 
     def _mark_clean() -> None:

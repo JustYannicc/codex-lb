@@ -181,6 +181,10 @@ class SqliteRunStateLockError(RuntimeError):
     """The process could not obtain exclusive ownership of a SQLite store."""
 
 
+class SqliteRunStateDurabilityError(OSError):
+    """The failed run-state marker could not be durably invalidated."""
+
+
 def acquire_sqlite_runstate_lock(db_path: Path) -> sqlite3.Connection:
     """Hold an exclusive sentinel transaction for the lifetime of one process.
 
@@ -318,6 +322,37 @@ def read_sqlite_runstate_record(db_path: Path) -> SqliteRunStateRecord | None:
     return SqliteRunStateRecord(state=state, identity=identity)
 
 
+def _invalidate_failed_sqlite_runstate(target: Path, tmp: Path | None) -> None:
+    """Remove an untrusted run-state write and persist that removal.
+
+    A failed replacement is safe to recover from only when both the temporary
+    file and any previous target are gone and the parent directory sync
+    confirms those removals. Raise a distinct error when that proof is
+    unavailable so startup cannot continue while an older ``clean`` marker
+    might still be trusted after a power loss.
+    """
+    cleanup_error: OSError | None = None
+    for cleanup in (tmp, target):
+        if cleanup is None:
+            continue
+        try:
+            cleanup.unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise SqliteRunStateDurabilityError(
+            f"could not remove failed SQLite run-state files for {target}"
+        ) from cleanup_error
+    try:
+        directory_synced = _fsync_directory(target.parent)
+    except OSError as exc:
+        raise SqliteRunStateDurabilityError(
+            f"could not persist removal of failed SQLite run-state files for {target}"
+        ) from exc
+    if not directory_synced:
+        raise SqliteRunStateDurabilityError(f"could not persist removal of failed SQLite run-state files for {target}")
+
+
 def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     """Record ``state`` atomically. Returns ``False`` if it could not be recorded.
 
@@ -332,8 +367,11 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     A failed write must never leave a stale ``clean`` sidecar behind, because
     that would tell the next startup to skip the integrity check for a store
     this process may have left mid-write. The fallback is to remove the
-    sidecar entirely, which reads back as unknown and forces the check. The
-    caller is responsible for holding the lifetime lock around state changes.
+    temporary and target entries, then sync the directory. If that
+    invalidation cannot be confirmed, ``SqliteRunStateDurabilityError`` is
+    raised so a startup caller can fail closed instead of trusting the marker.
+    The caller is responsible for holding the lifetime lock around state
+    changes.
     """
     target = sqlite_runstate_path(db_path)
     tmp: Path | None = None
@@ -365,12 +403,7 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             except OSError:
                 pass
         # The target cleanup can remove an older clean marker even when the
-        # replacement itself failed. Sync the directory after every cleanup
-        # path so that invalidation is durable before the caller continues.
-        try:
-            _fsync_directory(target.parent)
-        except OSError:
-            # The write is already failed closed; a cleanup sync error must
-            # not resurrect the exception as an unhandled startup failure.
-            pass
+        # replacement itself failed. A caller must distinguish a durably
+        # invalidated marker from cleanup whose durability is unknown.
+        _invalidate_failed_sqlite_runstate(target, tmp)
         return False

@@ -659,10 +659,11 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_http_client")
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         assert fleet_refresh_finished.is_set()
         assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_db")
+        return True
 
     class _BlockedAccountsService:
         async def import_account(self, raw: bytes) -> AccountImportResponse:
@@ -706,9 +707,9 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
     original_control_plane_drain = main._drain_detached_control_plane_tasks
 
-    async def _track_control_plane_drain(timeout_seconds: float) -> None:
+    async def _track_control_plane_drain(timeout_seconds: float) -> bool:
         final_control_plane_drain_started.set()
-        await original_control_plane_drain(timeout_seconds)
+        return await original_control_plane_drain(timeout_seconds)
 
     init_db = AsyncMock()
     init_db.side_effect = _init_db
@@ -865,10 +866,11 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     close_http_client = AsyncMock()
     shutdown_events: list[str] = []
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         shutdown_events.append("close_db")
         if dispose_failure:
             raise RuntimeError("dispose failed")
+        return True
 
     def _mark_sqlite_shutdown_clean() -> None:
         shutdown_events.append("mark_clean")

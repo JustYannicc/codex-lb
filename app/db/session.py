@@ -24,6 +24,7 @@ from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteIntegrityCheckMode,
     SqliteRunState,
+    SqliteRunStateDurabilityError,
     _sqlite_file_identity,
     acquire_sqlite_runstate_lock,
     check_sqlite_integrity,
@@ -984,7 +985,21 @@ async def _init_db() -> None:
             if previous_record is not None and previous_record.state is SqliteRunState.CLEAN
             else None
         )
-        running_recorded = _mark_sqlite_running(sqlite_path)
+        running_transition_error: SqliteRunStateDurabilityError | None = None
+        try:
+            running_recorded = _mark_sqlite_running(sqlite_path)
+        except SqliteRunStateDurabilityError as exc:
+            # A failed write can safely continue only when its old marker was
+            # durably removed. If that invalidation cannot be proven, still
+            # run the configured check, then stop before migrations or serving
+            # instead of allowing a stale CLEAN record to influence startup.
+            running_recorded = False
+            running_transition_error = exc
+            logger.error(
+                "Could not durably invalidate the SQLite run state path=%s; startup will fail closed",
+                sqlite_path,
+                exc_info=exc,
+            )
         running_record = read_sqlite_runstate_record(sqlite_path) if running_recorded else None
         running_identity = running_record.identity if running_record is not None else None
         current_identity = _sqlite_file_identity(sqlite_path)
@@ -1031,6 +1046,8 @@ async def _init_db() -> None:
                         "or restore a backup from the same directory."
                     )
                 raise RuntimeError(message)
+        if running_transition_error is not None:
+            raise running_transition_error
     try:
         inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()
     except ModuleNotFoundError as exc:
@@ -1133,7 +1150,9 @@ async def init_db() -> None:
         raise
 
 
-async def close_db() -> None:
+async def close_db() -> bool:
+    """Dispose database engines and report whether SQLite teardown fully drained."""
+    sqlite_teardown_drained = True
     if _wedged_teardown_cleanup_tasks:
         # Abandoned wedged teardowns plus their deferred bookkeeping closes.
         # Drain until the registry is stable — an abandoned teardown that
@@ -1152,6 +1171,7 @@ async def close_db() -> None:
                     "drain; their connections were already reclaimed (issue #1682)",
                     len(_wedged_teardown_cleanup_tasks),
                 )
+                sqlite_teardown_drained = False
                 break
             await asyncio.wait(tuple(_wedged_teardown_cleanup_tasks), timeout=remaining)
             # Completion callbacks (deregistration and scheduling of the
@@ -1161,3 +1181,4 @@ async def close_db() -> None:
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
+    return sqlite_teardown_drained

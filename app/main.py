@@ -181,7 +181,7 @@ def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
         logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
 
 
-async def _release_leader_lease_within(timeout: float) -> None:
+async def _release_leader_lease_within(timeout: float) -> bool:
     """Release the scheduler leader lease without ever pinning shutdown.
 
     ``release()`` uses a background DB session whose rollback/close shield and
@@ -201,10 +201,15 @@ async def _release_leader_lease_within(timeout: float) -> None:
             timeout,
         )
         release_task.add_done_callback(_log_abandoned_lease_release)
-        return
+        return False
+    if release_task.cancelled():
+        logger.warning("Scheduler leader lease release was cancelled during shutdown")
+        return False
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+        return False
+    return True
 
 
 async def _drain_proxy_persistence_tasks(
@@ -227,7 +232,7 @@ async def _drain_proxy_persistence_tasks(
         return False
 
 
-async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
+async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> bool:
     # Closing admission is synchronous with producer checks on the event loop,
     # so no task can appear after the stable drain passes complete.
     close_control_plane_task_admission()
@@ -256,7 +261,7 @@ async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
                 clean_pass = False
 
         if not clean_pass:
-            return
+            return False
 
         clean_passes += 1
 
@@ -265,6 +270,7 @@ async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
         # HTTP clients and DB engines are torn down.
         if clean_passes < 2:
             await asyncio.sleep(0)
+    return True
 
 
 class _MetricsServer(Protocol):
@@ -322,15 +328,21 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
     )
 
 
-async def _close_db_and_record_clean_shutdown() -> None:
+async def _close_db_and_record_clean_shutdown(
+    *,
+    database_tasks_drained: bool = True,
+    leader_lease_release_completed: bool = True,
+) -> None:
     """Dispose the database engines, then record the shutdown as clean.
 
-    The record is only reached once disposal returns. A cancellation or a
-    failed dispose must leave the run state unclean, because that is exactly
-    the incomplete shutdown the next startup's integrity scan is for.
+    The record is only reached once disposal returns and every database-owning
+    shutdown drain completed. A cancellation, failed dispose, or abandoned
+    drain must leave the run state unclean, because that is exactly the
+    incomplete shutdown the next startup's integrity scan is for.
     """
-    await close_db()
-    mark_sqlite_shutdown_clean()
+    sqlite_teardown_drained = await close_db()
+    if sqlite_teardown_drained and database_tasks_drained and leader_lease_release_completed:
+        mark_sqlite_shutdown_clean()
 
 
 @asynccontextmanager
@@ -659,6 +671,7 @@ async def lifespan(app: FastAPI):
             task_name_prefixes=("http-bridge-recovery-settlement-",),
             failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
         )
+        database_tasks_drained = recovery_settlements_drained
         if (
             recovery_settlements_drained
             and proxy_service is not None
@@ -677,11 +690,12 @@ async def lifespan(app: FastAPI):
         # requests writes their request logs, which enqueues more
         # persistence tasks that this drain must cover.
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
-        await _drain_proxy_persistence_tasks(
+        final_proxy_persistence_drained = await _drain_proxy_persistence_tasks(
             proxy_service,
             remaining_drain_seconds,
             failure_message="Failed to drain proxy persistence tasks during shutdown",
         )
+        database_tasks_drained = database_tasks_drained and final_proxy_persistence_drained
 
         # Cancel heartbeat and age the shared ring row near expiry.
         if heartbeat_task is not None:
@@ -723,7 +737,8 @@ async def lifespan(app: FastAPI):
         # The replica heartbeat is already stopped/staled so this grace period
         # does not extend its active bridge-ring lifetime.
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
-        await _drain_detached_control_plane_tasks(remaining_drain_seconds)
+        control_plane_tasks_drained = await _drain_detached_control_plane_tasks(remaining_drain_seconds)
+        database_tasks_drained = database_tasks_drained and control_plane_tasks_drained
 
         # Start the single process-level lease-renewal keeper BEFORE stopping any
         # scheduler. Schedulers are stopped one at a time and only the final
@@ -773,7 +788,7 @@ async def lifespan(app: FastAPI):
         # release path shields and awaits its own session teardown — is
         # enforced by abandoning the release task rather than awaiting a
         # potentially wedged cancellation, so shutdown always proceeds.
-        await _release_leader_lease_within(10)
+        leader_lease_release_completed = await _release_leader_lease_within(10)
         try:
             await close_http_client()
         finally:
@@ -787,7 +802,10 @@ async def lifespan(app: FastAPI):
             finally:
                 mark_process_dead()
                 try:
-                    await _close_db_and_record_clean_shutdown()
+                    await _close_db_and_record_clean_shutdown(
+                        database_tasks_drained=database_tasks_drained,
+                        leader_lease_release_completed=leader_lease_release_completed,
+                    )
                 finally:
                     shutdown_state.mark_lifespan_completed()
 

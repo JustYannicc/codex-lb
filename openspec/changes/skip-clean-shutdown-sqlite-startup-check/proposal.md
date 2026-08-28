@@ -32,7 +32,10 @@ case and turns every deploy into a multi-minute outage.
 - Read the prior record and persist `running` before making that skip
   decision. If the running transition cannot be recorded, startup takes the
   scan path and a failed startup leaves `running` where the sidecar can be
-  written.
+  written. If cleanup of an untrusted prior marker, or the directory sync
+  that proves that cleanup, cannot be confirmed, startup runs the configured
+  check when enabled and then aborts before migrations or serving rather than
+  continuing with an unproven marker.
 - Use an exclusive randomized temporary file for each sidecar write so a
   local symlink cannot redirect the write before the atomic replacement.
 - Announce the scan before it starts (path, mode, file size) and log its
@@ -53,7 +56,14 @@ replacement in any window forces the scan. If the directory fsync fails after
 the replacement, cleanup removes the sidecar and fsyncs the directory again.
 The lifetime lock makes that ownership rule process-wide: startup cannot trust
 another process's `clean` marker, and a clean marker cannot be written after
-the lock has been released.
+the lock has been released. SQLite releases the transaction when the owning
+process dies, so a subsequent process can recover ownership without deleting
+or trusting the persistent sentinel file.
+
+`clean` is withheld when any bounded database-owning shutdown drain is
+unfinished: reclaimed SQLite teardown, final proxy persistence, detached
+audit/fleet control-plane work, or scheduler leader-release. A timeout or
+failed drain therefore deliberately makes the next startup pay the scan.
 
 ## Capabilities
 

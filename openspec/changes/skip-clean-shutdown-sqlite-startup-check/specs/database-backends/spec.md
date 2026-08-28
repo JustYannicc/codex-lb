@@ -20,8 +20,12 @@ Startup MUST read the prior run-state record before mutating it, then MUST
 persist `running` before deciding whether a prior `clean` record permits
 skipping the integrity check. If the `running` transition cannot be recorded,
 startup MUST run the configured check when enabled and MUST NOT trust the
-prior `clean` record. A failed startup MUST leave a durable `running` marker
-where the sidecar can be written.
+prior `clean` record. When the failed transition has durably removed the
+untrusted sidecar, startup MAY continue after the configured check; when
+removal or its directory-sync durability cannot be confirmed, the write MUST
+report a distinct durability failure and startup MUST run the configured check
+when enabled, then abort before migrations or serving. A failed startup MUST
+leave a durable `running` marker where the sidecar can be written.
 
 Before reading the run-state sidecar, startup MUST acquire an exclusive
 transaction on a persistent `<db>.runstate.lock` SQLite sentinel. Startup MUST
@@ -37,7 +41,9 @@ sidecar MUST read as unknown rather than clean, so a first run and an upgrade
 from a build that never wrote one both still scan. Sidecar content that cannot be read, cannot be
 decoded, or is not recognized MUST also read as unknown, and MUST NOT
 propagate an error that aborts startup. A sidecar write that fails MUST
-remove the file rather than leave a stale `clean` behind.
+remove the temporary and target entries rather than leave a stale `clean`
+behind, and MUST directory-sync that removal. If either removal or its
+directory sync cannot be confirmed, the write MUST fail closed to its caller.
 
 The run state MUST be recorded even when the check mode is `off`, so
 re-enabling the check cannot trust a state the disabled build never
@@ -81,8 +87,12 @@ atomically replacing the sidecar. A predictable temporary pathname MUST NOT be
 opened for writing.
 
 Recording `clean` MUST NOT be reachable unless the database engines actually
-finished disposing. A cancelled or failed disposal MUST leave the run state
-unclean.
+finished disposing, all reclaimed SQLite teardown work finished within the
+bounded shutdown drain, and every database-owning shutdown drain completed.
+The database-owning drains include scheduler leader-release, final proxy
+persistence, and detached audit/fleet control-plane work. A cancelled or
+failed disposal, or a drain that abandons pending work at its deadline, MUST
+leave the run state unclean.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
 requirement governs only whether the selected mode runs on a given startup.
@@ -102,6 +112,16 @@ requirement governs only whether the selected mode runs on a given startup.
 - **THEN** the configured check runs
 - **AND** startup does not trust the prior `clean` record
 
+#### Scenario: An unconfirmed running invalidation aborts startup
+
+- **GIVEN** a SQLite sidecar records `clean`
+- **AND** replacing the sidecar fails and removal or its directory sync cannot
+  be confirmed
+- **WHEN** startup reaches the integrity-check decision
+- **THEN** the configured check runs when enabled
+- **AND** startup aborts before migrations or serving
+- **AND** the prior `clean` record is never trusted
+
 #### Scenario: A replacement around startup fencing still scans
 
 - **GIVEN** a SQLite sidecar records `clean` for database identity A
@@ -115,6 +135,14 @@ requirement governs only whether the selected mode runs on a given startup.
 - **WHEN** another process starts against the same SQLite file
 - **THEN** startup fails closed before it reads the clean marker
 - **AND** the second process does not run migrations or serve traffic
+
+#### Scenario: Process death releases the lifetime lock
+
+- **GIVEN** one process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** that process exits unexpectedly
+- **THEN** SQLite releases the transaction while the persistent sentinel file
+  remains
+- **AND** a subsequent process can acquire the lock before reading the sidecar
 
 #### Scenario: Clean shutdown releases ownership after the marker transition
 
@@ -179,6 +207,23 @@ requirement governs only whether the selected mode runs on a given startup.
 - **GIVEN** a shutdown in which disposing the database engines raises or is
   cancelled
 - **WHEN** the lifespan teardown completes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned SQLite teardown is not recorded as clean
+
+- **GIVEN** reclaimed SQLite teardown work remains pending when the bounded
+  shutdown drain reaches its deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned database-owning drain is not recorded as clean
+
+- **GIVEN** the final proxy persistence drain, detached audit/fleet
+  control-plane drain, or scheduler leader-release drain leaves database-using
+  work pending at its deadline
+- **WHEN** database disposal finishes
 - **THEN** the sidecar does not record a clean shutdown
 - **AND** the next startup runs the integrity check
 

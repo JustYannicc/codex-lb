@@ -23,6 +23,7 @@ from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteIntegrityCheckMode,
     SqliteRunState,
+    SqliteRunStateDurabilityError,
     acquire_sqlite_runstate_lock,
     read_sqlite_runstate,
     release_sqlite_runstate_lock,
@@ -1679,7 +1680,7 @@ async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_
                 release_wedge.set()
 
             releaser = asyncio.ensure_future(_release_soon())
-            await asyncio.wait_for(session_module.close_db(), timeout=5.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=5.0) is True
             # RED pre-fix: close_db saw an empty registry and returned
             # immediately, before the wedge was even released.
             assert release_wedge.is_set(), "close_db must drain the pending reclaimed rollback"
@@ -1709,7 +1710,7 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
     session_module._wedged_teardown_cleanup_tasks.add(stuck)
     try:
         with caplog.at_level(logging.WARNING, logger=session_module.__name__):
-            await asyncio.wait_for(session_module.close_db(), timeout=2.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=2.0) is False
         assert any("still-pending wedged-teardown" in record.getMessage() for record in caplog.records), (
             "the bounded drain must report what it abandoned"
         )
@@ -1791,6 +1792,58 @@ async def test_init_db_runs_startup_check_when_running_state_write_fails(monkeyp
     await session_module.init_db()
 
     assert seen == [SqliteIntegrityCheckMode.QUICK]
+
+
+@pytest.mark.asyncio
+async def test_init_db_aborts_after_check_when_running_invalidation_is_not_durable(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    seen: list[SqliteIntegrityCheckMode] = []
+    migration_loaded = False
+
+    def _raise_unconfirmed_invalidation(_: Path, __: SqliteRunState) -> bool:
+        raise SqliteRunStateDurabilityError("could not persist removal of failed SQLite run-state files")
+
+    def _load_entrypoints() -> tuple[object, object, object]:
+        nonlocal migration_loaded
+        migration_loaded = True
+        return (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations must not run")),
+            lambda _: (),
+        )
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "write_sqlite_runstate", _raise_unconfirmed_invalidation)
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(session_module, "_load_migration_entrypoints", _load_entrypoints)
+
+    with pytest.raises(SqliteRunStateDurabilityError, match="persist removal"):
+        await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert migration_loaded is False
+    replacement = acquire_sqlite_runstate_lock(db_path)
+    release_sqlite_runstate_lock(replacement)
 
 
 @pytest.mark.asyncio

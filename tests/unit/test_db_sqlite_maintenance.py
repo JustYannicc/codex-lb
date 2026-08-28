@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import errno
 import os
+import selectors
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +15,51 @@ import pytest
 import app.db.recover as recover_module
 import app.db.sqlite_utils as sqlite_utils_module
 from app.db.backup import create_sqlite_pre_migration_backup
+
+
+def _start_subprocess_lock_holder(db_path: Path) -> subprocess.Popen[str]:
+    script = """
+import sys
+from pathlib import Path
+
+from app.db.sqlite_utils import acquire_sqlite_runstate_lock
+
+connection = acquire_sqlite_runstate_lock(Path(sys.argv[1]))
+print("ready", flush=True)
+sys.stdin.readline()
+connection.rollback()
+connection.close()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(db_path)],
+        cwd=Path(__file__).resolve().parents[2],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    with selectors.DefaultSelector() as ready_selector:
+        ready_selector.register(process.stdout, selectors.EVENT_READ)
+        assert ready_selector.select(timeout=5), "lock holder did not become ready"
+    assert process.stdout.readline().strip() == "ready"
+    return process
+
+
+def _stop_subprocess(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.stdin is not None:
+        process.stdin.close()
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
 
 
 class _TrackedConnection(sqlite3.Connection):
@@ -133,6 +181,41 @@ def test_runstate_lifetime_lock_is_exclusive_and_reusable(tmp_path: Path) -> Non
     second = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
     sqlite_utils_module.release_sqlite_runstate_lock(second)
     assert sqlite_utils_module.sqlite_runstate_lock_path(db_path).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="subprocess lock semantics are exercised on POSIX")
+def test_runstate_lifetime_lock_contends_across_processes(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    holder = _start_subprocess_lock_holder(db_path)
+    try:
+        with pytest.raises(sqlite_utils_module.SqliteRunStateLockError, match="lifetime lock"):
+            sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+
+        assert holder.stdin is not None
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.wait(timeout=5) == 0
+
+        replacement = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+        sqlite_utils_module.release_sqlite_runstate_lock(replacement)
+    finally:
+        _stop_subprocess(holder)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="subprocess lock semantics are exercised on POSIX")
+def test_runstate_lifetime_lock_releases_after_process_death(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    holder = _start_subprocess_lock_holder(db_path)
+    try:
+        holder.kill()
+        assert holder.wait(timeout=5) is not None
+
+        replacement = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+        sqlite_utils_module.release_sqlite_runstate_lock(replacement)
+    finally:
+        _stop_subprocess(holder)
 
 
 def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
@@ -314,7 +397,8 @@ def test_runstate_write_fails_closed_when_the_directory_sync_fails(
 
     monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", lambda _directory: False)
 
-    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    with pytest.raises(sqlite_utils_module.SqliteRunStateDurabilityError, match="persist removal"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
 
     monkeypatch.undo()
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
@@ -340,6 +424,33 @@ def test_runstate_write_syncs_directory_again_after_cleanup(monkeypatch: pytest.
     assert directory_syncs == [db_path.parent, db_path.parent]
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_aborts_when_failed_marker_cannot_be_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unremovable stale marker must stop startup rather than stay trusted."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    target = sqlite_utils_module.sqlite_runstate_path(db_path)
+    real_unlink = Path.unlink
+
+    def _fail_target_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == target:
+            raise OSError("sidecar is locked")
+        real_unlink(path, missing_ok=missing_ok)
+
+    def _fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "replace", _fail_replace)
+    monkeypatch.setattr(Path, "unlink", _fail_target_unlink)
+
+    with pytest.raises(sqlite_utils_module.SqliteRunStateDurabilityError, match="remove failed SQLite run-state files"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
 
 
 def test_fsync_directory_reports_success_where_directory_handles_do_not_exist(

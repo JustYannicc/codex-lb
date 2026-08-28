@@ -38,6 +38,10 @@
   running transition before a clean skip; failed transitions force the scan.
 - [x] 2.6 Require matching non-null prior/running/current identities and
   revalidate at the final decision seam so replacement races force the scan.
+- [x] 2.7 Distinguish a durably cleaned failed `running` transition from an
+  unconfirmed invalidation, run the configured check first when enabled, and
+  abort startup before migrations or serving when invalidation durability is
+  unknown.
 
 ## 3. Shutdown
 
@@ -48,6 +52,10 @@
   `finally`.
 - [x] 3.3 Permit the clean transition only while the lifetime lock is held and
   release that lock after the write attempt.
+- [x] 3.4 Return whether the reclaimed SQLite teardown registry fully drained,
+  and withhold `clean` when the bounded drain abandons work.
+- [x] 3.5 Propagate final proxy persistence, detached audit/fleet control-plane,
+  and scheduler leader-release outcomes into clean-state recording.
 
 ## 4. Verification
 
@@ -69,3 +77,8 @@
 - [x] 4.8 Test failed running transitions, failed-check retries, all
   replacement windows, null identities, recursive JSON, and the second
   directory fsync after post-replace cleanup.
+- [x] 4.9 Add subprocess proof for lock contention, release after a clean child
+  exit, and release after child process death.
+- [x] 4.10 Add regression coverage for unconfirmed failed-marker invalidation,
+  abandoned SQLite teardown, and each database-owning shutdown drain suppressing
+  the clean marker.
