@@ -343,6 +343,9 @@ from app.modules.proxy._service.support import (
     _WebSocketRequestState,
     _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
+    clear_upstream_websocket_transport_failure,
+    mark_upstream_websocket_transport_failure,
+    websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
@@ -514,6 +517,23 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
 )
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
+
+
+@dataclass(slots=True)
+class _WebSocketConnectProgress:
+    """Whether an upstream websocket open reached the direct network connector.
+
+    Local websocket-connect admission and the account's route resolution run
+    inside the same request budget scope as the connector, so a budget
+    timeout that fires before this flag is set is local-contention evidence,
+    not upstream websocket transport evidence. The flag is confined to the
+    direct connector for the same reason a routed handshake failure carries
+    no transport provenance: a stalled routed open proves only that one
+    account's proxy endpoint is unhealthy, and a cancelled open raises no
+    ``ProxyResponseError`` for the routed exclusion to act on.
+    """
+
+    direct_upstream_connect_started: bool = False
 
 
 class _WebSocketReplaySequenceRegression(Exception):
@@ -1740,6 +1760,23 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
+                                if request_state.previous_response_id is not None:
+                                    request_state.previous_response_owner_account_id = (
+                                        await proxy._resolve_websocket_previous_response_owner(
+                                            previous_response_id=request_state.previous_response_id,
+                                            api_key=request_state.api_key or api_key,
+                                            session_id=request_state.session_id,
+                                            surface="websocket_source_route",
+                                            request_state=request_state,
+                                        )
+                                    )
+                                    request_state.preferred_account_id = resolve_required_account_id(
+                                        ("existing bridge or file", request_state.preferred_account_id),
+                                        (
+                                            "previous response",
+                                            request_state.previous_response_owner_account_id,
+                                        ),
+                                    )
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -1759,6 +1796,11 @@ class _WebSocketMixin:
                                     # to the pinned account instead of this
                                     # guard failing the turn.
                                     and not request_state.source_route_excluded
+                                    # A model source may emit the same canonical
+                                    # response-id shape as the subscription
+                                    # backend. Only recorded account ownership,
+                                    # resolved above, may bypass this guard.
+                                    and request_state.previous_response_owner_account_id is None
                                     and await responses_model_is_source_owned(
                                         request_state.model,
                                         request_state.api_key or api_key,
@@ -1816,11 +1858,17 @@ class _WebSocketMixin:
                                     )
                                     continue
                             except ProxyResponseError as exc:
+                                error = _parse_openai_error(exc.payload)
+                                error_code = _normalize_error_code(
+                                    error.code if error else None,
+                                    error.type if error else None,
+                                )
+                                error_message = error.message if error and error.message else "Upstream error"
                                 (
                                     status_code,
                                     error_payload,
-                                    _error_code,
-                                    _error_message,
+                                    error_code,
+                                    error_message,
                                 ) = _sanitize_websocket_previous_response_error(
                                     previous_response_id=_facade()._previous_response_id_from_payload(payload),
                                     session_id=_owner_lookup_session_id_from_headers(
@@ -1829,11 +1877,39 @@ class _WebSocketMixin:
                                     ),
                                     status_code=exc.status_code,
                                     payload=exc.payload,
-                                    error_code="upstream_error",
-                                    error_message="Upstream error",
+                                    error_code=error_code or "upstream_error",
+                                    error_message=error_message,
                                     surface="websocket_connect",
                                     expose_stale_previous_response_classifier=codex_session_affinity,
+                                    request_state=request_state,
                                 )
+                                if request_state is not None:
+                                    sanitized_error = _parse_openai_error(error_payload)
+                                    error_type = (
+                                        sanitized_error.type
+                                        if sanitized_error and sanitized_error.type
+                                        else "server_error"
+                                    )
+                                    error_param = sanitized_error.param if sanitized_error else None
+                                    await proxy._release_websocket_request_state_reservation(request_state)
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=None,
+                                        api_key=request_state.api_key or api_key,
+                                        request_state=request_state,
+                                        error_code=error_code,
+                                        error_message=error_message,
+                                    )
+                                    await proxy._emit_websocket_terminal_error(
+                                        websocket,
+                                        client_send_lock=client_send_lock,
+                                        request_state=request_state,
+                                        error_code=error_code,
+                                        error_message=error_message,
+                                        error_type=error_type,
+                                        error_param=error_param,
+                                        downstream_activity=downstream_activity,
+                                    )
+                                    continue
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
@@ -1947,13 +2023,19 @@ class _WebSocketMixin:
                             if turn_state is not None
                             else None
                         )
-                        previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
-                            previous_response_id=request_state.previous_response_id,
-                            api_key=request_state.api_key or api_key,
-                            session_id=request_state.session_id,
-                            surface="websocket",
-                            request_state=request_state,
-                        )
+                        previous_response_owner_account_id = request_state.previous_response_owner_account_id
+                        if (
+                            request_state.previous_response_id is not None
+                            and request_state.previous_response_owner_lookup_outcome is None
+                        ):
+                            previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
+                                previous_response_id=request_state.previous_response_id,
+                                api_key=request_state.api_key or api_key,
+                                session_id=request_state.session_id,
+                                surface="websocket",
+                                request_state=request_state,
+                            )
+                            request_state.previous_response_owner_account_id = previous_response_owner_account_id
                         request_state.preferred_account_id = resolve_required_account_id(
                             ("existing bridge or file", request_state.preferred_account_id),
                             ("turn state", turn_state_owner_account_id),
@@ -3404,18 +3486,21 @@ class _WebSocketMixin:
         # refresh mid-session cannot make this disagree with the equivalent
         # check on the prepared-request path.
         #
-        # Requests the HTTP route excludes from source routing (a terminal
-        # compaction trigger, ``input_file`` references pinned to the
-        # uploading account) skip the guard: they must land on a subscription
-        # account either way, and the owner-required selection below routes
-        # them there instead of bouncing the turn to HTTP.
-        if not request_state.source_route_excluded and await responses_model_is_source_owned(
-            model,
-            request_state.api_key or api_key,
-            # ``model`` is the session loop's post-enforcement
-            # ``request_state.model``; the raw client alias captured at
-            # preparation is what an alias-only source is registered under.
-            raw_model=request_state.raw_source_model,
+        # Structural HTTP exclusions and a recorded previous-response account
+        # owner skip the guard. Response-id syntax is provider-opaque, so a
+        # configured source with no recorded subscription owner still falls
+        # back to the HTTP source path.
+        if (
+            not request_state.source_route_excluded
+            and request_state.previous_response_owner_account_id is None
+            and await responses_model_is_source_owned(
+                model,
+                request_state.api_key or api_key,
+                # ``model`` is the session loop's post-enforcement
+                # ``request_state.model``; the raw client alias captured at
+                # preparation is what an alias-only source is registered under.
+                raw_model=request_state.raw_source_model,
+            )
         ):
             source_model = request_state.raw_source_model or model
             message = (
@@ -3600,7 +3685,19 @@ class _WebSocketMixin:
                 if selected_account_model_replacement:
                     # The account/model retry budget selected this replacement;
                     # its connection failure must be surfaced rather than
-                    # consuming another account through generic failover.
+                    # consuming another account through generic failover. A
+                    # connect-phase transport failure on the replacement open
+                    # is still websocket-transport evidence, so arm the
+                    # handshake-denial marker even though the failover
+                    # decision is skipped.
+                    if (
+                        websocket_connect_transport_failure_code(
+                            exc,
+                            confirmed_pre_dispatch=confirmed_pre_dispatch,
+                        )
+                        is not None
+                    ):
+                        mark_upstream_websocket_transport_failure()
                     action = "surface"
                 else:
                     action = await proxy._decide_websocket_failover_action(
@@ -4356,6 +4453,30 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
+        transport_failure_code = websocket_connect_transport_failure_code(
+            exc,
+            confirmed_pre_dispatch=confirmed_pre_dispatch,
+        )
+        if transport_failure_code is not None:
+            # A server-level failure of the websocket open itself is transport
+            # evidence, not account evidence. Codex clients only activate
+            # their HTTP transport fallback on a handshake-level HTTP 426, so
+            # surface the failure immediately (the routes deny the next
+            # handshake with 426 while the transport-failure marker is armed)
+            # and skip the account error penalty: penalizing here drives the
+            # owner account into transient backoff and fails the HTTP retry
+            # closed on hard session affinity even though the HTTP upstream
+            # path is healthy.
+            mark_upstream_websocket_transport_failure()
+            _facade().logger.info(
+                "Websocket connect transient transport failure surfaced for HTTP fallback "
+                "request_id=%s account_id=%s status=%s code=%s",
+                request_state.request_log_id or request_state.request_id,
+                account.id,
+                exc.status_code,
+                transport_failure_code,
+            )
+            return "surface"
         if confirmed_pre_dispatch:
             # A proven pre-dispatch proxy connect failure is account-local
             # transient evidence. The caller applies the bounded transient
@@ -4429,9 +4550,15 @@ class _WebSocketMixin:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
+            connect_progress = _WebSocketConnectProgress()
             try:
                 with anyio.fail_after(remaining_seconds):
-                    upstream = await proxy._open_upstream_websocket(account, headers, request_state=request_state)
+                    upstream = await proxy._open_upstream_websocket(
+                        account,
+                        headers,
+                        request_state=request_state,
+                        connect_progress=connect_progress,
+                    )
                 recovery.log_recovered()
                 return upstream
             except ProxyResponseError as exc:
@@ -4443,11 +4570,39 @@ class _WebSocketMixin:
                 if decision == "retry":
                     continue
                 if decision == "exhausted":
+                    # The budget-exhausted emit bypasses the failover
+                    # decision, so arm the handshake-denial marker here for
+                    # failures the decision path would have armed for. The
+                    # provenance gate matters: this loop also runs route
+                    # resolution, whose ``upstream_proxy_unavailable``
+                    # failures are pre-dispatch route evidence and must not
+                    # deny handshakes with 426.
+                    if (
+                        websocket_connect_transport_failure_code(
+                            exc,
+                            confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
+                        )
+                        is not None
+                    ):
+                        mark_upstream_websocket_transport_failure()
                     _raise_proxy_budget_exhausted()
                 raise
             except TimeoutError:
                 if time.monotonic() - started_at < timeout_seconds:
                     raise
+                # The websocket open itself consumed the connect budget, which
+                # is the same transport evidence as a classified connect
+                # timeout: the budget-exhausted emit below bypasses the
+                # failover decision, so arm the handshake-denial marker here
+                # or short-budget deployments never steer clients to HTTP.
+                # A budget shorter than the local admission wait expires
+                # before the connector ever runs; denying handshakes then
+                # would answer local contention by pushing every client onto
+                # HTTP, amplifying the overload it came from. A stalled
+                # routed open is route-scoped for the same reason its
+                # handshake failures are, so it stays out of this too.
+                if connect_progress.direct_upstream_connect_started:
+                    mark_upstream_websocket_transport_failure()
                 _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
@@ -4456,6 +4611,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
+        connect_progress: _WebSocketConnectProgress | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4477,6 +4633,8 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 ) from exc
+            if connect_progress is not None and route is None:
+                connect_progress.direct_upstream_connect_started = True
             upstream = await _facade()._call_with_supported_optional_kwargs(
                 _facade().connect_responses_websocket,
                 headers,
@@ -4489,6 +4647,14 @@ class _WebSocketMixin:
             )
             if request_state is not None:
                 _record_websocket_route_metadata(request_state, upstream=upstream, route=route)
+            if route is None:
+                # Symmetric with arming: a routed success proves only that one
+                # account's proxy endpoint is healthy, so it must not clear a
+                # denial state that direct-upstream evidence armed. Because a
+                # routed open can neither arm nor clear, an all-routed
+                # deployment simply never uses the marker, and a mixed one
+                # still falls back to the bounded TTL.
+                clear_upstream_websocket_transport_failure()
             return upstream
         finally:
             connect_lease.release()
@@ -6017,6 +6183,7 @@ class _WebSocketMixin:
                 or settlement.account_health_error
                 or settlement.record_success
                 or bool(request_state.deferred_account_error_backoffs)
+                or bool(request_state.deferred_keyed_stream_health)
             ),
         )
         # Settlement responsibility has transferred (the settle path tracks
@@ -6031,8 +6198,15 @@ class _WebSocketMixin:
             pending_backoffs = (
                 lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
             )
-            if pending_backoffs:
-                await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
+            try:
+                if pending_backoffs:
+                    await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
+            finally:
+                # Backoffs and queued stream-health penalties own independent
+                # post-settlement lanes: a failed backoff write must not
+                # orphan the deferred health write.
+                if request_state.deferred_keyed_stream_health:
+                    await proxy._drain_deferred_keyed_stream_health(request_state)
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (
