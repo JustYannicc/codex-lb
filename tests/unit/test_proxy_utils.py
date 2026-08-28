@@ -12574,6 +12574,60 @@ async def test_service_stream_responses_preserves_raw_codex_error_after_created(
     assert handle_args.args[2] == "rate_limit_exceeded"
 
 
+def test_raw_error_fields_preserve_param_for_later_frame_policy() -> None:
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "code": "invalid_request_error",
+        "message": "Invalid `previous_response_id`.",
+        "param": " previous_response_id ",
+    }
+
+    error_type, error_message, error_param, error_code = streaming_helpers_module._raw_stream_error_fields(
+        "error", payload
+    )
+
+    assert error_type is None
+    assert error_message == "Invalid `previous_response_id`."
+    assert error_param is not None
+    assert error_param.present
+    assert error_param.raw == " previous_response_id "
+    assert error_code == "invalid_request_error"
+    assert proxy_service._rewrite_previous_response_stream_error(
+        previous_response_id="resp_raw_anchor",
+        preferred_account_id=None,
+        error_code=error_code,
+        error_type=error_type,
+        error_message=error_message,
+        error_param=error_param,
+    ) == (
+        "stream_incomplete",
+        "Upstream websocket closed before response.completed",
+        None,
+    )
+
+
+def test_public_websocket_error_sanitizes_nested_and_top_level_params() -> None:
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "param": [],
+        "status": 400,
+        "error": {
+            "code": "invalid_request_error",
+            "message": "Invalid request",
+            "param": " model ",
+        },
+    }
+
+    normalized = websocket_helpers_module._sanitize_public_websocket_event_payload(payload, event_type="error")
+
+    assert normalized["type"] == "error"
+    assert normalized["status"] == 400
+    assert "param" not in normalized
+    nested_error = normalized["error"]
+    assert isinstance(nested_error, dict)
+    assert nested_error["param"] == "model"
+
+
 @pytest.mark.asyncio
 async def test_service_stream_responses_records_typeless_raw_codex_error_first(monkeypatch):
     settings = _make_proxy_settings()

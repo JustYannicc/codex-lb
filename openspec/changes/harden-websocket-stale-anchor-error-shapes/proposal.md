@@ -25,6 +25,11 @@ those boundaries explicit without changing account selection or retry policy.
   full-history replay or account switch.
 - Sanitize malformed public `param` values by omitting them; trim valid string
   parameters at response/event construction boundaries.
+- Preserve the native event envelope on WebSocket and HTTP Responses
+  serializers. The Chat Completions adapter intentionally translates terminal
+  Responses events into the documented Chat Completions `{"error": ...}`
+  envelope; it sanitizes that nested error detail without exposing native
+  `response.failed` fields that are not part of the Chat contract.
 - Classify typeless error payloads consistently and preserve a nested
   `response.failed` response id while masking its stale-anchor error details.
 - Keep the already-defined Codex-native canonical
@@ -36,8 +41,10 @@ those boundaries explicit without changing account selection or retry policy.
 - No new retry, account migration, durable-operation, retry-circuit,
   quarantine, or bridge ownership behavior.
 - No changes to the existing OpenSpec canonical signal or to client code.
-- No changes to ordinary invalid-request errors whose code, parameter, and
-  message do not identify a previous-response anchor.
+- No changes to ordinary invalid-request classification or recovery semantics.
+  Their public envelopes remain otherwise unchanged; as required above,
+  present malformed ``param`` metadata is omitted and valid string values are
+  trimmed, while errors without ``param`` metadata are unchanged.
 
 ## Capabilities
 

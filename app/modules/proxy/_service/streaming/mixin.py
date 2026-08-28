@@ -827,15 +827,20 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
+                        raw_error_type = error.type if error else None
+                        raw_error_message = error.message if error else None
+                        raw_error_param = error.param_state if error else None
                         if preserve_raw_sse_line and error is None:
-                            _, raw_error_message, _, raw_error_code = _raw_error_fields(event_type, event_payload)
+                            raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
+                                event_type,
+                                event_payload,
+                            )
                             upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
                             raw_error_code = _normalize_error_code(
                                 error.code if error else None,
-                                error.type if error else None,
+                                raw_error_type,
                             )
-                            raw_error_message = error.message if error else None
                             upstream_error = _upstream_error_from_openai(error)
                         raw_error_code = _raw_stream_error_code_or_upstream(
                             event_type,
@@ -846,9 +851,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
                             error_code=raw_error_code,
-                            error_type=error.type if error else None,
-                            error_message=error.message if error else None,
-                            error_param=error.param_state if error else None,
+                            error_type=raw_error_type,
+                            error_message=raw_error_message,
+                            error_param=raw_error_param,
                         )
                         if rewritten_error is not None:
                             response_id = (

@@ -30,11 +30,17 @@ surrounding whitespace before public serialization.
 
 ### Requirement: Public error serializers omit malformed parameter metadata
 
-When a public WebSocket, HTTP Responses, or Chat Completions serializer emits
-an error containing a present malformed `param`, it MUST omit that field. It
-MUST preserve the rest of the error envelope and MUST NOT expose a raw stale
-`previous_response_id`. A valid string parameter MUST remain available in
-trimmed form.
+When a public WebSocket or HTTP Responses serializer emits an error containing
+a present malformed `param`, it MUST omit that field. It MUST preserve the
+native event envelope and MUST NOT expose a raw stale `previous_response_id`.
+A valid string parameter MUST remain available in trimmed form. This
+sanitization applies regardless of the error code or message; only an error
+that has no `param` metadata is left unchanged.
+
+The Chat Completions adapter MUST apply the same parameter sanitization to the
+nested error detail, but it MUST retain the documented Chat Completions error
+envelope rather than forwarding the native Responses event type or outer
+`response` object.
 
 #### Scenario: native malformed error is sanitized without changing its shape
 
@@ -43,6 +49,15 @@ trimmed form.
 - **WHEN** the native stream is serialized for the client
 - **THEN** the error retains its event type and other fields
 - **AND** the malformed `param` is omitted
+
+#### Scenario: Chat Completions errors keep their adapter envelope
+
+- **GIVEN** a Chat Completions stream receives a native terminal error with a
+  present malformed `param`
+- **WHEN** the Chat adapter serializes the error
+- **THEN** it emits the documented `{"error": ...}` Chat Completions shape
+- **AND** the nested malformed `param` is omitted
+- **AND** native Responses-only fields are not forwarded
 
 #### Scenario: public stale-anchor error remains generic
 
