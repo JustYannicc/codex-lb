@@ -67,6 +67,8 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
     The lock blocks active writers while the recovered file and its sidecars
     are prepared. The connection is closed when this context exits, before any
     filesystem rename, because Windows rejects renames with an open handle.
+    This leaves only the bounded post-probe window before the operator CLI's
+    renames; the exclusive transaction still fences all preparation work.
     """
     connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
     acquired = False
@@ -81,6 +83,21 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
         if acquired:
             connection.rollback()
         connection.close()
+
+
+def _replace_recovered_database(source: Path, output: Path, backup: Path) -> None:
+    source.replace(backup)
+    try:
+        output.replace(source)
+    except OSError as exc:
+        try:
+            backup.replace(source)
+        except OSError as restore_exc:
+            raise RuntimeError(
+                f"failed to install recovered SQLite database at {source}: {exc}; "
+                f"failed to restore the original database from {backup}: {restore_exc}"
+            ) from exc
+        raise RuntimeError(f"failed to install recovered SQLite database at {source}: {exc}") from exc
 
 
 def _load_dump(source: Path) -> str:
@@ -123,8 +140,7 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
             _remove_sqlite_sidecars(options.output)
             _remove_sqlite_sidecars(options.source)
         backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-        options.source.replace(backup)
-        options.output.replace(options.source)
+        _replace_recovered_database(options.source, options.output, backup)
         return RecoveryOutcome(
             source=backup,
             output=options.source,

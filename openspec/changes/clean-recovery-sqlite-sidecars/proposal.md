@@ -12,7 +12,10 @@ with those sidecars present can attach stale state to the replacement.
 - Fence final output import and sidecar cleanup with an exclusive SQLite
   transaction, then close every recovery connection before sidecar or database
   renames so Windows can perform the file mutations. Fail closed if the lock or
-  any sidecar cleanup cannot complete.
+  any sidecar cleanup cannot complete. If the second replacement rename fails,
+  restore the original source path before reporting the error. Closing the
+  transaction leaves a bounded post-probe window before the operator CLI's
+  renames; all preparation work remains fenced.
 
 The recovery output and backup naming remain unchanged.
 

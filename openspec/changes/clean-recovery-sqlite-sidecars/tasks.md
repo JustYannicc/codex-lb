@@ -13,4 +13,5 @@
 - [x] 2.3 Cover a write attempt during the fenced preparation boundary.
 - [x] 2.4 Cover Windows-style rename behavior with a tracked-handle seam.
 - [x] 2.5 Cover partial cleanup and busy-source failures.
-- [x] 2.6 Run focused recovery tests, Ruff, formatting, `ty`, and strict OpenSpec.
+- [x] 2.6 Cover second-rename failure and source restoration.
+- [x] 2.7 Run focused recovery tests, Ruff, formatting, `ty`, and strict OpenSpec.
