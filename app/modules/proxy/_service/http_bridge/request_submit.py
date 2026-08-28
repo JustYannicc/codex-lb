@@ -173,6 +173,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _request_log_client_fields,
+    _revoke_http_bridge_event_queue,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
 )
@@ -551,24 +552,6 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._revoked.set()
 
 
-def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> None:
-    """Stop queue producers before fail-closed terminal cleanup.
-
-    A send can fail after upstream accepted the frame, before the downstream
-    stream has started consuming its queue.  If that queue is already full,
-    terminal cleanup must not wait for a consumer that will never start.
-    Revocation makes the finite queue's ``put`` operation a no-op and wakes any
-    producer that is waiting for capacity.
-    """
-
-    event_queue = request_state.event_queue
-    revoke = getattr(event_queue, "revoke", None)
-    if callable(revoke):
-        revoke()
-    else:
-        request_state.event_queue_revoked.set()
-
-
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeStaleGateSnapshot:
     pending_states: list[_WebSocketRequestState]
@@ -779,26 +762,20 @@ async def _settle_claimed_http_bridge_liveness_failure(
 
     if session.liveness_settlement_owner != "send":
         raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
-    # The failed send is pre-consumer, but an older sibling may already have a
-    # genuinely attached (and paused) downstream consumer.  Snapshot that
-    # distinction under the same lock used by stream attachment and detach;
-    # only queues with no consumer can be revoked and discarded without losing
-    # buffered delivery or leaving terminal cleanup waiting forever.
+    # A send normally runs before its own stream consumer attaches, but retry
+    # ownership can race with an already-attached request. Snapshot that
+    # distinction under the same lock used by stream attachment and detach.
+    # Revocation stops producers, while an attached queue remains owned by the
+    # request until terminal delivery or actual downstream detachment releases
+    # it.
     async with session.pending_lock:
         pending_requests = list(session.pending_requests)
         if all(pending_request is not failed_request_state for pending_request in pending_requests):
             pending_requests.append(failed_request_state)
         for pending_request in pending_requests:
-            if pending_request is not failed_request_state and getattr(
-                pending_request,
-                "event_queue_consumer_started",
-                False,
-            ):
+            if getattr(pending_request, "event_queue_consumer_started", False):
                 continue
             _revoke_http_bridge_event_queue(pending_request)
-            discard = getattr(pending_request.event_queue, "discard", None)
-            if callable(discard):
-                discard()
     async with session.lifecycle_lock:
         await service._fail_http_bridge_reader_and_maybe_retire(
             session,

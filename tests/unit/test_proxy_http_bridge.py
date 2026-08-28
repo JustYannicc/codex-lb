@@ -832,8 +832,8 @@ async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_liveness_settlement_discards_preconsumer_full_sibling_queue() -> None:
-    """A sibling that never attached must not wedge shared liveness settlement."""
+async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_event() -> None:
+    """A pre-consumer sibling keeps its buffered events and liveness failure."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -909,13 +909,24 @@ async def test_http_bridge_liveness_settlement_discards_preconsumer_full_sibling
     )
 
     assert sibling_state.event_queue_revoked.is_set()
-    assert sibling_queue.empty()
+    assert sibling_queue.get_nowait() == "buffered-1"
+    assert sibling_queue.get_nowait() == "buffered-2"
+    sibling_terminal = sibling_queue.get_nowait()
+    assert sibling_terminal is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in sibling_terminal
+    assert sibling_queue.get_nowait() is None
+    failed_queue = failed_state.event_queue
+    assert failed_queue is not None
+    failed_terminal = failed_queue.get_nowait()
+    assert failed_terminal is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in failed_terminal
+    assert failed_queue.get_nowait() is None
     assert session.pending_requests == deque()
 
 
 @pytest.mark.asyncio
 async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling_queue() -> None:
-    """An attached sibling keeps its buffered events ahead of terminal EOS."""
+    """Attached sibling and failed queues keep buffered events ahead of terminal EOS."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -943,6 +954,8 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
         maxsize=2,
         revoked=asyncio.Event(),
     )
+    failed_queue.put_nowait("failed-buffered-1")
+    failed_queue.put_nowait("failed-buffered-2")
     failed_state = proxy_service._WebSocketRequestState(
         request_id="req-attached-paused-failure",
         model="gpt-5.4",
@@ -952,6 +965,7 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
         started_at=time.monotonic(),
         event_queue=failed_queue,
         event_queue_revoked=failed_queue.revoked,
+        event_queue_consumer_started=True,
         transport="http",
         skip_request_log=True,
     )
@@ -1004,16 +1018,22 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
         await asyncio.wait_for(wait_for_pending_claim(), timeout=1.0)
         assert not settlement_task.done()
 
-        async def consume_sibling_events() -> list[str | None]:
+        async def consume_events(
+            queue: http_bridge_request_submit_module._HTTPBridgeLiveEventQueue,
+        ) -> list[str | None]:
             events: list[str | None] = []
             while True:
-                event = await sibling_queue.get()
+                event = await queue.get()
                 events.append(event)
                 if event is None:
                     return events
 
-        consumer_task = asyncio.create_task(consume_sibling_events())
-        events = await asyncio.wait_for(consumer_task, timeout=1.0)
+        sibling_consumer_task = asyncio.create_task(consume_events(sibling_queue))
+        failed_consumer_task = asyncio.create_task(consume_events(failed_queue))
+        events, failed_events = await asyncio.wait_for(
+            asyncio.gather(sibling_consumer_task, failed_consumer_task),
+            timeout=1.0,
+        )
         await asyncio.wait_for(settlement_task, timeout=1.0)
     finally:
         if not settlement_task.done():
@@ -1025,7 +1045,11 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
     assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in events[2]
     assert events[3] is None
     assert sibling_state.event_queue_revoked.is_set() is False
-    assert failed_state.event_queue_revoked.is_set() is True
+    assert failed_events[:2] == ["failed-buffered-1", "failed-buffered-2"]
+    assert failed_events[2] is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in failed_events[2]
+    assert failed_events[3] is None
+    assert failed_state.event_queue_revoked.is_set() is False
     assert session.pending_requests == deque()
 
 

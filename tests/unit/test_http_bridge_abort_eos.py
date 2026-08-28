@@ -99,7 +99,7 @@ async def test_aborted_terminal_settlement_unblocks_full_live_queue() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aborted_terminal_settlement_releases_unread_live_queue_credits() -> None:
+async def test_aborted_terminal_settlement_preserves_preconsumer_queue_until_consumed() -> None:
     budget = http_bridge_request_submit._HTTPBridgeLiveEventQueueByteBudget(max_bytes=64)
     event_queue = http_bridge_request_submit._HTTPBridgeLiveEventQueue(
         maxsize=2,
@@ -114,6 +114,8 @@ async def test_aborted_terminal_settlement_releases_unread_live_queue_credits() 
         [request_state],
     )
 
+    assert event_queue.get_nowait() == "unread-aborted-payload"
+    assert event_queue.get_nowait() is None
     assert event_queue.empty()
     assert event_queue.queued_bytes == 0
     assert budget.used_bytes == 0

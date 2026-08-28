@@ -4773,7 +4773,7 @@ class _HTTPBridgeStreamingMixin:
             # Submission and upstream delivery can run before this generator
             # reaches its queue consumer. Publish attachment under the same
             # pending lock used by liveness settlement so a full pre-consumer
-            # sibling can be discarded without revoking a paused consumer.
+            # sibling can be revoked without revoking a paused consumer.
             async with session.pending_lock:
                 if request_state.event_queue is event_queue and not request_state.event_queue_revoked.is_set():
                     request_state.event_queue_consumer_started = True

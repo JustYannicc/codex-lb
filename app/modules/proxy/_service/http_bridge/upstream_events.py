@@ -166,6 +166,7 @@ from app.modules.proxy._service.support import (
     _mark_response_create_attempt_observed,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _revoke_http_bridge_event_queue,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _websocket_request_can_replay_before_visible_output,
@@ -372,7 +373,7 @@ def _enqueue_http_bridge_abort_eos(
     the marker as a bounded out-of-band terminal state when its event deque is
     full; the consumer observes it only after draining every buffered event.
     """
-    if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
+    if request_state.event_queue is not event_queue:
         return False
     enqueue_terminal = getattr(event_queue, "enqueue_terminal_nowait", None)
     if callable(enqueue_terminal):
@@ -392,7 +393,7 @@ def _enqueue_http_bridge_terminal_event(
     event_block: str,
 ) -> bool:
     """Publish terminal event+EOS without waiting for live queue capacity."""
-    if request_state.event_queue is not event_queue or request_state.event_queue_revoked.is_set():
+    if request_state.event_queue is not event_queue:
         return False
     enqueue_terminal = getattr(event_queue, "enqueue_terminal_event_nowait", None)
     if callable(enqueue_terminal):
@@ -521,9 +522,9 @@ async def _persist_http_bridge_operation_event(
                 if delivery_queue is None:
                     return False
                 event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
-                if event_queue_revoked is not None and event_queue_revoked.is_set():
-                    return False
-                if not getattr(request_state, "event_queue_consumer_started", False):
+                if (event_queue_revoked is not None and event_queue_revoked.is_set()) or not getattr(
+                    request_state, "event_queue_consumer_started", False
+                ):
                     delivered = _enqueue_http_bridge_terminal_event(request_state, delivery_queue, event_block)
                     if delivered and terminal_delivery_scope is not None:
                         async with session.pending_lock:
@@ -667,12 +668,14 @@ async def _persist_http_bridge_operation_event(
         await release_terminal_append_barrier()
         if terminal_event_queue is not None and terminal and not terminal_enqueued:
             try:
-                await terminal_event_queue.put(event_block)
-                await terminal_event_queue.put(None)
-                if terminal_delivery_scope is not None:
+                terminal_enqueued = _enqueue_http_bridge_terminal_event(
+                    request_state,
+                    cast(asyncio.Queue[str | None], terminal_event_queue),
+                    event_block,
+                )
+                if terminal_enqueued and terminal_delivery_scope is not None:
                     async with session.pending_lock:
                         terminal_delivery_scope.terminal_enqueued = True
-                terminal_enqueued = True
             except Exception:
                 logger.debug(
                     "Failed to enqueue HTTP bridge terminal after spool error operation_id=%s",
@@ -2596,16 +2599,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.account.id,
                         exc_info=True,
                     )
-                # Best effort: unblock the downstream waiter so it observes
-                # end-of-stream instead of waiting for its idle timeout.
+                # Revocation stops late producers, but does not release the
+                # queue: a delayed consumer still owns buffered events until
+                # it receives the abort marker or actually detaches.
                 event_queue = request_state.event_queue
                 if event_queue is not None:
-                    discard = getattr(event_queue, "discard", None)
                     if not getattr(request_state, "event_queue_consumer_started", False):
-                        if callable(discard):
-                            discard()
-                        else:
-                            _enqueue_http_bridge_abort_eos(request_state, event_queue)
+                        _revoke_http_bridge_event_queue(request_state)
+                        _enqueue_http_bridge_abort_eos(request_state, event_queue)
                     elif (
                         request_state.completed_delivery_scope is None
                         or request_state.completed_delivery_scope.terminal_enqueued
