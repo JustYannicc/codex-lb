@@ -190,6 +190,8 @@ async def test_terminal_delivery_preserves_buffered_event_terminal_and_eos_order
 async def test_terminal_delivery_preserves_cancellation_after_revoked_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    live_event_budget = request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
+    baseline_budget_bytes = live_event_budget.used_bytes
     queue = _live_queue(maxsize=1)
     queue.put_nowait("buffered")
     request_state = _request_state(queue)
@@ -233,6 +235,8 @@ async def test_terminal_delivery_preserves_cancellation_after_revoked_cleanup(
         await asyncio.wait_for(persist_task, timeout=1.0)
     settle_terminal_event.assert_awaited_once()
     assert request_state.event_queue_revoked.is_set()
+    queue.discard()
+    assert live_event_budget.used_bytes == baseline_budget_bytes
 
 
 @pytest.mark.asyncio
