@@ -933,6 +933,19 @@ class _HTTPBridgeRetryCircuitAttemptSelection:
         return len(self.attempts) > 1
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitGeneration:
+    """Immutable retry-circuit snapshot used to fence stale-anchor replay."""
+
+    admission_generation: int
+    persisted_updated_at_epoch: float
+    persisted_consecutive_failures: int
+    durable_cooldown_until_epoch: float
+    local_consecutive_failures: int
+    last_failure_monotonic: float
+    local_cooldown_until: float
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -1079,7 +1092,7 @@ class _WebSocketRequestState:
     # circuit existed; a newer local/durable failure must suppress submit.
     verified_stale_anchor_retry_circuit_generation_captured: bool = False
     verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
-    verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
+    verified_stale_anchor_retry_circuit_generation: _HTTPBridgeRetryCircuitGeneration | None = None
     verified_stale_anchor_quarantine_generation: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when
     # it claimed none); released by the submit finalizer whenever the probe

@@ -1,0 +1,58 @@
+# Design: retry-circuit generation fencing
+
+## Boundary
+
+The durable `http_bridge_retry_circuits.admission_generation` integer is the
+linearization point for one internally authorized stale-anchor replay. The
+existing `updated_at_epoch`, failure count, and cooldown remain the observed
+failure state. They are compared in the claim so a stale snapshot cannot win,
+but they are not used as the admission version because wall clocks can be
+skewed and delayed failure writes must still merge.
+
+## Claim path
+
+At stale-anchor authorization, the bridge captures an immutable
+`_HTTPBridgeRetryCircuitGeneration` containing the durable fields and the
+process-local failure/cooldown state. Immediately before queue publication,
+the submitter checks the local state under the retry-circuit lock, releases the
+lock for durable I/O, and issues one conditional insert/update. SQLite and
+PostgreSQL are the only supported durable dialects for this path; the
+statement uses `RETURNING` so a successful receipt is returned by the same
+atomic write rather than a second read that could time out after consuming the
+generation. A missing row is created only when the captured generation proves
+absence (`generation == 0`).
+
+If the first bounded claim times out, cancellation does not prove whether the
+database committed. One identical compare-and-set may be retried within the
+remaining request deadline. A committed first claim rejects the retry through
+the incremented generation; an uncommitted one can be recovered. Refusal,
+store errors, a second timeout, or an expired deadline all remain fail-closed.
+After a successful receipt, the local state is checked again under the lock;
+any intervening same-key failure or cooldown suppresses the replay.
+
+## Reset path
+
+Successful response settlement first loads the durable row. A failed lookup
+does not establish a version fence, so it leaves the local state and marker
+sets intact. A confirmed miss may remove only a local marker that has not been
+updated since the lookup began. A present row is cleared by a conditional
+update matching both its observed timestamp and admission generation. A false
+row-count result means a newer durable writer won and the local state is kept.
+Only after a successful CAS does the local state get removed, and a local
+failure that arrived after the lookup still wins the post-CAS check.
+
+## Delayed failure merge
+
+Failure persistence continues to merge by the existing base observation
+timestamp and failure-count rules. It never rewrites `admission_generation`.
+Thus a failure write delayed by a skewed wall clock can merge after a replay
+claim while the independent integer continues to fence a later claim.
+
+## Proof seams
+
+- Unit tests cover immutable snapshot construction, local pre/post checks,
+  unrelated-key concurrency, timeout reconciliation, and marker cleanup.
+- Durable integration tests cover SQLite `RETURNING` claims, stale-generation
+  refusal, absent-row races, generation-fenced clears, and delayed failures.
+- The call-site regression passes the original bridge request deadline into the
+  claim; no retry can spend an unbounded second claim timeout.

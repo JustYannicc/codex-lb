@@ -2296,6 +2296,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=request_state.bridge_request_deadline,
                             )
                         generation_claimed = claim_outcome is True
                         if not generation_claimed:

@@ -767,18 +767,16 @@ class DurableBridgeRepository:
             "admission_generation": 1,
         }
         dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
+        if expected_updated_at_epoch is None and expected_admission_generation != 0:
+            return None
         async with sqlite_writer_section():
             if expected_updated_at_epoch is None:
-                if expected_admission_generation != 0:
-                    return None
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
-                elif dialect == "sqlite":
-                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 else:
-                    raise RuntimeError(
-                        f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
-                    )
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
             else:
                 statement = (
                     update(HttpBridgeRetryCircuit)
@@ -793,16 +791,13 @@ class DurableBridgeRepository:
                     )
                     .values(admission_generation=expected_admission_generation + 1)
                 )
-            result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
                 await self._session.rollback()
                 return None
             await self._session.commit()
-        return await self.get_retry_circuit(
-            session_key_kind=session_key_kind,
-            session_key_value=session_key_value,
-            api_key_scope=api_key_scope,
-        )
+        return _to_retry_circuit_snapshot(row)
 
     async def supersede_retry_circuit_detail(
         self,

@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
@@ -24,6 +25,7 @@ from app.modules.proxy._service.observability import _hash_identifier, _service_
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitGeneration,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
 )
@@ -70,6 +72,16 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     # signature, so at threshold it authorizes the same fenced abandonment.
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE: "repeated_zero_event_idle_timeout",
 }
+
+
+def _http_bridge_retry_circuit_claim_timeout_seconds(deadline: float | None) -> float | None:
+    """Clamp one durable claim attempt to the caller's remaining deadline."""
+    if deadline is None:
+        return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        return None
+    return min(_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS, remaining_seconds)
 # Written over a surviving at-threshold row when a completion registered a
 # fresh anchor but its settlement failed. Deliberately outside the poison
 # detail map: a replica loading the row keeps the cooldown but neither arms
@@ -235,13 +247,13 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_generation(
         self: Any,
         session: _HTTPBridgeSession,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         return await self._http_bridge_retry_circuit_generation_for_key(session.key)
 
     async def _http_bridge_retry_circuit_generation_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -264,19 +276,23 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_updated_at_epoch if state is not None else 0.0,
                 persisted.updated_at_epoch if persisted is not None else 0.0,
             )
+            persisted_admission_generation = max(
+                state.persisted_admission_generation if state is not None else 0,
+                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
+            )
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
             last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
             local_cooldown_until = state.cooldown_until if state is not None else 0.0
-            return True, (
-                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
-                persisted_updated_at_epoch,
-                persisted_consecutive_failures,
-                durable_cooldown_until_epoch,
-                local_consecutive_failures,
-                last_failure_monotonic,
-                local_cooldown_until,
+            return True, _HTTPBridgeRetryCircuitGeneration(
+                admission_generation=persisted_admission_generation,
+                persisted_updated_at_epoch=persisted_updated_at_epoch,
+                persisted_consecutive_failures=persisted_consecutive_failures,
+                durable_cooldown_until_epoch=durable_cooldown_until_epoch,
+                local_consecutive_failures=local_consecutive_failures,
+                last_failure_monotonic=last_failure_monotonic,
+                local_cooldown_until=local_cooldown_until,
             )
 
     async def _http_bridge_retry_circuit_generation_is_not_newer(
@@ -284,7 +300,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         key: _HTTPBridgeSessionKey,
         captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
+        generation: _HTTPBridgeRetryCircuitGeneration | None,
     ) -> bool:
         if not captured:
             return False
@@ -295,8 +311,14 @@ class _HTTPBridgeRetryCircuitMixin:
             return current_generation is None
         if current_generation is None:
             return True
-        return all(
-            current <= captured_value for current, captured_value in zip(current_generation, generation, strict=True)
+        return (
+            current_generation.admission_generation <= generation.admission_generation
+            and current_generation.persisted_updated_at_epoch <= generation.persisted_updated_at_epoch
+            and current_generation.persisted_consecutive_failures <= generation.persisted_consecutive_failures
+            and current_generation.durable_cooldown_until_epoch <= generation.durable_cooldown_until_epoch
+            and current_generation.local_consecutive_failures <= generation.local_consecutive_failures
+            and current_generation.last_failure_monotonic <= generation.last_failure_monotonic
+            and current_generation.local_cooldown_until <= generation.local_cooldown_until
         )
 
     async def _claim_http_bridge_retry_circuit_generation(
@@ -304,7 +326,8 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         key: _HTTPBridgeSessionKey,
         captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
+        generation: _HTTPBridgeRetryCircuitGeneration | None,
+        deadline: float | None = None,
     ) -> bool | None:
         """Atomically linearize replay admission against the captured circuit.
 
@@ -317,16 +340,17 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         if not captured:
             return False
-        expected_admission_generation = generation[0] if generation is not None else 0
-        expected_persisted_updated_at = generation[1] if generation is not None else 0.0
-        expected_persisted_failures = generation[2] if generation is not None else 0
-        expected_persisted_cooldown = generation[3] if generation is not None else 0.0
-        expected_local_failures = generation[4] if generation is not None else 0
-        expected_last_failure = generation[5] if generation is not None else 0.0
-        expected_local_cooldown = generation[6] if generation is not None else 0.0
+        expected_admission_generation = generation.admission_generation if generation is not None else 0
+        expected_persisted_updated_at = generation.persisted_updated_at_epoch if generation is not None else 0.0
+        expected_persisted_failures = generation.persisted_consecutive_failures if generation is not None else 0
+        expected_persisted_cooldown = generation.durable_cooldown_until_epoch if generation is not None else 0.0
+        expected_local_failures = generation.local_consecutive_failures if generation is not None else 0
+        expected_last_failure = generation.last_failure_monotonic if generation is not None else 0.0
+        expected_local_cooldown = generation.local_cooldown_until if generation is not None else 0.0
         claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
         if not callable(claim_generation):
             return None
+        claim_generation_fn = cast(Callable[..., Awaitable[Any]], claim_generation)
 
         # Local failure recording for this key serializes on the key lock,
         # so holding it across the durable CAS keeps the claim linearized
@@ -343,20 +367,37 @@ class _HTTPBridgeRetryCircuitMixin:
                     or state.cooldown_until > expected_local_cooldown
                 ):
                     return False
+            async def run_durable_claim() -> Any:
+                return await claim_generation_fn(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                    expected_updated_at_epoch=(
+                        expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
+                    ),
+                    expected_admission_generation=expected_admission_generation,
+                    expected_consecutive_failures=expected_persisted_failures,
+                    expected_cooldown_until_epoch=expected_persisted_cooldown,
+                )
+
+            claim_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+            if claim_timeout_seconds is None:
+                logger.warning(
+                    "No request budget left to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                )
+                return False
             try:
                 claimed = await asyncio.wait_for(
-                    claim_generation(
-                        session_key_kind=key.affinity_kind,
-                        session_key_value=key.affinity_key,
-                        api_key_id=key.api_key_id,
-                        expected_updated_at_epoch=(
-                            expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
-                        ),
-                        expected_admission_generation=expected_admission_generation,
-                        expected_consecutive_failures=expected_persisted_failures,
-                        expected_cooldown_until_epoch=expected_persisted_cooldown,
-                    ),
-                    timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+                    run_durable_claim(),
+                    timeout=claim_timeout_seconds,
+                )
+            except TimeoutError:
+                claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
+                    key=key,
+                    run_durable_claim=run_durable_claim,
+                    deadline=deadline,
                 )
             except Exception:
                 logger.warning(
@@ -374,6 +415,28 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
         finally:
             key_lock.release()
+
+    async def _reconcile_timed_out_retry_circuit_generation_claim(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        run_durable_claim: Callable[[], Awaitable[Any]],
+        deadline: float | None = None,
+    ) -> Any:
+        """Re-run a timed-out compare-and-set within the remaining request budget."""
+        reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if reconcile_timeout_seconds is None:
+            return None
+        try:
+            return await asyncio.wait_for(run_durable_claim(), timeout=reconcile_timeout_seconds)
+        except Exception:
+            logger.warning(
+                "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return None
 
     async def _ensure_http_bridge_retry_circuit_loaded_for_key(
         self: Any,
@@ -1492,8 +1555,8 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
         return max(
             0.0,
-            generation[3] - time.time(),
-            generation[6] - time.monotonic(),
+            generation.durable_cooldown_until_epoch - time.time(),
+            generation.local_cooldown_until - time.monotonic(),
         )
 
     async def _record_http_bridge_retry_circuit_failure(
@@ -1581,6 +1644,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         session.key,
                         _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
                     )
+                    assert state is not None
                     state.last_touched_monotonic = now
                     state.last_failure_monotonic = now
                     state.half_open_until = 0.0
