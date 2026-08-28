@@ -23327,7 +23327,7 @@ async def test_prewarm_budget_failure_is_not_treated_as_success(
     assert session.pending_requests == deque()
     assert session.response_create_gate.locked() is False
     warmup_queue = captured["warmup"].event_queue
-    assert warmup_queue is not None
+    assert isinstance(warmup_queue, http_bridge_request_submit_module._HTTPBridgeLiveEventQueue)
     assert warmup_queue.empty()
     assert warmup_queue.queued_bytes == 0
     assert budget.used_bytes == 0
