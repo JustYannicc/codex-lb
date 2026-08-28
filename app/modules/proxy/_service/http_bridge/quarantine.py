@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +45,11 @@ _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON = "retry_circuit_poisoned_anchor"
 @dataclass(slots=True)
 class _HTTPBridgeQuarantineEntry:
     generation: int = 0
+    # Keep a weak lifetime token rather than a strong session reference. A
+    # detached session may finish after the key is reused; retaining it here
+    # would defeat the registry's bounded lifetime and an integer object id
+    # could be recycled before that completion arrives.
+    owner_ref: weakref.ReferenceType[_HTTPBridgeSession] | None = None
     quarantined_until: float = 0.0
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
@@ -75,6 +81,21 @@ def _http_bridge_quarantine_registry(
         registry = {}
         service._http_bridge_quarantined_keys = registry
     return registry
+
+
+def _next_http_bridge_quarantine_generation(
+    service: Any,
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+) -> int:
+    """Return a generation unique for this service lifetime."""
+    current = getattr(service, "_http_bridge_quarantine_generation_counter", 0) or 0
+    # A test/recovery restore may seed the map independently of the lazy
+    # service counter. Preserve the greatest observed value before advancing so
+    # the counter remains monotonic even in that state.
+    current = max(current, max((entry.generation for entry in registry.values()), default=0))
+    next_generation = current + 1
+    service._http_bridge_quarantine_generation_counter = next_generation
+    return next_generation
 
 
 def _prune_http_bridge_quarantine_registry(
@@ -270,7 +291,11 @@ def _quarantine_http_bridge_session(
     # the window the weaker evidence earned.
     prior_reason = entry.reason
     prior_quarantined_until = entry.quarantined_until
-    entry.generation += 1
+    entry.generation = _next_http_bridge_quarantine_generation(service, registry)
+    # Store object lifetime, not ``id(session)``: a detached predecessor can
+    # finish after a replacement reuses this key, and CPython may recycle an
+    # integer id before that completion arrives.
+    entry.owner_ref = weakref.ref(session)
     ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
     if minimum_seconds is not None:
         ttl_seconds = max(ttl_seconds, minimum_seconds)
@@ -379,23 +404,39 @@ def _clear_http_bridge_quarantine(
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
 ) -> None:
-    """A completed response disproves the wedges captured when it settled.
+    """Clear only quarantine evidence this completion is authorized to clear.
 
-    Each key clears only against the generation fence captured before the
-    completion's durable awaits: a strike arming a new quarantine during
-    those awaits is fresh evidence this response does not disprove, and it
-    survives the clear. A poison entry fences on its own provenance — a
-    weaker arm during the window bumps the raw generation without disproving
-    the recovery — and a matched clear downgrades to a concurrent weaker
-    fence instead of evicting it.
+    The primary key is fenced by the completing session's identity and the
+    canonical session registry. A recovery-origin key is fenced by its exact
+    observed generation; ``None`` means the recovery observed absence and is
+    intentionally not a wildcard. Poison entries fence on their own
+    provenance, so a weaker arm during the completion's durable awaits does
+    not block a matched clear or get evicted with the disproved poison arm.
     """
     registry = _http_bridge_quarantine_registry(service)
     now = time.monotonic()
 
-    def clear_fenced(key: _HTTPBridgeSessionKey, captured_generation: int | None) -> bool:
+    def clear_fenced(
+        key: _HTTPBridgeSessionKey,
+        captured_generation: int | None,
+        *,
+        is_primary: bool = False,
+    ) -> bool:
         entry = registry.get(key)
         if entry is None:
             return True
+        if is_primary:
+            active_sessions = getattr(service, "_http_bridge_sessions", None)
+            is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
+            if (
+                entry.owner_ref is not None
+                and entry.owner_ref() is not session
+                and not is_current_primary_session
+            ):
+                # A detached predecessor can finish after a replacement has
+                # reused the key. The canonical registry wins over the stale
+                # object's mutable marker.
+                return False
         if entry.quarantined_until <= now:
             # An inactive entry still carries the eventless strike counter;
             # a healthy completion resets it regardless of the fence.
@@ -434,7 +475,7 @@ def _clear_http_bridge_quarantine(
         )
         return True
 
-    if clear_fenced(session.key, key_generation):
+    if clear_fenced(session.key, key_generation, is_primary=True):
         session.quarantined = False
     if additional_key is not None and additional_key != session.key:
         clear_fenced(additional_key, additional_key_generation)
