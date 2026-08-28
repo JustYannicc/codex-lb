@@ -133,6 +133,22 @@ def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey)
     return entry.generation
 
 
+def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
+    """Capture the registry generation a later completion is allowed to clear.
+
+    The first eventless timeout is retained as an inactive strike entry with
+    generation ``0``. It still needs an observation fence: an older completion
+    that observed no entry must not pop that strike after a settlement await.
+    """
+    registry = _http_bridge_quarantine_registry(service)
+    now = time.monotonic()
+    _prune_http_bridge_quarantine_registry(registry, now)
+    entry = registry.get(key)
+    if entry is None:
+        return None
+    return entry.generation
+
+
 def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *, reason: str) -> None:
     """Quarantine a bridge session that has proven silent/wedged.
 
@@ -196,6 +212,10 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     # not be resurrected into a "consecutive" second strike hours later.
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
+    # The strike entry is shared with the eventual quarantine record. Keep an
+    # owner token from the first strike onward so a detached predecessor can
+    # never clear or reset state after the key has been reused.
+    entry.owner_ref = weakref.ref(session)
     entry.consecutive_eventless_timeouts += 1
     entry.last_touched_monotonic = now
     if entry.consecutive_eventless_timeouts < _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD:
@@ -211,39 +231,62 @@ def _clear_http_bridge_quarantine(
     service: Any,
     session: _HTTPBridgeSession,
     *,
+    key_generation: int | None = None,
+    key_generation_captured: bool = False,
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
 ) -> None:
     """Clear only quarantine evidence this completion is authorized to clear.
 
-    The primary key is fenced by the completing session's identity and the
-    canonical session registry. A recovery-origin key is fenced by its exact
-    observed generation; ``None`` means the recovery observed absence and is
-    intentionally not a wildcard.
+    The primary key is fenced by the completing session's identity, the
+    canonical session registry, and the generation observed before any
+    completion awaits. A recovery-origin key is fenced by its exact observed
+    generation; ``None`` means the recovery observed absence and is
+    intentionally not a wildcard. Direct callers that do not provide a
+    pre-await fence capture one immediately before clearing.
     """
     registry = _http_bridge_quarantine_registry(service)
+    if not key_generation_captured:
+        key_generation = _http_bridge_quarantine_clear_fence(service, session.key)
     keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
     for key in keys:
         entry = registry.get(key)
+        captured_generation = key_generation
         if additional_key is not None and key == additional_key:
             # Recovery captures the origin generation before authorization.
             # An observed absence is a real fence: any entry that appears
             # while the recovery is in flight belongs to a newer operation.
-            if additional_key_generation is None or entry is None or entry.generation != additional_key_generation:
+            captured_generation = additional_key_generation
+            if entry is None or captured_generation is None or entry.generation != captured_generation:
                 continue
         if key == session.key:
             active_sessions = getattr(service, "_http_bridge_sessions", None)
-            is_current_primary_session = isinstance(active_sessions, dict) and active_sessions.get(key) is session
+            has_current_primary_session = False
+            is_current_primary_session = False
+            if isinstance(active_sessions, dict):
+                has_current_primary_session = key in active_sessions
+                is_current_primary_session = has_current_primary_session and active_sessions.get(key) is session
+            if entry is not None and has_current_primary_session and not is_current_primary_session:
+                # A detached predecessor can finish after a replacement has
+                # reused the key. The canonical registry wins over the stale
+                # object's mutable marker.
+                continue
             if (
                 entry is not None
                 and entry.owner_ref is not None
                 and entry.owner_ref() is not session
                 and not is_current_primary_session
             ):
-                # A detached predecessor can finish after a replacement has
-                # reused the key. The canonical registry wins over the stale
-                # object's mutable marker.
+                # If no canonical primary is present, the weak owner token
+                # still rejects a different detached session completion.
                 continue
+            if entry is not None:
+                # A captured absence is a real fence for both active
+                # quarantine and the inactive first-strike entry (generation
+                # zero). Only the exact observed registry generation may be
+                # removed after a completion await.
+                if captured_generation is None or entry.generation != captured_generation:
+                    continue
             session.quarantined = False
         entry = registry.pop(key, None)
         if entry is None or entry.quarantined_until <= time.monotonic():

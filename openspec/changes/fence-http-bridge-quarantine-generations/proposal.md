@@ -12,9 +12,13 @@ recovery observed an absent entry.
 
 - Allocate quarantine generations from a service-lifetime monotonic counter so
   pruning never makes an old observation valid for a reused key.
-- Keep a weak session lifetime token on each entry and require the completing
-  session to remain the canonical primary session (or the entry owner) before
-  clearing the primary key.
+- Keep a weak session lifetime token on each entry. For a registered key, the
+  canonical primary session wins: only that session may clear the key. Use the
+  entry owner as a fallback only while no canonical primary is registered, so
+  a detached predecessor cannot clear even an inactive first-strike entry.
+- Capture the primary-key quarantine generation before any completion await that
+  can arm a replacement entry. An observed absence or mismatched generation is
+  a non-clearing fence.
 - Treat an observed quarantine generation, including an observed absence, as an
   exact cleanup fence for recovery-origin keys.
 - Keep quarantine bounded by its existing TTL and size cap, and keep successful
