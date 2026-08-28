@@ -79,9 +79,13 @@ from app.core.errors import (
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     is_previous_response_not_found_error,
+    is_previous_response_not_found_public_shape,
+    normalize_public_error_param,
     openai_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.exceptions import (
     ProxyAuthError,
@@ -132,7 +136,7 @@ from app.core.openai.models import (
 from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
-from app.core.openai.parsing import parse_response_payload
+from app.core.openai.parsing import classify_event_type, parse_response_payload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
@@ -238,7 +242,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
-from app.modules.proxy.helpers import _rate_limit_details
+from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
@@ -7933,7 +7937,7 @@ async def _stream_response_error_events(
                 error.message if error and error.message else "Upstream error",
                 error.type if error and error.type else "server_error",
                 response_id=response_id,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
         )
 
@@ -7979,7 +7983,7 @@ def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel |
     payload = _parse_sse_payload(event_block)
     if payload is None:
         return None
-    event_type = payload.get("type")
+    event_type = classify_event_type(payload)
     if event_type == "error":
         return _parse_event_error_envelope(payload)
     if event_type != "response.failed":
@@ -7989,10 +7993,7 @@ def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel |
         return _default_error_envelope()
     error_value = response.get("error")
     if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
+        return _parse_event_error_envelope({"error": error_value})
     parsed = parse_response_payload(response)
     if parsed is not None and parsed.error is not None:
         return _error_envelope_from_response(parsed.error)
@@ -8558,7 +8559,7 @@ async def _collect_responses_payload(
             continue
         if captured_turn_state_headers is not None:
             _capture_response_metadata_turn_state(payload, captured_turn_state_headers)
-        event_type = payload.get("type")
+        event_type = classify_event_type(payload)
         _collect_output_item_event(payload, output_items)
         if terminal_result is not None:
             continue
@@ -8570,12 +8571,8 @@ async def _collect_responses_payload(
             if isinstance(response, dict):
                 error_value = response.get("error")
                 if isinstance(error_value, dict):
-                    try:
-                        terminal_result = OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-                        continue
-                    except ValidationError:
-                        terminal_result = _default_error_envelope()
-                        continue
+                    terminal_result = _parse_event_error_envelope({"error": error_value})
+                    continue
                 parsed = parse_response_payload(response)
                 if parsed is not None and parsed.error is not None:
                     terminal_result = _error_envelope_from_response(parsed.error)
@@ -8795,7 +8792,7 @@ async def _normalize_public_responses_stream(
             contract_violation_kind = contract_violation_kind or violation_kind
         if normalized_payload is None:
             continue
-        event_type = normalized_payload.get("type")
+        event_type = classify_event_type(normalized_payload)
         synthetic_created = None
         if (
             enforce_openai_sdk_contract
@@ -8810,11 +8807,12 @@ async def _normalize_public_responses_stream(
         )
         if synthetic_created is not None and synthetic_created_sequence is not None:
             synthetic_created["sequence_number"] = synthetic_created_sequence
-        if not enforce_openai_sdk_contract and (
-            event_type == "error" or is_json_mapping(normalized_payload.get("error"))
-        ):
+        if not enforce_openai_sdk_contract and event_type in {"error", "response.failed"}:
             terminal_seen = True
-            yield event_block
+            if normalized_payload is parsed_payload:
+                yield event_block
+            else:
+                yield format_sse_event(normalized_payload)
             continue
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
@@ -8975,7 +8973,7 @@ def _public_response_failed_event_blocks_from_error(
             message or "Upstream error",
             error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
-            error_param=error.param,
+            error_param=error.param_state,
         ),
     )
     failed_payload["sequence_number"] = sequence_number + int(include_created)
@@ -9183,7 +9181,7 @@ def _normalize_public_stream_payload(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
-    event_type = payload.get("type")
+    event_type = classify_event_type(payload)
     if event_type == "response.reasoning_summary_text.done" and isinstance(payload.get("text"), str):
         normalized_payload = dict(payload)
         normalized_payload["text"] = _strip_blank_html_comment_lines(cast(str, payload["text"]))
@@ -9207,20 +9205,30 @@ def _normalize_public_stream_payload(
     # they continue to forward unchanged.
     if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
-    if event_type == "error":
-        parsed_error = _parse_event_error_envelope(payload)
-        if _is_previous_response_not_found_public_error(parsed_error.error):
+    if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
+        if event_type == "error":
+            parsed_error = _parse_event_error_envelope(payload)
+        else:
+            response = payload.get("response")
+            nested_error = response.get("error") if isinstance(response, dict) else None
+            parsed_error = _parse_event_error_envelope({"error": nested_error})
+        if enforce_openai_sdk_contract and _is_previous_response_not_found_public_error(parsed_error.error):
+            response_id = _response_id_from_event_payload(payload) if event_type == "response.failed" else None
             return (
                 cast(
                     dict[str, JsonValue],
                     response_failed_event(
                         "stream_incomplete",
                         PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+                        response_id=response_id,
                     ),
                 ),
                 None,
             )
-        return payload, None
+        if event_type == "error":
+            return _sanitize_public_stream_error_payload(payload), None
+    if event_type == "response.failed":
+        return _sanitize_public_stream_error_payload(payload), None
     if event_type in ("response.completed", "response.incomplete"):
         response = payload.get("response")
         if not is_json_mapping(response):
@@ -9265,6 +9273,47 @@ def _normalize_public_stream_payload(
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
+
+
+def _sanitize_public_stream_error_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Normalize or omit malformed ``error.param`` at the public boundary."""
+
+    event_type = classify_event_type(payload)
+    if event_type == "error":
+        error_value = payload.get("error")
+        if is_json_mapping(error_value):
+            sanitized_error = sanitize_public_error_detail(error_value)
+            if sanitized_error == error_value:
+                return payload
+            normalized = dict(payload)
+            normalized["error"] = sanitized_error
+            return normalized
+        if "param" not in payload:
+            return payload
+        normalized = dict(payload)
+        public_param = normalize_public_error_param(OpenAIErrorParam(True, payload["param"]))
+        if public_param is None:
+            normalized.pop("param", None)
+        else:
+            normalized["param"] = public_param
+        return normalized
+
+    if event_type != "response.failed":
+        return payload
+    response_value = payload.get("response")
+    if not is_json_mapping(response_value):
+        return payload
+    error_value = response_value.get("error")
+    if not is_json_mapping(error_value):
+        return payload
+    sanitized_error = sanitize_public_error_detail(error_value)
+    if sanitized_error == error_value:
+        return payload
+    normalized_response = dict(response_value)
+    normalized_response["error"] = sanitized_error
+    normalized = dict(payload)
+    normalized["response"] = normalized_response
+    return normalized
 
 
 def _synthetic_response_created_envelope(
@@ -9502,7 +9551,10 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
         if payload is None:
             yield event_block
             continue
-        event_type = payload.get("type")
+        # Error frames can omit the discriminator and carry only ``error``;
+        # classify those as terminal so a pending reasoning candidate flushes
+        # before the frame is forwarded.
+        event_type = classify_event_type(payload)
         event_key = _reasoning_summary_delta_key(payload)
         if (
             pending
@@ -9647,12 +9699,10 @@ def _record_public_contract_violation(kind: str) -> None:
 
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:
     error_value = payload.get("error")
-    if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
-    return _default_error_envelope()
+    if not isinstance(error_value, dict):
+        return _default_error_envelope()
+    parsed = _parse_openai_error({"error": error_value})
+    return _error_envelope_from_response(parsed)
 
 
 def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
@@ -9670,10 +9720,11 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
         return _default_error_envelope()
     if payload.get("type") == "error":
         return _parse_event_error_envelope(cast(dict[str, JsonValue], payload))
-    try:
-        return OpenAIErrorEnvelopeModel.model_validate(payload)
-    except ValidationError:
+    error_value = payload.get("error")
+    if not isinstance(error_value, dict):
         return _default_error_envelope()
+    parsed = _parse_openai_error({"error": error_value})
+    return _error_envelope_from_response(parsed)
 
 
 def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
@@ -9696,12 +9747,43 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
     return OpenAIErrorEnvelopeModel(error=error_value)
 
 
+def _sanitize_public_error_model(error_value: OpenAIError | None) -> OpenAIError | None:
+    """Copy an error model with only a client-safe ``param`` value."""
+
+    if error_value is None or not error_value.param_state.present:
+        return error_value
+    normalized_param = normalize_public_error_param(error_value.param_state)
+    sanitized = error_value.model_copy(update={"param": normalized_param})
+    # Internal classifiers may run after a public copy has been made; retain
+    # the wire-level presence/raw value on the private state.
+    sanitized.set_param_state(error_value.param_state)
+    return sanitized
+
+
+def _sanitize_public_error_envelope(envelope: OpenAIErrorEnvelopeModel) -> OpenAIErrorEnvelopeModel:
+    error = envelope.error
+    sanitized = _sanitize_public_error_model(error)
+    if sanitized is error:
+        return envelope
+    return OpenAIErrorEnvelopeModel(error=sanitized)
+
+
 def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
+    if error_value is None:
+        return False
+    return is_previous_response_not_found_public_shape(
+        code=error_value.code,
+        param=_openai_error_param(error_value),
+        message=error_value.message,
+    )
+
+
+def _is_previous_response_not_found_recoverable_error(error_value: OpenAIError | None) -> bool:
     if error_value is None:
         return False
     return is_previous_response_not_found_error(
         code=error_value.code,
-        param=error_value.param,
+        param=_openai_error_param(error_value),
         message=error_value.message,
     )
 
@@ -9737,17 +9819,24 @@ def _mask_previous_response_not_found_error(
     allow_client_full_history_once: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
-        return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+        return (
+            default_status if default_status is not None else _status_for_error(envelope.error),
+            _sanitize_public_error_envelope(envelope),
+        )
     # In recovery-first mode, preserve the upstream-shaped 400 so Codex can
     # drop the ambiguous previous_response_id anchor and resend full local
     # history. This is intentionally opt-in because the resend is at-least-once
     # and may duplicate an upstream response that was accepted but not observed.
     if (
         allow_client_full_history_once
+        and _is_previous_response_not_found_recoverable_error(envelope.error)
         and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
         == "client_full_history_once"
     ):
-        return default_status if default_status is not None else 400, envelope
+        return (
+            default_status if default_status is not None else 400,
+            _sanitize_public_error_envelope(envelope),
+        )
     return (
         502,
         OpenAIErrorEnvelopeModel(

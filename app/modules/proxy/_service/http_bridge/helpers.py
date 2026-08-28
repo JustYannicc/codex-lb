@@ -48,6 +48,8 @@ from app.core.errors import (
     HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
+    coerce_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
@@ -1101,13 +1103,15 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
+def _http_bridge_precreated_retry_failure_error(
+    exc: BaseException,
+) -> tuple[int, str, str, str, OpenAIErrorParam | None]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
         error_type = parsed.type if parsed and parsed.type else "server_error"
-        error_param = parsed.param if parsed else None
+        error_param = parsed.param_state if parsed else None
         return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
         return (
@@ -1175,7 +1179,7 @@ def _normalize_http_bridge_error_event(
     error_code_value: str | None = None
     error_type_value: str | None = None
     error_message_value: str | None = None
-    error_param_value: str | None = None
+    error_param_value: OpenAIErrorParam | None = None
     explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
 
@@ -1183,7 +1187,7 @@ def _normalize_http_bridge_error_event(
         error_code_value = event.error.code
         error_type_value = event.error.type
         error_message_value = event.error.message
-        error_param_value = event.error.param
+        error_param_value = event.error.param_state
         if isinstance(error_code_value, str) and error_code_value.strip():
             explicit_error_code = True
     elif isinstance(payload, dict):
@@ -1207,9 +1211,8 @@ def _normalize_http_bridge_error_event(
                 stripped = message_value.strip()
                 if stripped:
                     error_message_value = stripped
-            param_value = payload_error.get("param")
-            if isinstance(param_value, str):
-                error_param_value = param_value.strip()
+            if "param" in payload_error:
+                error_param_value = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
 
     if isinstance(payload, dict):
         raw_error = payload.get("error")
@@ -1217,8 +1220,7 @@ def _normalize_http_bridge_error_event(
             raw_error = _websocket_top_level_error_payload(payload)
         if isinstance(raw_error, dict):
             if "param" in raw_error:
-                raw_param = raw_error.get("param")
-                error_param_value = raw_param.strip() if isinstance(raw_param, str) else ""
+                error_param_value = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
                 rate_limit_metadata["plan_type"] = plan_type
@@ -1238,7 +1240,7 @@ def _normalize_http_bridge_error_event(
         if request_state.error_message_override is not None:
             error_message_value = request_state.error_message_override
         if request_state.error_param_override is not None:
-            error_param_value = request_state.error_param_override
+            error_param_value = coerce_error_param(request_state.error_param_override)
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
