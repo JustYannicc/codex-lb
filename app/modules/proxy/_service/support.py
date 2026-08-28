@@ -1266,6 +1266,9 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    # The live session keeps only its current denial tombstone.  Historical
+    # ids remain in the process-local fence ledger while prepared requests pin
+    # them, so this carrier cannot grow with every denied sibling anchor.
     denied_proxy_injected_anchor_ids: set[str] = field(default_factory=set)
     denied_proxy_injected_anchor_generation: int = 0
     alias_registration_generation: int = 0

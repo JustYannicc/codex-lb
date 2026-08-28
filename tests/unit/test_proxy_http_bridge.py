@@ -37,6 +37,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
+from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
@@ -254,6 +255,37 @@ def test_http_bridge_inserts_previous_response_id_for_hard_turn_advance() -> Non
         )
         is None
     )
+
+
+def test_http_bridge_prepares_full_resend_shape_for_late_hard_anchor_injection() -> None:
+    """Operation-ledger anchors retain the original payload's resend shape."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = ResponsesRequest(
+        model="gpt-5.6",
+        instructions="",
+        input=[
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ],
+    )
+
+    request_state, _text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport="http",
+        client_metadata=None,
+    )
+
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id="resp-late-hard-anchor",
+    )
+
+    assert request_state.proxy_injected_anchor_had_full_resend_payload is True
 
 
 def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:
@@ -32945,6 +32977,29 @@ def test_denied_anchor_owner_epoch_cleanup_does_not_clear_successor_slot() -> No
     assert "resp-successor" in service._http_bridge_denied_anchor_fences
 
 
+def test_late_predecessor_denial_does_not_replace_a_newer_owner_epoch() -> None:
+    """A stale predecessor publication cannot roll back the current slot."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    successor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor",
+        owner_key="durable-cross-session",
+        owner_epoch=9,
+    )
+    predecessor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
+
+    assert predecessor_generation == 0
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")["durable-cross-session"] == "resp-successor"
+    assert service._http_bridge_denied_anchor_fences["resp-successor"].generation == successor_generation
+    assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
+
+
 def test_denied_anchor_owner_rebind_drops_the_stale_local_owner_mapping() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     response_id = "resp-local-to-durable"
@@ -33214,6 +33269,27 @@ async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already
     assert "resp_denied" in session.denied_proxy_injected_anchor_ids
     assert session.last_completed_response_id == "resp_completed_meanwhile"
     assert session.last_completed_input_count == 12
+
+
+@pytest.mark.asyncio
+async def test_denied_anchor_session_tombstone_keeps_only_the_current_slot() -> None:
+    """Repeated denials do not grow the session-local tombstone set."""
+    session = _denied_anchor_session()
+    # A clean fenced no-match keeps the tombstone alive; successful durable
+    # cleanup intentionally discards it after the alias is unregistered.
+    service = _denied_anchor_service(cleared=False)
+
+    for index in range(3):
+        response_id = f"resp-denied-{index}"
+        session.last_completed_response_id = response_id
+        await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id=response_id,
+        )
+
+    assert session.denied_proxy_injected_anchor_ids == {"resp-denied-2"}
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")[session.durable_session_id] == "resp-denied-2"
 
 
 @pytest.mark.asyncio

@@ -64,6 +64,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence,
+    _http_bridge_denied_anchor_fence_current_map,
+    _http_bridge_denied_anchor_fence_entry,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
@@ -1237,7 +1239,6 @@ async def _invalidate_denied_http_bridge_anchor(
         # while an already-prepared request still holds the denied id; that
         # request must remain fenced even when there is no current anchor left
         # to clear.
-        session.denied_proxy_injected_anchor_ids.add(denied_response_id)
         session.denied_proxy_injected_anchor_generation += 1
         # Retain denial provenance after the session-local tombstone is retired.
         # A request that began on an absent canonical session otherwise receives
@@ -1247,12 +1248,34 @@ async def _invalidate_denied_http_bridge_anchor(
         durable_api_key_id = session.key.api_key_id
         durable_instance_id = _service_get_settings().http_responses_session_bridge_instance_id
         owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
-        _record_http_bridge_denied_anchor_fence(
+        recorded_generation = _record_http_bridge_denied_anchor_fence(
             service,
             denied_response_id,
             owner_key=owner_key,
             owner_epoch=durable_owner_epoch,
         )
+        current_fence = _http_bridge_denied_anchor_fence_current_map(service).get(owner_key)
+        recorded_entry = _http_bridge_denied_anchor_fence_entry(service, denied_response_id)
+        record_won_owner_slot = (
+            current_fence == denied_response_id
+            and recorded_entry is not None
+            and recorded_entry.owner_key == owner_key
+            and recorded_entry.generation == recorded_generation
+        )
+        # Keep one current session-local tombstone.  Displaced ids remain
+        # fenced in the process ledger while any prepared request pins them;
+        # retaining every historical id here would make the session carrier
+        # grow without bound and duplicate that ledger's ownership fence.  A
+        # stale detached predecessor must not erase a successor's tombstone,
+        # so only replace the set when this publication owns the current slot.
+        if record_won_owner_slot:
+            session.denied_proxy_injected_anchor_ids.clear()
+            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+        elif not session.denied_proxy_injected_anchor_ids:
+            # A detached predecessor may still have a request pinned to its
+            # own session object. Keep that one local tombstone without
+            # growing a second historical slot beside a successor's entry.
+            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
         # Another request may have completed and advanced the anchor between
         # the denied dispatch and this frame. Only retire the id that was
         # refused.

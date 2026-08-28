@@ -158,6 +158,7 @@ cleanup succeeds or the durable row is confirmed absent.
 ### Requirement: Anchored recovery retries retain the provenance of the anchor they replay
 
 When the HTTP bridge dispatches an anchored recovery retry that replays a `previous_response_id` the proxy injected, the retry request state MUST record that the anchor is proxy-injected. A recovery path that dispatches without an anchor MUST leave that provenance false, because there is no anchor for it to describe.
+When a hard turn-state operation-ledger lookup injects an anchor after the request state was initially prepared without a `previous_response_id`, the request state MUST preserve the original payload's full-resend classification and use it when deciding whether a later denial may retire that injected anchor.
 
 #### Scenario: An anchored recovery retry is attributable to the proxy
 

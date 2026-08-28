@@ -432,6 +432,30 @@ def _record_http_bridge_denied_anchor_fence(
         current = _http_bridge_denied_anchor_fence_current_map(service)
     fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
     prior_response_id = current.get(owner_key) if owner_key is not None and current is not None else None
+    existing_entry = fences.get(response_id) if isinstance(fences, dict) else None
+    if (
+        isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
+        and existing_entry.owner_key == owner_key
+        and owner_epoch is not None
+        and existing_entry.owner_epoch is not None
+        and owner_epoch < existing_entry.owner_epoch
+    ):
+        # A detached predecessor can publish after a successor has already
+        # claimed the same durable owner at a newer epoch.  The stale
+        # publication must not roll the entry back or advance the global
+        # generation, otherwise it can replace the successor's denial slot.
+        return existing_entry.generation
+    if prior_response_id is not None and prior_response_id != response_id and isinstance(fences, dict):
+        prior_entry = fences.get(prior_response_id)
+        if (
+            isinstance(prior_entry, _HTTPBridgeDeniedAnchorFence)
+            and owner_epoch is not None
+            and prior_entry.owner_epoch is not None
+            and owner_epoch < prior_entry.owner_epoch
+        ):
+            # The current owner slot belongs to a newer epoch.  Ignore this
+            # stale publication rather than superseding the successor fence.
+            return existing_entry.generation if isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence) else 0
     if isinstance(fences, dict) and prior_response_id is not None and prior_response_id != response_id:
         prior_entry = fences.get(prior_response_id)
         if isinstance(prior_entry, _HTTPBridgeDeniedAnchorFence):

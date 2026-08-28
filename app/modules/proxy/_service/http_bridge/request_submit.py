@@ -86,6 +86,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
+    _http_bridge_payload_looks_like_full_resend,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
@@ -735,6 +736,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 payload.previous_response_id is not None
                 or _sticky_key_from_turn_state_header(headers or {}) is not None
             ),
+            # Hard turn-state operation recovery can inject its anchor later,
+            # after the request state is prepared. Preserve the original
+            # payload shape so a full resend remains eligible for denied-anchor
+            # retirement when that operation path supplies the id.
+            proxy_injected_anchor_had_full_resend_payload=_http_bridge_payload_looks_like_full_resend(payload),
             payload_conversation_bound=bool(payload.conversation),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
