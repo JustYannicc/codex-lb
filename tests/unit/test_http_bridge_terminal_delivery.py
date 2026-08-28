@@ -270,7 +270,9 @@ async def test_revoked_terminal_delivery_settles_without_waiting_for_idle_timeou
     assert persist_task.done() is False
     queue.revoke()
 
-    assert await asyncio.wait_for(persist_task, timeout=0.2) is False
+    assert await asyncio.wait_for(persist_task, timeout=0.2) is True
     settle_terminal_event.assert_awaited_once()
     assert request_state.event_queue_revoked.is_set()
     assert queue.get_nowait() == "buffered"
+    assert queue.get_nowait() == 'data: {"type":"response.failed"}\n\n'
+    assert queue.get_nowait() is None

@@ -968,8 +968,9 @@ class _WebSocketRequestState:
     event_queue_revoked: asyncio.Event = field(default_factory=asyncio.Event)
     # Set once the HTTP stream has reached its downstream queue-consumer loop.
     # A request can be pending and already have buffered upstream events before
-    # that point; liveness settlement may discard only those pre-consumer
-    # queues, while an attached consumer must retain ordered backpressure.
+    # that point; liveness settlement revokes producers but keeps pre-consumer
+    # queues owned until terminal delivery, while an attached consumer retains
+    # ordered backpressure until it detaches.
     event_queue_consumer_started: bool = False
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
@@ -1207,6 +1208,23 @@ class _WebSocketRequestState:
     account_capacity_wait_retry_after_seconds: float | None = None
     capacity_startup_wait_event: asyncio.Event | None = None
     capacity_startup_ready_event: asyncio.Event | None = None
+
+
+def _revoke_http_bridge_event_queue(request_state: _WebSocketRequestState) -> None:
+    """Stop live-event producers while retaining queued bytes for delivery.
+
+    The queue implementation lives with HTTP-bridge request preparation, but
+    terminal bookkeeping and submission cleanup both need the same revocation
+    operation.  Keep this small ownership hook in the shared request-state
+    module so those paths do not import each other and create a cycle.
+    """
+
+    event_queue = request_state.event_queue
+    revoke = getattr(event_queue, "revoke", None)
+    if callable(revoke):
+        revoke()
+    else:
+        request_state.event_queue_revoked.set()
 
 
 @dataclass(frozen=True, slots=True)
