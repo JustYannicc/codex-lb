@@ -6,11 +6,16 @@ to the session that armed the entry. A service-level counter allocates the next
 generation before the entry is updated. The counter survives entry pruning and
 is never derived from the current map alone.
 
-Primary-key cleanup is identity fenced. A completion may clear the entry when
-the entry's weak owner is the completing session, or when the completing
-session is the current value in `_http_bridge_sessions` for that key. A
-detached predecessor therefore cannot clear a replacement's entry, even if a
-mutable `session.quarantined` flag was reset or an object id was recycled.
+Primary-key cleanup is identity fenced. When `_http_bridge_sessions` has a
+canonical value for the key, only that exact session may clear the entry; the
+canonical registry wins over a detached object's weak owner token. The weak
+owner is a fallback only when no canonical primary is registered, which also
+protects an inactive first-strike entry from a detached predecessor. A
+completion captures the primary-key generation (including an observed
+absence) before any await that can arm a replacement. Only that exact captured
+generation may be cleared, so a completion cannot remove a newer entry armed
+while retry-circuit settlement is in flight. Mutable `session.quarantined`
+flags and recycled object ids are never authority.
 
 Recovery-origin cleanup is observation fenced. The recovery captures the active
 generation before authorization. If it observed no entry, it passes `None` and
@@ -35,4 +40,6 @@ when the request itself does not carry a full resend.
   the reused key.
 - A recovery that observed absence cannot clear an entry armed while it was in
   flight, for both distinct-key and same-key cleanup.
+- A primary completion that yields during retry-circuit settlement cannot clear
+  a quarantine armed during that await.
 - Weak references compare object lifetime rather than integer ids.

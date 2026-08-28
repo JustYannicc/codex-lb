@@ -6632,6 +6632,60 @@ async def test_ordinary_completed_alias_rejection_preserves_successful_response(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_completion_preserves_quarantine_armed_during_retry_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completion cannot clear a quarantine armed while settlement yields."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-quarantine-settlement-race",
+        response_id="resp-quarantine-settlement-race",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="quarantine-settlement-race",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    service._http_bridge_sessions = {session.key: session}
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    async def arm_quarantine_during_settlement(completing_session: proxy_service._HTTPBridgeSession) -> None:
+        http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, completing_session)
+
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit", arm_quarantine_during_settlement)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-quarantine-settlement-race",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.consecutive_eventless_timeouts == 1
+    assert entry.owner_ref is not None
+    assert entry.owner_ref() is session
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_upstream_text_archives_with_request_archive_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -34456,6 +34510,28 @@ def test_http_bridge_quarantine_eventless_strikes_require_threshold(caplog: pyte
     assert "reason=repeated_eventless_timeout" in caplog.text
 
 
+def test_http_bridge_quarantine_first_strike_survives_detached_predecessor_completion() -> None:
+    """A detached predecessor cannot reset a replacement's first strike."""
+    service = SimpleNamespace()
+    predecessor = _make_bridge_session(key_value="quarantine-first-strike-owner")
+    replacement = _make_bridge_session(key=predecessor.key)
+    service._http_bridge_sessions = {predecessor.key: replacement}
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, predecessor)
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[predecessor.key]
+    assert entry.consecutive_eventless_timeouts == 1
+    assert entry.owner_ref is not None
+    assert entry.owner_ref() is predecessor
+
+    predecessor.quarantined = False
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, predecessor)
+
+    current_entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[predecessor.key]
+    assert current_entry.consecutive_eventless_timeouts == 1
+    assert current_entry.owner_ref is not None
+    assert current_entry.owner_ref() is predecessor
+
+
 def test_http_bridge_quarantine_cleared_by_completed_response(caplog: pytest.LogCaptureFixture) -> None:
     service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-clear")
@@ -34539,6 +34615,41 @@ def test_http_bridge_quarantine_recovery_clear_preserves_newer_origin_generation
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
 
 
+def test_http_bridge_quarantine_primary_clear_preserves_generation_armed_during_settlement() -> None:
+    """A completion cannot clear a newer same-key quarantine armed while it awaited."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-primary-settlement-generation")
+    service._http_bridge_sessions = {session.key: session}
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+    captured_generation = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence(service, session.key)
+    assert captured_generation is not None
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="repeated_eventless_timeout",
+    )
+    current_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, session.key)
+    assert current_generation is not None
+    assert current_generation != captured_generation
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured_generation,
+        key_generation_captured=True,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.generation == current_generation
+
+
 def test_http_bridge_quarantine_recovery_clear_rejects_generation_reused_after_prune() -> None:
     service = SimpleNamespace()
     origin = _make_bridge_session(key_value="quarantine-pruned-generation")
@@ -34610,6 +34721,28 @@ def test_http_bridge_quarantine_distinct_key_clear_denied_when_no_generation_obs
 
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
     assert origin.quarantined is True
+
+
+def test_http_bridge_quarantine_recovery_absence_preserves_first_strike() -> None:
+    """An observed absence cannot remove an inactive raced strike entry."""
+    service = SimpleNamespace()
+    origin = _make_bridge_session(key_value="quarantine-origin-first-strike")
+    replacement = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("internal_unanchored_parallel", "recovery-first-strike", None),
+        key_value="recovery-first-strike",
+    )
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, origin)
+    assert http_bridge_quarantine_module._http_bridge_quarantine_generation(service, origin.key) is None
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        replacement,
+        additional_key=origin.key,
+        additional_key_generation=None,
+    )
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[origin.key]
+    assert entry.consecutive_eventless_timeouts == 1
 
 
 def test_http_bridge_quarantine_same_key_clear_denied_when_no_generation_observed() -> None:

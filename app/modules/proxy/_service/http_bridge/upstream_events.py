@@ -3926,6 +3926,29 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
+        completion_quarantine_clear_fence: int | None = None
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+            and terminal_request_state.request_kind != "prewarm"
+            and not terminal_request_state.skip_request_log
+        ):
+            # Capture before the retry-circuit settlement await. A concurrent
+            # failure may arm a newer same-key quarantine while that await is
+            # in flight; this completion must not clear evidence it did not
+            # observe.
+            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+            if not terminal_request_state.verified_stale_anchor_replay:
+                await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                key_generation=completion_quarantine_clear_fence,
+                key_generation_captured=True,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
         ) and (matched_request_state is None or matched_request_state.enforce_openai_sdk_contract)
