@@ -833,7 +833,7 @@ async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue(
 
 @pytest.mark.asyncio
 async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_event() -> None:
-    """A pre-consumer sibling keeps its buffered events and liveness failure."""
+    """A delayed sibling keeps its failure while the failed sender queue is released."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -861,12 +861,15 @@ async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_eve
     sibling_queue.put_nowait("buffered-1")
     sibling_queue.put_nowait("buffered-2")
     sibling_state = live_state("req-preconsumer-sibling", sibling_queue)
+    failed_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
+    failed_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=failed_budget,
+    )
     failed_state = live_state(
         "req-liveness-failure",
-        http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
-            maxsize=2,
-            revoked=asyncio.Event(),
-        ),
+        failed_queue,
     )
     session = _make_bridge_session(
         key_value="preconsumer-full-sibling",
@@ -915,12 +918,10 @@ async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_eve
     assert sibling_terminal is not None
     assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in sibling_terminal
     assert sibling_queue.get_nowait() is None
-    failed_queue = failed_state.event_queue
-    assert failed_queue is not None
-    failed_terminal = failed_queue.get_nowait()
-    assert failed_terminal is not None
-    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in failed_terminal
-    assert failed_queue.get_nowait() is None
+    assert failed_state.event_queue is None
+    assert failed_queue.empty()
+    assert failed_queue.queued_bytes == 0
+    assert failed_budget.used_bytes == 0
     assert session.pending_requests == deque()
 
 
