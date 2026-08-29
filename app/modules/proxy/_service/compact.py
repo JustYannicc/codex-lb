@@ -862,12 +862,11 @@ class _CompactMixin:
             api_key_reservation: ApiKeyUsageReservationData | None,
             response: CompactResponsePayload | None,
             request_service_tier: str | None,
-            settle_forwarded_error: bool = False,
         ) -> None:
             nonlocal settlement_attempted
             if settlement_attempted:
                 return
-            if forwarded_request and response is None and not settle_forwarded_error:
+            if forwarded_request and response is None:
                 # A forwarded receiver has not transferred cleanup ownership
                 # until its successful HTTP 200. Every error before that
                 # acknowledgement remains the origin's single release path.
@@ -933,7 +932,6 @@ class _CompactMixin:
                     api_key_reservation=api_key_reservation,
                     response=None,
                     request_service_tier=_service_tier_from_compact_payload(payload),
-                    settle_forwarded_error=False,
                 )
             except ProxyResponseError as exc:
                 if exc.failure_phase == "usage_settlement" and exc.reservation_released:
