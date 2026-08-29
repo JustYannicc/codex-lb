@@ -271,15 +271,13 @@ def _clear_http_bridge_quarantine(
                 # reused the key. The canonical registry wins over the stale
                 # object's mutable marker.
                 continue
-            if (
-                entry is not None
-                and entry.owner_ref is not None
-                and entry.owner_ref() is not session
-                and not is_current_primary_session
-            ):
+            if entry is not None and not is_current_primary_session:
                 # If no canonical primary is present, the weak owner token
-                # still rejects a different detached session completion.
-                continue
+                # is the only identity authority. Restored/legacy ownerless
+                # entries cannot be cleared by a completion guessing its
+                # ownership.
+                if entry.owner_ref is None or entry.owner_ref() is not session:
+                    continue
             if entry is not None:
                 # A captured absence is a real fence for both active
                 # quarantine and the inactive first-strike entry (generation
