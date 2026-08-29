@@ -14,8 +14,9 @@ is the current canonical session for a registered key, or when no canonical
 primary is registered and the entry's weak owner is the completing session. If
 the key is registered to a different session, the canonical registry wins and a
 detached predecessor MUST NOT clear any entry or first-strike evidence for that
-key, regardless of a mutable per-session marker or recycled object id. The
-completion MUST capture the primary-key quarantine generation, including an
+key, and an ownerless entry MUST remain uncleared when no canonical primary is
+registered, regardless of a mutable per-session marker or recycled object id.
+The completion MUST capture the primary-key quarantine generation, including an
 observed absence, before any await that can arm a replacement entry. Only the
 exact captured generation MAY be cleared; an observed absence or generation
 mismatch MUST leave a raced entry active.
