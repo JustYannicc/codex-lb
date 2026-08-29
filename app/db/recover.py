@@ -64,11 +64,11 @@ def _remove_sqlite_sidecars(db_path: Path) -> None:
 def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
     """Fence recovery preparation with SQLite's exclusive lock.
 
-    The lock blocks active writers while the recovered file and its sidecars
-    are prepared. The connection is closed when this context exits, before any
-    filesystem rename, because Windows rejects renames with an open handle.
-    This leaves only the bounded post-probe window before the operator CLI's
-    renames; the exclusive transaction still fences all preparation work.
+    The lock blocks active writers while the recovered file is imported. The
+    connection is closed when this context exits, before sidecars are removed
+    or any filesystem rename, because Windows rejects file mutations with an
+    open handle. Sidecar cleanup and the renames therefore require the caller
+    to keep external writers quiescent during the bounded post-probe window.
     """
     connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
     acquired = False
@@ -88,8 +88,12 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
 def _replace_recovered_database(source: Path, output: Path, backup: Path) -> None:
     source.replace(backup)
     try:
+        # A writer can recreate source sidecars after the probe closes and just
+        # before the source rename. Remove those orphaned entries while the
+        # source path is empty, before installing the recovered database.
+        _remove_sqlite_sidecars(source)
         output.replace(source)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         try:
             backup.replace(source)
         except OSError as restore_exc:
@@ -134,11 +138,12 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
 
     dump = _load_dump(options.source)
     if options.replace:
+        _remove_sqlite_sidecars(options.output)
         with _sqlite_recovery_lock(options.source):
-            _remove_sqlite_sidecars(options.output)
             _write_dump(options.output, dump)
-            _remove_sqlite_sidecars(options.output)
-            _remove_sqlite_sidecars(options.source)
+        # Recovery-owned SQLite handles are closed before any sidecar unlink.
+        _remove_sqlite_sidecars(options.output)
+        _remove_sqlite_sidecars(options.source)
         backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
         _replace_recovered_database(options.source, options.output, backup)
         return RecoveryOutcome(

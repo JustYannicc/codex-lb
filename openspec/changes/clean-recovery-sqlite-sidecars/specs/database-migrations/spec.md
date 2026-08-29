@@ -7,11 +7,16 @@
 When recovery writes or installs a file-backed SQLite replacement, it MUST
 remove the target's `-wal`, `-shm`, `-journal`, and master-journal sidecars
 before and after dump import. With `--replace`, it MUST remove source sidecars
-before moving the source to its corrupt backup. Master-journal matching MUST
-treat the database basename literally. Before final output import and sidecar
-cleanup, recovery MUST acquire an exclusive SQLite transaction on the source
-and MUST close every recovery-opened SQLite connection before any sidecar or
-database rename.
+before moving the source to its corrupt backup and repeat source cleanup after
+that move, before installing the output. Master-journal matching MUST treat the
+database basename literally. Before final output import, recovery MUST acquire
+an exclusive SQLite transaction on the source. After that transaction closes,
+recovery MUST perform final sidecar cleanup before either database rename, and
+MUST close every recovery-opened SQLite connection before each sidecar unlink or
+database rename. The operator MUST keep external writers quiescent from lock
+release through completion of both renames; this is the bounded post-probe
+window required by platforms that reject filesystem mutation with open SQLite
+handles.
 If an active connection prevents the lock, or sidecar cleanup fails, recovery
 MUST fail without moving the source or installing the output.
 
@@ -19,6 +24,8 @@ MUST fail without moving the source or installing the output.
 
 - **GIVEN** recovery is replacing a file-backed SQLite database
 - **AND** a source WAL is created after the dump is read
+- **AND** external writers remain quiescent after the recovery lock closes
+  until both replacement renames complete
 - **WHEN** recovery moves the source aside and installs the output
 - **THEN** source and output SQLite sidecars MUST be absent
 - **AND** reopening the installed database MUST not apply stale WAL rows
