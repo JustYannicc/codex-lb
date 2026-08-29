@@ -6123,6 +6123,7 @@ async def test_http_bridge_completion_fence_precedes_alias_persistence_await(
 
     async def register_alias_and_arm_quarantine(*args: object, **kwargs: object) -> bool:
         del args, kwargs
+        await asyncio.sleep(0)
         http_bridge_quarantine_module._quarantine_http_bridge_session(
             service,
             session,
