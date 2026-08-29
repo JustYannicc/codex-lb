@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from app.core.config.settings import get_settings
 from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
+
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
 @dataclass(slots=True)
@@ -36,6 +40,68 @@ def _timestamp() -> str:
 def _default_output_path(source: Path) -> Path:
     suffix = source.suffix or ".db"
     return source.with_name(f"{source.stem}.recover-{_timestamp()}{suffix}")
+
+
+def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, ...]:
+    fixed = tuple(db_path.with_name(f"{db_path.name}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
+    master = tuple(sorted(db_path.parent.glob(f"{glob.escape(db_path.name)}-mj*")))
+    return (*fixed, *master)
+
+
+def _remove_sqlite_sidecars(db_path: Path) -> None:
+    failures: list[tuple[Path, OSError]] = []
+    for sidecar in _sqlite_sidecar_paths(db_path):
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append((sidecar, exc))
+    if failures:
+        details = "; ".join(f"{path}: {error}" for path, error in failures)
+        raise RuntimeError(f"failed to remove SQLite sidecars: {details}")
+
+
+@contextmanager
+def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
+    """Fence recovery preparation with SQLite's exclusive lock.
+
+    The lock blocks active writers while the recovered file is imported. The
+    connection is closed when this context exits, before sidecars are removed
+    or any filesystem rename, because Windows rejects file mutations with an
+    open handle. Sidecar cleanup and the renames therefore require the caller
+    to keep external writers quiescent during the bounded post-probe window.
+    """
+    connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
+    acquired = False
+    try:
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            acquired = True
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"could not acquire exclusive SQLite recovery lock for {db_path}: {exc}") from exc
+        yield
+    finally:
+        if acquired:
+            connection.rollback()
+        connection.close()
+
+
+def _replace_recovered_database(source: Path, output: Path, backup: Path) -> None:
+    source.replace(backup)
+    try:
+        # A writer can recreate source sidecars after the probe closes and just
+        # before the source rename. Remove those orphaned entries while the
+        # source path is empty, before installing the recovered database.
+        _remove_sqlite_sidecars(source)
+        output.replace(source)
+    except (OSError, RuntimeError) as exc:
+        try:
+            backup.replace(source)
+        except OSError as restore_exc:
+            raise RuntimeError(
+                f"failed to install recovered SQLite database at {source}: {exc}; "
+                f"failed to restore the original database from {backup}: {restore_exc}"
+            ) from exc
+        raise RuntimeError(f"failed to install recovered SQLite database at {source}: {exc}") from exc
 
 
 def _load_dump(source: Path) -> str:
@@ -71,18 +137,25 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
         logger.info("SQLite integrity check OK. Proceeding with export/import.")
 
     dump = _load_dump(options.source)
-    _write_dump(options.output, dump)
-
     if options.replace:
+        _remove_sqlite_sidecars(options.output)
+        with _sqlite_recovery_lock(options.source):
+            _write_dump(options.output, dump)
+        # Recovery-owned SQLite handles are closed before any sidecar unlink.
+        _remove_sqlite_sidecars(options.output)
+        _remove_sqlite_sidecars(options.source)
         backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-        options.source.replace(backup)
-        options.output.replace(options.source)
+        _replace_recovered_database(options.source, options.output, backup)
         return RecoveryOutcome(
             source=backup,
             output=options.source,
             replaced=True,
             integrity=integrity,
         )
+
+    _remove_sqlite_sidecars(options.output)
+    _write_dump(options.output, dump)
+    _remove_sqlite_sidecars(options.output)
 
     return RecoveryOutcome(
         source=options.source,
