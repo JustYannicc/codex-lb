@@ -60,7 +60,6 @@ from app.modules.proxy._service.http_bridge import session_registry as http_brid
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
-from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -943,13 +942,31 @@ async def test_http_bridge_liveness_settlement_discards_revoked_preconsumer_queu
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_finalizer_discards_queue_revoked_while_reacquiring_pending_lock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A queue revoked during terminal publication still releases its budget."""
+async def test_http_bridge_finalizer_discards_queue_revoked_while_reacquiring_pending_lock() -> None:
+    """A revoked pre-consumer queue still releases its unread byte budget."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    pending_lock = anyio.Lock()
+
+    class _CountingPendingLock:
+        def __init__(self) -> None:
+            self._lock = anyio.Lock()
+            self.acquire_count = 0
+
+        async def acquire(self) -> None:
+            self.acquire_count += 1
+            await self._lock.acquire()
+
+        def release(self) -> None:
+            self._lock.release()
+
+        async def __aenter__(self) -> "_CountingPendingLock":
+            await self.acquire()
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            self.release()
+
+    pending_lock = _CountingPendingLock()
     queue_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
     queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
         maxsize=2,
@@ -969,29 +986,13 @@ async def test_http_bridge_finalizer_discards_queue_revoked_while_reacquiring_pe
         transport="http",
         skip_request_log=True,
     )
-    terminal_enqueue_started = asyncio.Event()
-    release_terminal_enqueue = asyncio.Event()
-
-    async def gated_terminal_enqueue(
-        request_state: Any,
-        event_queue: Any,
-        event_block: str,
-        *,
-        terminal: bool = False,
-        nonblocking_preconsumer: bool = False,
-    ) -> bool:
-        del request_state, event_queue, event_block, terminal, nonblocking_preconsumer
-        terminal_enqueue_started.set()
-        await release_terminal_enqueue.wait()
-        return True
-
-    monkeypatch.setattr(websocket_mixin_module, "_enqueue_http_bridge_event", gated_terminal_enqueue)
+    request_state.event_queue_revoked.set()
     finalizer_task = asyncio.create_task(
         service._finalize_claimed_websocket_requests(
             account=None,
             account_id_value=None,
             remaining=[request_state],
-            pending_lock=pending_lock,
+            pending_lock=cast(Any, pending_lock),
             error_code="upstream_request_timeout",
             error_message="reader failed",
             api_key=None,
@@ -1004,20 +1005,15 @@ async def test_http_bridge_finalizer_discards_queue_revoked_while_reacquiring_pe
             suppress_sequenced_downstream_errors=False,
         )
     )
-    await asyncio.wait_for(terminal_enqueue_started.wait(), timeout=1.0)
-
-    await pending_lock.acquire()
-    request_state.event_queue_revoked.set()
-    release_terminal_enqueue.set()
-    await asyncio.sleep(0)
-    assert finalizer_task.done() is False
-    pending_lock.release()
-
     await asyncio.wait_for(finalizer_task, timeout=1.0)
     assert request_state.event_queue is None
     assert queue.empty()
     assert queue.queued_bytes == 0
     assert queue_budget.used_bytes == 0
+    # Terminal publication and revocation/discard now share one lock scope;
+    # a second reacquire would reopen the race that can hide a sibling revoke
+    # behind ``terminal_pending``.
+    assert pending_lock.acquire_count == 1
 
 
 @pytest.mark.asyncio

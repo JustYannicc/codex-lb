@@ -6762,20 +6762,61 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+            terminal_event = format_sse_event(
+                response_failed_event(
+                    request_error_code,
+                    request_error_message,
+                    error_type=request_error_type,
+                    response_id=_websocket_downstream_response_id(request_state),
+                    error_param=request_error_param,
+                )
+            )
+            # A liveness claimant revokes pre-consumer sibling queues while it
+            # still owns the pending lock.  Their terminal publication is
+            # non-blocking, so keep that publication and the discard decision
+            # in the same critical section.  This prevents a sibling revoke
+            # from landing between the snapshot and a second lock acquisition,
+            # where ``terminal_pending`` would otherwise hide the revocation
+            # and leak the queue's unread byte reservation.
             async with pending_lock:
                 event_queue = request_state.event_queue
+                event_queue_consumer_started = getattr(request_state, "event_queue_consumer_started", False)
                 revoked_before_terminal = request_state.event_queue_revoked.is_set()
-            if event_queue is not None:
-                try:
-                    terminal_event = format_sse_event(
-                        response_failed_event(
-                            request_error_code,
-                            request_error_message,
-                            error_type=request_error_type,
-                            response_id=_websocket_downstream_response_id(request_state),
-                            error_param=request_error_param,
+                if event_queue is not None and not event_queue_consumer_started:
+                    try:
+                        await _enqueue_http_bridge_event(
+                            request_state,
+                            event_queue,
+                            terminal_event,
+                            terminal=True,
+                        )
+                    except Exception:
+                        _facade().logger.warning(
+                            "Failed to publish websocket terminal queue event during cleanup request_id=%s",
+                            request_state.request_log_id or request_state.request_id,
+                            exc_info=True,
+                        )
+                    queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                    discard_revoked_preconsumer = (
+                        request_state.event_queue is event_queue
+                        and not getattr(request_state, "event_queue_consumer_started", False)
+                        and (
+                            revoked_before_terminal
+                            or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
                         )
                     )
+                    if discard_revoked_preconsumer:
+                        request_state.event_queue = None
+                        request_state.event_queue_revoked.set()
+                        discard = getattr(event_queue, "discard", None)
+                        if callable(discard):
+                            discard()
+
+            # Attached queues retain their buffered events for the active
+            # consumer.  Their terminal publication may wait for capacity, so
+            # it must happen outside ``pending_lock``.
+            if event_queue is not None and event_queue_consumer_started:
+                try:
                     await _enqueue_http_bridge_event(
                         request_state,
                         event_queue,
@@ -6788,35 +6829,6 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
-                # A liveness claimant revokes pre-consumer sibling queues while
-                # it still owns the pending lock. Once terminal bookkeeping has
-                # run, no delayed stream can attach to that queue, so release
-                # its unread payload credits instead of retaining them forever.
-                # Keep unrevoked pre-consumer queues available for their normal
-                # delayed terminal consumer, and never discard an attached queue.
-                queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
-                async with pending_lock:
-                    # Recheck revocation after terminal publication: a
-                    # sibling can lose its delayed-consumer owner while this
-                    # finalizer waits to reacquire the shared pending lock.
-                    discard_revoked_preconsumer = (
-                        request_state.event_queue is event_queue
-                        and not getattr(request_state, "event_queue_consumer_started", False)
-                        and (
-                            revoked_before_terminal
-                            or (
-                                request_state.event_queue_revoked.is_set()
-                                and not getattr(event_queue, "terminal_pending", False)
-                            )
-                            or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
-                        )
-                    )
-                    if discard_revoked_preconsumer:
-                        request_state.event_queue = None
-                        request_state.event_queue_revoked.set()
-                        discard = getattr(event_queue, "discard", None)
-                        if callable(discard):
-                            discard()
             if (
                 websocket is not None
                 and client_send_lock is not None
