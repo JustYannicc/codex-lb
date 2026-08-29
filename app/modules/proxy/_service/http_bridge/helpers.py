@@ -2791,6 +2791,9 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
     type_value = error.get("type")
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
+    if param_state.malformed:
+        return False
     # Normalize like the websocket rewrite path (#1818): upstream frames may
     # carry the classifiable code only in ``type`` (or omit both code and
     # param on the terse previous-response rejection), and a raw read would
@@ -2811,13 +2814,9 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
@@ -2831,16 +2830,15 @@ def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError
     raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
     type_value = error.get("type")
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
+    if param_state.malformed:
+        return False
     code = _normalize_error_code(raw_code, error_type)
     if code == "bridge_previous_response_not_found":
         return True
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
 def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:

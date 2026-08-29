@@ -9114,39 +9114,46 @@ def _sanitize_public_stream_error_payload(payload: dict[str, JsonValue]) -> dict
 
     event_type = classify_event_type(payload)
     if event_type == "error":
+        normalized = payload
         error_value = payload.get("error")
         if is_json_mapping(error_value):
             sanitized_error = sanitize_public_error_detail(error_value)
-            if sanitized_error == error_value:
-                return payload
-            normalized = dict(payload)
-            normalized["error"] = sanitized_error
-            return normalized
-        if "param" not in payload:
-            return payload
-        normalized = dict(payload)
-        public_param = normalize_public_error_param(OpenAIErrorParam(True, payload["param"]))
-        if public_param is None:
-            normalized.pop("param", None)
-        else:
-            normalized["param"] = public_param
+            if sanitized_error != error_value:
+                normalized = dict(normalized)
+                normalized["error"] = sanitized_error
+        if "param" in payload:
+            sanitized = dict(normalized)
+            public_param = normalize_public_error_param(OpenAIErrorParam(True, payload["param"]))
+            if public_param is None:
+                sanitized.pop("param", None)
+            else:
+                sanitized["param"] = public_param
+            if sanitized != normalized:
+                normalized = sanitized
         return normalized
 
     if event_type != "response.failed":
         return payload
+    normalized = payload
     response_value = payload.get("response")
-    if not is_json_mapping(response_value):
-        return payload
-    error_value = response_value.get("error")
-    if not is_json_mapping(error_value):
-        return payload
-    sanitized_error = sanitize_public_error_detail(error_value)
-    if sanitized_error == error_value:
-        return payload
-    normalized_response = dict(response_value)
-    normalized_response["error"] = sanitized_error
-    normalized = dict(payload)
-    normalized["response"] = normalized_response
+    if is_json_mapping(response_value):
+        error_value = response_value.get("error")
+        if is_json_mapping(error_value):
+            sanitized_error = sanitize_public_error_detail(error_value)
+            if sanitized_error != error_value:
+                normalized_response = dict(response_value)
+                normalized_response["error"] = sanitized_error
+                normalized = dict(normalized)
+                normalized["response"] = normalized_response
+    if "param" in payload:
+        sanitized = dict(normalized)
+        public_param = normalize_public_error_param(OpenAIErrorParam(True, payload["param"]))
+        if public_param is None:
+            sanitized.pop("param", None)
+        else:
+            sanitized["param"] = public_param
+        if sanitized != normalized:
+            normalized = sanitized
     return normalized
 
 

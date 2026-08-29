@@ -49,7 +49,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIEvent
+from app.core.openai.models import OpenAIError, OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -604,6 +604,14 @@ def _raw_stream_error_fields(
         raw_error_param,
         _normalize_error_code(_websocket_event_error_code(event_type, event_payload), raw_error_type),
     )
+
+
+def _openai_error_fields(
+    error: OpenAIError | None,
+) -> tuple[str | None, str | None, OpenAIErrorParam | None]:
+    if error is None:
+        return None, None, None
+    return error.type, error.message, error.param_state
 
 
 def _raw_stream_error_code_or_upstream(

@@ -35,7 +35,9 @@ a present malformed `param`, it MUST omit that field. It MUST preserve the
 native event envelope and MUST NOT expose a raw stale `previous_response_id`.
 A valid string parameter MUST remain available in trimmed form. This
 sanitization applies regardless of the error code or message; only an error
-that has no `param` metadata is left unchanged.
+that has no `param` metadata is left unchanged. When stale-anchor masking
+applies, its generic terminal envelope takes precedence and may remove even a
+valid `previous_response_id` parameter.
 
 The Chat Completions adapter MUST apply the same parameter sanitization to the
 nested error detail, but it MUST retain the documented Chat Completions error
