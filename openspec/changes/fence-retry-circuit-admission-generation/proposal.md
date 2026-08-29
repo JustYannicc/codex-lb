@@ -32,6 +32,10 @@ explicitly generation-fenced.
 - Fence stale retry-circuit purges on the captured failure timestamp and
   admission generation so a delayed same-generation failure cannot be deleted
   by an older cleanup read.
+- Treat a stale purge that loses its conditional fence or fails before
+  confirming deletion as unknown durable state: pre-created admission and its
+  cooldown hint fail closed for that call, while an ordinary lookup failure
+  keeps the existing local fallback behavior.
 
 ## Scope and non-goals
 

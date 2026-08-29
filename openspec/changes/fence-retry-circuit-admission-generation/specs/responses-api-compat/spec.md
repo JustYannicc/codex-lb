@@ -72,7 +72,9 @@ independent `admission_generation`.
 
 Expired retry-circuit purges MUST compare the captured `updated_at_epoch` and
 `admission_generation` in their delete predicate. A purge that loses a
-generation race MUST leave the newer row intact.
+generation race MUST leave the newer row intact. If a stale-row purge returns
+no match or raises before confirming deletion, the loader MUST report the
+durable state as uncertain for that call.
 
 #### Scenario: A claim survives a stale purge
 
@@ -80,3 +82,11 @@ generation race MUST leave the newer row intact.
 - **WHEN** a replay claim advances that row to generation `g + 1` before cleanup deletes it
 - **THEN** the cleanup delete MUST match no row
 - **AND** the claimed row MUST remain available for later generation-fenced settlement
+
+#### Scenario: An uncertain stale purge suppresses pre-created admission
+
+- **GIVEN** a loader observed an expired retry row for a hard-affinity key
+- **WHEN** its conditional purge returns no match or cannot complete
+- **THEN** pre-created retry admission MUST fail closed for that call
+- **AND** its cooldown hint MUST remain fail closed instead of using an
+  untrusted local fallback

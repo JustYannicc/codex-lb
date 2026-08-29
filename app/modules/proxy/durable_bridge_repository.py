@@ -10,7 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -3580,26 +3580,22 @@ class DurableBridgeRepository:
             keys = [tuple(row) for row in result.fetchall()]
             if not keys:
                 return deleted_count
-            batch_deleted_count = 0
             async with sqlite_writer_section():
-                for (
-                    session_key_kind,
-                    session_key_hash,
-                    api_key_scope,
-                    updated_at_epoch,
-                    admission_generation,
-                ) in keys:
-                    deleted = await self._session.execute(
-                        delete(HttpBridgeRetryCircuit)
-                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
-                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
-                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
-                        .where(HttpBridgeRetryCircuit.updated_at_epoch == updated_at_epoch)
-                        .where(HttpBridgeRetryCircuit.admission_generation == admission_generation)
-                        .where(stale_predicate)
-                        .returning(HttpBridgeRetryCircuit.session_key_hash)
+                deleted = await self._session.execute(
+                    delete(HttpBridgeRetryCircuit)
+                    .where(
+                        tuple_(
+                            HttpBridgeRetryCircuit.session_key_kind,
+                            HttpBridgeRetryCircuit.session_key_hash,
+                            HttpBridgeRetryCircuit.api_key_scope,
+                            HttpBridgeRetryCircuit.updated_at_epoch,
+                            HttpBridgeRetryCircuit.admission_generation,
+                        ).in_(keys)
                     )
-                    batch_deleted_count += len(deleted.scalars().all())
+                    .where(stale_predicate)
+                    .returning(HttpBridgeRetryCircuit.session_key_hash)
+                )
+                batch_deleted_count = len(deleted.scalars().all())
                 await self._session.commit()
             if batch_deleted_count == 0:
                 return deleted_count

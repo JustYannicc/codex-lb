@@ -17,8 +17,8 @@
 
 ## 3. Coverage
 
-- [x] 3.1 Cover local/remote claim races, stateless marker cleanup, and the
-  timeout reconciliation outcomes.
+- [x] 3.1 Cover local/remote claim races, stateless local-state cleanup, and
+  the timeout reconciliation outcomes.
 - [x] 3.2 Cover generation-fenced clear races, lookup failure retention, and
   delayed clock-skewed failure merges on SQLite.
 - [x] 3.3 Run focused retry-circuit/durable bridge tests plus lint, format,
@@ -33,5 +33,5 @@
   suppress concurrent reconciliation while the original write is still
   running.
 - [x] 4.3 Fence per-key and batch stale purges on captured `updated_at_epoch`
-  plus `admission_generation`; cover claim-versus-purge and delayed-failure
-  races.
+  plus `admission_generation`; cover claim-versus-purge, delayed-failure,
+  purge-failure, and concurrent-loader races.

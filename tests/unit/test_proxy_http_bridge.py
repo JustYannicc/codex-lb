@@ -30964,6 +30964,72 @@ async def test_http_bridge_retry_circuit_fails_closed_when_stale_purge_fence_mis
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_fails_closed_when_stale_purge_is_unavailable() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-expired-circuit-purge-unavailable")
+    expired_updated_at = (
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 1.0,
+                last_detail="stream_idle_timeout",
+                updated_at_epoch=expired_updated_at,
+                admission_generation=3,
+            )
+        ),
+        purge_retry_circuit=AsyncMock(side_effect=RuntimeError("durable purge unavailable")),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) == 0.0
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_stale_purge_outcome_isolated_between_loaders() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-expired-circuit-concurrent-load")
+    expired_updated_at = (
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
+    )
+    first_purge_started = asyncio.Event()
+    release_first_purge = asyncio.Event()
+    purge_count = 0
+
+    async def purge_retry_circuit(**_kwargs: Any) -> bool:
+        nonlocal purge_count
+        purge_count += 1
+        if purge_count == 1:
+            first_purge_started.set()
+            await release_first_purge.wait()
+            return False
+        return True
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 1.0,
+                last_detail="stream_idle_timeout",
+                updated_at_epoch=expired_updated_at,
+                admission_generation=3,
+            )
+        ),
+        purge_retry_circuit=purge_retry_circuit,
+    )
+
+    first_task = asyncio.create_task(service._http_bridge_precreated_retry_allowed(hard_session))
+    await asyncio.wait_for(first_purge_started.wait(), timeout=0.5)
+    second_task = asyncio.create_task(service._http_bridge_precreated_retry_allowed(hard_session))
+    assert await asyncio.wait_for(second_task, timeout=0.5) is True
+    release_first_purge.set()
+    assert await asyncio.wait_for(first_task, timeout=0.5) is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_refreshes_persisted_state_after_initial_miss() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-replica-refresh-circuit")
@@ -44922,6 +44988,65 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
         durable_bridge.clear_retry_circuit.assert_awaited(),
         ("the abandonment removed the cooldown's cause, so the circuit must settle with it"),
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_clear_keeps_local_state_when_newer_durable_failure_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-clear-race")
+    now_epoch = time.time()
+    durable_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=1800.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_epoch,
+        admission_generation=4,
+    )
+    clear_started = asyncio.Event()
+    release_clear = asyncio.Event()
+    clear_kwargs: dict[str, Any] = {}
+
+    async def clear_retry_circuit_impl(**kwargs: Any) -> bool:
+        clear_kwargs.update(kwargs)
+        clear_started.set()
+        await release_clear.wait()
+        return (
+            clear_kwargs["expected_admission_generation"] == durable_row.admission_generation
+            and clear_kwargs["expected_updated_at_epoch"] == durable_row.updated_at_epoch
+        )
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=durable_row),
+        clear_retry_circuit=AsyncMock(side_effect=clear_retry_circuit_impl),
+    )
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now + 60.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=now_epoch,
+        persisted_admission_generation=4,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+
+    clear_task = asyncio.create_task(service._clear_http_bridge_retry_circuit(hard_session))
+    await asyncio.wait_for(clear_started.wait(), timeout=0.5)
+    durable_row.consecutive_failures = 3
+    durable_row.cooldown_until_epoch = 1900.0
+    durable_row.last_detail = "stream_idle_timeout"
+    durable_row.updated_at_epoch = now_epoch + 1.0
+    durable_row.admission_generation = 5
+    release_clear.set()
+    await asyncio.wait_for(clear_task, timeout=0.5)
+
+    assert clear_kwargs["expected_updated_at_epoch"] == now_epoch
+    assert clear_kwargs["expected_admission_generation"] == 4
+    assert hard_session.key in cast(Any, service)._http_bridge_retry_circuits
+    assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key] is state
 
 
 @pytest.mark.asyncio
