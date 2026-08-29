@@ -33089,6 +33089,32 @@ def test_stale_predecessor_churn_keeps_one_unpinned_slot_per_owner() -> None:
     assert fences["resp-predecessor-599"].retain_until_durable_clear is True
 
 
+def test_same_epoch_stale_predecessor_churn_keeps_one_unpinned_slot_per_owner() -> None:
+    """Repeated late denials from one predecessor epoch stay bounded."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_key = "durable-cross-session"
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor",
+        owner_key=owner_key,
+        owner_epoch=10,
+    )
+    for index in range(600):
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            service,
+            f"resp-predecessor-{index}",
+            owner_key=owner_key,
+            owner_epoch=4,
+        )
+
+    fences = service._http_bridge_denied_anchor_fences
+    assert len(fences) == 2
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")[owner_key] == "resp-successor"
+    assert "resp-predecessor-599" in fences
+    assert fences["resp-predecessor-599"].retain_until_durable_clear is True
+
+
 def test_newer_durable_clear_retires_stale_predecessor_after_pin_release() -> None:
     """A current-owner clear releases stale slots but respects active pins."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))

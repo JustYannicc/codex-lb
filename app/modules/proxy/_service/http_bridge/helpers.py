@@ -287,7 +287,6 @@ def _drop_older_unpinned_http_bridge_denial_predecessors(
     service: Any,
     owner_key: str,
     *,
-    owner_epoch: int,
     response_id: str,
 ) -> None:
     """Keep only the newest unpinned stale predecessor for one owner.
@@ -308,12 +307,7 @@ def _drop_older_unpinned_http_bridge_denial_predecessors(
             continue
         if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
             continue
-        if (
-            entry.owner_key != owner_key
-            or not entry.retain_until_durable_clear
-            or entry.owner_epoch is None
-            or entry.owner_epoch >= owner_epoch
-        ):
+        if entry.owner_key != owner_key or not entry.retain_until_durable_clear:
             continue
         if entry.active_request_ids:
             entry.superseded = True
@@ -611,7 +605,6 @@ def _record_http_bridge_denied_anchor_fence(
         _drop_older_unpinned_http_bridge_denial_predecessors(
             service,
             owner_key,
-            owner_epoch=owner_epoch,
             response_id=response_id,
         )
     if (
