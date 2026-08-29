@@ -3668,6 +3668,7 @@ its existing subscription fallback instead of converting the lookup failure into
 
 - **GIVEN** a Responses-compatible source is configured for the requested model
 - **AND** no subscription account is recorded as owner of `previous_response_id`
+- **AND** the source catalog confirms that the requested model is source-owned
 - **AND** `previous_response_id` uses a canonical OpenAI-compatible `resp_` hexadecimal shape
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the request is forwarded to the configured model source
