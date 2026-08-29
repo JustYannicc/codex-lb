@@ -1227,13 +1227,15 @@ async def _invalidate_denied_http_bridge_anchor(
     durable row that survives re-injects the id on a later turn, which is denied
     in turn and re-enters this path, so the clear is re-attempted rather than
     lost.
+
+    ``closed`` only fences new admissions. Requests admitted before a session
+    closed can still deliver a terminal denial and must publish its provenance
+    and finish the same cleanup.
     """
     if denied_response_id is None:
         return False
     sibling_advanced = False
     async with session.lifecycle_lock:
-        if session.closed:
-            return False
         # Serialize publication with the submitter's final tombstone check and
         # upstream send. A sibling completion can advance the current carrier
         # while an already-prepared request still holds the denied id; that
@@ -1380,18 +1382,29 @@ def _denied_proxy_injected_anchor_id(
 ) -> str | None:
     """Choose the anchor a denial may retire, if any.
 
-    Only an anchor codex-lb injected onto a full-resend-shaped payload can be
-    retired. A delta-only request has no other way to convey prior context once
-    its anchor is gone, which is the same rule the expired-anchor path applies
-    before clearing durable continuity.
+    Only an anchor shared exclusively by requests that codex-lb injected onto
+    full-resend-shaped payloads can be retired. A client-supplied or delta-only
+    sibling has no other way to convey prior context once its anchor is gone,
+    which is the same rule the expired-anchor path applies before clearing
+    durable continuity.
     """
+    requests_by_anchor: dict[str, list[_WebSocketRequestState]] = {}
     for request_state in request_states:
-        if (
+        previous_response_id = request_state.previous_response_id
+        if previous_response_id is not None:
+            requests_by_anchor.setdefault(previous_response_id, []).append(request_state)
+
+    safely_retirable_anchors = [
+        previous_response_id
+        for previous_response_id, grouped_request_states in requests_by_anchor.items()
+        if all(
             request_state.proxy_injected_previous_response_id
             and request_state.proxy_injected_anchor_had_full_resend_payload
-            and request_state.previous_response_id is not None
-        ):
-            return request_state.previous_response_id
+            for request_state in grouped_request_states
+        )
+    ]
+    if len(safely_retirable_anchors) == 1:
+        return safely_retirable_anchors[0]
     return None
 
 

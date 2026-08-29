@@ -33304,6 +33304,26 @@ async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
 
 
 @pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_publishes_for_a_closed_session() -> None:
+    """A closed session can still finish an admitted denial."""
+    session = _denied_anchor_session()
+    session.closed = True
+    service = _denied_anchor_service(cleared=False)
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_awaited_once()
+    assert session.denied_proxy_injected_anchor_ids == {"resp_denied"}
+    assert "resp_denied" in service._http_bridge_denied_anchor_fences
+    assert session.last_completed_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already_advanced():
     """A concurrent completion may advance the anchor before the denial is handled."""
     session = _denied_anchor_session(anchor="resp_completed_meanwhile")
@@ -33688,6 +33708,26 @@ async def test_retire_denied_bridge_anchor_leaves_a_delta_only_anchor_alone():
         service,
         session,
         request_states=[_denied_anchor_request_state(full_resend_shaped=False)],
+    )
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
+    assert session.last_completed_response_id == "resp_denied"
+
+
+@pytest.mark.asyncio
+async def test_retire_denied_bridge_anchor_leaves_a_mixed_full_resend_fan_out_alone():
+    """A delta-only sibling still depends on the shared anchor for context."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    request_states = [
+        _denied_anchor_request_state(previous_response_id="resp_denied", full_resend_shaped=True),
+        _denied_anchor_request_state(previous_response_id="resp_denied", full_resend_shaped=False),
+    ]
+
+    await http_bridge_upstream_events_module._retire_denied_http_bridge_anchor(
+        service,
+        session,
+        request_states=request_states,
     )
 
     service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
