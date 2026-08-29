@@ -88,13 +88,19 @@ def _next_http_bridge_quarantine_generation(
     registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
 ) -> int:
     """Return a generation unique for this service lifetime."""
-    current = getattr(service, "_http_bridge_quarantine_generation_counter", 0) or 0
+    current = max(
+        getattr(service, "_http_bridge_quarantine_generation_counter", 0) or 0,
+        getattr(service, "_http_bridge_quarantine_generation_high_water", 0) or 0,
+    )
     # A test/recovery restore may seed the map independently of the lazy
     # service counter. Preserve the greatest observed value before advancing so
-    # the counter remains monotonic even in that state.
+    # the counter remains monotonic even in that state. The separate high-water
+    # mark survives a counter or registry reset, so a reset cannot recycle a
+    # generation that was already observed during this service lifetime.
     current = max(current, max((entry.generation for entry in registry.values()), default=0))
     next_generation = current + 1
     service._http_bridge_quarantine_generation_counter = next_generation
+    service._http_bridge_quarantine_generation_high_water = next_generation
     return next_generation
 
 
