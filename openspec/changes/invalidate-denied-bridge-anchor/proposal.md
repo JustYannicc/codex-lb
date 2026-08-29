@@ -35,6 +35,7 @@ None.
 ## Impact
 
 - HTTP bridge terminal-event handling (`app/modules/proxy/_service/http_bridge/upstream_events.py`) and anchored recovery retry state (`app/modules/proxy/_service/http_bridge/streaming.py`).
+- Denial-fence lifecycle state (`app/modules/proxy/_service/http_bridge/helpers.py`), service protocol members (`app/modules/proxy/_service/http_bridge/protocol.py`), single-alias unregistration (`app/modules/proxy/_service/http_bridge/session_registry.py`), and the fenced durable anchor clear (`app/modules/proxy/durable_bridge_repository.py`, `app/modules/proxy/durable_bridge_coordinator.py`).
 - No API, schema, migration, dependency, configuration, or dashboard changes. The poison threshold setting and its default of seven are untouched, and the downstream error contract is unchanged: the denial is still masked to `stream_incomplete` and still surfaces as 502, so clients keep their anchor and do not resend full history (the invariant from #397).
 - The session's turn-state and unrelated response-id aliases remain routable after retirement; only the denied response-id alias is removed.
 
