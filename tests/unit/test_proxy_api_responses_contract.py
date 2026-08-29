@@ -840,6 +840,58 @@ async def test_normalize_public_responses_stream_sanitizes_native_malformed_erro
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_top_level_and_nested_error_params() -> None:
+    source = (
+        'data: {"type":"error","param":[],"status":400,'
+        '"error":{"code":"upstream_error","message":"bad","param":" model "}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "error"
+    assert payload["status"] == 400
+    assert "param" not in payload
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_response_failed_top_level_param() -> None:
+    source = (
+        'data: {"type":"response.failed","param":{},"response":{"id":"resp_1",'
+        '"error":{"code":"upstream_error","message":"bad","param":[]}}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    assert "param" not in payload
+    response = payload["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == "resp_1"
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_keeps_native_valid_error_frame_byte_identical() -> None:
     source = 'data: {"type":"error","error":{"code":"upstream_error","message":"bad","param":"model"}}\n\n'
 

@@ -894,6 +894,17 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
 
 
+@pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
+@pytest.mark.parametrize("param", [None, "", "   ", 0, False, {}, []])
+def test_http_bridge_stale_anchor_recovery_rejects_malformed_present_param(code: str, param: object) -> None:
+    error = proxy_service.openai_error(code, "Previous response with id 'resp_missing' not found.")
+    cast(Any, error["error"])["param"] = param
+    exc = ProxyResponseError(400, error)
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
+    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
+
+
 @pytest.mark.parametrize("param", ["", "   "])
 def test_previous_response_recovery_preserves_present_blank_param(param: str) -> None:
     error = proxy_service.openai_error("invalid_request_error", "Invalid previous_response_id.")

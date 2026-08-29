@@ -277,12 +277,11 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _openai_error_fields,
     _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _raw_stream_error_fields as _raw_error_fields,
-)
+from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
 )
@@ -827,7 +826,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
-                        raw_error_type, raw_error_message, raw_error_param = (None, None, None)
+                        raw_error_type, raw_error_message, raw_error_param = _openai_error_fields(error)
                         if preserve_raw_sse_line and error is None:
                             raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
                                 event_type,

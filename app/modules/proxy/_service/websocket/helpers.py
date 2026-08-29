@@ -1156,7 +1156,7 @@ def _sanitize_public_websocket_event_payload(
     """Copy a terminal event with only a client-safe ``error.param``."""
 
     normalized = payload
-    if event_type == "error":
+    if event_type in {"error", "response.failed"}:
         error_value = payload.get("error")
         if isinstance(error_value, dict):
             sanitized_error = sanitize_public_error_detail(error_value)
@@ -1735,6 +1735,13 @@ def _match_websocket_request_state_for_previous_response_error(
     return None
 
 
+def _is_unanchored_previous_response_error_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.casefold().replace("`", "").split()).removesuffix(".").rstrip()
+    return normalized == "invalid previous_response_id"
+
+
 def _matching_websocket_request_states_for_previous_response_error(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1776,6 +1783,16 @@ def _matching_websocket_request_states_for_previous_response_error(
         }
         if len(unique_previous_response_ids) == 1:
             return unresolved_followups
+    if (
+        allow_unanchored_previous_response_error
+        and len(followup_requests) == 1
+        and _is_unanchored_previous_response_error_message(error_message)
+    ):
+        # A post-created terminal error may omit both its response id and the
+        # rejected anchor id. When exactly one follow-up is pending, its
+        # previous-response ownership is the only safe correlation seam even
+        # after ``response.created`` assigned a response id.
+        return followup_requests
     return []
 
 
