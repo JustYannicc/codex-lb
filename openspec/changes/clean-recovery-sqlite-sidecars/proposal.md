@@ -9,13 +9,15 @@ with those sidecars present can attach stale state to the replacement.
 - Remove fixed SQLite sidecars around output dump import and source replacement.
 - Match master journals literally so glob metacharacters in a database name
   cannot remove another database's journal.
-- Fence final output import and sidecar cleanup with an exclusive SQLite
-  transaction, then close every recovery connection before sidecar or database
-  renames so Windows can perform the file mutations. Fail closed if the lock or
-  any sidecar cleanup cannot complete. If the second replacement rename fails,
-  restore the original source path before reporting the error. Closing the
-  transaction leaves a bounded post-probe window before the operator CLI's
-  renames; all preparation work remains fenced.
+- Remove pre-existing output sidecars before import, then fence final output
+  import with an exclusive SQLite transaction. Close every recovery connection
+  before final sidecar cleanup or either database rename so Windows can perform
+  the file mutations; repeat source cleanup after the source move to catch
+  sidecars recreated around that move. Fail closed if the lock or any sidecar
+  cleanup cannot complete. If the second replacement rename fails, restore the
+  original source path before reporting the error. Closing the transaction
+  leaves a bounded post-probe window before cleanup and renames, so the
+  operator must keep external writers quiescent throughout it.
 
 The recovery output and backup naming remain unchanged.
 

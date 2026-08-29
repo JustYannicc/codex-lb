@@ -8,14 +8,18 @@ not part of the dump, so they must be removed at each replacement boundary.
 
 - Remove `-wal`, `-shm`, and `-journal` by exact path.
 - Remove `-mj*` master journals by globbing an escaped database basename.
-- Hold `BEGIN EXCLUSIVE` on the source across final output import and sidecar
-  cleanup. Release and close that connection before any sidecar or database
-  rename because Windows rejects file mutations with an open SQLite handle.
-  The exclusive transaction remains the pre-replacement race/ownership fence:
-  active writers fail closed while the replacement is prepared, and a lock
-  failure aborts before any rename. Closing the probe necessarily leaves a
-  bounded post-probe window before the operator CLI's renames; this is the
-  accepted Windows trade-off, while all preparation work remains fenced.
+- Remove pre-existing output sidecars before opening the recovery lock so stale
+  WAL/journal state cannot attach during import. Hold `BEGIN EXCLUSIVE` on the
+  source across final output import. Release and close that connection before
+  final output/source sidecar cleanup or either database rename because Windows
+  rejects filesystem mutation with an open SQLite handle. Repeat source cleanup
+  after moving the source to its backup so sidecars recreated around that move
+  are removed before the recovered output is installed. The exclusive
+  transaction remains the pre-replacement race/ownership fence: active writers
+  fail closed while the replacement is prepared, and a lock failure aborts
+  before any rename. Closing the probe necessarily leaves a bounded post-probe
+  window before the cleanup and renames; the operator must keep external
+  writers quiescent throughout that window.
 - Fail recovery rather than install an ambiguous replacement when sidecar
   removal reports an error.
 - Treat the two filesystem renames as a small transaction: if installing the
@@ -28,11 +32,12 @@ not part of the dump, so they must be removed at each replacement boundary.
 Recovery tests hold a source WAL open across dump creation, seed output
 sidecars, and verify the installed database and both sidecar sets. A boundary
 test attempts a write while the exclusive lock is held and verifies that a
-fresh connection writes to the installed database. A rename seam asserts that
-every tracked recovery connection is closed before each file mutation. Partial
-cleanup, busy-source, and second-rename failures prove the replacement fails
-closed, and a wildcard filename test proves unrelated master journals remain
-untouched.
+fresh connection writes to the installed database. A filesystem seam tracks
+every sidecar unlink and database rename, asserting that every tracked recovery
+connection is closed first; it also recreates a source sidecar around the
+source move to prove the repeat cleanup. Partial cleanup, busy-source, and
+second-rename failures prove the replacement fails closed, and a wildcard
+filename test proves unrelated master journals remain untouched.
 
 ## Dependencies
 

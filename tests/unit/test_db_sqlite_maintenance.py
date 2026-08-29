@@ -81,14 +81,27 @@ def test_recover_cli_closes_connections_before_replacing_database(
 
     connections = _track_connections(monkeypatch)
     rename_checks: list[bool] = []
+    unlink_checks: list[bool] = []
     path_type = type(db_path)
     real_replace = path_type.replace
+    real_unlink = path_type.unlink
 
     def replace_without_open_sqlite_handles(path: Path, target: str | Path) -> Path:
         rename_checks.append(all(connection.closed for connection in connections))
         return real_replace(path, target)
 
+    tracked_sidecars = {
+        *(db_path.with_name(f"{db_path.name}{suffix}") for suffix in ("-wal", "-shm", "-journal")),
+        *(output_path.with_name(f"{output_path.name}{suffix}") for suffix in ("-wal", "-shm", "-journal")),
+    }
+
+    def unlink_without_open_sqlite_handles(path: Path, *, missing_ok: bool = False) -> None:
+        if path in tracked_sidecars:
+            unlink_checks.append(all(connection.closed for connection in connections))
+        real_unlink(path, missing_ok=missing_ok)
+
     monkeypatch.setattr(path_type, "replace", replace_without_open_sqlite_handles)
+    monkeypatch.setattr(path_type, "unlink", unlink_without_open_sqlite_handles)
 
     try:
         exit_code = recover_module.main(
@@ -109,6 +122,8 @@ def test_recover_cli_closes_connections_before_replacing_database(
         assert connections
         assert all(connection.closed for connection in connections)
         assert rename_checks == [True, True]
+        assert unlink_checks
+        assert all(unlink_checks)
 
         with closing(sqlite3.connect(db_path)) as connection:
             assert connection.execute("SELECT name FROM items").fetchall() == [("alpha",)]
@@ -146,6 +161,20 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
         return dump
 
     monkeypatch.setattr(recover_module, "_load_dump", _load_dump_then_leave_source_wal)
+
+    path_type = type(db_path)
+    real_replace = path_type.replace
+
+    def replace_and_recreate_source_sidecar(path: Path, target: str | Path) -> Path:
+        result = real_replace(path, target)
+        if path == db_path and Path(target).name.startswith(f"{db_path.name}.corrupt-"):
+            # Model a writer recreating a sidecar after source.replace() while
+            # the source path is temporarily empty. The post-rename cleanup
+            # must remove it before the recovered output is installed.
+            Path(f"{path}-wal").write_bytes(b"recreated around source rename")
+        return result
+
+    monkeypatch.setattr(path_type, "replace", replace_and_recreate_source_sidecar)
 
     recover_module.recover_sqlite_db(recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True))
 
