@@ -173,7 +173,7 @@ async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
             logger.warning(failure_message, exc_info=True)
 
 
-def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
+def _log_abandoned_lease_release(task: asyncio.Task[bool]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -192,7 +192,7 @@ async def _release_leader_lease_within(timeout: float) -> bool:
     outcome from a done callback) so shutdown always proceeds within the
     deadline; the lease then expires after its TTL, which is acceptable.
     """
-    release_task: asyncio.Task[None] = asyncio.ensure_future(get_leader_election().release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(get_leader_election().release())
     done, _ = await asyncio.wait({release_task}, timeout=timeout)
     if release_task not in done:
         logger.warning(
@@ -208,6 +208,9 @@ async def _release_leader_lease_within(timeout: float) -> bool:
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+        return False
+    if release_task.result() is False:
+        logger.warning("Scheduler leader lease release did not complete; suppressing the SQLite clean marker")
         return False
     return True
 
@@ -671,7 +674,10 @@ async def lifespan(app: FastAPI):
             task_name_prefixes=("http-bridge-recovery-settlement-",),
             failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
         )
-        database_tasks_drained = recovery_settlements_drained
+        # An in-flight request can still own a database session after the
+        # process-wide drain deadline. It is therefore part of the clean proof
+        # even though the later detached drains have their own gates.
+        database_tasks_drained = drained and recovery_settlements_drained
         if (
             recovery_settlements_drained
             and proxy_service is not None

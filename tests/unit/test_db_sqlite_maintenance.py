@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import selectors
 import sqlite3
@@ -236,6 +237,32 @@ def test_runstate_clean_with_null_identity_is_unknown(tmp_path: Path, db_exists:
     )
 
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param("not-an-object", id="scalar"),
+        pytest.param({"dev": 1}, id="missing-fields"),
+        pytest.param(
+            {"dev": True, "ino": 1, "size": 1, "mtime_ns": 1, "ctime_ns": 1},
+            id="bool-is-not-an-integer",
+        ),
+    ],
+)
+def test_runstate_running_with_malformed_identity_remains_untrusted(tmp_path: Path, identity: object) -> None:
+    """A malformed identity cannot become a clean-skip input."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text(
+        json.dumps({"state": "running", "identity": identity}),
+        encoding="utf-8",
+    )
+
+    record = sqlite_utils_module.read_sqlite_runstate_record(db_path)
+    assert record is not None
+    assert record.state is sqlite_utils_module.SqliteRunState.RUNNING
+    assert record.identity is None
 
 
 def test_runstate_recursive_json_is_unknown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

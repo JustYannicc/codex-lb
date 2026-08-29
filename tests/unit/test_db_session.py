@@ -21,6 +21,7 @@ import app.db.session as session_module
 from app.db.models import Account, AccountStatus, Base
 from app.db.sqlite_utils import (
     IntegrityCheck,
+    SqliteFileIdentity,
     SqliteIntegrityCheckMode,
     SqliteRunState,
     SqliteRunStateDurabilityError,
@@ -1721,6 +1722,40 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
         await stuck
 
 
+@pytest.mark.asyncio
+async def test_close_db_drains_teardown_registered_during_engine_disposal(monkeypatch) -> None:
+    """A disposal callback registered after the initial snapshot still gates clean."""
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.5)
+    release_wedge = asyncio.Event()
+    late_task: asyncio.Task[bool] | None = None
+
+    class _EngineThatRegistersLateTeardown:
+        async def dispose(self) -> None:
+            nonlocal late_task
+            late_task = asyncio.create_task(release_wedge.wait(), name="late-disposal-teardown")
+            session_module._wedged_teardown_cleanup_tasks.add(late_task)
+            late_task.add_done_callback(session_module._wedged_teardown_cleanup_tasks.discard)
+
+    monkeypatch.setattr(session_module, "engine", _EngineThatRegistersLateTeardown())
+    monkeypatch.setattr(session_module, "_background_engine", None)
+
+    async def _release_soon() -> None:
+        await asyncio.sleep(0.05)
+        release_wedge.set()
+
+    releaser = asyncio.create_task(_release_soon())
+    try:
+        assert await asyncio.wait_for(session_module.close_db(), timeout=5.0) is True
+        assert release_wedge.is_set(), "close_db must drain teardown registered by engine disposal"
+        assert late_task is not None and late_task.done()
+        assert not session_module._wedged_teardown_cleanup_tasks
+    finally:
+        release_wedge.set()
+        await releaser
+        if late_task is not None:
+            await late_task
+
+
 def _stub_head_migration_state(monkeypatch) -> None:
     monkeypatch.setattr(
         session_module,
@@ -1740,7 +1775,7 @@ def _stub_head_migration_state(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_init_db_skips_startup_check_after_recorded_clean_shutdown(monkeypatch, tmp_path) -> None:
+async def test_init_db_skips_startup_check_after_recorded_clean_shutdown(monkeypatch, tmp_path, caplog) -> None:
     db_path = tmp_path / "store.db"
     db_path.write_bytes(b"sqlite")
     write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
@@ -1759,13 +1794,15 @@ async def test_init_db_skips_startup_check_after_recorded_clean_shutdown(monkeyp
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
     _stub_head_migration_state(monkeypatch)
 
-    await session_module.init_db()
+    with caplog.at_level(logging.INFO, logger=session_module.__name__):
+        await session_module.init_db()
 
     assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+    assert "Skipping SQLite startup quick_check after a recorded clean shutdown" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_init_db_runs_startup_check_when_running_state_write_fails(monkeypatch, tmp_path) -> None:
+async def test_init_db_runs_startup_check_when_running_state_write_fails(monkeypatch, tmp_path, caplog) -> None:
     db_path = tmp_path / "store.db"
     db_path.write_bytes(b"sqlite")
     write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
@@ -1789,9 +1826,12 @@ async def test_init_db_runs_startup_check_when_running_state_write_fails(monkeyp
     monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
     _stub_head_migration_state(monkeypatch)
 
-    await session_module.init_db()
+    with caplog.at_level(logging.INFO, logger=session_module.__name__):
+        await session_module.init_db()
 
     assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert "Running SQLite startup quick_check" in caplog.text
+    assert "SQLite startup quick_check passed in" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1964,8 +2004,16 @@ async def test_init_db_runs_startup_check_when_database_replaced_before_decision
 @pytest.mark.parametrize(
     ("running_identity", "current_identity"),
     [
-        pytest.param(None, {"dev": 1}, id="running-identity-missing"),
-        pytest.param({"dev": 1}, None, id="current-identity-unavailable"),
+        pytest.param(
+            None,
+            SqliteFileIdentity(dev=1, ino=1, size=1, mtime_ns=1, ctime_ns=1),
+            id="running-identity-missing",
+        ),
+        pytest.param(
+            SqliteFileIdentity(dev=1, ino=1, size=1, mtime_ns=1, ctime_ns=1),
+            None,
+            id="current-identity-unavailable",
+        ),
     ],
 )
 def test_sqlite_startup_check_requires_non_null_identities_for_a_clean_skip(

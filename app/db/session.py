@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config.settings import get_settings
 from app.db.sqlite_utils import (
     IntegrityCheck,
+    SqliteFileIdentity,
     SqliteIntegrityCheckMode,
     SqliteRunState,
     SqliteRunStateDurabilityError,
@@ -33,6 +34,7 @@ from app.db.sqlite_utils import (
     read_sqlite_runstate_record,
     release_sqlite_runstate_lock,
     sqlite_db_path_from_url,
+    sqlite_url_is_memory,
     write_sqlite_runstate,
 )
 
@@ -113,7 +115,7 @@ def _is_sqlite_url(url: str) -> bool:
 
 
 def _is_sqlite_memory_url(url: str) -> bool:
-    return _is_sqlite_url(url) and ":memory:" in url
+    return sqlite_url_is_memory(url)
 
 
 def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
@@ -399,7 +401,7 @@ def _sqlite_startup_check_required(
     mode: SqliteIntegrityCheckMode,
     previous_state: SqliteRunState | None,
     running_recorded: bool,
-    running_identity: dict[str, int] | None,
+    running_identity: SqliteFileIdentity | None,
 ) -> bool:
     """Decide whether this startup has to scan the whole SQLite file.
 
@@ -1152,33 +1154,39 @@ async def init_db() -> None:
 
 async def close_db() -> bool:
     """Dispose database engines and report whether SQLite teardown fully drained."""
+    loop = asyncio.get_running_loop()
+    # A teardown reclaimed as wedged can finish while engine disposal is in
+    # progress and register its bookkeeping close from a done callback. Use
+    # one deadline for both registry snapshots so that late work is included
+    # without allowing shutdown to grow an unbounded second wait.
+    deadline = loop.time() + 2 * _SQLITE_TEARDOWN_TIMEOUT_SECONDS
     sqlite_teardown_drained = True
-    if _wedged_teardown_cleanup_tasks:
-        # Abandoned wedged teardowns plus their deferred bookkeeping closes.
-        # Drain until the registry is stable — an abandoned teardown that
-        # completes during the drain schedules its bookkeeping close only
-        # after any one-time snapshot — and bound the whole drain so a
-        # teardown still wedged despite the reclaim (the interrupt is
-        # best-effort) cannot wedge shutdown too: one deadline covers the
-        # abandoned teardown and the bounded close it chains.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2 * _SQLITE_TEARDOWN_TIMEOUT_SECONDS
+
+    async def _drain_wedged_teardown_registry() -> None:
+        nonlocal sqlite_teardown_drained
         while _wedged_teardown_cleanup_tasks:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                logger.warning(
-                    "close_db abandoned %d still-pending wedged-teardown task(s) after the bounded "
-                    "drain; their connections were already reclaimed (issue #1682)",
-                    len(_wedged_teardown_cleanup_tasks),
-                )
+                if sqlite_teardown_drained:
+                    logger.warning(
+                        "close_db abandoned %d still-pending wedged-teardown task(s) after the bounded "
+                        "drain; their connections were already reclaimed (issue #1682)",
+                        len(_wedged_teardown_cleanup_tasks),
+                    )
                 sqlite_teardown_drained = False
-                break
+                return
             await asyncio.wait(tuple(_wedged_teardown_cleanup_tasks), timeout=remaining)
             # Completion callbacks (deregistration and scheduling of the
             # deferred bookkeeping close) run via call_soon; yield once so
             # the registry reflects them before the next stability check.
             await asyncio.sleep(0)
+
+    # Drain work already registered before disposal, then give disposal a
+    # chance to schedule late cleanup before taking the final bounded snapshot.
+    await _drain_wedged_teardown_registry()
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
+    await asyncio.sleep(0)
+    await _drain_wedged_teardown_registry()
     return sqlite_teardown_drained

@@ -1528,7 +1528,7 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
     assert not body_done.is_set()
 
     # Release runs concurrently with the still-draining detached body.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
 
     # Let release wait through several renew intervals (renew_interval = 1s)
     # while the body is still draining. On the pre-fix code release waits without
@@ -1618,7 +1618,7 @@ async def test_release_keeper_renews_across_cross_scheduler_stop_gap(monkeypatch
     # The final release runs: it stops the keeper (handing renewal to its own
     # drain), drains the body — here we let it finish — then deletes the row it
     # still owns.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
     release_body.set()
     await release_task
 

@@ -252,6 +252,21 @@ async def test_release_leader_lease_within_swallows_release_error(
     assert await _release_leader_lease_within(5) is False
 
 
+@pytest.mark.asyncio
+async def test_release_leader_lease_within_propagates_unsuccessful_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnsuccessfulElection:
+        async def release(self) -> bool:
+            return False
+
+    monkeypatch.setattr(app_main, "get_leader_election", lambda: _UnsuccessfulElection())
+
+    # A completed release task can still report that detached work or the row
+    # deletion was not durably completed; that result must suppress CLEAN.
+    assert await _release_leader_lease_within(5) is False
+
+
 @pytest.fixture(autouse=True)
 def reset_shutdown_state() -> Iterator[None]:
     shutdown_state.reset()
@@ -704,7 +719,7 @@ async def test_in_flight_middleware_increments_and_decrements() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -731,7 +746,7 @@ async def test_in_flight_middleware_checks_http_drain_after_registration(
 
     monkeypatch.setattr(shutdown_state, "is_draining", observe_drain_after_registration)
     middleware = InFlightMiddleware(inner_app)
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -840,7 +855,7 @@ async def test_in_flight_middleware_checks_websocket_drain_after_registration(
 
     monkeypatch.setattr(shutdown_state, "is_draining", observe_drain_after_registration)
     middleware = InFlightMiddleware(inner_app)
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def ws_receive():  # noqa: ANN202
         return {"type": "websocket.connect"}
@@ -891,7 +906,7 @@ async def test_in_flight_middleware_rejects_new_websocket_during_drain() -> None
     async def ws_receive():  # noqa: ANN202
         return {"type": "websocket.connect"}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def ws_send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1010,7 +1025,7 @@ async def test_in_flight_middleware_allows_internal_bridge_handoff_during_drain(
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"{}", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1050,7 +1065,7 @@ async def test_in_flight_middleware_allows_drain_status_during_drain() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1090,7 +1105,7 @@ async def test_in_flight_middleware_allows_drain_stop_during_drain() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)

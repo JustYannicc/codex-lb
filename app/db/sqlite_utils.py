@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TypedDict, cast
 
 
 @dataclass(slots=True)
@@ -31,11 +32,64 @@ class SqliteRunState(str, Enum):
 
 
 @dataclass(slots=True, frozen=True)
+class SqliteFileIdentity:
+    """The filesystem identity captured by a run-state transition."""
+
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    def as_payload(self) -> SqliteFileIdentityPayload:
+        return {
+            "dev": self.dev,
+            "ino": self.ino,
+            "size": self.size,
+            "mtime_ns": self.mtime_ns,
+            "ctime_ns": self.ctime_ns,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> SqliteFileIdentity | None:
+        if not isinstance(payload, dict) or payload.keys() != _SQLITE_FILE_IDENTITY_KEYS:
+            return None
+        typed_payload = cast(SqliteFileIdentityPayload, cast(object, payload))
+        values = (
+            typed_payload["dev"],
+            typed_payload["ino"],
+            typed_payload["size"],
+            typed_payload["mtime_ns"],
+            typed_payload["ctime_ns"],
+        )
+        if any(type(value) is not int for value in values):
+            return None
+        return cls(
+            dev=typed_payload["dev"],
+            ino=typed_payload["ino"],
+            size=typed_payload["size"],
+            mtime_ns=typed_payload["mtime_ns"],
+            ctime_ns=typed_payload["ctime_ns"],
+        )
+
+
+class SqliteFileIdentityPayload(TypedDict):
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+_SQLITE_FILE_IDENTITY_KEYS = frozenset({"dev", "ino", "size", "mtime_ns", "ctime_ns"})
+
+
+@dataclass(slots=True, frozen=True)
 class SqliteRunStateRecord:
     """A run-state transition and the database identity captured with it."""
 
     state: SqliteRunState
-    identity: dict[str, int] | None
+    identity: SqliteFileIdentity | None
 
 
 @contextmanager
@@ -74,6 +128,59 @@ def _decode_sqlalchemy_windows_sqlite_path(path: str) -> str:
     return urllib.parse.unquote(path)
 
 
+def _sqlite_uri_query(url: str, path_start: int) -> dict[str, list[str]]:
+    """Return decoded query values from a SQLite URL's URI suffix."""
+    query_start = url.find("?", path_start)
+    if query_start < 0:
+        return {}
+    fragment_start = url.find("#", query_start + 1)
+    query_end = len(url) if fragment_start < 0 else fragment_start
+    return urllib.parse.parse_qs(url[query_start + 1 : query_end], keep_blank_values=True)
+
+
+def _sqlite_uri_query_value_is_true(value: str) -> bool:
+    """Match the truthy values accepted by SQLAlchemy's SQLite dialect."""
+    return value.strip().lower() in {"1", "t", "true", "y", "yes", "on"}
+
+
+def _sqlite_uri_enabled(url: str, path_start: int) -> bool:
+    query = _sqlite_uri_query(url, path_start)
+    return any(_sqlite_uri_query_value_is_true(value) for value in query.get("uri", []))
+
+
+def _sqlite_uri_is_memory(url: str, path_start: int, path: str) -> bool:
+    """Return whether a SQLite URI denotes an in-memory database.
+
+    A ``file:`` name is a filesystem path until the SQLite dialect is put in
+    URI mode. Only then do ``mode=memory`` and SQLite's ``file::memory:`` URI
+    have their in-memory meaning; otherwise the path retains its normal
+    file-backed semantics for sidecars and startup checks.
+    """
+    if not path.startswith("file:") or not _sqlite_uri_enabled(url, path_start):
+        return False
+    query = _sqlite_uri_query(url, path_start)
+    if any(value.strip().lower() == "memory" for value in query.get("mode", [])):
+        return True
+    return urllib.parse.unquote(path) == "file::memory:"
+
+
+def _sqlite_uri_file_path(path: str) -> str | None:
+    """Resolve a supported file-backed SQLite URI to its filesystem path."""
+    parsed = urllib.parse.urlsplit(path)
+    if parsed.scheme != "file":
+        return path
+    if parsed.netloc not in {"", "localhost"}:
+        return None
+    resolved = urllib.parse.unquote(parsed.path)
+    # SQLite treats the tilde in ``file:~/store.db`` literally; unlike a
+    # normal application path it is not a shell shorthand for the home
+    # directory. Likewise, ``file:///C:/...`` uses one leading slash for the
+    # authority-less URI syntax rather than as part of the Windows drive path.
+    if len(resolved) >= 4 and resolved[0] == "/" and resolved[1].isalpha() and resolved[2] == ":":
+        resolved = resolved[1:]
+    return resolved
+
+
 def sqlite_db_path_from_url(url: str) -> Path | None:
     if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return None
@@ -83,7 +190,8 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     if marker_index < 0:
         return None
 
-    path = url[marker_index + len(marker) :]
+    path_start = marker_index + len(marker)
+    path = url[path_start:]
     if _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
         # Raw Windows drive and UNC paths are filesystem paths, not URL-encoded
         # forms: a `#` is a legal path character there (e.g. the decoded output
@@ -102,10 +210,41 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     # as `/var/lib/codex%20lb/store.db` must remain literal.
     path = _decode_sqlalchemy_windows_sqlite_path(path)
 
-    if not path or path == ":memory:":
+    if not path or path == ":memory:" or _sqlite_uri_is_memory(url, path_start, path):
         return None
 
-    return Path(path).expanduser()
+    uri_file_path = path.startswith("file:") and _sqlite_uri_enabled(url, path_start)
+    if uri_file_path:
+        path = _sqlite_uri_file_path(path)
+        if not path:
+            return None
+
+    # URI paths are already the exact SQLite target. In particular, a leading
+    # ``~`` is literal in SQLite's ``file:`` URI syntax and must not be
+    # expanded as it would be for a regular filesystem path.
+    return Path(path) if uri_file_path else Path(path).expanduser()
+
+
+def sqlite_url_is_memory(url: str) -> bool:
+    """Return whether a SQLite URL opens an in-memory database."""
+    if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
+        return False
+
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0:
+        # SQLAlchemy's ``sqlite:///``-less form (``sqlite://``) is its
+        # in-memory URL.
+        return True
+
+    path_start = marker_index + len(marker)
+    path = url[path_start:]
+    if _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
+        path = path.partition("?")[0]
+    else:
+        path = path.partition("?")[0].partition("#")[0]
+    path = _decode_sqlalchemy_windows_sqlite_path(path)
+    return not path or path == ":memory:" or _sqlite_uri_is_memory(url, path_start, path)
 
 
 def normalize_sqlite_url(url: str) -> str:
@@ -219,7 +358,7 @@ def release_sqlite_runstate_lock(connection: sqlite3.Connection) -> None:
         connection.close()
 
 
-def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
+def _sqlite_file_identity(db_path: Path) -> SqliteFileIdentity | None:
     """Identify the database file well enough to detect that it was replaced.
 
     Size and mtime alone are not enough: a restore that preserves timestamps
@@ -232,13 +371,13 @@ def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
         stat_result = db_path.stat()
     except OSError:
         return None
-    return {
-        "dev": stat_result.st_dev,
-        "ino": stat_result.st_ino,
-        "size": stat_result.st_size,
-        "mtime_ns": stat_result.st_mtime_ns,
-        "ctime_ns": stat_result.st_ctime_ns,
-    }
+    return SqliteFileIdentity(
+        dev=stat_result.st_dev,
+        ino=stat_result.st_ino,
+        size=stat_result.st_size,
+        mtime_ns=stat_result.st_mtime_ns,
+        ctime_ns=stat_result.st_ctime_ns,
+    )
 
 
 # Windows cannot obtain a directory handle through ``os.open``: the underlying
@@ -312,7 +451,7 @@ def read_sqlite_runstate_record(db_path: Path) -> SqliteRunStateRecord | None:
     try:
         payload = json.loads(raw)
         state = SqliteRunState(payload["state"])
-        identity = payload.get("identity")
+        identity = SqliteFileIdentity.from_payload(payload.get("identity"))
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return None
     if state is SqliteRunState.CLEAN:
@@ -376,7 +515,8 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     target = sqlite_runstate_path(db_path)
     tmp: Path | None = None
     tmp_fd: int | None = None
-    payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
+    identity = _sqlite_file_identity(db_path)
+    payload = json.dumps({"state": state.value, "identity": identity.as_payload() if identity else None})
     try:
         tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{target.name}.", suffix=".tmp", dir=target.parent)
         tmp = Path(tmp_name)

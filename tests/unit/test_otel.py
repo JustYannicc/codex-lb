@@ -612,6 +612,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     allow_fleet_refresh = asyncio.Event()
     fleet_refresh_finished = asyncio.Event()
     audit_write_actions: list[str] = []
+    clean_marker_attempted = False
 
     async def _mark_stale(*args, **kwargs) -> None:
         _ = (args, kwargs)
@@ -664,6 +665,10 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_db")
         return True
+
+    def _mark_sqlite_shutdown_clean() -> None:
+        nonlocal clean_marker_attempted
+        clean_marker_attempted = True
 
     class _BlockedAccountsService:
         async def import_account(self, raw: bytes) -> AccountImportResponse:
@@ -730,6 +735,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "mark_sqlite_shutdown_clean", _mark_sqlite_shutdown_clean)
     monkeypatch.setattr(audit_service_module, "_write_audit_log", _blocked_audit_write)
     monkeypatch.setattr(main.fleet_api, "_refresh_fleet_usage_with_owned_session", _blocked_fleet_refresh)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -835,6 +841,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     assert api_key_limit_reset_scheduler.stopped is True
     assert model_scheduler.stopped is True
     assert sticky_scheduler.stopped is True
+    assert clean_marker_attempted is False
 
 
 @pytest.mark.asyncio
