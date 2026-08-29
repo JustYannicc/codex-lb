@@ -5024,9 +5024,9 @@ ordinary selection, and MUST NOT reclassify local capacity or overload codes
 
 When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, or (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.
 
-While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
+While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session). For local session lookup and full-resend anchor injection, a quarantined live session MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent as a local session candidate. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still resolve and receive its durable anchor independently, because it has no other way to convey prior conversation state; quarantining the live session MUST NOT erase or rewrite that durable context.
 
-Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), and is cleared when a response completes with the applicable session-identity or exact recovery-generation fence. Every quarantine generation MUST come from a service-lifetime monotonic allocator and MUST never be reused, including after per-key removal, TTL/size-cap pruning, registry reinitialization, or an allocator reset; any allocator reset MUST resume above every generation already observed in that service lifetime. Quarantine cleanup MUST NOT write account health, alter routing or account selection, or mutate durable bridge ownership. For a registered primary key, only the current canonical session MAY clear its quarantine; the canonical registry wins over a detached session's weak owner token. The weak owner MAY authorize a clear only when no canonical primary is registered, and an ownerless entry MUST remain uncleared through that fallback. A primary completion MUST capture the key's quarantine generation, including an observed absence, before any await that can arm a replacement; only that exact captured generation MAY be cleared, so a completion cannot remove a newer entry or first-strike evidence armed while settlement is in flight. A stale-anchor recovery-origin key MUST be fenced by the exact quarantine generation observed when recovery was authorized; an observed absence or generation mismatch MUST leave a raced quarantine active.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 
@@ -5086,16 +5086,41 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 
 - **GIVEN** a quarantined session key — including one whose quarantined session is still open with other active requests
 - **WHEN** a later request arrives whose payload does not look like a full conversation resend
-- **THEN** the still-open quarantined session counts as absent for durable-anchor selection
+- **THEN** the still-open quarantined session counts as absent as a local session candidate
 - **AND** the durable anchor is still injected for that request, preserving the client's only way to convey prior context
 
 #### Scenario: Quarantine is bounded and self-clearing
 
 - **GIVEN** a quarantined session key
-- **WHEN** a response completes on that session key, or the quarantine TTL elapses
+- **WHEN** a response completes on that session key with its applicable session-identity or exact recovery-generation fence, or the quarantine TTL elapses
 - **THEN** the quarantine (and its eventless strike counter) is cleared
 - **AND** a session that survived the quarantine window is reusable again instead of staying rejected forever
 - **AND** no durable row, janitor work, or account-health write was involved at any point
+
+#### Scenario: Detached predecessor cannot clear a replacement quarantine
+
+- **GIVEN** a predecessor session quarantined a primary bridge key
+- **AND** a replacement session reused that key and received a newer quarantine generation
+- **WHEN** the detached predecessor completes and runs quarantine cleanup
+- **THEN** the replacement's primary-key quarantine remains active
+- **AND** the replacement generation remains authoritative
+
+#### Scenario: Primary completion preserves a first strike recorded during settlement
+
+- **GIVEN** a primary completion observes no active quarantine for its key
+- **WHEN** retry-circuit settlement yields and another request records the first
+  eventless strike for that key before completion cleanup resumes
+- **THEN** the completion leaves that inactive first-strike evidence in the
+  registry
+- **AND** the next eventless timeout can still observe it as the prior strike
+
+#### Scenario: A recovery that observed no quarantine cannot clear a raced one
+
+- **GIVEN** a stale-anchor recovery observed no active quarantine on its recovery-origin key when it was authorized
+- **AND** that key is quarantined while the retry is in flight
+- **WHEN** the recovery completes and runs quarantine cleanup
+- **THEN** the raced quarantine remains active
+- **AND** this holds whether the recovery-origin key is a distinct key or the completing session's own key
 
 ### Requirement: Scoped operation identity
 

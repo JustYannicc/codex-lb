@@ -3545,8 +3545,13 @@ class _HTTPBridgeStreamingMixin:
                 )
                 raise
             elif previous_response_rejected_full_resend:
-                await capture_verified_stale_anchor_circuit_generation(session)
+                # Capture the quarantine generation at rejection/authorization
+                # time, before the durable circuit lookup can yield to a
+                # concurrent retirement that arms a newer quarantine. An
+                # observed absence must remain an absence fence; otherwise
+                # completion of this recovery could clear that raced entry.
                 capture_verified_stale_anchor_quarantine_generation(session)
+                await capture_verified_stale_anchor_circuit_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,

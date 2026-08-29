@@ -78,6 +78,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _http_bridge_quarantine_clear_fence,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -2405,6 +2406,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        # Capture before taking the pending-lock or entering any await below.
+        # Alias persistence, operation updates, and recovery settlement can
+        # yield while a concurrent failure arms a newer same-key quarantine;
+        # that completion must not capture and clear evidence it did not see.
+        completion_quarantine_clear_fence = (
+            _http_bridge_quarantine_clear_fence(self, session.key) if event_type == "response.completed" else None
+        )
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -3414,6 +3422,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             _clear_http_bridge_quarantine(
                 self,
                 session,
+                key_generation=completion_quarantine_clear_fence,
+                key_generation_captured=True,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
             )

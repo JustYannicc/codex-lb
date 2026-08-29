@@ -1,0 +1,45 @@
+## Design
+
+The quarantine registry remains an in-memory map owned by one proxy service.
+Each entry keeps its key, reason, TTL/last-touch fields, and a weak reference
+to the session that armed the entry. A service-level counter allocates the next
+generation before the entry is updated. The counter survives entry pruning and
+is never derived from the current map alone.
+
+Primary-key cleanup is identity fenced. When `_http_bridge_sessions` has a
+canonical value for the key, only that exact session may clear the entry; the
+canonical registry wins over a detached object's weak owner token. The weak
+owner is a fallback only when no canonical primary is registered, which also
+protects an inactive first-strike entry from a detached predecessor. A
+completion captures the primary-key generation (including an observed
+absence) before any await that can arm a replacement. Only that exact captured
+generation may be cleared, so a completion cannot remove a newer entry armed
+while retry-circuit settlement is in flight. Mutable `session.quarantined`
+flags and recycled object ids are never authority.
+
+Recovery-origin cleanup is observation fenced. The recovery captures the active
+generation before authorization. If it observed no entry, it passes `None` and
+must not clear an entry that appeared later. If it observed a generation, only
+the exact surviving generation may be cleared; a pruned-and-reused key or any
+new arm is left intact. The same rule applies when the recovery-origin key is
+also the completing session's primary key.
+
+TTL and size pruning remain the only automatic expiry mechanisms. Successful
+completion clears only quarantine state; it does not touch retry-circuit,
+account-health, routing, or durable-owner state. Delta-only anchor selection is
+kept explicit in the main Responses contract: a quarantined live session is
+absent as a local session candidate, but the durable anchor remains available
+when the request itself does not carry a full resend.
+
+## Proof seams
+
+- Direct retirement and completion on one session clear a matching entry.
+- A replacement under the same key keeps its newer entry when the detached
+  predecessor completes.
+- A generation captured before TTL pruning cannot clear a newly armed entry on
+  the reused key.
+- A recovery that observed absence cannot clear an entry armed while it was in
+  flight, for both distinct-key and same-key cleanup.
+- A primary completion that yields during retry-circuit settlement cannot clear
+  a quarantine armed during that await.
+- Weak references compare object lifetime rather than integer ids.
