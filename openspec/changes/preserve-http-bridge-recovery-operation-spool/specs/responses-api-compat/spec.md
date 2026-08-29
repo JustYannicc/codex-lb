@@ -32,9 +32,9 @@ replacement dispatch.
 
 Before an account-neutral or owner-bound unanchored stale-anchor replay, the
 implementation MUST keep the operation fence and required spool reset strict.
-An unavailable, refused, or raising required reset MUST return the typed
-`bridge_continuity_persistence_failed` error and MUST NOT dispatch the
-unanchored replacement request.
+An unavailable or refused required reset, or a required reset operation that
+raises an exception, MUST return the typed `bridge_continuity_persistence_failed`
+error and MUST NOT dispatch the unanchored replacement request.
 
 #### Scenario: Required reset refusal blocks unanchored replay
 
