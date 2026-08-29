@@ -22,8 +22,9 @@
 - [x] 4.1 Run focused bridge tests and affected unit/integration checks.
 - [x] 4.2 Run Ruff, formatting, changed-file type checks, proxy architecture,
   simplicity, diff, and strict OpenSpec validation where available.
-  Strict OpenSpec CLI is unavailable in this environment (`openspec` is not
-  installed); record that as a hosted/environment gate rather than claiming a
-  local strict validation result.
-- [ ] 4.3 Review the immutable candidate and post exact-head evidence before
+  Exact candidate validation: `pnpm --silent dlx
+  @fission-ai/openspec@1.10.0 validate
+  pin-same-owner-stale-anchor-replay --strict` passes. Full strict specs remain
+  57/58 with the unrelated pre-existing `model-source-routing` failure.
+- [x] 4.3 Review the immutable candidate and post exact-head evidence before
   requesting maintainer merge.
