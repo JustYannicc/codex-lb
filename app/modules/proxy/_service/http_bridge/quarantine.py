@@ -143,8 +143,9 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
     """Capture the registry generation a later completion is allowed to clear.
 
     The first eventless timeout is retained as an inactive strike entry with
-    generation ``0``. It still needs an observation fence: an older completion
-    that observed no entry must not pop that strike after a settlement await.
+    its own generation. It still needs an observation fence: an older
+    completion that observed no entry must not pop that strike after a
+    settlement await.
     """
     registry = _http_bridge_quarantine_registry(service)
     now = time.monotonic()
@@ -217,7 +218,17 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     # Prune before touching the entry: a strike whose TTL already lapsed must
     # not be resurrected into a "consecutive" second strike hours later.
     _prune_http_bridge_quarantine_registry(registry, now)
-    entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
+    entry = registry.get(session.key)
+    if entry is None:
+        entry = _HTTPBridgeQuarantineEntry(
+            generation=_next_http_bridge_quarantine_generation(service, registry),
+        )
+        registry[session.key] = entry
+    elif entry.generation == 0:
+        # Restored/legacy entries may lack a generation. Allocate one before
+        # mutating the strike so a completion can never observe a reusable
+        # zero-generation fence.
+        entry.generation = _next_http_bridge_quarantine_generation(service, registry)
     # The strike entry is shared with the eventual quarantine record. Keep an
     # owner token from the first strike onward so a detached predecessor can
     # never clear or reset state after the key has been reused.
@@ -286,9 +297,9 @@ def _clear_http_bridge_quarantine(
                     continue
             if entry is not None:
                 # A captured absence is a real fence for both active
-                # quarantine and the inactive first-strike entry (generation
-                # zero). Only the exact observed registry generation may be
-                # removed after a completion await.
+                # quarantine and the inactive first-strike entry. Only the
+                # exact observed registry generation may be removed after a
+                # completion await.
                 if captured_generation is None or entry.generation != captured_generation:
                     continue
             session.quarantined = False
