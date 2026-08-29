@@ -5,11 +5,15 @@
 For a hard-affinity HTTP bridge key, a verified stale-anchor replay MUST capture
 the durable retry-circuit state and local admission state in one typed immutable
 snapshot. Immediately before queue publication, the replay MUST atomically
-claim that snapshot by advancing only `admission_generation`; it MUST compare
+claim that snapshot by advancing only `admission_generation` and recording a
+nullable claim start epoch, claimed generation, and claim-until epoch; it MUST compare
 the captured durable timestamp, failure count, cooldown, and generation, and it
 MUST compare the captured local failure/cooldown state before and after the
 durable operation. The claim MUST use a dialect-guarded SQLite/PostgreSQL
 `RETURNING` statement so a successful claim receipt is part of the same write.
+The claim lease MUST cover the request's remaining budget plus 60 seconds of
+cleanup grace (or two hours plus that grace when no request deadline is
+provided), and an active lease MUST block a second claim.
 
 #### Scenario: A newer same-key local failure suppresses a delayed claim
 
@@ -51,7 +55,10 @@ match. A conditional-clear refusal MUST report no match and MUST NOT remove
 local state. A confirmed durable miss MAY remove a local marker only when no
 newer local failure arrived during the lookup. Delayed failure persistence MUST
 merge using the existing failure observation metadata without rewriting the
-independent `admission_generation`.
+independent `admission_generation` or an active claim receipt. A terminal,
+aborted, cancelled, or proven pre-dispatch-cleaned replay MUST release its
+receipt by matching the claimed generation and any captured timestamps; an
+older receipt MUST NOT clear a reclaimed marker.
 
 #### Scenario: A newer durable failure survives an older success
 
@@ -71,10 +78,12 @@ independent `admission_generation`.
 ### Requirement: Retry-circuit stale purges are generation-fenced
 
 Expired retry-circuit purges MUST compare the captured `updated_at_epoch` and
-`admission_generation` in their delete predicate. A purge that loses a
-generation race MUST leave the newer row intact. If a stale-row purge returns
-no match or raises before confirming deletion, the loader MUST report the
-durable state as uncertain for that call.
+`admission_generation` in their delete predicate and MUST exclude rows with an
+unexpired claim receipt. A purge that loses a generation or claim-receipt race
+MUST leave the newer row intact. An expired claim MAY be reclaimed only by a
+new generation-fenced claim. If a stale-row purge returns no match or raises
+before confirming deletion, the loader MUST report the durable state as
+uncertain for that call.
 
 #### Scenario: A claim survives a stale purge
 
@@ -82,6 +91,16 @@ durable state as uncertain for that call.
 - **WHEN** a replay claim advances that row to generation `g + 1` before cleanup deletes it
 - **THEN** the cleanup delete MUST match no row
 - **AND** the claimed row MUST remain available for later generation-fenced settlement
+
+#### Scenario: Active and expired claim leases
+
+- **GIVEN** a retry row has an unexpired claim receipt
+- **WHEN** per-key or batch cleanup runs
+- **THEN** cleanup MUST leave that row intact
+- **WHEN** the receipt expires and a replay captures the current generation
+- **THEN** the replay MAY reclaim the row by advancing the generation and
+  recording a new lease
+- **AND** a release using the prior generation MUST return no match
 
 #### Scenario: An uncertain stale purge suppresses pre-created admission
 

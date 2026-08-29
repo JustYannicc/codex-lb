@@ -6162,6 +6162,10 @@ class _WebSocketMixin:
         if request_state.draining_until_terminal:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
             await proxy._release_websocket_request_state_reservation(request_state)
+            # A stale-anchor replay may be detached while waiting for its
+            # terminal event.  It still owns the durable admission marker;
+            # release it only after this terminal cleanup path has run.
+            await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
             # The reservation is settled; clear any terminal-bookkeeping
             # settlement claim so abort handling does not settle it again.
             request_state.terminal_settlement_phase = None
@@ -6435,6 +6439,11 @@ class _WebSocketMixin:
                     account_id=account_id_value,
                     session_id=request_state.session_id,
                 )
+
+        # Keep the admission marker until terminal settlement has completed;
+        # a later cleanup path can retry the fenced release if persistence was
+        # unavailable here.
+        await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
 
     async def _write_websocket_connect_failure(
         self,
@@ -6806,6 +6815,17 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+            try:
+                # Every request popped into terminal cleanup owns its replay
+                # marker until this terminal event/EOS handoff completes,
+                # including requests without an API-key reservation.
+                await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+            except Exception:
+                _facade().logger.warning(
+                    "Failed to release websocket retry-circuit admission claim during terminal cleanup request_id=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    exc_info=True,
+                )
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)

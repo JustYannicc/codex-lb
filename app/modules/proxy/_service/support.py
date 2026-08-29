@@ -944,6 +944,9 @@ class _HTTPBridgeRetryCircuitGeneration:
     local_consecutive_failures: int
     last_failure_monotonic: float
     local_cooldown_until: float
+    admission_claimed_at_epoch: float | None = None
+    admission_claimed_generation: int | None = None
+    admission_claimed_until_epoch: float | None = None
 
 
 @dataclass
@@ -1093,6 +1096,12 @@ class _WebSocketRequestState:
     verified_stale_anchor_retry_circuit_generation_captured: bool = False
     verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
     verified_stale_anchor_retry_circuit_generation: _HTTPBridgeRetryCircuitGeneration | None = None
+    # Durable generation written by the one-shot stale-anchor claim. The
+    # marker is released only after this request reaches terminal settlement
+    # (or a proven pre-dispatch cleanup path).
+    verified_stale_anchor_retry_circuit_claimed_generation: int | None = None
+    verified_stale_anchor_retry_circuit_claimed_at_epoch: float | None = None
+    verified_stale_anchor_retry_circuit_claimed_until_epoch: float | None = None
     verified_stale_anchor_quarantine_generation: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when
     # it claimed none); released by the submit finalizer whenever the probe

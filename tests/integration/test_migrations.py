@@ -1998,6 +1998,105 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
+    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = inspector.get_columns("http_bridge_retry_circuits")
+        marker = next(column for column in columns if column["name"] == "admission_claimed_at_epoch")
+        return {
+            "columns": {column["name"] for column in columns},
+            "marker_nullable": marker["nullable"],
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            before_has_table = await conn.run_sync(
+                lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_retry_circuits")
+            )
+            before_columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+        assert before_has_table is True
+        assert "admission_claimed_at_epoch" not in before_columns
+        assert "admission_claimed_generation" not in before_columns
+        assert "admission_claimed_until_epoch" not in before_columns
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(state["columns"])
+        assert state["marker_nullable"] is True
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_retry_circuits (
+                        session_key_kind, session_key_hash, api_key_scope,
+                        consecutive_failures, cooldown_until_epoch, last_detail,
+                        updated_at_epoch, admission_generation,
+                        admission_claimed_at_epoch, admission_claimed_generation,
+                        admission_claimed_until_epoch
+                    ) VALUES (
+                        'session_header', 'legacy-hash', '__anonymous__',
+                        2, 1300.0, 'stream_incomplete', 1200.0, 4, 1100.0, 4, 1200.0
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            after_downgrade = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+        assert "admission_claimed_at_epoch" not in after_downgrade
+        assert "admission_claimed_generation" not in after_downgrade
+        assert "admission_claimed_until_epoch" not in after_downgrade
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+        assert state["marker_nullable"] is True
+        # The forward-only migration preserves the durable row while the
+        # downgraded schema has no marker; re-upgrade restores a nullable NULL.
+        assert tuple(row) == (4, None, None, None)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_chunks_migration_preserves_legacy_and_guards_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

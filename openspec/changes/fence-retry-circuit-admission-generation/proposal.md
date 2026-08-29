@@ -24,14 +24,21 @@ explicitly generation-fenced.
   detached at that bound and remain fail-closed without a concurrent retry.
 - Recheck local state both before and after the durable CAS so a same-key local
   failure wins over a delayed replay claim.
+- Store a nullable claim receipt (`admission_claimed_at_epoch`,
+  `admission_claimed_generation`, and `admission_claimed_until_epoch`) with a
+  bounded lease. The request path carries its remaining budget plus cleanup
+  grace; direct repository callers use the two-hour budget plus the same
+  grace, so a crashed owner is reclaimable without allowing an active replay
+  to be purged.
 - Carry the independent `admission_generation` through local loads and delayed
   failure merges; failure observation timestamps remain merge metadata only.
-- Clear a circuit only with the captured timestamp and generation, retain local
-  admission state on lookup/CAS failure, and report whether the durable clear
-  actually matched.
+- Clear a circuit only with the captured timestamp and generation, release a
+  replay marker only with its claim receipt, retain local admission state on
+  lookup/CAS failure, and report whether the durable clear actually matched.
 - Fence stale retry-circuit purges on the captured failure timestamp and
-  admission generation so a delayed same-generation failure cannot be deleted
-  by an older cleanup read.
+  admission generation plus any captured claim receipt, so a delayed
+  same-generation failure or active replay cannot be deleted by an older
+  cleanup read.
 - Treat a stale purge that loses its conditional fence or fails before
   confirming deletion as unknown durable state: pre-created admission and its
   cooldown hint fail closed for that call, while an ordinary lookup failure
@@ -40,10 +47,11 @@ explicitly generation-fenced.
 ## Scope and non-goals
 
 This change touches retry-circuit state and its direct durable repository/
-coordinator boundary plus the call-site deadline/type plumbing and regression
-coverage. It does not add a migration, alter the existing admission-generation
-column, change cooldown policy, or include operation, quarantine, replay,
-account-routing, attribution, or container work from the other PR lanes.
+coordinator boundary, adds one forward-only nullable-column migration for the
+claim receipt, and updates the call-site deadline/type plumbing and regression
+coverage. It does not alter the existing admission-generation column, change
+cooldown policy, or include operation, quarantine, replay, account-routing,
+attribution, or container work from the other PR lanes.
 
 The stale-anchor recovery behavior remains a partial vehicle for #1867; this
 delta does not claim to close that broad PR or either continuity issue wholesale.

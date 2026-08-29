@@ -2292,14 +2292,30 @@ class _HTTPBridgeRequestSubmitMixin:
                     ):
                         circuit_key = request_state.verified_stale_anchor_retry_circuit_key
                         claim_outcome: bool | None = False
+                        claim_receipt: dict[str, Any] = {}
                         if circuit_key is not None:
                             claim_outcome = await self._claim_http_bridge_retry_circuit_generation(
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
                                 deadline=request_state.bridge_request_deadline,
+                                claim_receipt=claim_receipt,
                             )
                         generation_claimed = claim_outcome is True
+                        if generation_claimed:
+                            captured_generation = request_state.verified_stale_anchor_retry_circuit_generation
+                            claimed_generation = claim_receipt.get("generation")
+                            if claimed_generation is None:
+                                claimed_generation = (
+                                    captured_generation.admission_generation if captured_generation is not None else 0
+                                ) + 1
+                            request_state.verified_stale_anchor_retry_circuit_claimed_generation = claimed_generation
+                            request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = claim_receipt.get(
+                                "claimed_at_epoch"
+                            )
+                            request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = claim_receipt.get(
+                                "claimed_until_epoch"
+                            )
                         if not generation_claimed:
                             remote_probe_holds_lease = False
                             if claim_outcome is False and circuit_key is not None:
@@ -2797,6 +2813,30 @@ class _HTTPBridgeRequestSubmitMixin:
         counted_in_queue: bool,
         admission_waiter_registered: bool = False,
     ) -> None:
+        claimed_generation = request_state.verified_stale_anchor_retry_circuit_claimed_generation
+        claim_key = request_state.verified_stale_anchor_retry_circuit_key
+        if (
+            claimed_generation is not None
+            and claim_key is not None
+            and not request_state.recovery_attempt_dispatched
+            and not request_state.operation_dispatched
+        ):
+            clear_claim_kwargs: dict[str, Any] = {
+                "key": claim_key,
+                "claimed_generation": claimed_generation,
+            }
+            if request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch is not None:
+                clear_claim_kwargs["claimed_at_epoch"] = (
+                    request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch
+                )
+            if request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch is not None:
+                clear_claim_kwargs["claimed_until_epoch"] = (
+                    request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch
+                )
+            if await self._clear_http_bridge_retry_circuit_admission_claim(**clear_claim_kwargs):
+                request_state.verified_stale_anchor_retry_circuit_claimed_generation = None
+                request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
+                request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
         retire_closed_session = False
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:

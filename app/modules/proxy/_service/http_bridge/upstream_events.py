@@ -2473,27 +2473,41 @@ class _HTTPBridgeUpstreamEventsMixin:
             return
         with anyio.CancelScope(shield=True):
             for request_state in request_states:
-                if request_state.terminal_settlement_phase is None:
-                    continue
                 async with session.pending_lock:
                     if request_state in session.pending_requests:
+                        # A retry branch put the request back under pending
+                        # ownership.  Its replay still owns the marker, so
+                        # leave both settlement and marker cleanup to the
+                        # eventual terminal request.
                         request_state.terminal_settlement_phase = None
                         continue
-                request_state.terminal_settlement_phase = "abandoned"
+                needs_reservation_settlement = request_state.terminal_settlement_phase is not None
+                if needs_reservation_settlement:
+                    request_state.terminal_settlement_phase = "abandoned"
+                    try:
+                        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                        await self._release_websocket_request_state_reservation(request_state)
+                        request_state.api_key_reservation = None
+                        request_state.terminal_settlement_phase = None
+                    except Exception:
+                        # Leave the "abandoned" marker so the downstream
+                        # detach backstop can retry the settlement later.
+                        logger.warning(
+                            "Failed to settle aborted HTTP bridge terminal request request_id=%s account_id=%s",
+                            request_state.request_log_id or request_state.request_id,
+                            session.account.id,
+                            exc_info=True,
+                        )
                 try:
-                    self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-                    await self._release_websocket_request_state_reservation(request_state)
-                    request_state.api_key_reservation = None
-                    request_state.terminal_settlement_phase = None
+                    await self._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
                 except Exception:
-                    # Leave the "abandoned" marker so the downstream detach
-                    # backstop can retry the settlement later.
                     logger.warning(
-                        "Failed to settle aborted HTTP bridge terminal request request_id=%s account_id=%s",
+                        "Failed to release aborted HTTP bridge retry-circuit admission claim request_id=%s",
                         request_state.request_log_id or request_state.request_id,
-                        session.account.id,
                         exc_info=True,
                     )
+                if not needs_reservation_settlement:
+                    continue
                 # Best effort: unblock the downstream waiter so it observes
                 # end-of-stream instead of waiting for its idle timeout.
                 event_queue = request_state.event_queue

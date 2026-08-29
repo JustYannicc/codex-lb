@@ -3893,6 +3893,15 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.verified_stale_anchor_retry_circuit_generation = (
                         verified_stale_anchor_generation
                     )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_generation = (
+                        request_state.verified_stale_anchor_retry_circuit_claimed_generation
+                    )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = (
+                        request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch
+                    )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = (
+                        request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch
+                    )
                     retry_request_state.verified_stale_anchor_quarantine_generation = (
                         verified_stale_anchor_quarantine_generation
                     )
