@@ -283,6 +283,84 @@ def _prune_http_bridge_denied_anchor_fences(service: Any) -> None:
         fences.pop(oldest_response_id, None)
 
 
+def _drop_older_unpinned_http_bridge_denial_predecessors(
+    service: Any,
+    owner_key: str,
+    *,
+    owner_epoch: int,
+    response_id: str,
+) -> None:
+    """Keep only the newest unpinned stale predecessor for one owner.
+
+    A detached predecessor can publish after a successor has taken the same
+    durable owner.  Its denial still needs a positive fence while a prepared
+    request pins that response id, but retaining every late predecessor would
+    make the process-local ledger grow once per owner epoch.  Older entries
+    without request pins are superseded by the newest predecessor and can be
+    dropped. Pinned entries are marked superseded and remain only until their
+    request releases the pin.
+    """
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    for predecessor_response_id, entry in tuple(fences.items()):
+        if predecessor_response_id == response_id:
+            continue
+        if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+            continue
+        if (
+            entry.owner_key != owner_key
+            or not entry.retain_until_durable_clear
+            or entry.owner_epoch is None
+            or entry.owner_epoch >= owner_epoch
+        ):
+            continue
+        if entry.active_request_ids:
+            entry.superseded = True
+            entry.retain_until_durable_clear = False
+        else:
+            fences.pop(predecessor_response_id, None)
+
+
+def _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
+    service: Any,
+    owner_key: str,
+    *,
+    owner_epoch: int | None,
+    preserve_response_ids: Sequence[str] = (),
+) -> None:
+    """Retire stale predecessor fences after a newer owner clears its anchor.
+
+    A successful clear under the current owner proves that older response ids
+    are no longer the durable latest anchor.  Drop unpinned predecessor slots
+    and mark pinned slots superseded so their final release removes them.  The
+    explicit preserve set is used by session close while an unresolved cleanup
+    still needs its fence.
+    """
+    if owner_epoch is None:
+        return
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    preserved = set(preserve_response_ids)
+    for response_id, entry in tuple(fences.items()):
+        if response_id in preserved or not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+            continue
+        if (
+            entry.owner_key != owner_key
+            or not entry.retain_until_durable_clear
+            or entry.owner_epoch is None
+            or entry.owner_epoch >= owner_epoch
+        ):
+            continue
+        if entry.active_request_ids:
+            entry.superseded = True
+            entry.retain_until_durable_clear = False
+        else:
+            fences.pop(response_id, None)
+    _prune_http_bridge_denied_anchor_fences(service)
+
+
 def _schedule_http_bridge_background_cleanup(
     service: Any,
     awaitable: Coroutine[Any, Any, Any],
@@ -422,6 +500,12 @@ def _forget_http_bridge_denied_anchor_fence(
         entry.superseded = True
     else:
         fences.pop(response_id, None)
+    if entry.owner_key is not None:
+        _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
+            service,
+            entry.owner_key,
+            owner_epoch=entry.owner_epoch,
+        )
     _prune_http_bridge_denied_anchor_fences(service)
     return True
 
@@ -523,6 +607,13 @@ def _record_http_bridge_denied_anchor_fence(
             # Keep the positive tombstone even when no request is pinned: a
             # later recapture of a stale durable row must observe this denial.
             stale_owner_publication = True
+    if stale_owner_publication and owner_key is not None and owner_epoch is not None:
+        _drop_older_unpinned_http_bridge_denial_predecessors(
+            service,
+            owner_key,
+            owner_epoch=owner_epoch,
+            response_id=response_id,
+        )
     if (
         not stale_owner_publication
         and isinstance(fences, dict)
@@ -1407,6 +1498,12 @@ async def _close_http_bridge_session_resources(
         owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
         pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
         _forget_http_bridge_denied_anchor_fence_owner(
+            service,
+            owner_key,
+            owner_epoch=durable_owner_epoch,
+            preserve_response_ids=pending_denied_response_ids,
+        )
+        _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
             service,
             owner_key,
             owner_epoch=durable_owner_epoch,

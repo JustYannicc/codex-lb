@@ -134,6 +134,31 @@ durable denial slot while that session still records an unresolved durable
 cleanup, so a stale row cannot be recaptured; the slot MUST be retired when
 cleanup succeeds or the durable row is confirmed absent.
 
+When several late predecessor denials arrive for one durable owner, only the
+newest unpinned predecessor slot MUST be retained while its durable cleanup is
+unresolved. Older predecessor slots MUST remain fenced while request pins are
+active, then MUST be retired when those pins release or when a newer owner
+confirms durable cleanup. This keeps predecessor churn bounded without
+allowing an already-prepared request to redispatch a denied anchor.
+
+#### Scenario: Late predecessor churn remains bounded
+
+- **GIVEN** one durable owner advances through more than the process-local
+  denial-ledger bound
+- **AND** each successor denial is followed by a late predecessor denial
+- **WHEN** no predecessor request retains an active ledger pin
+- **THEN** the ledger retains the current denial and at most the newest
+  unresolved predecessor denial for that owner
+- **AND** a current-owner durable clear retires the unresolved predecessor
+  slot
+
+#### Scenario: Pinned predecessor survives bounded churn until release
+
+- **GIVEN** a late predecessor denial still has an active prepared-request pin
+- **WHEN** a newer predecessor denial is recorded for the same durable owner
+- **THEN** the pinned predecessor remains fenced until its request finalizes
+- **AND** releasing the final pin removes that superseded predecessor slot
+
 #### Scenario: A retirement failure cannot change the denial delivered downstream
 
 - **GIVEN** the bookkeeping performed while retiring a denied anchor raises

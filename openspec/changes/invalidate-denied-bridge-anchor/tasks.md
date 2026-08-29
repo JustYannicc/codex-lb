@@ -29,6 +29,7 @@
 - [x] 2.11 Retire no-durable-owner sibling-race slots and stale session/epoch owner slots without clearing a successor fence.
 - [x] 2.12 Keep local-only alias cleanup retries tracked when no durable owner exists, and distinguish unresolved current cleanup from historical sibling fences during close.
 - [x] 2.13 Retain an unpinned stale-predecessor denial fence until a current owner confirms the matching durable anchor is cleared.
+- [x] 2.14 Bound late-predecessor churn to the newest unpinned slot per owner, preserve older active pins until release, and retire retained predecessors after a newer durable clear.
 
 ## 3. Recovery Provenance
 

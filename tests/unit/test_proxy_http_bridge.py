@@ -33056,6 +33056,136 @@ def test_late_predecessor_denial_does_not_replace_a_newer_owner_epoch() -> None:
     assert predecessor_entry.superseded is True
 
 
+def test_stale_predecessor_churn_keeps_one_unpinned_slot_per_owner() -> None:
+    """Repeated late predecessor denials do not grow the process ledger."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_key = "durable-cross-session"
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor-0",
+        owner_key=owner_key,
+        owner_epoch=0,
+    )
+    for epoch in range(1, 601):
+        response_id = f"resp-successor-{epoch}"
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            service,
+            response_id,
+            owner_key=owner_key,
+            owner_epoch=epoch,
+        )
+        http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+            service,
+            f"resp-predecessor-{epoch - 1}",
+            owner_key=owner_key,
+            owner_epoch=epoch - 1,
+        )
+
+    fences = service._http_bridge_denied_anchor_fences
+    assert len(fences) == 2
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")[owner_key] == "resp-successor-600"
+    assert "resp-predecessor-599" in fences
+    assert fences["resp-predecessor-599"].retain_until_durable_clear is True
+
+
+def test_newer_durable_clear_retires_stale_predecessor_after_pin_release() -> None:
+    """A current-owner clear releases stale slots but respects active pins."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_key = "durable-cross-session"
+    stale_response_id = "resp-predecessor"
+    current_response_id = "resp-successor"
+    request_state = _denied_anchor_request_state(previous_response_id=stale_response_id)
+    request_state.request_id = "request-predecessor"
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        current_response_id,
+        owner_key=owner_key,
+        owner_epoch=9,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        stale_response_id,
+        owner_key=owner_key,
+        owner_epoch=4,
+    )
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id=stale_response_id,
+    )
+
+    assert http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence(
+        service,
+        current_response_id,
+        owner_key=owner_key,
+        owner_epoch=9,
+    )
+    stale_entry = service._http_bridge_denied_anchor_fences[stale_response_id]
+    assert stale_entry.active_request_ids == {request_state.request_id}
+    assert stale_entry.superseded is True
+    assert stale_entry.retain_until_durable_clear is False
+
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(
+        service,
+        request_state.request_id,
+    )
+    assert stale_response_id not in service._http_bridge_denied_anchor_fences
+
+
+def test_stale_predecessor_pin_survives_newer_predecessor_until_release() -> None:
+    """An older pinned predecessor is retained only for its pin lifetime."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_key = "durable-cross-session"
+    request_state = _denied_anchor_request_state(previous_response_id="resp-predecessor-0")
+    request_state.request_id = "request-predecessor-0"
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor-1",
+        owner_key=owner_key,
+        owner_epoch=1,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor-0",
+        owner_key=owner_key,
+        owner_epoch=0,
+    )
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        request_state,
+        response_id="resp-predecessor-0",
+    )
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor-2",
+        owner_key=owner_key,
+        owner_epoch=2,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor-1",
+        owner_key=owner_key,
+        owner_epoch=1,
+    )
+
+    pinned_entry = service._http_bridge_denied_anchor_fences["resp-predecessor-0"]
+    assert pinned_entry.active_request_ids == {request_state.request_id}
+    assert pinned_entry.superseded is True
+    assert pinned_entry.retain_until_durable_clear is False
+    assert "resp-predecessor-1" in service._http_bridge_denied_anchor_fences
+
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(
+        service,
+        request_state.request_id,
+    )
+    assert "resp-predecessor-0" not in service._http_bridge_denied_anchor_fences
+    assert "resp-predecessor-1" in service._http_bridge_denied_anchor_fences
+
+
 def test_late_local_predecessor_denial_does_not_replace_a_durable_owner() -> None:
     """An ownerless predecessor cannot roll back a durable successor fence."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
