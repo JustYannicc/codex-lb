@@ -34801,6 +34801,41 @@ def test_http_bridge_quarantine_generation_reset_does_not_reuse_observed_value()
     assert second_generation > first_generation
 
 
+def test_http_bridge_quarantine_first_strike_generation_survives_prune_and_reset() -> None:
+    """A stale first-strike completion cannot clear a post-prune replacement."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-first-strike-generation")
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    first_entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    first_generation = first_entry.generation
+    assert first_generation > 0
+    captured_generation = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence(service, session.key)
+    assert captured_generation == first_generation
+
+    # TTL pruning removes the inactive strike, then a service reset recreates
+    # the map and counter. The lifetime high-water mark must still fence it.
+    now = time.monotonic()
+    first_entry.quarantined_until = now - 1.0
+    first_entry.last_touched_monotonic = now - http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS - 1.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    service._http_bridge_quarantined_keys = {}
+    service._http_bridge_quarantine_generation_counter = 0
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    replacement_entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert replacement_entry.generation > first_generation
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured_generation,
+        key_generation_captured=True,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key] is replacement_entry
+    assert replacement_entry.consecutive_eventless_timeouts == 1
+
+
 def test_http_bridge_quarantine_distinct_key_clear_denied_when_no_generation_observed() -> None:
     """An observed absence must not clear a quarantine raced in during the retry."""
     service = SimpleNamespace()
