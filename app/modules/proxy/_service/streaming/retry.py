@@ -35,12 +35,12 @@ from app.core.clients.thread_cache_identity import (
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
-    synthetic_transport_failure_event,
-)
-from app.core.errors import (
     synthetic_stream_failure_event as response_failed_event,
+    synthetic_transport_failure_event,
 )
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import (
@@ -1326,13 +1326,29 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
-                    selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                        model=payload.model,
-                        additional_limit_name=None,
-                        account_ids=None,
-                    )
-                    if len(selection_inputs.accounts) != 1:
-                        message = "Previous response owner account is unavailable; retry later."
+                    # A file pin is structural ownership evidence, so it stays
+                    # strict even when the subscription pool has one candidate.
+                    if rewritten_file_account_id is not None:
+                        selection_candidates: tuple[Account, ...] = ()
+                    else:
+                        # Preserve the compatibility fallback for an owner miss
+                        # when exactly one eligible subscription account remains.
+                        # An account-scoped API key narrows the candidate set before
+                        # the count; an unscoped key uses the normal model pool. A
+                        # missing owner with multiple or zero candidates still fails
+                        # closed because selection would otherwise guess an account.
+                        selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                            model=payload.model,
+                            service_tier=payload.service_tier,
+                            additional_limit_name=None,
+                            account_ids=(
+                                api_key.assigned_account_ids
+                                if api_key is not None and api_key.account_assignment_scope_enabled
+                                else None
+                            ),
+                        )
+                    if len(selection_candidates) != 1:
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1341,7 +1357,7 @@ class _StreamingRetryMixin:
                             upstream_error_code="owner_lookup_miss",
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                             message,
                             response_id=request_id,
                         )
@@ -1354,7 +1370,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((clock.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1766,8 +1782,8 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "no_accounts"
                         if selection.error_code == "continuity_owner_conflict":
@@ -1920,8 +1936,8 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "upstream_unavailable"
                         if selection.error_code == "continuity_owner_conflict":
