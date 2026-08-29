@@ -3604,9 +3604,12 @@ class DurableBridgeRepository:
                     )
                     batch_deleted_count += len(deleted.scalars().all())
                 await self._session.commit()
-            if batch_deleted_count == 0:
-                return deleted_count
             deleted_count += batch_deleted_count
+            if batch_deleted_count != len(keys):
+                # A conditional delete miss means a concurrent claim or
+                # failure changed at least one selected row. Do not select it
+                # again with its new generation and delete that newer state.
+                return deleted_count
 
     async def upsert_alias(
         self,

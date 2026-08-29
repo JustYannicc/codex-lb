@@ -3501,6 +3501,58 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_generation_fenced(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_batch_purge_stops_after_mixed_generation_miss(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    updated_at_epoch = 1200.0
+    for session_key_value, api_key_id in (
+        ("sid-retry-circuit-mixed-purge-a", "key-mixed-purge-a"),
+        ("sid-retry-circuit-mixed-purge-b", "key-mixed-purge-b"),
+    ):
+        await coordinator.persist_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value=session_key_value,
+            api_key_id=api_key_id,
+            consecutive_failures=2,
+            cooldown_until_epoch=1300.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=updated_at_epoch,
+        )
+
+    async with async_session_factory() as purge_session:
+        blocked_session = _BlockedSelectSession(purge_session)
+        repository = DurableBridgeRepository(cast(AsyncSession, blocked_session))
+        purge_task = asyncio.create_task(
+            repository.purge_retry_circuits_before(updated_at_epoch + 1.0, batch_size=2),
+        )
+        await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
+
+        claimed = await coordinator.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-mixed-purge-b",
+            api_key_id="key-mixed-purge-b",
+            expected_updated_at_epoch=updated_at_epoch,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=1300.0,
+        )
+        assert claimed is not None
+        assert claimed.admission_generation == 1
+
+        blocked_session.release_delete.set()
+        assert await asyncio.wait_for(purge_task, timeout=1.0) == 1
+
+    remaining = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-mixed-purge-b",
+        api_key_id="key-mixed-purge-b",
+    )
+    assert remaining is not None
+    assert remaining.admission_generation == 1
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
     async_session_factory: Callable[[], AsyncSession],
     coordinator: DurableBridgeSessionCoordinator,
