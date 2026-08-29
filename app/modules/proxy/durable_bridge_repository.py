@@ -60,6 +60,9 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Keep the five-column tuple predicate below under SQLite's 999 bind-variable
+# limit while retaining a single writer transaction for each selected batch.
+_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 150
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -3581,21 +3584,25 @@ class DurableBridgeRepository:
             if not keys:
                 return deleted_count
             async with sqlite_writer_section():
-                deleted = await self._session.execute(
-                    delete(HttpBridgeRetryCircuit)
-                    .where(
-                        tuple_(
-                            HttpBridgeRetryCircuit.session_key_kind,
-                            HttpBridgeRetryCircuit.session_key_hash,
-                            HttpBridgeRetryCircuit.api_key_scope,
-                            HttpBridgeRetryCircuit.updated_at_epoch,
-                            HttpBridgeRetryCircuit.admission_generation,
-                        ).in_(keys)
+                batch_deleted_count = 0
+                for offset in range(0, len(keys), _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE):
+                    key_chunk = keys[offset : offset + _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE]
+                    deleted = await self._session.execute(
+                        delete(HttpBridgeRetryCircuit)
+                        .where(
+                            tuple_(
+                                HttpBridgeRetryCircuit.session_key_kind,
+                                HttpBridgeRetryCircuit.session_key_hash,
+                                HttpBridgeRetryCircuit.api_key_scope,
+                                HttpBridgeRetryCircuit.updated_at_epoch,
+                                HttpBridgeRetryCircuit.admission_generation,
+                            ).in_(key_chunk)
+                        )
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .where(stale_predicate)
+                        .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
-                    .where(stale_predicate)
-                    .returning(HttpBridgeRetryCircuit.session_key_hash)
-                )
-                batch_deleted_count = len(deleted.scalars().all())
+                    batch_deleted_count += len(deleted.scalars().all())
                 await self._session.commit()
             if batch_deleted_count == 0:
                 return deleted_count

@@ -17,6 +17,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.time import utcnow
 from app.db.models import (
     Base,
+    HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -59,6 +60,42 @@ async def async_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
 @pytest.fixture
 async def coordinator(async_session_factory: Callable[[], AsyncSession]) -> DurableBridgeSessionCoordinator:
     return DurableBridgeSessionCoordinator(async_session_factory)
+
+
+class _BlockedSelectSession:
+    def __init__(self, inner: AsyncSession) -> None:
+        self._inner = inner
+        self.selected = asyncio.Event()
+        self.release_delete = asyncio.Event()
+        self._blocked_once = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await self._inner.execute(statement, *args, **kwargs)
+        if getattr(statement, "is_select", False) and not self._blocked_once:
+            self._blocked_once = True
+            # Release the read transaction so the competing writer can commit
+            # before this stale batch reaches its DELETE.
+            await self._inner.rollback()
+            self.selected.set()
+            await self.release_delete.wait()
+        return result
+
+
+class _CountingDeleteSession:
+    def __init__(self, inner: AsyncSession) -> None:
+        self._inner = inner
+        self.delete_count = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(statement, "is_delete", False):
+            self.delete_count += 1
+        return await self._inner.execute(statement, *args, **kwargs)
 
 
 def test_durable_bridge_live_claim_requires_process_epoch() -> None:
@@ -3431,27 +3468,6 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_generation_fenced(
         updated_at_epoch=updated_at_epoch,
     )
 
-    class _BlockedSelectSession:
-        def __init__(self, inner: AsyncSession) -> None:
-            self._inner = inner
-            self.selected = asyncio.Event()
-            self.release_delete = asyncio.Event()
-            self._blocked_once = False
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._inner, name)
-
-        async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-            result = await self._inner.execute(statement, *args, **kwargs)
-            if getattr(statement, "is_select", False) and not self._blocked_once:
-                self._blocked_once = True
-                # Release the read transaction so the competing claim can
-                # commit before this stale batch reaches its DELETE.
-                await self._inner.rollback()
-                self.selected.set()
-                await self.release_delete.wait()
-            return result
-
     async with async_session_factory() as purge_session:
         blocked_session = _BlockedSelectSession(purge_session)
         repository = DurableBridgeRepository(cast(AsyncSession, blocked_session))
@@ -3500,25 +3516,6 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
         last_detail="stream_incomplete",
         updated_at_epoch=initial_updated_at_epoch,
     )
-
-    class _BlockedSelectSession:
-        def __init__(self, inner: AsyncSession) -> None:
-            self._inner = inner
-            self.selected = asyncio.Event()
-            self.release_delete = asyncio.Event()
-            self._blocked_once = False
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._inner, name)
-
-        async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-            result = await self._inner.execute(statement, *args, **kwargs)
-            if getattr(statement, "is_select", False) and not self._blocked_once:
-                self._blocked_once = True
-                await self._inner.rollback()
-                self.selected.set()
-                await self.release_delete.wait()
-            return result
 
     async with async_session_factory() as purge_session:
         blocked_session = _BlockedSelectSession(purge_session)
@@ -3599,6 +3596,39 @@ async def test_durable_bridge_retry_circuit_batch_purge_deletes_only_expired_row
     )
     assert remaining is not None
     assert remaining.updated_at_epoch == 1100.0
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_batch_purge_chunks_tuple_delete_keys(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    row_count = 151
+    async with async_session_factory() as seed_session:
+        seed_session.add_all(
+            [
+                HttpBridgeRetryCircuit(
+                    session_key_kind="session_header",
+                    session_key_hash=durable_bridge_hash(f"sid-retry-circuit-chunk-{index}"),
+                    api_key_scope=f"key-retry-circuit-chunk-{index}",
+                    consecutive_failures=2,
+                    cooldown_until_epoch=1300.0,
+                    last_detail="stream_incomplete",
+                    updated_at_epoch=900.0,
+                    admission_generation=0,
+                )
+                for index in range(row_count)
+            ]
+        )
+        await seed_session.commit()
+
+    async with async_session_factory() as purge_session:
+        counting_session = _CountingDeleteSession(purge_session)
+        deleted = await DurableBridgeRepository(cast(AsyncSession, counting_session)).purge_retry_circuits_before(
+            1000.0
+        )
+
+    assert deleted == row_count
+    assert counting_session.delete_count == 2
 
 
 def _lookup_with_lease(lease_expires_at):
