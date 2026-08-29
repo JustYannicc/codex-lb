@@ -205,6 +205,308 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # the configured stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
+# Keep process-local *uncaptured* entries bounded. A denied entry is retained
+# until the matching durable anchor is confirmed cleared; evicting it would let
+# a stale durable row regain generation zero after enough unrelated denials.
+# This is intentionally a correctness bound, not an unconditional memory cap.
+_HTTP_BRIDGE_DENIED_ANCHOR_FENCE_MAX_IDS = 512
+
+
+@dataclass
+class _HTTPBridgeDeniedAnchorFence:
+    generation: int
+    active_request_ids: set[str]
+    owner_key: str | None = None
+    owner_epoch: int | None = None
+    superseded: bool = False
+
+
+def _http_bridge_denied_anchor_fence_entry(
+    service: Any,
+    response_id: str,
+    *,
+    create: bool = False,
+) -> _HTTPBridgeDeniedAnchorFence | None:
+    """Read process-local denial state, tolerating older service doubles."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        if not create:
+            return None
+        fences = {}
+        setattr(service, "_http_bridge_denied_anchor_fences", fences)
+    entry = fences.get(response_id)
+    if isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+        return entry
+    if isinstance(entry, int):
+        upgraded = _HTTPBridgeDeniedAnchorFence(entry, set())
+        fences[response_id] = upgraded
+        return upgraded
+    if not create:
+        return None
+    entry = _HTTPBridgeDeniedAnchorFence(0, set())
+    fences[response_id] = entry
+    return entry
+
+
+def _http_bridge_denied_anchor_fence_current_map(service: Any) -> dict[str, str]:
+    """Read/create the owner-to-current-denial map used to bound fence state."""
+    current = getattr(service, "_http_bridge_denied_anchor_fence_current", None)
+    if not isinstance(current, dict):
+        current = {}
+        setattr(service, "_http_bridge_denied_anchor_fence_current", current)
+    return current
+
+
+def _prune_http_bridge_denied_anchor_fences(service: Any) -> None:
+    """Drop idle, non-denied entries without evicting a live denial fence."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    while len(fences) > _HTTP_BRIDGE_DENIED_ANCHOR_FENCE_MAX_IDS:
+        idle_entries = [
+            (response_id, entry)
+            for response_id, entry in fences.items()
+            if (
+                isinstance(entry, _HTTPBridgeDeniedAnchorFence)
+                and entry.generation == 0
+                and not entry.active_request_ids
+            )
+        ]
+        if not idle_entries:
+            return
+        oldest_response_id, _oldest_entry = min(idle_entries, key=lambda item: item[1].generation)
+        fences.pop(oldest_response_id, None)
+
+
+def _http_bridge_denied_anchor_fence_generation(service: Any, response_id: str) -> int:
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
+    return entry.generation if entry is not None else 0
+
+
+def _http_bridge_denied_anchor_fence_was_recorded(service: Any, response_id: str) -> bool:
+    """Return whether this process has already recorded a denial for an id."""
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
+    return bool(entry is not None and entry.generation > 0)
+
+
+def _retain_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    request_id: str,
+) -> int:
+    """Pin a response-id fence for the lifetime of one bridge request."""
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
+    assert entry is not None
+    entry.active_request_ids.add(request_id)
+    _prune_http_bridge_denied_anchor_fences(service)
+    return entry.generation
+
+
+def _capture_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    request_id: str,
+) -> tuple[int, bool]:
+    """Capture one anchor's generation and whether its denial is already known."""
+    generation = _retain_http_bridge_denied_anchor_fence(service, response_id, request_id)
+    return generation, _http_bridge_denied_anchor_fence_was_recorded(service, response_id)
+
+
+def _bind_http_bridge_proxy_injected_anchor(
+    service: Any,
+    request_state: _WebSocketRequestState,
+    *,
+    response_id: str | None,
+    proxy_injected: bool = True,
+    fence_request_id: str | None = None,
+) -> None:
+    """Bind denial provenance to the response id currently carried by a request."""
+    previous_fence_request_id = request_state.denied_proxy_injected_anchor_fence_request_id
+    _release_http_bridge_denied_anchor_fences(service, request_state.request_id)
+    if previous_fence_request_id is not None and previous_fence_request_id != request_state.request_id:
+        _release_http_bridge_denied_anchor_fences(service, previous_fence_request_id)
+    request_state.previous_response_id = response_id
+    request_state.proxy_injected_previous_response_id = proxy_injected and response_id is not None
+    request_state.denied_proxy_injected_anchor_fence_response_id = (
+        response_id if request_state.proxy_injected_previous_response_id else None
+    )
+    effective_fence_request_id = fence_request_id or previous_fence_request_id or request_state.request_id
+    request_state.denied_proxy_injected_anchor_fence_request_id = (
+        effective_fence_request_id if request_state.proxy_injected_previous_response_id else None
+    )
+    request_state.denied_proxy_injected_anchor_fence_generation_at_prepare = None
+    request_state.denied_proxy_injected_anchor_fence_was_already_denied = False
+    if request_state.proxy_injected_previous_response_id:
+        assert response_id is not None
+        (
+            request_state.denied_proxy_injected_anchor_fence_generation_at_prepare,
+            request_state.denied_proxy_injected_anchor_fence_was_already_denied,
+        ) = _capture_http_bridge_denied_anchor_fence(
+            service,
+            response_id,
+            effective_fence_request_id,
+        )
+
+
+def _forget_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    *,
+    owner_key: str | None = None,
+    owner_epoch: int | None = None,
+) -> bool:
+    """Release a denial tombstone once durable cleanup has been confirmed."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return False
+    entry = fences.get(response_id)
+    if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+        return False
+    if owner_key is not None and entry.owner_key != owner_key:
+        return False
+    if owner_epoch is not None and entry.owner_epoch != owner_epoch:
+        return False
+    current = _http_bridge_denied_anchor_fence_current_map(service)
+    if entry.owner_key is not None and current.get(entry.owner_key) == response_id:
+        current.pop(entry.owner_key, None)
+    if entry.active_request_ids:
+        # A request prepared before the denial must remain fenced until its
+        # final pin is released, even after durable cleanup succeeds.
+        entry.superseded = True
+    else:
+        fences.pop(response_id, None)
+    _prune_http_bridge_denied_anchor_fences(service)
+    return True
+
+
+def _forget_http_bridge_denied_anchor_fence_owner(
+    service: Any,
+    owner_key: str,
+    *,
+    owner_epoch: int | None = None,
+    preserve_response_ids: Sequence[str] = (),
+) -> None:
+    """Drop unpinned fence slots for a closed or superseded owner epoch."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    for response_id, entry in tuple(fences.items()):
+        if not isinstance(entry, _HTTPBridgeDeniedAnchorFence) or entry.owner_key != owner_key:
+            continue
+        if response_id in preserve_response_ids:
+            continue
+        if owner_epoch is not None and entry.owner_epoch not in (None, owner_epoch):
+            continue
+        _forget_http_bridge_denied_anchor_fence(
+            service,
+            response_id,
+            owner_key=owner_key,
+            owner_epoch=entry.owner_epoch,
+        )
+
+
+def _release_http_bridge_denied_anchor_fences(service: Any, request_id: str) -> None:
+    """Release all response-id fences captured by a completed bridge request."""
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    if not isinstance(fences, dict):
+        return
+    for response_id, entry in list(fences.items()):
+        if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
+            continue
+        entry.active_request_ids.discard(request_id)
+        if (entry.generation == 0 or entry.superseded) and not entry.active_request_ids:
+            fences.pop(response_id, None)
+    _prune_http_bridge_denied_anchor_fences(service)
+
+
+def _record_http_bridge_denied_anchor_fence(
+    service: Any,
+    response_id: str,
+    *,
+    owner_key: str | None = None,
+    owner_epoch: int | None = None,
+) -> int:
+    """Record a denial after a request may have captured the old generation."""
+    current: dict[str, str] | None = None
+    if owner_key is not None:
+        current = _http_bridge_denied_anchor_fence_current_map(service)
+    fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
+    prior_response_id = current.get(owner_key) if owner_key is not None and current is not None else None
+    existing_entry = fences.get(response_id) if isinstance(fences, dict) else None
+    if (
+        isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
+        and existing_entry.owner_key == owner_key
+        and owner_epoch is not None
+        and existing_entry.owner_epoch is not None
+        and owner_epoch < existing_entry.owner_epoch
+    ):
+        # A detached predecessor can publish after a successor has already
+        # claimed the same durable owner at a newer epoch.  The stale
+        # publication must not roll the entry back or advance the global
+        # generation, otherwise it can replace the successor's denial slot.
+        return existing_entry.generation
+    if prior_response_id is not None and prior_response_id != response_id and isinstance(fences, dict):
+        prior_entry = fences.get(prior_response_id)
+        if (
+            isinstance(prior_entry, _HTTPBridgeDeniedAnchorFence)
+            and owner_epoch is not None
+            and prior_entry.owner_epoch is not None
+            and owner_epoch < prior_entry.owner_epoch
+        ):
+            # The current owner slot belongs to a newer epoch.  Ignore this
+            # stale publication rather than superseding the successor fence.
+            return existing_entry.generation if isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence) else 0
+    if isinstance(fences, dict) and prior_response_id is not None and prior_response_id != response_id:
+        prior_entry = fences.get(prior_response_id)
+        if isinstance(prior_entry, _HTTPBridgeDeniedAnchorFence):
+            prior_entry.superseded = True
+            if not prior_entry.active_request_ids:
+                fences.pop(prior_response_id, None)
+    if owner_key is not None and current is not None:
+        # A session can first deny an anchor while it has only a process-local
+        # owner and later rebind that same denial to its durable owner. The
+        # fence entry has one authoritative owner, so retire any stale alias
+        # for the same response before publishing the new owner mapping.
+        for prior_owner_key, prior_response_id_for_owner in tuple(current.items()):
+            if prior_owner_key != owner_key and prior_response_id_for_owner == response_id:
+                current.pop(prior_owner_key, None)
+    if owner_key is not None and current is not None:
+        current[owner_key] = response_id
+    entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
+    assert entry is not None
+    generation = getattr(service, "_http_bridge_denied_anchor_fence_generation", 0)
+    if not isinstance(generation, int):
+        generation = 0
+    generation += 1
+    setattr(service, "_http_bridge_denied_anchor_fence_generation", generation)
+    entry.generation = generation
+    entry.owner_key = owner_key
+    entry.owner_epoch = owner_epoch
+    entry.superseded = False
+    _prune_http_bridge_denied_anchor_fences(service)
+    return generation
+
+
+def _http_bridge_denied_anchor_fence_advanced(
+    service: Any,
+    request_state: _WebSocketRequestState,
+) -> bool:
+    response_id = request_state.previous_response_id
+    captured_generation = request_state.denied_proxy_injected_anchor_fence_generation_at_prepare
+    return bool(
+        request_state.proxy_injected_previous_response_id
+        and response_id is not None
+        and request_state.denied_proxy_injected_anchor_fence_response_id == response_id
+        and (
+            request_state.denied_proxy_injected_anchor_fence_was_already_denied
+            or (
+                captured_generation is not None
+                and captured_generation < _http_bridge_denied_anchor_fence_generation(service, response_id)
+            )
+        )
+    )
+
+
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
@@ -989,6 +1291,9 @@ async def _close_http_bridge_session_resources(
     release_durable_session: bool = True,
 ) -> None:
     session.closed = True
+    durable_session_id = getattr(session, "durable_session_id", None)
+    durable_owner_epoch = getattr(session, "durable_owner_epoch", None)
+    durable_release_allowed = release_durable_session and _http_bridge_durable_release_allowed(service, session)
     if turn_state_lock_held:
         service._unregister_http_bridge_turn_states_locked(session)
         service._unregister_http_bridge_previous_response_ids_locked(session)
@@ -1002,16 +1307,39 @@ async def _close_http_bridge_session_resources(
         logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
     finally:
         session.account_lease = None
-    if release_durable_session and _http_bridge_durable_release_allowed(service, session):
+    durable_release_succeeded = durable_owner_epoch is None
+    release_result_was_missing = False
+    if durable_release_allowed:
         try:
-            await service._durable_bridge.release_live_session(
-                session_id=session.durable_session_id,
+            released = await service._durable_bridge.release_live_session(
+                session_id=durable_session_id,
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=session.durable_owner_epoch,
+                owner_epoch=durable_owner_epoch,
                 draining=shutdown_state.is_bridge_drain_active(),
             )
+            # Fenced releases return the current owner snapshot, while a
+            # missing row returns None. Only an ownerless snapshot (or a
+            # missing row) means this generation no longer owns a durable lease.
+            release_result_was_missing = released is None
+            durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
         except Exception:
             logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
+    # Closing a generation retires its process-local denial slot as well as
+    # its routing aliases. Keep pinned requests fenced; the owner helper marks
+    # those entries superseded and lets their final pin release remove them.
+    # A deliberately retained lease or a failed/fenced release still belongs
+    # to a live durable owner, so its fence must remain for a successor.
+    if durable_release_succeeded:
+        owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
+        pending_denied_response_ids = (
+            () if release_result_was_missing else tuple(getattr(session, "denied_proxy_injected_anchor_ids", ()))
+        )
+        _forget_http_bridge_denied_anchor_fence_owner(
+            service,
+            owner_key,
+            owner_epoch=durable_owner_epoch,
+            preserve_response_ids=pending_denied_response_ids,
+        )
     upstream_reader = session.upstream_reader
     if upstream_reader is not None:
         if upstream_reader is asyncio.current_task():

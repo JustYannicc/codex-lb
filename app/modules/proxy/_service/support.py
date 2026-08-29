@@ -1038,6 +1038,17 @@ class _WebSocketRequestState:
     # genuine delta-only client has no other way to convey prior context and
     # must stay anchored.
     proxy_injected_anchor_had_full_resend_payload: bool = False
+    # Process-local denial generation captured before any canonical session
+    # exists. A detached predecessor can reject the anchor while the request
+    # is waiting for owner resolution; retain that generation through retries
+    # so the successor's final dispatch fence still fails closed.
+    denied_proxy_injected_anchor_fence_generation_at_prepare: int | None = None
+    # Generation equality alone cannot distinguish a request captured after a
+    # denial from one captured before it. Preserve the tombstone observation on
+    # the prepared request so a stale durable lookup cannot be redispatched.
+    denied_proxy_injected_anchor_fence_response_id: str | None = None
+    denied_proxy_injected_anchor_fence_request_id: str | None = None
+    denied_proxy_injected_anchor_fence_was_already_denied: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -1286,6 +1297,11 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    # The live session keeps only its current denial tombstone.  Historical
+    # ids remain in the process-local fence ledger while prepared requests pin
+    # them, so this carrier cannot grow with every denied sibling anchor.
+    denied_proxy_injected_anchor_ids: set[str] = field(default_factory=set)
+    denied_proxy_injected_anchor_generation: int = 0
     alias_registration_generation: int = 0
     turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
