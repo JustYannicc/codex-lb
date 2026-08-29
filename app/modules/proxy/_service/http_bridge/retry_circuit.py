@@ -102,13 +102,22 @@ class _HTTPBridgeRetryCircuitBoundedCall:
     value: Any = None
 
 
+@dataclass(slots=True)
+class _HTTPBridgeRetryCircuitLoadOutcome:
+    """Per-call result details for a durable retry-circuit load."""
+
+    # A stale row was observed, but its conditional purge did not establish
+    # that the row was removed.  Callers must fail closed because the durable
+    # cooldown/generation may have changed while the purge was in flight.
+    stale_purge_uncertain: bool = False
+
+
 def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
     if reset_transient_cache is not None:
         reset_transient_cache()
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
-    service._http_bridge_retry_circuit_purge_fence_misses = set()
     service._http_bridge_retry_circuit_abandoned_tasks = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
 
@@ -535,7 +544,12 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
 
-    async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
+    async def _load_http_bridge_retry_circuit(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        outcome: _HTTPBridgeRetryCircuitLoadOutcome | None = None,
+    ) -> bool:
         if session.key.strength != "hard":
             return True
 
@@ -577,7 +591,6 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-                self._http_bridge_retry_circuit_purge_fence_misses.discard(session.key)
             return True
 
         now_epoch = time.time()
@@ -593,6 +606,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     expected_admission_generation=getattr(persisted, "admission_generation", 0),
                 )
             except Exception:
+                if outcome is not None:
+                    outcome.stale_purge_uncertain = True
                 logger.warning(
                     "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                     session.key.affinity_kind,
@@ -608,7 +623,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 # Its durable state is authoritative; keep local protection
                 # and fail closed instead of admitting against an unknown
                 # cooldown or generation.
-                self._http_bridge_retry_circuit_purge_fence_misses.add(session.key)
+                if outcome is not None:
+                    outcome.stale_purge_uncertain = True
                 logger.info(
                     "http_bridge_retry_circuit event=stale_purge_fence_miss bridge_kind=%s bridge_key=%s",
                     session.key.affinity_kind,
@@ -627,7 +643,6 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-                self._http_bridge_retry_circuit_purge_fence_misses.discard(session.key)
             return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
@@ -659,7 +674,6 @@ class _HTTPBridgeRetryCircuitMixin:
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(session.key)
-            self._http_bridge_retry_circuit_purge_fence_misses.discard(session.key)
         return True
 
     async def _persist_http_bridge_retry_circuit(
@@ -761,12 +775,12 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return True
 
-        load_succeeded = await self._load_http_bridge_retry_circuit(session)
-        if not load_succeeded and session.key in self._http_bridge_retry_circuit_purge_fence_misses:
-            # A stale purge fence miss means another writer changed the row
-            # after our read. Durable state is unknown, so do not admit
-            # another pre-created request. Other lookup failures retain the
-            # existing local fallback behavior.
+        load_outcome = _HTTPBridgeRetryCircuitLoadOutcome()
+        load_succeeded = await self._load_http_bridge_retry_circuit(session, outcome=load_outcome)
+        if not load_succeeded and load_outcome.stale_purge_uncertain:
+            # A stale purge could not establish removal, so durable state is
+            # unknown. Do not admit another pre-created request. Other lookup
+            # failures retain the existing local fallback behavior.
             return False
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
@@ -841,8 +855,9 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return 0.0
 
-        load_succeeded = await self._load_http_bridge_retry_circuit(session)
-        if not load_succeeded and session.key in self._http_bridge_retry_circuit_purge_fence_misses:
+        load_outcome = _HTTPBridgeRetryCircuitLoadOutcome()
+        load_succeeded = await self._load_http_bridge_retry_circuit(session, outcome=load_outcome)
+        if not load_succeeded and load_outcome.stale_purge_uncertain:
             return 0.0
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:

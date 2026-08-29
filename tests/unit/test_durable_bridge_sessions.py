@@ -3556,6 +3556,51 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
     assert remaining.consecutive_failures == 3
 
 
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_batch_purge_deletes_only_expired_rows(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    for index, updated_at_epoch in enumerate((900.0, 950.0, 1100.0)):
+        await coordinator.persist_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value=f"sid-retry-circuit-batch-purge-{index}",
+            api_key_id=f"key-batch-purge-{index}",
+            consecutive_failures=2,
+            cooldown_until_epoch=1300.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=updated_at_epoch,
+        )
+
+    async with async_session_factory() as session:
+        deleted = await DurableBridgeRepository(session).purge_retry_circuits_before(1000.0)
+
+    assert deleted == 2
+    assert (
+        await coordinator.lookup_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-batch-purge-0",
+            api_key_id="key-batch-purge-0",
+        )
+        is None
+    )
+    assert (
+        await coordinator.lookup_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-batch-purge-1",
+            api_key_id="key-batch-purge-1",
+        )
+        is None
+    )
+    remaining = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-batch-purge-2",
+        api_key_id="key-batch-purge-2",
+    )
+    assert remaining is not None
+    assert remaining.updated_at_epoch == 1100.0
+
+
 def _lookup_with_lease(lease_expires_at):
     from app.db.models import HttpBridgeSessionState
     from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup

@@ -48,7 +48,11 @@ Expired-row purges compare both the observed timestamp and
 ``admission_generation``. The per-key loader and the batch cleanup scheduler
 carry the generation selected by their read into the delete predicate, so a
 claim that advances the generation cannot be deleted by a stale purge and
-later recreated from generation zero.
+later recreated from generation zero. If that conditional delete returns no
+match or cannot complete, the loader reports an uncertain stale purge to its
+caller; pre-created admission remains fail-closed for that call rather than
+using an untrusted local fallback. The result is carried per call so concurrent
+loads cannot clear each other's uncertainty.
 
 ## Delayed failure merge
 
