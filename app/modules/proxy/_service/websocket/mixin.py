@@ -6,6 +6,7 @@ import logging
 import sys
 import time
 from collections import deque
+from collections.abc import Collection
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -68,6 +69,8 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
     STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     openai_error,
@@ -106,8 +109,9 @@ from app.modules.api_keys.service import (
     ApiKeysService,
 )
 from app.modules.model_sources.selection import (
+    ResponsesModelSourceOwnership,
     effective_model_for_api_key,
-    responses_model_is_source_owned,
+    resolve_responses_model_source_ownership,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -1821,15 +1825,14 @@ class _WebSocketMixin:
                                     # backend. Only recorded account ownership,
                                     # resolved above, may bypass this guard.
                                     and request_state.previous_response_owner_account_id is None
-                                    and await responses_model_is_source_owned(
-                                        request_state.model,
-                                        request_state.api_key or api_key,
-                                        # The raw client model, before enforcement
-                                        # normalized aliases: an alias-only source
-                                        # (``gpt-5-high``) is invisible in the
-                                        # normalized ``request_state.model``.
-                                        raw_model=request_state.raw_source_model,
+                                    and (
+                                        await self._resolve_cached_websocket_source_ownership(
+                                            request_state,
+                                            model=request_state.model,
+                                            api_key=request_state.api_key or api_key,
+                                        )
                                     )
+                                    is ResponsesModelSourceOwnership.SOURCE_OWNED
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
                                     # response.create that switches to a source-owned model
@@ -2064,6 +2067,74 @@ class _WebSocketMixin:
                             ("turn state", turn_state_owner_account_id),
                             ("previous response", previous_response_owner_account_id),
                         )
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and not request_state.source_route_excluded
+                        ):
+                            await self._resolve_cached_websocket_source_ownership(
+                                request_state,
+                                model=request_state.model,
+                                api_key=request_state.api_key or api_key,
+                            )
+                        owner_miss_requires_fail_closed = request_state.source_route_excluded
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and not owner_miss_requires_fail_closed
+                            and request_state.source_model_ownership is ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+                        ):
+                            # Preserve the compatibility fallback for a
+                            # subscription-model owner miss when exactly one
+                            # eligible account remains. Account-scoped API
+                            # keys narrow the count; unscoped keys use the
+                            # normal model pool. Structural source exclusions
+                            # stay strict because their account pin is the
+                            # only ownership evidence on this path.
+                            selection_api_key = request_state.api_key or api_key
+                            selection_account_ids: Collection[str] | None = None
+                            if selection_api_key is not None and selection_api_key.account_assignment_scope_enabled:
+                                selection_account_ids = selection_api_key.assigned_account_ids
+                            selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                                model=request_state.model,
+                                service_tier=request_state.requested_service_tier,
+                                additional_limit_name=None,
+                                account_ids=selection_account_ids,
+                                exclude_account_ids=request_state.excluded_account_ids,
+                                require_security_work_authorized=request_state.require_security_work_authorized,
+                            )
+                            owner_miss_requires_fail_closed = len(selection_candidates) != 1
+                            if not owner_miss_requires_fail_closed:
+                                # The sole-candidate fallback is only safe if
+                                # the existing socket is rebound to that same
+                                # candidate. Otherwise reuse would bypass the
+                                # refreshed API-key scope and dispatch the
+                                # continuation on an unrelated account.
+                                request_state.preferred_account_id = resolve_required_account_id(
+                                    ("existing bridge or file", request_state.preferred_account_id),
+                                    ("sole owner-miss candidate", selection_candidates[0].id),
+                                )
+                        if (
+                            request_state.previous_response_id is not None
+                            and previous_response_owner_account_id is None
+                            and owner_miss_requires_fail_closed
+                        ):
+                            message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
+                            _record_continuity_fail_closed(
+                                surface="websocket_connect",
+                                reason="owner_account_unavailable",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="owner_lookup_miss",
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+                                    message,
+                                    error_type="server_error",
+                                ),
+                            )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
@@ -2076,7 +2147,7 @@ class _WebSocketMixin:
                         await proxy._release_websocket_request_state_reservation(request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=None,
-                            api_key=api_key,
+                            api_key=request_state.api_key or api_key,
                             request_state=request_state,
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
@@ -2145,7 +2216,7 @@ class _WebSocketMixin:
                             client_send_lock=client_send_lock,
                             request_state=request_state,
                             account=account,
-                            api_key=api_key,
+                            api_key=request_state.api_key or api_key,
                             response_create_gate=response_create_gate,
                             downstream_activity=downstream_activity,
                             error_code="stream_incomplete",
@@ -2197,7 +2268,7 @@ class _WebSocketMixin:
                             await proxy._release_websocket_request_state_reservation(request_state)
                             await proxy._write_websocket_connect_failure(
                                 account_id=account.id,
-                                api_key=api_key,
+                                api_key=request_state.api_key or api_key,
                                 request_state=request_state,
                                 error_code=error_code or "upstream_error",
                                 error_message=error_message,
@@ -2227,7 +2298,7 @@ class _WebSocketMixin:
                             )
                             await proxy._write_websocket_connect_failure(
                                 account_id=account.id,
-                                api_key=api_key,
+                                api_key=request_state.api_key or api_key,
                                 request_state=request_state,
                                 error_code=CAPABILITY_ROUTING_UNAVAILABLE_CODE,
                                 error_message=CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE,
@@ -2263,7 +2334,7 @@ class _WebSocketMixin:
                                 client_send_lock=client_send_lock,
                                 request_state=request_state,
                                 account=account,
-                                api_key=api_key,
+                                api_key=request_state.api_key or api_key,
                                 response_create_gate=response_create_gate,
                                 downstream_activity=downstream_activity,
                             )
@@ -2367,7 +2438,7 @@ class _WebSocketMixin:
                         await proxy._release_websocket_request_state_reservation(response_create_request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=account.id if account else None,
-                            api_key=api_key,
+                            api_key=response_create_request_state.api_key or api_key,
                             request_state=response_create_request_state,
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
@@ -2434,7 +2505,7 @@ class _WebSocketMixin:
                                 client_send_lock=client_send_lock,
                                 request_state=request_state,
                                 account=account,
-                                api_key=api_key,
+                                api_key=request_state.api_key or api_key,
                                 response_create_gate=response_create_gate,
                                 downstream_activity=downstream_activity,
                             )
@@ -2511,7 +2582,7 @@ class _WebSocketMixin:
                         routing_strategy=routing_strategy,
                         model=request_state.model,
                         request_state=request_state,
-                        api_key=api_key,
+                        api_key=request_state.api_key or api_key,
                         client_send_lock=client_send_lock,
                         websocket=websocket,
                     )
@@ -3365,7 +3436,7 @@ class _WebSocketMixin:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=sticky_threads_enabled,
-            api_key=api_key,
+            api_key=refreshed_api_key,
             synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
@@ -3462,6 +3533,22 @@ class _WebSocketMixin:
             return None, selection.error_code, selection.error_message
         return selected_account, None, None
 
+    async def _resolve_cached_websocket_source_ownership(
+        self,
+        request_state: _WebSocketRequestState,
+        *,
+        model: str | None,
+        api_key: ApiKeyData | None,
+    ) -> ResponsesModelSourceOwnership:
+        """Resolve model-source ownership once for one ``response.create``."""
+        if request_state.source_model_ownership is None:
+            request_state.source_model_ownership = await resolve_responses_model_source_ownership(
+                model,
+                api_key,
+                raw_model=request_state.raw_source_model,
+            )
+        return request_state.source_model_ownership
+
     async def _connect_proxy_websocket(
         self,
         headers: dict[str, str],
@@ -3482,6 +3569,11 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        # ``request_state.api_key`` is refreshed for every response.create on a
+        # long-lived socket.  Keep all connect-time selection and failure
+        # accounting on that per-request policy rather than the handshake key,
+        # whose assignment scope may now be stale.
+        api_key = request_state.api_key or api_key
 
         async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
             if request_state.api_key_reservation is not None:
@@ -3531,14 +3623,14 @@ class _WebSocketMixin:
         if (
             not request_state.source_route_excluded
             and request_state.previous_response_owner_account_id is None
-            and await responses_model_is_source_owned(
-                model,
-                request_state.api_key or api_key,
-                # ``model`` is the session loop's post-enforcement
-                # ``request_state.model``; the raw client alias captured at
-                # preparation is what an alias-only source is registered under.
-                raw_model=request_state.raw_source_model,
+            and (
+                await self._resolve_cached_websocket_source_ownership(
+                    request_state,
+                    model=model,
+                    api_key=request_state.api_key or api_key,
+                )
             )
+            is ResponsesModelSourceOwnership.SOURCE_OWNED
         ):
             source_model = request_state.raw_source_model or model
             message = (
@@ -3931,13 +4023,13 @@ class _WebSocketMixin:
             and account.id != preferred_account_id
         ):
             await proxy._load_balancer.release_account_lease(selection.lease)
-            message = "Previous response owner account is unavailable; retry later."
+            message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
             _record_continuity_fail_closed(
                 surface="websocket_connect",
                 reason="owner_account_unavailable",
                 previous_response_id=request_state.previous_response_id,
                 session_id=request_state.session_id,
-                upstream_error_code="previous_response_owner_unavailable",
+                upstream_error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
             )
             await proxy._emit_websocket_connect_failure(
                 websocket,
@@ -3947,11 +4039,11 @@ class _WebSocketMixin:
                 request_state=request_state,
                 status_code=502,
                 payload=openai_error(
-                    "previous_response_owner_unavailable",
+                    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                     message,
                     error_type="server_error",
                 ),
-                error_code="previous_response_owner_unavailable",
+                error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                 error_message=message,
             )
             return None
@@ -4009,7 +4101,7 @@ class _WebSocketMixin:
                     error_message=error_message,
                 )
                 return None
-            message = "Previous response owner account is unavailable; retry later."
+            message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
             _record_continuity_fail_closed(
                 surface="websocket_connect",
                 reason="owner_account_unavailable",
@@ -4025,11 +4117,11 @@ class _WebSocketMixin:
                 request_state=request_state,
                 status_code=502,
                 payload=openai_error(
-                    "previous_response_owner_unavailable",
+                    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                     message,
                     error_type="server_error",
                 ),
-                error_code="previous_response_owner_unavailable",
+                error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                 error_message=message,
             )
             return None
@@ -6151,6 +6243,7 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        effective_api_key = request_state.api_key or api_key
         status = "success"
         error_code = None
         error_message = None
@@ -6260,7 +6353,7 @@ class _WebSocketMixin:
             upstream_control.retire_after_drain = True
         lifecycle = request_state.deferred_account_backoff_lifecycle
         settlement_committed = await proxy._settle_stream_api_key_usage(
-            api_key,
+            effective_api_key,
             request_state.api_key_reservation,
             settlement,
             response_id,
@@ -6308,7 +6401,7 @@ class _WebSocketMixin:
             try:
                 await proxy._write_request_log(
                     account_id=account_id_value,
-                    api_key=api_key,
+                    api_key=effective_api_key,
                     request_id=request_log_response_id,
                     archive_request_id=request_state.archive_request_id,
                     model=request_state.model or "",
@@ -6431,7 +6524,7 @@ class _WebSocketMixin:
             for remembered_response_id in _websocket_continuity_response_ids(request_state, response_id):
                 proxy._remember_websocket_previous_response_owner(
                     previous_response_id=remembered_response_id,
-                    api_key_id=api_key.id if api_key is not None else None,
+                    api_key_id=effective_api_key.id if effective_api_key is not None else None,
                     account_id=account_id_value,
                     session_id=request_state.session_id,
                 )
