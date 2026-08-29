@@ -11,18 +11,19 @@ with those sidecars present can attach stale state to the replacement.
   cannot remove another database's journal.
 - Reject identical source/output paths and source/output overlap with either
   path's fixed sidecars or master-journal namespace before any cleanup or write.
-- Remove pre-existing output sidecars before import, then fence final output
-  import with an exclusive SQLite transaction. Close every recovery connection
-  before final sidecar cleanup or either database rename so Windows can perform
-  the file mutations; repeat source cleanup after the source move to catch
-  sidecars recreated around that move. Fail closed if the lock or any sidecar
-  cleanup cannot complete before the source move. If repeat source cleanup
-  fails after the source move, restore the original source path before
-  reporting the error and leave the recovered output as an uninstalled
-  recovery artifact. If the second replacement rename fails, restore the
-  original source path before reporting the error. Closing the transaction
-  leaves a bounded post-probe window before cleanup and renames, so the
-  operator must keep external writers quiescent throughout it.
+- Remove pre-existing output sidecars before opening an exclusive SQLite
+  recovery transaction. Acquire that lock before exporting the source, generate
+  the dump from the lock-holding connection, and keep the transaction through
+  output import. Close every recovery connection before final sidecar cleanup
+  or either database rename so Windows can perform the file mutations; repeat
+  source cleanup after the source move to catch sidecars recreated around that
+  move. Fail closed if the lock or any sidecar cleanup cannot complete before
+  the source move. If repeat source cleanup fails after the source move, restore
+  the original source path before reporting the error and leave the recovered
+  output as an uninstalled recovery artifact. If the second replacement rename
+  fails, restore the original source path before reporting the error. Closing
+  the transaction leaves a bounded post-probe window before cleanup and
+  renames, so the operator must keep external writers quiescent throughout it.
 
 The recovery output and backup naming remain unchanged.
 

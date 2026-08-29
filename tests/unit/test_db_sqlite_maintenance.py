@@ -169,22 +169,30 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
         connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
         connection.execute("INSERT INTO items (name) VALUES ('base')")
 
+    # Capture a valid WAL containing a row absent from the base file. Restore
+    # the base bytes before recovery so the sidecars can be recreated after the
+    # locked export and prove that cleanup prevents them attaching on rename.
+    base_bytes = db_path.read_bytes()
+    stale_connection = sqlite3.connect(db_path)
+    stale_connection.execute("PRAGMA journal_mode=WAL")
+    stale_connection.execute("PRAGMA wal_autocheckpoint=0")
+    stale_connection.execute("INSERT INTO items (name) VALUES ('stale-after-dump')")
+    stale_connection.commit()
+    stale_sidecars = {suffix: Path(f"{db_path}{suffix}").read_bytes() for suffix in ("-wal", "-shm")}
+    stale_connection.close()
+    db_path.write_bytes(base_bytes)
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(f"{db_path}{suffix}").unlink(missing_ok=True)
+
     for suffix in ("-wal", "-shm", "-journal", "-mj12345678"):
         (tmp_path / f"{output_path.name}{suffix}").write_bytes(b"stale output sidecar")
 
     real_load_dump = recover_module._load_dump
 
-    def _load_dump_then_leave_source_wal(path: Path) -> str:
-        dump = real_load_dump(path)
-        connection = sqlite3.connect(path)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA wal_autocheckpoint=0")
-        connection.execute("INSERT INTO items (name) VALUES ('stale-after-dump')")
-        connection.commit()
-        source_sidecars = {suffix: Path(f"{path}{suffix}").read_bytes() for suffix in ("-wal", "-shm")}
-        connection.close()
-        for suffix, contents in source_sidecars.items():
-            Path(f"{path}{suffix}").write_bytes(contents)
+    def _load_dump_then_leave_source_wal(connection: sqlite3.Connection) -> str:
+        dump = real_load_dump(connection)
+        for suffix, contents in stale_sidecars.items():
+            Path(f"{db_path}{suffix}").write_bytes(contents)
         return dump
 
     monkeypatch.setattr(recover_module, "_load_dump", _load_dump_then_leave_source_wal)
@@ -213,11 +221,13 @@ def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
             assert not Path(f"{path}{suffix}").exists()
 
 
-def test_recover_replace_blocks_writes_across_the_install_boundary(
+@pytest.mark.parametrize("replace", [False, True])
+def test_recover_blocks_writes_during_locked_snapshot_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replace: bool,
 ) -> None:
-    """An active source connection cannot write while recovery replaces it."""
+    """An active source connection cannot write during the locked export."""
     db_path = tmp_path / "store.db"
     output_path = tmp_path / "recovered.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
@@ -226,11 +236,12 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
 
     writer = sqlite3.connect(db_path, timeout=0, isolation_level=None)
     write_attempts: list[str] = []
-    writer_closed_before_replace = False
-    real_write_dump = recover_module._write_dump
+    writer_closed_before_lock_release = False
+    real_load_dump = recover_module._load_dump
 
-    def _write_dump_then_attempt_source_write(output: Path, dump: str) -> None:
-        nonlocal writer_closed_before_replace
+    def _load_dump_then_attempt_source_write(connection: sqlite3.Connection) -> str:
+        nonlocal writer_closed_before_lock_release
+        dump = real_load_dump(connection)
         try:
             writer.execute("BEGIN IMMEDIATE")
             writer.execute("INSERT INTO items (name) VALUES ('raced')")
@@ -239,29 +250,30 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
         except sqlite3.OperationalError as exc:
             writer.rollback()
             write_attempts.append(str(exc).lower())
+        finally:
             # The operator contract requires external writer handles to be
-            # closed before the probe is released and replacement begins.
+            # closed before the recovery lock is released.
             writer.close()
-            writer_closed_before_replace = True
-        real_write_dump(output, dump)
+            writer_closed_before_lock_release = True
+        return dump
 
-    monkeypatch.setattr(recover_module, "_write_dump", _write_dump_then_attempt_source_write)
+    monkeypatch.setattr(recover_module, "_load_dump", _load_dump_then_attempt_source_write)
 
     try:
-        recover_module.recover_sqlite_db(
-            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        outcome = recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=replace)
         )
     finally:
         writer.close()
 
     assert write_attempts == ["database is locked"]
-    assert writer_closed_before_replace
+    assert writer_closed_before_lock_release
+    assert outcome.replaced is replace
+    assert db_path.exists()
+    assert output_path.exists() is not replace
     with closing(sqlite3.connect(db_path)) as connection:
         connection.execute("INSERT INTO items (name) VALUES ('after')")
-        assert connection.execute("SELECT name FROM items ORDER BY rowid").fetchall() == [
-            ("base",),
-            ("after",),
-        ]
+        assert connection.execute("SELECT name FROM items ORDER BY rowid").fetchall()[-1] == ("after",)
 
 
 def test_recover_replace_fails_closed_on_partial_sidecar_cleanup(

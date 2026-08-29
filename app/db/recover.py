@@ -85,14 +85,15 @@ def _remove_sqlite_sidecars(db_path: Path) -> None:
 
 
 @contextmanager
-def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
-    """Fence recovery preparation with SQLite's exclusive lock.
+def _sqlite_recovery_lock(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Fence source export and output import with an exclusive SQLite lock.
 
-    The lock blocks active writers while the recovered file is imported. The
-    connection is closed when this context exits, before sidecars are removed
-    or any filesystem rename, because Windows rejects file mutations with an
-    open handle. Sidecar cleanup and the renames therefore require the caller
-    to keep external writers quiescent during the bounded post-probe window.
+    The lock blocks active writers while the source dump is generated and the
+    recovered file is imported. The connection is closed when this context
+    exits, before sidecars are removed or any filesystem rename, because
+    Windows rejects file mutations with an open handle. Sidecar cleanup and
+    the renames therefore require the caller to keep external writers
+    quiescent during the bounded post-probe window.
     """
     connection = sqlite3.connect(str(db_path), timeout=0, isolation_level=None)
     acquired = False
@@ -102,7 +103,7 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
             acquired = True
         except sqlite3.Error as exc:
             raise RuntimeError(f"could not acquire exclusive SQLite recovery lock for {db_path}: {exc}") from exc
-        yield
+        yield connection
     finally:
         try:
             if acquired:
@@ -132,10 +133,9 @@ def _replace_recovered_database(source: Path, output: Path, backup: Path) -> Non
         raise RuntimeError(f"failed to install recovered SQLite database at {source}: {exc}") from exc
 
 
-def _load_dump(source: Path) -> str:
+def _load_dump(connection: sqlite3.Connection) -> str:
     try:
-        with sqlite_connection(source) as conn:
-            return "\n".join(conn.iterdump())
+        return "\n".join(connection.iterdump())
     except sqlite3.DatabaseError as exc:
         message = f"failed to read sqlite dump: {exc}"
         raise RuntimeError(message) from exc
@@ -165,11 +165,12 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
     else:
         logger.info("SQLite integrity check OK. Proceeding with export/import.")
 
-    dump = _load_dump(options.source)
+    _remove_sqlite_sidecars(options.output)
+    with _sqlite_recovery_lock(options.source) as source_connection:
+        dump = _load_dump(source_connection)
+        _write_dump(options.output, dump)
+
     if options.replace:
-        _remove_sqlite_sidecars(options.output)
-        with _sqlite_recovery_lock(options.source):
-            _write_dump(options.output, dump)
         # Recovery-owned SQLite handles are closed before any sidecar unlink.
         _remove_sqlite_sidecars(options.output)
         _remove_sqlite_sidecars(options.source)
@@ -182,8 +183,6 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
             integrity=integrity,
         )
 
-    _remove_sqlite_sidecars(options.output)
-    _write_dump(options.output, dump)
     _remove_sqlite_sidecars(options.output)
 
     return RecoveryOutcome(

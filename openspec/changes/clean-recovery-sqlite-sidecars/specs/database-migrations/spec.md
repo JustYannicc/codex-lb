@@ -10,41 +10,45 @@ master-journal namespace.
 
 When recovery writes or installs a file-backed SQLite replacement, it MUST
 remove the target's `-wal`, `-shm`, `-journal`, and master-journal sidecars
-before and after dump import. For `--replace`, pre-existing output sidecars
-MUST be removed before opening the recovery lock; recovery MUST then acquire an
-exclusive SQLite transaction on the source before final output import. Once
-that transaction closes, recovery MUST perform final output/source sidecar
-cleanup before either database rename. It MUST remove source sidecars before
-moving the source to its corrupt backup and repeat source cleanup after that
-move, before installing the output. Master-journal matching MUST treat the
-database basename literally. Recovery MUST close every recovery-opened SQLite
-connection before each sidecar unlink or database rename. The operator MUST
-keep external writers quiescent from lock release through completion of both
-renames; this is the bounded post-probe window required by platforms that
-reject filesystem mutation with open SQLite handles. If an active connection
-prevents the lock, or any pre-move sidecar cleanup fails, recovery MUST fail
-without moving the source or installing the output. If the repeat source
-cleanup after the source move fails, recovery MUST restore the source from its
-corrupt backup before reporting the cleanup failure; the recovered output MUST
-NOT be installed as the live source, though the output and any partially
-cleaned sidecars MAY remain for operator recovery.
+before and after dump import. For both output-only and `--replace` flows,
+pre-existing output sidecars MUST be removed before opening the recovery lock;
+recovery MUST then acquire an exclusive SQLite transaction on the source before
+exporting the source dump, generate that dump from the lock-holding connection,
+and retain the transaction through final output import. Once that transaction
+closes, recovery MUST perform final output/source sidecar cleanup before either
+database rename. It MUST remove source sidecars before moving the source to its
+corrupt backup and repeat source cleanup after that move, before installing the
+output. Master-journal matching MUST treat the database basename literally.
+Recovery MUST close every recovery-opened SQLite connection before each sidecar
+unlink or database rename. The operator MUST keep external writers quiescent
+from lock release through completion of both renames; this is the bounded
+post-probe window required by platforms that reject filesystem mutation with
+open SQLite handles. If an active connection prevents the lock, or any
+pre-move sidecar cleanup fails, recovery MUST fail without moving the source or
+installing the output. If the repeat source cleanup after the source move
+fails, recovery MUST restore the source from its corrupt backup before
+reporting the cleanup failure; the recovered output MUST NOT be installed as
+the live source, though the output and any partially cleaned sidecars MAY
+remain for operator recovery.
 
 #### Scenario: A stale source WAL cannot attach to the replacement
 
 - **GIVEN** recovery is replacing a file-backed SQLite database
-- **AND** a source WAL is created after the dump is read
+- **AND** source WAL/shared-memory sidecars contain rows that are absent from
+  the exported dump
 - **AND** external writers remain quiescent after the recovery lock closes
   until both replacement renames complete
 - **WHEN** recovery moves the source aside and installs the output
 - **THEN** source and output SQLite sidecars MUST be absent
 - **AND** reopening the installed database MUST not apply stale WAL rows
 
-#### Scenario: An active writer cannot cross the fenced preparation boundary
+#### Scenario: An active writer cannot cross the fenced snapshot boundary
 
 - **GIVEN** a source connection is open while recovery is replacing the database
 - **AND** the external writer closes its connection before recovery releases
   the lock and starts replacement renames
-- **WHEN** that connection attempts a write during final import and cleanup
+- **WHEN** that connection attempts a write while recovery exports the source
+  from the lock-holding transaction
 - **THEN** the write MUST fail with the source's exclusive recovery lock held
 - **AND** a fresh connection MUST be able to write to the installed database
 
