@@ -15247,7 +15247,7 @@ async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkey
         }
     )
 
-    with pytest.raises(RuntimeError, match="selection catalog unavailable"):
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service.compact_responses(
             payload,
             {},
@@ -15255,6 +15255,9 @@ async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkey
             api_key_reservation=reservation,
         )
 
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "previous_response_owner_unavailable"
+    assert _proxy_error_message(exc_info.value) == "Previous response owner account is unavailable; retry later."
     list_selection_candidates.assert_awaited_once()
     settle_compact_usage.assert_awaited_once()
     assert settle_compact_usage.await_args is not None
