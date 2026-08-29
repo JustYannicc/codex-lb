@@ -3611,7 +3611,11 @@ class _HTTPBridgeStreamingMixin:
                             preferred_account_id=retry_preferred_account_id,
                             preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
                             fallback_on_preferred_account_unavailable=not (
-                                file_required_preferred_account and retry_preferred_account_id is not None
+                                file_required_preferred_account
+                                or (
+                                    recovery_path == "local_previous_response_same_owner_fresh_replay"
+                                    and retry_preferred_account_id is not None
+                                )
                             ),
                             request_usage_budget=estimate_api_key_request_usage(retry_payload),
                             request_deadline=request_deadline,
