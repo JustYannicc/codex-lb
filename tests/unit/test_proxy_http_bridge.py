@@ -34532,6 +34532,29 @@ def test_http_bridge_quarantine_first_strike_survives_detached_predecessor_compl
     assert current_entry.owner_ref() is predecessor
 
 
+def test_http_bridge_quarantine_clear_rejects_ownerless_entry_without_canonical_session() -> None:
+    """A restored ownerless entry cannot be cleared by an unregistered session."""
+    session = _make_bridge_session(key_value="quarantine-ownerless-restored")
+    service = SimpleNamespace(
+        _http_bridge_quarantined_keys={
+            session.key: http_bridge_quarantine_module._HTTPBridgeQuarantineEntry(
+                generation=11,
+                quarantined_until=time.monotonic() + 60.0,
+                last_touched_monotonic=time.monotonic(),
+                reason="restored-ownerless-entry",
+            )
+        }
+    )
+    session.quarantined = True
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, session)
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service).get(session.key)
+    assert entry is not None
+    assert entry.generation == 11
+    assert session.quarantined is True
+
+
 def test_http_bridge_quarantine_cleared_by_completed_response(caplog: pytest.LogCaptureFixture) -> None:
     service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-clear")
