@@ -163,6 +163,958 @@ def _without_installation_metadata(text: str) -> dict[str, Any]:
     return payload
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_event_put_delivers_after_capacity_frees() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)
+    event_queue.put_nowait("first")
+
+    put_task = asyncio.create_task(event_queue.put("second"))
+    first = event_queue.get_nowait()
+    await put_task
+
+    assert first == "first"
+    assert event_queue.get_nowait() == "second"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_abort_terminal_cancels_blocked_producer_after_buffered_events() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    event_queue.put_nowait("first")
+    event_queue.put_nowait("second")
+    blocked_put = asyncio.create_task(event_queue.put("late"))
+    request_state = cast(Any, SimpleNamespace(event_queue=event_queue, event_queue_revoked=revoked))
+
+    await asyncio.sleep(0)
+    assert http_bridge_upstream_events_module._enqueue_http_bridge_abort_eos(request_state, event_queue) is True
+    assert revoked.is_set()
+    assert [event_queue.get_nowait(), event_queue.get_nowait(), event_queue.get_nowait()] == ["first", "second", None]
+
+    await asyncio.wait_for(blocked_put, timeout=0.1)
+    assert event_queue.empty()
+
+
+def test_http_bridge_plain_queue_terminal_delivery_does_not_duplicate_event() -> None:
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=3)
+    event_queue.put_nowait("buffered")
+    request_state = cast(Any, SimpleNamespace(event_queue=event_queue, event_queue_revoked=asyncio.Event()))
+    event_block = 'data: {"type":"response.completed"}\n\n'
+
+    assert (
+        http_bridge_upstream_events_module._enqueue_http_bridge_terminal_event(
+            request_state,
+            event_queue,
+            event_block,
+        )
+        is True
+    )
+    assert [event_queue.get_nowait(), event_queue.get_nowait(), event_queue.get_nowait()] == [
+        "buffered",
+        event_block,
+        None,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_queue_shares_a_process_byte_budget() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
+    first_revoked = asyncio.Event()
+    second_revoked = asyncio.Event()
+    first_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=first_revoked,
+        byte_budget=budget,
+    )
+    second_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=second_revoked,
+        byte_budget=budget,
+    )
+
+    first_queue.put_nowait("12345")
+    await second_queue.put("x")
+
+    assert budget.used_bytes == 5
+    assert first_queue.queued_bytes == 5
+    assert second_revoked.is_set()
+    assert second_queue.empty()
+    assert budget.used_bytes == 5
+
+    assert first_queue.get_nowait() == "12345"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_queue_discard_releases_only_its_shared_budget_credit() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=10)
+    first_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    second_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+
+    first_queue.put_nowait("123456")
+    second_queue.put_nowait("abcd")
+    assert budget.used_bytes == 10
+
+    first_queue.discard()
+
+    assert first_queue.queued_bytes == 0
+    assert second_queue.queued_bytes == 4
+    assert budget.used_bytes == 4
+    assert second_queue.get_nowait() == "abcd"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_queue_discard_releases_retained_payloads() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=16)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("payload")
+
+    event_queue.revoke()
+
+    assert revoked.is_set()
+    assert event_queue.queued_bytes == len("payload")
+    assert budget.used_bytes == len("payload")
+    event_queue.discard()
+    event_queue.discard()
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event consumed after budget selection must still reach the stream."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    original_wait = asyncio.wait
+    race_triggered = False
+
+    async def wait_with_budget_race(
+        awaitables: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal race_triggered
+        tasks = tuple(awaitables)
+        result = await original_wait(tasks, *args, **kwargs)
+        task_names = {task.get_name() for task in tasks if isinstance(task, asyncio.Task)}
+        if (
+            not race_triggered
+            and "http-bridge-event-consumer" in task_names
+            and "http-bridge-event-budget" in task_names
+        ):
+            race_triggered = True
+            event_queue.put_nowait("raced-event")
+            event_queue.revoke()
+        return result
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", wait_with_budget_race)
+
+    async def trip_budget() -> None:
+        await asyncio.sleep(0)
+        event_queue.budget_exceeded.set()
+
+    budget_task = asyncio.create_task(trip_budget())
+    assert await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=None) == "raced-event"
+    await budget_task
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-payload")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-detach-unread-live-queue",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="detach-unread-live-queue",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+
+    assert request_state.event_queue is None
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    replacement_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    replacement_queue.put_nowait("replacement")
+    assert replacement_queue.get_nowait() == "replacement"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_completed_delivery_cleanup_releases_queue_after_racing_detach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-payload")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-completed-delivery-racing-detach",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="completed-delivery-racing-detach",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def process_event(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        completed_delivery_scope: proxy_support_module._HTTPBridgeCompletedDeliveryScope,
+        claimed_terminal_request_states: list[proxy_service._WebSocketRequestState],
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        request_state.completed_delivery_scope = completed_delivery_scope
+        completed_delivery_scope.active = True
+        claimed_terminal_request_states.append(request_state)
+        assert await service._detach_http_bridge_request(target_session, request_state=request_state) is True
+        assert completed_delivery_scope.detach_requested is True
+        completed_delivery_scope.terminal_enqueued = True
+
+    monkeypatch.setattr(service, "_process_parsed_http_bridge_upstream_event", process_event)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        '{"type":"response.completed","response":{"id":"resp-completed-delivery-racing-detach"}}',
+    )
+
+    assert request_state.event_queue is None
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    assert revoked.is_set()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_aborted_completed_delivery_discards_detached_attached_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("unread-payload")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-aborted-completed-delivery",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        event_queue_consumer_started=True,
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="aborted-completed-delivery",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def process_event(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        completed_delivery_scope: proxy_support_module._HTTPBridgeCompletedDeliveryScope,
+        claimed_terminal_request_states: list[proxy_service._WebSocketRequestState],
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        request_state.completed_delivery_scope = completed_delivery_scope
+        completed_delivery_scope.active = True
+        claimed_terminal_request_states.append(request_state)
+        request_state.event_queue_revoked.set()
+        assert await service._detach_http_bridge_request(target_session, request_state=request_state) is True
+        assert completed_delivery_scope.detach_requested is True
+        raise RuntimeError("terminal delivery aborted")
+
+    monkeypatch.setattr(service, "_process_parsed_http_bridge_upstream_event", process_event)
+
+    with pytest.raises(RuntimeError, match="terminal delivery aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            '{"type":"response.completed","response":{"id":"resp-aborted-completed-delivery"}}',
+        )
+
+    assert request_state.event_queue is None
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+    assert revoked.is_set()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_without_keepalives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="budget-rejection-stream")
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1)
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=revoked,
+        byte_budget=budget,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-budget-rejection-stream",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        request_text='{"type":"response.create","input":"budget"}',
+        transport="http",
+    )
+    submitted = asyncio.Event()
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+        submitted.set()
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(sse_keepalive_interval_seconds=0, stream_idle_timeout_seconds=1),
+    )
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    stream_task = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(submitted.wait(), timeout=1.0)
+
+        async def wait_for_consumer_attachment() -> None:
+            while not request_state.event_queue_consumer_started:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_consumer_attachment(), timeout=1.0)
+        await event_queue.put("too-large-for-budget")
+        terminal_event = await asyncio.wait_for(stream_task, timeout=1.0)
+        assert '"type":"response.failed"' in terminal_event
+        assert '"code":"upstream_unavailable"' in terminal_event
+        assert event_queue.budget_exceeded.is_set()
+        assert revoked.is_set()
+        assert budget.used_bytes == 0
+        assert request_state.event_queue_consumer_started is True
+    finally:
+        stream_task.cancel()
+        await asyncio.gather(stream_task, return_exceptions=True)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)
+    event_queue.put_nowait("first")
+    revoked.set()
+
+    await event_queue.put("second")
+
+    assert event_queue.get_nowait() == "first"
+    assert event_queue.empty()
+    assert not [
+        task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="cancel-before-consumer")
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-before-consumer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        transport="http",
+    )
+    producer_started = asyncio.Event()
+    producer_released = asyncio.Event()
+    cooldown_entered = asyncio.Event()
+    producer_task: asyncio.Task[None] | None = None
+
+    async def produce_after_capacity() -> None:
+        producer_started.set()
+        await event_queue.put("third")
+        producer_released.set()
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        nonlocal producer_task
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+        event_queue.put_nowait("first")
+        event_queue.put_nowait("second")
+        producer_task = asyncio.create_task(produce_after_capacity(), name="test-http-bridge-blocked-producer")
+        await producer_started.wait()
+        assert not producer_task.done()
+
+    async def hold_precreated_cooldown(target_session: proxy_service._HTTPBridgeSession) -> float:
+        del target_session
+        cooldown_entered.set()
+        await asyncio.Event().wait()
+        return 0.0
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", hold_precreated_cooldown)
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    consumer_task = asyncio.create_task(anext(stream))
+
+    try:
+        await asyncio.wait_for(cooldown_entered.wait(), timeout=1.0)
+        consumer_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer_task, timeout=1.0)
+        await asyncio.wait_for(producer_released.wait(), timeout=1.0)
+        await stream.aclose()
+
+        assert revoked.is_set()
+        assert request_state.event_queue is None
+        assert request_state.event_queue_consumer_started is False
+        assert request_state.draining_until_terminal is True
+        assert request_state not in session.pending_requests
+        assert session.queued_request_count == 0
+        assert session.upstream_control.reconnect_requested is True
+        assert session.upstream_control.retire_after_drain is True
+        assert session.upstream_close_attempted is True
+        assert event_queue.empty()
+        assert event_queue.queued_bytes == 0
+        assert producer_task is not None and producer_task.done()
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+        ]
+    finally:
+        consumer_task.cancel()
+        if producer_task is not None:
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed send must not wait for a consumer that never starts."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="late-send-full-queue")
+    send_text = AsyncMock(side_effect=RuntimeError("late send"))
+    close = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=close))
+    service._http_bridge_sessions[session.key] = session
+
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    event_queue.put_nowait("buffered-1")
+    event_queue.put_nowait("buffered-2")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-late-send-full-queue",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        request_text='{"type":"response.create","input":"late"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_stream_lease_locked", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock())
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await asyncio.wait_for(
+            service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            ),
+            timeout=1.0,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert revoked.is_set()
+    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
+    assert session.pending_requests == deque()
+    assert send_text.await_count == 1
+    close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("buffered-1")
+    event_queue.put_nowait("buffered-2")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reader-full-preconsumer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="reader-full-preconsumer",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await asyncio.wait_for(
+        service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code="upstream_request_timeout",
+            error_message="reader failed",
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        ),
+        timeout=0.2,
+    )
+
+    assert event_queue.get_nowait() == "buffered-1"
+    assert event_queue.get_nowait() == "buffered-2"
+    terminal = event_queue.get_nowait()
+    assert terminal is not None and "upstream_request_timeout" in terminal
+    assert event_queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_event() -> None:
+    """A delayed sibling keeps its failure while the failed sender queue is released."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    def live_state(
+        request_id: str,
+        event_queue: http_bridge_request_submit_module._HTTPBridgeLiveEventQueue,
+    ) -> proxy_service._WebSocketRequestState:
+        return proxy_service._WebSocketRequestState(
+            request_id=request_id,
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=event_queue,
+            event_queue_revoked=event_queue.revoked,
+            transport="http",
+            skip_request_log=True,
+        )
+
+    sibling_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    sibling_queue.put_nowait("buffered-1")
+    sibling_queue.put_nowait("buffered-2")
+    sibling_state = live_state("req-preconsumer-sibling", sibling_queue)
+    failed_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
+    failed_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=failed_budget,
+    )
+    failed_state = live_state(
+        "req-liveness-failure",
+        failed_queue,
+    )
+    session = _make_bridge_session(
+        key_value="preconsumer-full-sibling",
+        pending_requests=deque([sibling_state, failed_state]),
+        queued_request_count=2,
+    )
+    session.liveness_settlement_owner = "send"
+
+    async def fail_reader(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        error_code: str,
+        error_message: str,
+        **kwargs: Any,
+    ) -> bool:
+        del kwargs
+        await service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        )
+        return True
+
+    service._fail_http_bridge_reader_and_maybe_retire = cast(Any, fail_reader)
+
+    await asyncio.wait_for(
+        http_bridge_request_submit_module._settle_claimed_http_bridge_liveness_failure(
+            service,
+            session,
+            failed_request_state=failed_state,
+            error_message="heartbeat expired",
+        ),
+        timeout=0.2,
+    )
+
+    assert sibling_state.event_queue_revoked.is_set()
+    assert sibling_queue.get_nowait() == "buffered-1"
+    assert sibling_queue.get_nowait() == "buffered-2"
+    sibling_terminal = sibling_queue.get_nowait()
+    assert sibling_terminal is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in sibling_terminal
+    assert sibling_queue.get_nowait() is None
+    assert failed_state.event_queue is None
+    assert failed_queue.empty()
+    assert failed_queue.queued_bytes == 0
+    assert failed_budget.used_bytes == 0
+    assert session.pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling_queue() -> None:
+    """Attached sibling and failed queues keep buffered events ahead of terminal EOS."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    sibling_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    sibling_queue.put_nowait("buffered-1")
+    sibling_queue.put_nowait("buffered-2")
+    sibling_state = proxy_service._WebSocketRequestState(
+        request_id="req-attached-paused-sibling",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-attached-paused-sibling",
+        event_queue=sibling_queue,
+        event_queue_revoked=sibling_queue.revoked,
+        event_queue_consumer_started=True,
+        transport="http",
+        skip_request_log=True,
+    )
+    failed_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    failed_queue.put_nowait("failed-buffered-1")
+    failed_queue.put_nowait("failed-buffered-2")
+    failed_state = proxy_service._WebSocketRequestState(
+        request_id="req-attached-paused-failure",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=failed_queue,
+        event_queue_revoked=failed_queue.revoked,
+        event_queue_consumer_started=True,
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="attached-paused-sibling",
+        pending_requests=deque([sibling_state, failed_state]),
+        queued_request_count=2,
+    )
+    session.liveness_settlement_owner = "send"
+    fail_reader_started = asyncio.Event()
+
+    async def fail_reader(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        error_code: str,
+        error_message: str,
+        **kwargs: Any,
+    ) -> bool:
+        del kwargs
+        fail_reader_started.set()
+        await service._fail_pending_websocket_requests(
+            account=None,
+            account_id_value=None,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        )
+        return True
+
+    service._fail_http_bridge_reader_and_maybe_retire = cast(Any, fail_reader)
+    settlement_task = asyncio.create_task(
+        http_bridge_request_submit_module._settle_claimed_http_bridge_liveness_failure(
+            service,
+            session,
+            failed_request_state=failed_state,
+            error_message="heartbeat expired",
+        )
+    )
+    try:
+        await asyncio.wait_for(fail_reader_started.wait(), timeout=1.0)
+
+        async def wait_for_pending_claim() -> None:
+            while session.pending_requests:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_pending_claim(), timeout=1.0)
+        assert not settlement_task.done()
+
+        async def consume_events(
+            queue: http_bridge_request_submit_module._HTTPBridgeLiveEventQueue,
+        ) -> list[str | None]:
+            events: list[str | None] = []
+            while True:
+                event = await queue.get()
+                events.append(event)
+                if event is None:
+                    return events
+
+        sibling_consumer_task = asyncio.create_task(consume_events(sibling_queue))
+        failed_consumer_task = asyncio.create_task(consume_events(failed_queue))
+        events, failed_events = await asyncio.wait_for(
+            asyncio.gather(sibling_consumer_task, failed_consumer_task),
+            timeout=1.0,
+        )
+        await asyncio.wait_for(settlement_task, timeout=1.0)
+    finally:
+        if not settlement_task.done():
+            settlement_task.cancel()
+        await asyncio.gather(settlement_task, return_exceptions=True)
+
+    assert events[:2] == ["buffered-1", "buffered-2"]
+    assert events[2] is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in events[2]
+    assert events[3] is None
+    assert sibling_state.event_queue_revoked.is_set() is False
+    assert failed_events[:2] == ["failed-buffered-1", "failed-buffered-2"]
+    assert failed_events[2] is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in failed_events[2]
+    assert failed_events[3] is None
+    assert failed_state.event_queue_revoked.is_set() is False
+    assert session.pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="finite-replay")
+    session.durable_session_id = "durable-finite-replay"
+    session.durable_owner_epoch = 3
+    live_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    live_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=live_budget,
+    )
+    live_queue.put_nowait("stale-buffered-event")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-finite-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp-parent",
+        event_queue=live_queue,
+        request_text='{"type":"response.create","previous_response_id":"resp-parent"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    operation = SimpleNamespace(
+        created=False,
+        operation_id="operation-finite-replay",
+        state="completed",
+        response_id="resp-replay",
+        event_spool_complete=True,
+    )
+    replay_events = ["data: first\n\n", "data: second\n\n"]
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=operation),
+            get_operation=AsyncMock(return_value=operation),
+            record_operation=AsyncMock(return_value=operation),
+            get_operation_events=AsyncMock(return_value=replay_events),
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-finite-replay"),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+        request_scope_id="scope-finite-replay",
+        owned_unanchored_handoff=False,
+    )
+
+    replay_queue = request_state.event_queue
+    assert replay_queue is not None
+    assert replay_queue is not live_queue
+    assert replay_queue.maxsize == len(replay_events) + 1
+    assert [replay_queue.get_nowait() for _ in range(replay_queue.qsize())] == [*replay_events, None]
+    assert request_state.operation_replay is True
+    assert live_queue.empty()
+    assert live_queue.queued_bytes == 0
+    assert live_budget.used_bytes == 0
+
+
 def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     payload = {"type": "response.create", "previous_response_id": "resp_parent", "input": "continue"}
     text = json.dumps(payload)
@@ -20632,6 +21584,154 @@ async def test_prewarm_timeout_pins_only_account_neutral_recovery_session(
 
 
 @pytest.mark.asyncio
+async def test_prewarm_uses_finite_revocable_queue_and_revokes_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-finite-queue")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-finite-queue",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    captured: dict[str, proxy_service._WebSocketRequestState] = {}
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    async def send_warmup(
+        _session: proxy_service._HTTPBridgeSession,
+        state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        captured["warmup"] = state
+        assert state.event_queue is not None
+        state.event_queue.put_nowait("buffered-1")
+        state.event_queue.put_nowait("buffered-2")
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(http_bridge_request_submit_module, "_prewarm_response_timeout_seconds", lambda: 0.001)
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module, "_send_http_bridge_request_text_with_archive_id", send_warmup
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    await service._maybe_prewarm_http_bridge_session(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+
+    warmup_state = captured["warmup"]
+    assert isinstance(warmup_state.event_queue, http_bridge_request_submit_module._HTTPBridgeLiveEventQueue)
+    assert warmup_state.event_queue.maxsize == http_bridge_request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE
+    assert warmup_state.event_queue_revoked.is_set()
+    await warmup_state.event_queue.put("after-timeout")
+    assert warmup_state.event_queue.empty()
+    assert session.pending_requests == deque()
+    assert session.response_create_gate.locked() is False
+    reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_budget_failure_is_not_treated_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-budget-failure")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-budget-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=0)
+    captured: dict[str, proxy_service._WebSocketRequestState] = {}
+
+    async def send_warmup(
+        _session: proxy_service._HTTPBridgeSession,
+        warmup_state: proxy_service._WebSocketRequestState,
+        _text: str,
+    ) -> None:
+        captured["warmup"] = warmup_state
+        assert warmup_state.event_queue is not None
+        warmup_state.event_queue.put_nowait("budget-rejected")
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET",
+        budget,
+    )
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_send_http_bridge_request_text_with_archive_id",
+        send_warmup,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert request_state.prewarm_status == "error"
+    assert session.pending_requests == deque()
+    assert session.response_create_gate.locked() is False
+    warmup_queue = captured["warmup"].event_queue
+    assert isinstance(warmup_queue, http_bridge_request_submit_module._HTTPBridgeLiveEventQueue)
+    assert warmup_queue.empty()
+    assert warmup_queue.queued_bytes == 0
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_prewarm_send_cancellation_retires_before_admitted_request_can_reuse_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -26622,7 +27722,11 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
             )
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    sibling_queue_revoked = asyncio.Event()
+    sibling_queue: asyncio.Queue[str | None] = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=sibling_queue_revoked,
+    )
     sibling_state = proxy_service._WebSocketRequestState(
         request_id="req-bridge-liveness-race-sibling",
         model="gpt-5.4",
@@ -26632,10 +27736,16 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         started_at=time.monotonic(),
         response_id="resp-bridge-liveness-race-sibling",
         event_queue=sibling_queue,
+        event_queue_revoked=sibling_queue_revoked,
+        event_queue_consumer_started=True,
         transport="http",
         skip_request_log=True,
     )
-    request_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_queue_revoked = asyncio.Event()
+    request_queue: asyncio.Queue[str | None] = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=request_queue_revoked,
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-bridge-liveness-race",
         model="gpt-5.4",
@@ -26645,6 +27755,7 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         started_at=time.monotonic(),
         awaiting_response_created=True,
         event_queue=request_queue,
+        event_queue_revoked=request_queue_revoked,
         request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
         transport="http",
         skip_request_log=True,
@@ -26716,12 +27827,14 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
     assert failure_call is not None
     assert failure_call.kwargs["penalize_account"] is False
     retry_precreated.assert_not_awaited()
-    for event_queue in (sibling_queue, request_queue):
-        terminal_event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-        assert terminal_event is not None
-        assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
-        assert await asyncio.wait_for(event_queue.get(), timeout=0.1) is None
+    terminal_event = await asyncio.wait_for(sibling_queue.get(), timeout=0.1)
+    assert terminal_event is not None
+    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
+    assert await asyncio.wait_for(sibling_queue.get(), timeout=0.1) is None
     assert request_state.replay_count == 0
+    assert sibling_state.event_queue_revoked.is_set() is False
+    assert request_state.event_queue_revoked.is_set() is True
+    assert request_queue.empty()
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0
     assert session.closed is True
