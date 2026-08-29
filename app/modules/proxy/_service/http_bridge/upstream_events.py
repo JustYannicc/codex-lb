@@ -1862,6 +1862,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        # Capture before taking the pending-lock or entering any await below.
+        # Alias persistence, operation updates, and recovery settlement can
+        # yield while a concurrent failure arms a newer same-key quarantine;
+        # that completion must not capture and clear evidence it did not see.
+        completion_quarantine_clear_fence = (
+            _http_bridge_quarantine_clear_fence(self, session.key) if event_type == "response.completed" else None
+        )
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -2841,7 +2848,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
-        completion_quarantine_clear_fence: int | None = None
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2849,11 +2855,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             and terminal_request_state.request_kind != "prewarm"
             and not terminal_request_state.skip_request_log
         ):
-            # Capture before the retry-circuit settlement await. A concurrent
-            # failure may arm a newer same-key quarantine while that await is
-            # in flight; this completion must not clear evidence it did not
-            # observe.
-            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
             if not terminal_request_state.verified_stale_anchor_replay:
                 await self._clear_http_bridge_retry_circuit(session)
             _clear_http_bridge_quarantine(
