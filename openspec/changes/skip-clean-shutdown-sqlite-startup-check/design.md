@@ -40,9 +40,10 @@ specification for the normative behavior.
   configured check when enabled, then refuses to continue with a potentially
   trusted marker. A successful invalidation may still return `False`, which
   forces the integrity scan while allowing the caller to continue.
-- `close_db()`, final proxy persistence, detached audit/fleet drains, and
-  leader release each report completion. The lifespan records `clean` only
-  when all four reports are true and database disposal itself completed.
+- `close_db()`, HTTP bridge durable-session marking/closure, final proxy
+  persistence, detached audit/fleet drains, and leader release each report
+  completion. The lifespan records `clean` only when every report is true and
+  database disposal itself completed.
 - The existing persistent sentinel remains a SQLite `BEGIN IMMEDIATE`
   transaction held until the clean-transition attempt. It is never unlinked;
   SQLite releases the transaction if the owner process dies. Subprocess tests

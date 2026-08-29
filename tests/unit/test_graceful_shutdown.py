@@ -10,6 +10,7 @@ import pytest
 from app.core.shutdown import wait_for_tasks_to_drain
 from app.main import (
     InFlightMiddleware,
+    _close_proxy_http_bridge_sessions_for_shutdown,
     _drain_detached_control_plane_tasks,
     _drain_proxy_persistence_tasks,
     _release_leader_lease_within,
@@ -151,6 +152,33 @@ async def test_lifespan_recovery_settlement_pre_drain_uses_remaining_deadline() 
             "task_name_prefixes": ("http-bridge-recovery-settlement-",),
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("mark", "close"))
+async def test_bridge_shutdown_failure_suppresses_clean_marker_gate(failure: str) -> None:
+    calls: list[str] = []
+
+    class _ProxyService:
+        async def mark_http_bridge_draining(self) -> bool:
+            calls.append("mark")
+            if failure == "mark":
+                return False
+            return True
+
+        async def close_all_http_bridge_sessions(self) -> None:
+            calls.append("close")
+            if failure == "close":
+                raise RuntimeError("bridge close failed")
+
+    assert (
+        await _close_proxy_http_bridge_sessions_for_shutdown(
+            _ProxyService(),
+            mark_draining=True,
+        )
+        is False
+    )
+    assert calls == ["mark", "close"]
 
 
 @pytest.mark.asyncio

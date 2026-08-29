@@ -82,3 +82,5 @@
 - [x] 4.10 Add regression coverage for unconfirmed failed-marker invalidation,
   abandoned SQLite teardown, and each database-owning shutdown drain suppressing
   the clean marker.
+- [x] 4.11 Add regression coverage for failed HTTP bridge durable-session
+  marking or closure suppressing the clean marker.

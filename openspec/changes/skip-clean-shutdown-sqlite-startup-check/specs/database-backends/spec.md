@@ -89,10 +89,10 @@ opened for writing.
 Recording `clean` MUST NOT be reachable unless the database engines actually
 finished disposing, all reclaimed SQLite teardown work finished within the
 bounded shutdown drain, and every database-owning shutdown drain completed.
-The database-owning drains include scheduler leader-release, final proxy
-persistence, and detached audit/fleet control-plane work. A cancelled or
-failed disposal, or a drain that abandons pending work at its deadline, MUST
-leave the run state unclean.
+The database-owning drains include HTTP bridge durable-session marking and
+closure, scheduler leader-release, final proxy persistence, and detached
+audit/fleet control-plane work. A cancelled or failed disposal, or a drain
+that abandons pending work at its deadline, MUST leave the run state unclean.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
 requirement governs only whether the selected mode runs on a given startup.
@@ -223,6 +223,13 @@ requirement governs only whether the selected mode runs on a given startup.
 - **GIVEN** the final proxy persistence drain, detached audit/fleet
   control-plane drain, or scheduler leader-release drain leaves database-using
   work pending at its deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: A failed HTTP bridge shutdown is not recorded as clean
+
+- **GIVEN** HTTP bridge durable-session marking or closure fails during shutdown
 - **WHEN** database disposal finishes
 - **THEN** the sidecar does not record a clean shutdown
 - **AND** the next startup runs the integrity check

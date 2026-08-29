@@ -1623,13 +1623,15 @@ class _HTTPBridgeMixin(
                 )
             return created_session
 
-    async def mark_http_bridge_draining(self) -> None:
+    async def mark_http_bridge_draining(self) -> bool:
         try:
             await self._durable_bridge.mark_instance_draining(
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
             )
         except Exception:
             logger.warning("Failed to mark durable HTTP bridge sessions draining", exc_info=True)
+            return False
+        return True
 
     def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
         now = _service_time().monotonic()

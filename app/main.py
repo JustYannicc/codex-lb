@@ -241,6 +241,42 @@ async def _drain_proxy_persistence_tasks(
         return False
 
 
+async def _close_proxy_http_bridge_sessions_for_shutdown(
+    proxy_service: Any,
+    *,
+    mark_draining: bool,
+) -> bool:
+    """Close bridge resources and report whether that database-owning step completed.
+
+    Bridge teardown owns durable leases and can enqueue persistence work.  A
+    failed mark/close must therefore suppress the SQLite ``clean`` marker even
+    when the later persistence drain and engine disposal happen to complete.
+    ``None`` remains a successful result for older/test service doubles; the
+    concrete service returns ``True`` or ``False`` explicitly.
+    """
+    if proxy_service is None:
+        return True
+
+    bridge_sessions_drained = True
+    if mark_draining and hasattr(proxy_service, "mark_http_bridge_draining"):
+        try:
+            result = await proxy_service.mark_http_bridge_draining()
+            if result is False:
+                bridge_sessions_drained = False
+        except Exception:
+            logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
+            bridge_sessions_drained = False
+
+    if hasattr(proxy_service, "close_all_http_bridge_sessions"):
+        try:
+            await proxy_service.close_all_http_bridge_sessions()
+        except Exception:
+            logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
+            bridge_sessions_drained = False
+
+    return bridge_sessions_drained
+
+
 async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> bool:
     # Closing admission is synchronous with producer checks on the event loop,
     # so no task can appear after the stable drain passes complete.
@@ -732,20 +768,11 @@ async def lifespan(app: FastAPI):
         # process-wide drain deadline. It is therefore part of the clean proof
         # even though the later detached drains have their own gates.
         database_tasks_drained = drained and recovery_settlements_drained
-        if (
-            recovery_settlements_drained
-            and proxy_service is not None
-            and hasattr(proxy_service, "mark_http_bridge_draining")
-        ):
-            try:
-                await proxy_service.mark_http_bridge_draining()
-            except Exception:
-                logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
-        if proxy_service is not None and hasattr(proxy_service, "close_all_http_bridge_sessions"):
-            try:
-                await proxy_service.close_all_http_bridge_sessions()
-            except Exception:
-                logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
+        bridge_sessions_drained = await _close_proxy_http_bridge_sessions_for_shutdown(
+            proxy_service,
+            mark_draining=recovery_settlements_drained,
+        )
+        database_tasks_drained = database_tasks_drained and bridge_sessions_drained
         # Drain AFTER the bridge teardown: failing a bridge's pending
         # requests writes their request logs, which enqueues more
         # persistence tasks that this drain must cover.
