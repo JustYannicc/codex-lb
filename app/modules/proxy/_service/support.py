@@ -1270,6 +1270,11 @@ class _HTTPBridgeSession:
     # ids remain in the process-local fence ledger while prepared requests pin
     # them, so this carrier cannot grow with every denied sibling anchor.
     denied_proxy_injected_anchor_ids: set[str] = field(default_factory=set)
+    # Denials whose durable or local alias cleanup still needs a retry.  This
+    # is separate from the current tombstone carrier: a sibling-advanced
+    # denial remains fenced for pinned requests, but is not unresolved cleanup
+    # and may be retired when the session closes.
+    denied_proxy_injected_anchor_cleanup_pending: set[str] = field(default_factory=set)
     denied_proxy_injected_anchor_generation: int = 0
     alias_registration_generation: int = 0
     turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)

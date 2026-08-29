@@ -33030,7 +33030,7 @@ def test_denied_anchor_owner_epoch_cleanup_does_not_clear_successor_slot() -> No
 
 
 def test_late_predecessor_denial_does_not_replace_a_newer_owner_epoch() -> None:
-    """A stale predecessor publication cannot roll back the current slot."""
+    """A stale predecessor publication keeps its own positive tombstone."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
     successor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
@@ -33046,10 +33046,37 @@ def test_late_predecessor_denial_does_not_replace_a_newer_owner_epoch() -> None:
         owner_epoch=4,
     )
 
-    assert predecessor_generation == 0
+    assert predecessor_generation > successor_generation
     assert getattr(service, "_http_bridge_denied_anchor_fence_current")["durable-cross-session"] == "resp-successor"
     assert service._http_bridge_denied_anchor_fences["resp-successor"].generation == successor_generation
-    assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
+    predecessor_entry = service._http_bridge_denied_anchor_fences["resp-predecessor"]
+    assert predecessor_entry.generation == predecessor_generation
+    assert predecessor_entry.owner_key == "durable-cross-session"
+    assert predecessor_entry.owner_epoch == 4
+    assert predecessor_entry.superseded is True
+
+
+def test_late_local_predecessor_denial_does_not_replace_a_durable_owner() -> None:
+    """An ownerless predecessor cannot roll back a durable successor fence."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    successor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-shared-anchor",
+        owner_key="durable-successor",
+        owner_epoch=9,
+    )
+    predecessor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-shared-anchor",
+        owner_key="local:predecessor",
+    )
+
+    assert predecessor_generation == successor_generation
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current") == {"durable-successor": "resp-shared-anchor"}
+    entry = service._http_bridge_denied_anchor_fences["resp-shared-anchor"]
+    assert entry.owner_key == "durable-successor"
+    assert entry.owner_epoch == 9
 
 
 def test_late_predecessor_denial_advances_a_pinned_capture_without_replacing_owner() -> None:
@@ -33151,6 +33178,43 @@ async def test_closing_http_bridge_session_retires_unpinned_owner_fence() -> Non
 
 
 @pytest.mark.asyncio
+async def test_closing_http_bridge_session_retires_unpinned_sibling_advanced_fence() -> None:
+    """A sibling-advanced denial is historical, not unresolved cleanup."""
+    session = _denied_anchor_session(anchor="resp-successor")
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(
+            release_live_session=AsyncMock(
+                return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+            )
+        ),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+
+    await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp-denied",
+    )
+
+    entry = service._http_bridge_denied_anchor_fences["resp-denied"]
+    assert entry.active_request_ids == set()
+    assert session.denied_proxy_injected_anchor_cleanup_pending == set()
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+    )
+
+    assert "resp-denied" not in service._http_bridge_denied_anchor_fences
+    assert session.durable_session_id not in service._http_bridge_denied_anchor_fence_current
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("release_durable_session", [True, False])
 async def test_closing_http_bridge_session_keeps_fence_after_durable_release_failure_or_retention(
     release_durable_session: bool,
@@ -33232,6 +33296,7 @@ async def test_closing_http_bridge_session_keeps_fence_when_release_leaves_denia
     """A lease release cannot retire an anchor whose durable clear failed."""
     session = _denied_anchor_session()
     session.denied_proxy_injected_anchor_ids.add("resp_denied")
+    session.denied_proxy_injected_anchor_cleanup_pending.add("resp_denied")
     service = SimpleNamespace(
         _background_cleanup_tasks=set(),
         _unregister_http_bridge_turn_states_locked=Mock(),
@@ -33259,6 +33324,87 @@ async def test_closing_http_bridge_session_keeps_fence_when_release_leaves_denia
 
     assert "resp_denied" in service._http_bridge_denied_anchor_fences
     assert service._http_bridge_denied_anchor_fence_current[session.durable_session_id] == "resp_denied"
+
+
+@pytest.mark.asyncio
+async def test_local_denied_anchor_alias_cleanup_retries_without_durable_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local-only alias failure is retried instead of leaking its fence."""
+    session = _denied_anchor_session()
+    session.durable_session_id = None
+    session.durable_owner_epoch = None
+    service = _denied_anchor_service()
+    service._background_cleanup_tasks = set()
+    unregister = AsyncMock(side_effect=[RuntimeError("registry down"), True])
+    service._unregister_http_bridge_previous_response_id = unregister
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key=f"local:{id(session)}",
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    with pytest.raises(RuntimeError, match="registry down"):
+        await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp_denied",
+        )
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
+
+    assert unregister.await_count == 2
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_cleanup_pending
+    assert "resp_denied" not in service._http_bridge_denied_anchor_fences
+
+
+@pytest.mark.asyncio
+async def test_local_denied_anchor_alias_retry_survives_durable_successor_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local predecessor still retries its alias after a durable successor wins."""
+    session = _denied_anchor_session()
+    session.durable_session_id = None
+    session.durable_owner_epoch = None
+    service = _denied_anchor_service()
+    service._background_cleanup_tasks = set()
+    unregister = AsyncMock(side_effect=[RuntimeError("registry down"), True])
+    service._unregister_http_bridge_previous_response_id = unregister
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp_denied",
+        owner_key="durable-successor",
+        owner_epoch=9,
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    with pytest.raises(RuntimeError, match="registry down"):
+        await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp_denied",
+        )
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
+
+    assert unregister.await_count == 2
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_ids
+    assert "resp_denied" not in session.denied_proxy_injected_anchor_cleanup_pending
+    assert service._http_bridge_denied_anchor_fences["resp_denied"].owner_key == "durable-successor"
 
 
 @pytest.mark.asyncio

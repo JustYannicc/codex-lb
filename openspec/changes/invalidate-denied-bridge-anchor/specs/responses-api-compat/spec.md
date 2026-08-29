@@ -172,3 +172,58 @@ When a hard turn-state operation-ledger lookup injects an anchor after the reque
 - **GIVEN** a recovery path dispatches without a `previous_response_id`
 - **WHEN** the retry request state is prepared
 - **THEN** it MUST NOT record a proxy-injected anchor
+
+### Requirement: Denied proxy-injected bridge anchors have fenced lifecycle cleanup
+
+When upstream rejects a proxy-injected `previous_response_id` with
+`previous_response_not_found`, the HTTP bridge MUST publish a positive
+process-local denial generation before any cleanup await. A prepared request
+that captured that anchor before the denial MUST fail closed without another
+upstream dispatch, including when the request was admitted before its session
+was closed. The generation MUST remain available while any request pins it.
+
+An owner transition MUST NOT allow a stale predecessor to replace a newer
+durable owner's denial fence. An ownerless or process-local predecessor MUST
+not overwrite a durable owner entry for the same response id. When local alias
+cleanup fails without a durable owner, the bridge MUST retain a tracked retry
+that can remove the alias and fence rather than abandoning an unbounded local
+tombstone.
+
+When a sibling has already advanced the current response, its denial fence is
+historical rather than unresolved cleanup. Closing the session MUST retire an
+unpinned historical fence once durable ownership is released (including an
+ownerless release result), while preserving unresolved current-anchor cleanup
+and any pinned generations for their final request release.
+
+#### Scenario: An admitted denial still cleans up after session close
+
+- **GIVEN** a request was admitted with a proxy-injected anchor
+- **AND** the bridge session is marked closed before upstream returns
+  `previous_response_not_found`
+- **WHEN** the terminal denial is handled
+- **THEN** the denial generation is published and the request receives the
+  existing downstream error contract
+- **AND** the denied anchor is not re-injected by a later request
+
+#### Scenario: A stale local predecessor cannot replace a durable fence
+
+- **GIVEN** a durable owner holds a positive denial fence for response id `A`
+- **WHEN** a late process-local predecessor records denial for the same `A`
+- **THEN** the durable owner and generation remain authoritative
+- **AND** the predecessor does not remove the durable owner mapping
+
+#### Scenario: Local alias cleanup failure remains tracked
+
+- **GIVEN** a denied anchor belongs only to a process-local session
+- **WHEN** local alias unregistering fails transiently
+- **THEN** the bridge tracks a bounded cleanup retry
+- **AND** a successful retry removes the local alias and denial fence
+
+#### Scenario: Sibling-advanced fence retires on ownerless close
+
+- **GIVEN** a denial arrives after a sibling has advanced the session's current
+  response
+- **AND** no request still pins the denied generation
+- **WHEN** closing the session releases durable ownership with no owner
+- **THEN** the historical denial fence and owner mapping are removed
+- **AND** unresolved current-anchor cleanup fences remain retained

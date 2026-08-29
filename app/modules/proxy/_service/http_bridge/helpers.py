@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
@@ -278,6 +279,44 @@ def _prune_http_bridge_denied_anchor_fences(service: Any) -> None:
         fences.pop(oldest_response_id, None)
 
 
+def _schedule_http_bridge_background_cleanup(
+    service: Any,
+    awaitable: Coroutine[Any, Any, Any],
+    *,
+    name: str,
+    error_message: str,
+    attribute: tuple[str, Any] | None = None,
+) -> asyncio.Task[Any] | None:
+    """Track one best-effort cleanup task until it settles.
+
+    Denied-anchor retries and recovery-settlement retries have the same
+    ownership contract: callers must retain the task in the service registry,
+    remove it exactly once on completion, and consume failures so a transient
+    bookkeeping error cannot become an unhandled task exception.
+    """
+    cleanup_tasks = getattr(service, "_background_cleanup_tasks", None)
+    if cleanup_tasks is None:
+        if inspect.iscoroutine(awaitable):
+            awaitable.close()
+        return None
+    task = asyncio.create_task(awaitable, name=name)
+    if attribute is not None:
+        setattr(task, attribute[0], attribute[1])
+    cleanup_tasks.add(task)
+
+    def _discard(done_task: asyncio.Task[Any]) -> None:
+        cleanup_tasks.discard(done_task)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error(error_message, exc_info=True)
+
+    task.add_done_callback(_discard)
+    return task
+
+
 def _http_bridge_denied_anchor_fence_generation(service: Any, response_id: str) -> int:
     entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
     return entry.generation if entry is not None else 0
@@ -436,6 +475,19 @@ def _record_http_bridge_denied_anchor_fence(
     stale_owner_publication = False
     if (
         isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
+        and existing_entry.owner_key is not None
+        and not existing_entry.owner_key.startswith("local:")
+        and existing_entry.owner_epoch is not None
+        and (owner_key is None or owner_key.startswith("local:"))
+        and owner_epoch is None
+        # A local/ownerless predecessor cannot replace a durable successor's
+        # denial for the same anchor.  Keep the successor's owner mapping and
+        # generation authoritative; the late predecessor has no durable lease
+        # that could justify rewriting it.
+    ):
+        return existing_entry.generation
+    if (
+        isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
         and existing_entry.owner_key == owner_key
         and owner_epoch is not None
         and existing_entry.owner_epoch is not None
@@ -458,9 +510,9 @@ def _record_http_bridge_denied_anchor_fence(
             # stale publication rather than superseding the successor fence.
             # A pinned predecessor capture still needs a positive generation,
             # though, so a prepared request cannot resend its denied anchor.
-            stale_owner_publication = isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
-            if not stale_owner_publication:
-                return 0
+            # Keep the positive tombstone even when no request is pinned: a
+            # later recapture of a stale durable row must observe this denial.
+            stale_owner_publication = True
     if (
         not stale_owner_publication
         and isinstance(fences, dict)
@@ -1320,7 +1372,6 @@ async def _close_http_bridge_session_resources(
     finally:
         session.account_lease = None
     durable_release_succeeded = durable_owner_epoch is None
-    release_result_was_missing = False
     if durable_release_allowed:
         try:
             released = await service._durable_bridge.release_live_session(
@@ -1332,7 +1383,6 @@ async def _close_http_bridge_session_resources(
             # Fenced releases return the current owner snapshot, while a
             # missing row returns None. Only an ownerless snapshot (or a
             # missing row) means this generation no longer owns a durable lease.
-            release_result_was_missing = released is None
             durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
         except Exception:
             logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
@@ -1343,9 +1393,7 @@ async def _close_http_bridge_session_resources(
     # to a live durable owner, so its fence must remain for a successor.
     if durable_release_succeeded:
         owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
-        pending_denied_response_ids = (
-            () if release_result_was_missing else tuple(getattr(session, "denied_proxy_injected_anchor_ids", ()))
-        )
+        pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
         _forget_http_bridge_denied_anchor_fence_owner(
             service,
             owner_key,

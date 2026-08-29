@@ -11,6 +11,8 @@
 - [x] 1.7 Add a coordinated regression proving denial publication and prepared dispatch are lifecycle-serialized.
 - [x] 1.8 Add a product-path regression proving a detached predecessor fences a durable-anchor capture made before successor session creation, and a ledger-pruning regression proving active entries survive the bound.
 - [x] 1.9 Add regressions proving equal-generation durable recaptures after failed cleanup and owner-forward recovery injections retain an existing denial and fail closed before dispatch.
+- [x] 1.10 Add product-path coverage for admitted denials after session close and for historical sibling fences retiring on ownerless close.
+- [x] 1.11 Add owner-ordering coverage proving a local predecessor cannot replace a newer durable denial fence.
 
 ## 2. Anchor Retirement
 
@@ -25,6 +27,7 @@
 - [x] 2.9 Treat an already-recorded denial as a hard observation for later durable captures and owner-forward recovery injections, even when no generation advance is observed by the new request.
 - [x] 2.10 Preserve positive denial generations until the last active request pin releases, including after durable clear success or alias-unregister failure.
 - [x] 2.11 Retire no-durable-owner sibling-race slots and stale session/epoch owner slots without clearing a successor fence.
+- [x] 2.12 Keep local-only alias cleanup retries tracked when no durable owner exists, and distinguish unresolved current cleanup from historical sibling fences during close.
 
 ## 3. Recovery Provenance
 
