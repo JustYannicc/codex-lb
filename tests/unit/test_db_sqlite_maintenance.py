@@ -409,3 +409,34 @@ def test_recover_sidecar_cleanup_treats_wildcard_database_names_literally(tmp_pa
 
     assert not target_master_journal.exists()
     assert unrelated_master_journal.read_bytes() == b"unrelated"
+
+
+@pytest.mark.parametrize(
+    ("source_name", "output_name"),
+    [
+        ("store.db-wal", "store.db"),
+        ("store.db", "store.db-wal"),
+        ("store.db-mj12345678", "store.db"),
+        ("store.db", "store.db-mj12345678"),
+    ],
+)
+@pytest.mark.parametrize("replace", [False, True])
+def test_recover_rejects_source_output_sidecar_overlap(
+    tmp_path: Path,
+    source_name: str,
+    output_name: str,
+    replace: bool,
+) -> None:
+    """Overlapping source/output namespaces must fail before cleanup."""
+    source = tmp_path / source_name
+    output = tmp_path / output_name
+    with closing(sqlite3.connect(source)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    with pytest.raises(ValueError, match="overlaps a SQLite sidecar"):
+        recover_module.recover_sqlite_db(recover_module.RecoveryOptions(source=source, output=output, replace=replace))
+
+    assert source.exists()
+    assert not output.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))

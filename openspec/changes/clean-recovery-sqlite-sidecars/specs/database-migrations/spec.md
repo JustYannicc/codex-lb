@@ -4,6 +4,10 @@
 
 ### Requirement: SQLite recovery MUST fence replacement sidecars
 
+Before any sidecar cleanup or output write, recovery MUST reject source/output
+paths that are identical or overlap either path's fixed SQLite sidecars or
+master-journal namespace.
+
 When recovery writes or installs a file-backed SQLite replacement, it MUST
 remove the target's `-wal`, `-shm`, `-journal`, and master-journal sidecars
 before and after dump import. For `--replace`, pre-existing output sidecars
@@ -90,3 +94,11 @@ cleaned sidecars MAY remain for operator recovery.
 - **WHEN** recovery cleans the target sidecars
 - **THEN** the target journal MUST be removed
 - **AND** the unrelated journal MUST remain
+
+#### Scenario: Source and output sidecar namespaces cannot overlap
+
+- **GIVEN** the source or output path is a fixed SQLite sidecar or master
+  journal of the other path
+- **WHEN** recovery is invoked in either replace or non-replace mode
+- **THEN** recovery MUST fail before deleting sidecars, writing output, or
+  moving the source

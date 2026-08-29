@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import glob
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,6 +47,29 @@ def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, ...]:
     fixed = tuple(db_path.with_name(f"{db_path.name}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
     master = tuple(sorted(db_path.parent.glob(f"{glob.escape(db_path.name)}-mj*")))
     return (*fixed, *master)
+
+
+def _is_sqlite_sidecar_path(database: Path, candidate: Path) -> bool:
+    database_parent = os.path.normcase(str(database.parent))
+    candidate_parent = os.path.normcase(str(candidate.parent))
+    if database_parent != candidate_parent:
+        return False
+
+    database_name = os.path.normcase(database.name)
+    candidate_name = os.path.normcase(candidate.name)
+    fixed_names = {f"{database_name}{suffix}" for suffix in _SQLITE_SIDECAR_SUFFIXES}
+    return candidate_name in fixed_names or candidate_name.startswith(f"{database_name}-mj")
+
+
+def _validate_recovery_paths(source: Path, output: Path) -> None:
+    normalized_source = source.expanduser().resolve(strict=False)
+    normalized_output = output.expanduser().resolve(strict=False)
+    if normalized_source == normalized_output:
+        raise ValueError(f"source and output paths must differ: {source}")
+    if _is_sqlite_sidecar_path(normalized_source, normalized_output):
+        raise ValueError(f"output path overlaps a SQLite sidecar of source: {source} -> {output}")
+    if _is_sqlite_sidecar_path(normalized_output, normalized_source):
+        raise ValueError(f"source path overlaps a SQLite sidecar of output: {source} -> {output}")
 
 
 def _remove_sqlite_sidecars(db_path: Path) -> None:
@@ -129,6 +153,7 @@ def _write_dump(output: Path, dump: str) -> None:
 
 
 def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
+    _validate_recovery_paths(options.source, options.output)
     if not options.source.exists():
         raise FileNotFoundError(f"sqlite database not found: {options.source}")
     if options.output.exists():

@@ -8,6 +8,9 @@ not part of the dump, so they must be removed at each replacement boundary.
 
 - Remove `-wal`, `-shm`, and `-journal` by exact path.
 - Remove `-mj*` master journals by globbing an escaped database basename.
+- Reject identical source/output paths and any source/output pair where either
+  path is the other's fixed sidecar or `-mj*` master journal before cleanup or
+  output creation.
 - Remove pre-existing output sidecars before opening the recovery lock so stale
   WAL/journal state cannot attach during import. Hold `BEGIN EXCLUSIVE` on the
   source across final output import. Release and close that connection before

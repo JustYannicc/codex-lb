@@ -9,6 +9,8 @@ with those sidecars present can attach stale state to the replacement.
 - Remove fixed SQLite sidecars around output dump import and source replacement.
 - Match master journals literally so glob metacharacters in a database name
   cannot remove another database's journal.
+- Reject identical source/output paths and source/output overlap with either
+  path's fixed sidecars or master-journal namespace before any cleanup or write.
 - Remove pre-existing output sidecars before import, then fence final output
   import with an exclusive SQLite transaction. Close every recovery connection
   before final sidecar cleanup or either database rename so Windows can perform
