@@ -1114,6 +1114,7 @@ async def _wait_before_http_bridge_model_capacity_retry(
                             retry_after_seconds=remaining_sleep_seconds,
                         )
                     ),
+                    nonblocking_preconsumer=True,
                 )
                 keepalive_countdown_seconds = _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS
             chunk_seconds = min(

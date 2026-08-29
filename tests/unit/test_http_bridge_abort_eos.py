@@ -140,13 +140,16 @@ async def test_revoked_discarded_live_queue_wakes_a_delayed_consumer() -> None:
 
 
 def test_abort_eos_respects_queue_revocation() -> None:
-    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=4)
     event_queue.put_nowait("buffered-event")
     request_state = _make_claimed_request_state(event_queue)
     request_state.event_queue_revoked.set()
 
-    assert http_bridge_upstream_events._enqueue_http_bridge_abort_eos(request_state, event_queue) is False
+    # Revocation stops live producers, but terminal abort EOS remains allowed
+    # so a delayed consumer can drain the buffered event and finish promptly.
+    assert http_bridge_upstream_events._enqueue_http_bridge_abort_eos(request_state, event_queue) is True
     assert event_queue.get_nowait() == "buffered-event"
+    assert event_queue.get_nowait() is None
     assert event_queue.empty()
 
 
