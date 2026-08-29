@@ -433,6 +433,7 @@ def _record_http_bridge_denied_anchor_fence(
     fences = getattr(service, "_http_bridge_denied_anchor_fences", None)
     prior_response_id = current.get(owner_key) if owner_key is not None and current is not None else None
     existing_entry = fences.get(response_id) if isinstance(fences, dict) else None
+    stale_owner_publication = False
     if (
         isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
         and existing_entry.owner_key == owner_key
@@ -442,8 +443,8 @@ def _record_http_bridge_denied_anchor_fence(
     ):
         # A detached predecessor can publish after a successor has already
         # claimed the same durable owner at a newer epoch.  The stale
-        # publication must not roll the entry back or advance the global
-        # generation, otherwise it can replace the successor's denial slot.
+        # publication for this response was already recorded by the newer
+        # epoch; return its generation without rolling that entry back.
         return existing_entry.generation
     if prior_response_id is not None and prior_response_id != response_id and isinstance(fences, dict):
         prior_entry = fences.get(prior_response_id)
@@ -455,8 +456,17 @@ def _record_http_bridge_denied_anchor_fence(
         ):
             # The current owner slot belongs to a newer epoch.  Ignore this
             # stale publication rather than superseding the successor fence.
-            return existing_entry.generation if isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence) else 0
-    if isinstance(fences, dict) and prior_response_id is not None and prior_response_id != response_id:
+            # A pinned predecessor capture still needs a positive generation,
+            # though, so a prepared request cannot resend its denied anchor.
+            stale_owner_publication = isinstance(existing_entry, _HTTPBridgeDeniedAnchorFence)
+            if not stale_owner_publication:
+                return 0
+    if (
+        not stale_owner_publication
+        and isinstance(fences, dict)
+        and prior_response_id is not None
+        and prior_response_id != response_id
+    ):
         prior_entry = fences.get(prior_response_id)
         if isinstance(prior_entry, _HTTPBridgeDeniedAnchorFence):
             prior_entry.superseded = True
@@ -470,7 +480,7 @@ def _record_http_bridge_denied_anchor_fence(
         for prior_owner_key, prior_response_id_for_owner in tuple(current.items()):
             if prior_owner_key != owner_key and prior_response_id_for_owner == response_id:
                 current.pop(prior_owner_key, None)
-    if owner_key is not None and current is not None:
+    if owner_key is not None and current is not None and not stale_owner_publication:
         current[owner_key] = response_id
     entry = _http_bridge_denied_anchor_fence_entry(service, response_id, create=True)
     assert entry is not None
@@ -482,7 +492,9 @@ def _record_http_bridge_denied_anchor_fence(
     entry.generation = generation
     entry.owner_key = owner_key
     entry.owner_epoch = owner_epoch
-    entry.superseded = False
+    # Keep a stale predecessor generation only for requests that still pin it;
+    # finalization can then release this non-current owner entry.
+    entry.superseded = stale_owner_publication
     _prune_http_bridge_denied_anchor_fences(service)
     return generation
 

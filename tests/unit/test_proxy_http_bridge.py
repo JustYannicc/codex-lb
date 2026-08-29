@@ -33052,6 +33052,42 @@ def test_late_predecessor_denial_does_not_replace_a_newer_owner_epoch() -> None:
     assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
 
 
+def test_late_predecessor_denial_advances_a_pinned_capture_without_replacing_owner() -> None:
+    """A pinned predecessor capture remains fenced across owner handoff."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    predecessor_request = _denied_anchor_request_state(previous_response_id="resp-predecessor")
+    predecessor_request.request_id = "request-predecessor"
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        predecessor_request,
+        response_id="resp-predecessor",
+    )
+    assert predecessor_request.denied_proxy_injected_anchor_fence_generation_at_prepare == 0
+    successor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor",
+        owner_key="durable-cross-session",
+        owner_epoch=9,
+    )
+    predecessor_generation = http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
+
+    assert predecessor_generation > successor_generation
+    assert http_bridge_helpers_module._http_bridge_denied_anchor_fence_advanced(service, predecessor_request)
+    assert getattr(service, "_http_bridge_denied_anchor_fence_current")["durable-cross-session"] == "resp-successor"
+    predecessor_entry = service._http_bridge_denied_anchor_fences["resp-predecessor"]
+    assert predecessor_entry.generation == predecessor_generation
+    assert predecessor_entry.owner_key == "durable-cross-session"
+    assert predecessor_entry.owner_epoch == 4
+
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, predecessor_request.request_id)
+    assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
+
+
 def test_denied_anchor_owner_rebind_drops_the_stale_local_owner_mapping() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     response_id = "resp-local-to-durable"
