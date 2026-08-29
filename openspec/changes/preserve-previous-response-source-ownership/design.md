@@ -9,9 +9,11 @@ The HTTP routes decide source selection before entering subscription streaming, 
 **Goals:**
 
 - Preserve a recorded subscription owner for hard prior-response continuity.
-- Preserve configured model-source routing when no subscription owner is recorded, including for canonical OpenAI response IDs.
+- Preserve configured model-source routing when the source catalog confirms source ownership and no subscription owner is recorded, including for canonical OpenAI response IDs.
+- Preserve the compatibility fallback for a known subscription-model owner miss only when exactly one eligible subscription account remains after API-key assignment scoping; fail closed when the count is zero or ambiguous.
 - Keep HTTP and direct WebSocket decisions aligned.
-- Retain existing compaction and file-pin exclusions.
+- Retain strict file/account ownership and the subscription-only compaction boundary, while applying the same sole-candidate fallback to compact HTTP selection.
+- Settle compact API-key reservations before owner-miss diagnostics, health writes, or exit.
 
 **Non-Goals:**
 
@@ -25,7 +27,7 @@ The HTTP routes decide source selection before entering subscription streaming, 
 
 The shared synchronous source-route predicate will cover only structural subscription constraints: Codex compaction and account-pinned file references. It will not inspect `previous_response_id` syntax.
 
-When an HTTP request has a viable model-source candidate and a prior response ID, the route will query the existing subscription continuity resolver. A recorded account owner vetoes the source candidate; a miss leaves the configured source candidate intact. This keeps the extra lookup off requests that cannot source-route.
+When an HTTP request has a viable model-source candidate and a prior response ID, the route will query the existing subscription continuity resolver. A recorded account owner vetoes the source candidate. If the source catalog confirms source ownership and the lookup misses, the source candidate remains authoritative. For a known subscription model, a miss instead counts eligible subscription candidates after API-key assignment scoping: one candidate uses the existing compatibility fallback, while zero or multiple candidates fail closed. Compact uses this same cardinality rule within its subscription-only selection path. This keeps the extra lookup off requests that cannot source-route.
 
 Alternative considered: retain or broaden the regular expression. Rejected because provider-generated IDs are opaque and canonical OpenAI-compatible sources may use exactly the same shape.
 
@@ -37,11 +39,11 @@ Alternative considered: persist a separate source-response-ID index. Rejected fo
 
 ### Preserve fail-closed lookup behavior
 
-Ownership lookup failures continue to surface through the existing sanitized `ProxyResponseError` paths. They do not silently select a source. A lookup miss is not a failure: without account-owner evidence, the configured source remains authoritative.
+An owner miss and source-catalog unavailability are distinct states. Known subscription-model misses fail closed unless the sole-candidate compatibility fallback applies; source-owned HTTP requests remain source-routed. Source-catalog unavailability preserves the existing direct WebSocket subscription fallback. Owner errors use the sanitized `previous_response_owner_unavailable` contract. Compact settles any API-key reservation before emitting diagnostics or leaving the owner-miss path; a confirmed fail-safe release preserves the original owner error, while an unconfirmed settlement failure propagates.
 
 ## Risks / Trade-offs
 
-- [A subscription response created outside this proxy has no local owner evidence] -> A configured model source remains selected; this avoids guessing an account and matches the explicit source configuration.
+- [A subscription response created outside this proxy has no local owner evidence] -> A source-owned HTTP request remains source-routed; a known subscription-model request uses the one-candidate compatibility fallback and otherwise fails closed, avoiding an account guess.
 - [Moving the reuse guard changes its timing] -> Keep it before any upstream send and add direct WebSocket tests proving both subscription forwarding and source HTTP fallback.
 - [HTTP and WebSocket logic could drift again] -> Both paths use the same model-source selector and the existing subscription-owner resolver; regression tests cover both transports and canonical response-ID shapes.
 

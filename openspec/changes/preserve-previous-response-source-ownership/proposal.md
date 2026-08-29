@@ -5,10 +5,12 @@
 ## What Changes
 
 - Use recorded subscription continuity ownership, rather than an ID regex, when a prior response must override configured model-source routing.
-- Keep source-configured models source-routed when no subscription owner is known, regardless of the provider's response-ID format.
+- If the source catalog confirms source ownership and no subscription owner is recorded, keep the request source-routed regardless of the provider's response-ID format.
+- For a known subscription model with an owner miss, preserve the compatibility fallback only when exactly one eligible subscription account remains after API-key assignment scoping; fail closed for zero or multiple candidates.
 - Apply the same ownership decision to HTTP Responses routes and the direct Responses WebSocket source guard.
-- Preserve the existing subscription-only exclusions for Codex compaction and account-pinned file references.
-- Add HTTP and direct WebSocket regressions for subscription-owned and source-owned prior responses.
+- Preserve strict file-pinned/account-owned routing, the subscription-only Codex compaction boundary, and the compact sole-candidate fallback.
+- Keep source-catalog unavailability distinct from an owner miss so direct WebSocket requests retain their existing subscription fallback.
+- Settle compact API-key reservations before owner-miss diagnostics, health writes, or exit, and add HTTP and direct WebSocket regressions for the external contract.
 
 ## Capabilities
 
