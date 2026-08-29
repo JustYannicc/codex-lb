@@ -30840,6 +30840,7 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     session.durable_session_id = "durable-terse-recovery"
     session.durable_owner_epoch = 7
     request_states: list[proxy_service._WebSocketRequestState] = []
+    ordered_events: list[str] = []
 
     def fake_prepare(
         request_payload: proxy_service.ResponsesRequest,
@@ -30916,18 +30917,29 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
-    reset_operation_event_spool = (
-        AsyncMock(side_effect=reset_outcome)
-        if isinstance(reset_outcome, RuntimeError)
-        else AsyncMock(return_value=reset_outcome)
-    )
+
+    async def reset_spool(**_kwargs: Any) -> bool:
+        ordered_events.append("reset")
+        if isinstance(reset_outcome, RuntimeError):
+            raise reset_outcome
+        return reset_outcome
+
+    reset_operation_event_spool = AsyncMock(side_effect=reset_spool)
+
+    async def retire_session(*_args: Any, **_kwargs: Any) -> None:
+        ordered_events.append("retire")
+
     monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", reset_operation_event_spool)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "_reset_http_bridge_session_after_local_terminal_error", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_reset_http_bridge_session_after_local_terminal_error",
+        AsyncMock(side_effect=retire_session),
+    )
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
 
@@ -30956,6 +30968,7 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     assert recovery_call.kwargs["request_stage"] == "reattach"
     assert stream_attempts == ["resp_stale_anchor", "resp_stale_anchor"]
     assert request_states
+    assert ordered_events == ["reset", "retire"]
     reset_operation_event_spool.assert_awaited_once_with(
         operation_id="op-terse-recovery",
         session_id="durable-terse-recovery",
