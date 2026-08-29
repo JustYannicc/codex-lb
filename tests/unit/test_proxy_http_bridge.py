@@ -33080,7 +33080,7 @@ def test_late_local_predecessor_denial_does_not_replace_a_durable_owner() -> Non
 
 
 def test_late_predecessor_denial_advances_a_pinned_capture_without_replacing_owner() -> None:
-    """A pinned predecessor capture remains fenced across owner handoff."""
+    """A predecessor tombstone remains fenced across owner handoff and release."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     predecessor_request = _denied_anchor_request_state(previous_response_id="resp-predecessor")
     predecessor_request.request_id = "request-predecessor"
@@ -33110,8 +33110,77 @@ def test_late_predecessor_denial_advances_a_pinned_capture_without_replacing_own
     assert predecessor_entry.generation == predecessor_generation
     assert predecessor_entry.owner_key == "durable-cross-session"
     assert predecessor_entry.owner_epoch == 4
+    assert predecessor_entry.retain_until_durable_clear is True
 
     http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, predecessor_request.request_id)
+    retained_entry = service._http_bridge_denied_anchor_fences["resp-predecessor"]
+    assert retained_entry.active_request_ids == set()
+    assert retained_entry.retain_until_durable_clear is True
+    assert http_bridge_helpers_module._http_bridge_denied_anchor_fence_was_recorded(
+        service,
+        "resp-predecessor",
+    )
+
+    # A later capture after the final predecessor pin still observes the
+    # positive denial and is failed closed rather than redispatching the id.
+    recapture = _denied_anchor_request_state(previous_response_id="resp-predecessor")
+    recapture.request_id = "request-recapture"
+    http_bridge_helpers_module._bind_http_bridge_proxy_injected_anchor(
+        service,
+        recapture,
+        response_id="resp-predecessor",
+    )
+    assert recapture.denied_proxy_injected_anchor_fence_was_already_denied is True
+    assert http_bridge_helpers_module._http_bridge_denied_anchor_fence_advanced(service, recapture)
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(service, recapture.request_id)
+    assert "resp-predecessor" in service._http_bridge_denied_anchor_fences
+
+    # A matching durable clear is the explicit confirmation that permits
+    # retirement of the otherwise-unpinned stale predecessor tombstone.
+    assert http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
+    assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
+
+
+def test_unpinned_stale_predecessor_denial_keeps_a_positive_tombstone() -> None:
+    """An unpinned stale denial cannot regress to generation zero."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-successor",
+        owner_key="durable-cross-session",
+        owner_epoch=9,
+    )
+    http_bridge_helpers_module._record_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
+
+    stale_entry = service._http_bridge_denied_anchor_fences["resp-predecessor"]
+    assert stale_entry.active_request_ids == set()
+    assert stale_entry.superseded is True
+    assert stale_entry.retain_until_durable_clear is True
+
+    # Request-pin release is a no-op for this retained stale tombstone.
+    http_bridge_helpers_module._release_http_bridge_denied_anchor_fences(
+        service,
+        "request-never-pinned",
+    )
+    assert service._http_bridge_denied_anchor_fences["resp-predecessor"].generation > 0
+
+    assert http_bridge_helpers_module._forget_http_bridge_denied_anchor_fence(
+        service,
+        "resp-predecessor",
+        owner_key="durable-cross-session",
+        owner_epoch=4,
+    )
     assert "resp-predecessor" not in service._http_bridge_denied_anchor_fences
 
 

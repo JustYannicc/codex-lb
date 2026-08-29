@@ -28,6 +28,7 @@
 - [x] 2.10 Preserve positive denial generations until the last active request pin releases, including after durable clear success or alias-unregister failure.
 - [x] 2.11 Retire no-durable-owner sibling-race slots and stale session/epoch owner slots without clearing a successor fence.
 - [x] 2.12 Keep local-only alias cleanup retries tracked when no durable owner exists, and distinguish unresolved current cleanup from historical sibling fences during close.
+- [x] 2.13 Retain an unpinned stale-predecessor denial fence until a current owner confirms the matching durable anchor is cleared.
 
 ## 3. Recovery Provenance
 

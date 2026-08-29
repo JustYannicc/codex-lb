@@ -184,10 +184,14 @@ was closed. The generation MUST remain available while any request pins it.
 
 An owner transition MUST NOT allow a stale predecessor to replace a newer
 durable owner's denial fence. An ownerless or process-local predecessor MUST
-not overwrite a durable owner entry for the same response id. When local alias
+NOT overwrite a durable owner entry for the same response id. When local alias
 cleanup fails without a durable owner, the bridge MUST retain a tracked retry
 that can remove the alias and fence rather than abandoning an unbounded local
 tombstone.
+
+An unpinned stale-predecessor denial fence MUST remain available until a
+current owner confirms that the matching durable anchor has been cleared;
+releasing the stale request's final pin alone MUST NOT drop that fence.
 
 When a sibling has already advanced the current response, its denial fence is
 historical rather than unresolved cleanup. Closing the session MUST retire an

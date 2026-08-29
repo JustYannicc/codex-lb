@@ -220,6 +220,10 @@ class _HTTPBridgeDeniedAnchorFence:
     owner_key: str | None = None
     owner_epoch: int | None = None
     superseded: bool = False
+    # A stale predecessor may not own the current durable slot, so its
+    # positive denial tombstone must survive request-pin release until a
+    # current owner confirms that durable anchor is gone.
+    retain_until_durable_clear: bool = False
 
 
 def _http_bridge_denied_anchor_fence_entry(
@@ -408,6 +412,10 @@ def _forget_http_bridge_denied_anchor_fence(
     current = _http_bridge_denied_anchor_fence_current_map(service)
     if entry.owner_key is not None and current.get(entry.owner_key) == response_id:
         current.pop(entry.owner_key, None)
+    # Durable cleanup is the confirmation that makes a positive tombstone
+    # dispensable.  Clear stale-predecessor retention before waiting for a
+    # pinned request's final release.
+    entry.retain_until_durable_clear = False
     if entry.active_request_ids:
         # A request prepared before the denial must remain fenced until its
         # final pin is released, even after durable cleanup succeeds.
@@ -453,7 +461,9 @@ def _release_http_bridge_denied_anchor_fences(service: Any, request_id: str) -> 
         if not isinstance(entry, _HTTPBridgeDeniedAnchorFence):
             continue
         entry.active_request_ids.discard(request_id)
-        if (entry.generation == 0 or entry.superseded) and not entry.active_request_ids:
+        if (
+            entry.generation == 0 or (entry.superseded and not entry.retain_until_durable_clear)
+        ) and not entry.active_request_ids:
             fences.pop(response_id, None)
     _prune_http_bridge_denied_anchor_fences(service)
 
@@ -544,9 +554,11 @@ def _record_http_bridge_denied_anchor_fence(
     entry.generation = generation
     entry.owner_key = owner_key
     entry.owner_epoch = owner_epoch
-    # Keep a stale predecessor generation only for requests that still pin it;
-    # finalization can then release this non-current owner entry.
+    # Keep a stale predecessor generation until a current owner confirms the
+    # durable anchor is gone; finalization may release its request pin without
+    # dropping this non-current owner entry prematurely.
     entry.superseded = stale_owner_publication
+    entry.retain_until_durable_clear = stale_owner_publication
     _prune_http_bridge_denied_anchor_fences(service)
     return generation
 
