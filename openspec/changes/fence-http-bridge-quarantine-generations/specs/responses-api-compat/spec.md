@@ -3,11 +3,14 @@
 ### Requirement: HTTP bridge quarantine cleanup is generation and identity fenced
 
 The in-memory HTTP bridge quarantine registry MUST allocate generations from a
-service-lifetime monotonic counter. TTL and size-cap pruning MUST NOT allow a
-later arm for a reused session key to receive a generation already observed by
-an earlier completion. Each entry MUST retain only a weak reference to the
-session that armed it, so the bounded registry cannot retain detached websocket
-sessions until TTL expiry.
+service-lifetime monotonic counter. Generation values MUST never be reused,
+including after per-key removal, TTL/size-cap pruning, registry
+reinitialization, or an allocator reset; any allocator reset MUST resume above
+every generation already observed during that service lifetime. TTL and
+size-cap pruning MUST NOT allow a later arm for a reused session key to receive
+a generation already observed by an earlier completion. Each entry MUST retain
+only a weak reference to the session that armed it, so the bounded registry
+cannot retain detached websocket sessions until TTL expiry.
 
 A primary-key completion MAY clear quarantine only when its completing session
 is the current canonical session for a registered key, or when no canonical

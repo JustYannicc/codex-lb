@@ -34715,6 +34715,32 @@ def test_http_bridge_quarantine_recovery_clear_rejects_generation_reused_after_p
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, origin.key) is True
 
 
+def test_http_bridge_quarantine_generation_reset_does_not_reuse_observed_value() -> None:
+    service = SimpleNamespace()
+    first = _make_bridge_session(key_value="quarantine-generation-reset-first")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        first,
+        reason="reattach_missing_response_created",
+    )
+    first_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, first.key)
+    assert first_generation is not None
+
+    # A reset can clear the per-key map and counter, but the service-lifetime
+    # high-water mark must prevent an observed generation from being recycled.
+    service._http_bridge_quarantined_keys = {}
+    service._http_bridge_quarantine_generation_counter = 0
+    second = _make_bridge_session(key_value="quarantine-generation-reset-second")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        second,
+        reason="repeated_eventless_timeout",
+    )
+    second_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, second.key)
+    assert second_generation is not None
+    assert second_generation > first_generation
+
+
 def test_http_bridge_quarantine_distinct_key_clear_denied_when_no_generation_observed() -> None:
     """An observed absence must not clear a quarantine raced in during the retry."""
     service = SimpleNamespace()
