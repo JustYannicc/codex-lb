@@ -49,7 +49,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorParam, openai_error
 from app.core.exceptions import ProxyReasoningEffortNotAllowed
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -8805,7 +8805,7 @@ def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_
         error_code_override="replacement_unavailable",
         error_message_override="Selected replacement connection failed",
         error_type_override="server_error",
-        error_param_override="model",
+        error_param_override=OpenAIErrorParam(True, "model"),
         error_http_status_override=503,
     )
 
@@ -12685,6 +12685,83 @@ async def test_service_stream_responses_preserves_raw_codex_error_after_created(
     assert handle_args.args[2] == "rate_limit_exceeded"
 
 
+def test_raw_error_fields_preserve_param_for_later_frame_policy() -> None:
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "code": "invalid_request_error",
+        "message": "Invalid `previous_response_id`.",
+        "param": " previous_response_id ",
+    }
+
+    error_type, error_message, error_param, error_code = streaming_helpers_module._raw_stream_error_fields(
+        "error", payload
+    )
+
+    assert error_type is None
+    assert error_message == "Invalid `previous_response_id`."
+    assert error_param is not None
+    assert error_param.present
+    assert error_param.raw == " previous_response_id "
+    assert error_code == "invalid_request_error"
+    assert proxy_service._rewrite_previous_response_stream_error(
+        previous_response_id="resp_raw_anchor",
+        preferred_account_id=None,
+        error_code=error_code,
+        error_type=error_type,
+        error_message=error_message,
+        error_param=error_param,
+    ) == (
+        "stream_incomplete",
+        "Upstream websocket closed before response.completed",
+        None,
+    )
+
+
+def test_public_websocket_error_sanitizes_nested_and_top_level_params() -> None:
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "param": [],
+        "status": 400,
+        "error": {
+            "code": "invalid_request_error",
+            "message": "Invalid request",
+            "param": " model ",
+        },
+    }
+
+    normalized = websocket_helpers_module._sanitize_public_websocket_event_payload(payload, event_type="error")
+
+    assert normalized["type"] == "error"
+    assert normalized["status"] == 400
+    assert "param" not in normalized
+    nested_error = normalized["error"]
+    assert isinstance(nested_error, dict)
+    assert nested_error["param"] == "model"
+
+
+def test_public_websocket_response_failed_sanitizes_nested_and_top_level_params() -> None:
+    payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "param": [],
+        "response": {
+            "id": "resp_failed_param",
+            "error": {"code": "upstream_error", "message": "bad", "param": " model "},
+        },
+    }
+
+    normalized = websocket_helpers_module._sanitize_public_websocket_event_payload(
+        payload,
+        event_type="response.failed",
+    )
+
+    assert "param" not in normalized
+    response = normalized["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["param"] == "model"
+
+
 @pytest.mark.asyncio
 async def test_service_stream_responses_records_typeless_raw_codex_error_first(monkeypatch):
     settings = _make_proxy_settings()
@@ -13114,6 +13191,89 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_after_c
     assert handle_args is not None
     assert handle_args.args[0] == account
     assert handle_args.args[2] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_service_stream_responses_masks_structured_stale_anchor_error_after_created(
+    monkeypatch,
+    caplog,
+):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_structured_stale_anchor")
+    previous_response_id = "resp_structured_stale_anchor"
+    request_logs.response_owner_by_id[(previous_response_id, None, "sid-stream")] = account.id
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        yield 'data: {"type":"response.created","response":{"id":"resp_child"}}\n\n'
+        yield (
+            'data: {"type":"error","error":{"type":"invalid_request_error",'
+            '"code":"invalid_request_error","message":"Invalid previous_response_id.",'
+            '"param":"previous_response_id"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": previous_response_id,
+        }
+    )
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"session_id": "sid-stream"},
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert len(chunks) == 2
+    created = parse_sse_data_json(chunks[0])
+    assert created is not None
+    assert created["type"] == "response.created"
+    failed = parse_sse_data_json(chunks[1])
+    assert failed is not None
+    assert failed["type"] == "response.failed"
+    response = failed["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in chunks[1]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert "continuity_fail_closed surface=http_stream reason=previous_response_not_found" in caplog.text
+    handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -28482,6 +28642,86 @@ async def test_process_upstream_websocket_text_masks_foreign_previous_response_n
     assert list(pending_requests) == []
 
 
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_finalizes_unanchored_previous_response_error_after_created(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_unanchored_prev_nf_created")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_followup_created_unanchored_prev_nf",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        previous_response_id="resp_anchor",
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    response_create_gate = asyncio.Semaphore(1)
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_followup_created", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=response_create_gate,
+    )
+
+    assert pending_request.response_id == "resp_ws_followup_created"
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Invalid previous_response_id.",
+                    "param": "previous_response_id",
+                },
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=response_create_gate,
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"id":"resp_ws_followup_created"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert upstream_control.reconnect_requested is False
+    finalize_request_state.assert_awaited_once()
+    finalize_call = finalize_request_state.await_args
+    assert finalize_call is not None
+    assert finalize_call.args[0] is pending_request
+    assert finalize_call.kwargs["event_type"] == "response.failed"
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -36295,7 +36535,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         error_code_override="upstream_unavailable",
         error_message_override="previous replay failed",
         error_type_override="server_error",
-        error_param_override="previous_response_id",
+        error_param_override=OpenAIErrorParam(True, "previous_response_id"),
         error_http_status_override=502,
         preferred_account_id=account.id,
     )
@@ -36593,7 +36833,7 @@ def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
         error_code_override="upstream_unavailable",
         error_message_override="previous auth replay failed",
         error_type_override="server_error",
-        error_param_override="previous_response_id",
+        error_param_override=OpenAIErrorParam(True, "previous_response_id"),
         error_http_status_override=502,
     )
 
@@ -37718,7 +37958,7 @@ async def test_fail_pending_websocket_requests_masks_previous_response_override_
     request_state.error_code_override = "invalid_request_error"
     request_state.error_message_override = "Previous response with id 'resp_pending_leak' not found."
     request_state.error_type_override = "invalid_request_error"
-    request_state.error_param_override = "previous_response_id"
+    request_state.error_param_override = OpenAIErrorParam(True, "previous_response_id")
 
     await service._fail_pending_websocket_requests(
         account_id_value=None,
