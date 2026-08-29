@@ -6686,6 +6686,65 @@ async def test_http_bridge_completion_preserves_first_strike_recorded_during_ret
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_completion_fence_precedes_alias_persistence_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quarantine armed during alias persistence is newer than completion's fence."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-quarantine-alias-race",
+        response_id="resp-quarantine-alias-race",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="quarantine-alias-race",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    service._http_bridge_sessions = {session.key: session}
+
+    async def register_alias_and_arm_quarantine(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        http_bridge_quarantine_module._quarantine_http_bridge_session(
+            service,
+            session,
+            reason="reattach_missing_response_created",
+        )
+        return True
+
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_alias_and_arm_quarantine)
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-quarantine-alias-race",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service).get(session.key)
+    assert entry is not None
+    assert entry.quarantined_until > time.monotonic()
+    assert session.quarantined is True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_upstream_text_archives_with_request_archive_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
