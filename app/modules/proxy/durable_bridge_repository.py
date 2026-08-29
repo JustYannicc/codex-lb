@@ -927,12 +927,12 @@ class DurableBridgeRepository:
         if expected_admission_generation is not None:
             conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            result = await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            result = await self._session.execute(
+                delete(HttpBridgeRetryCircuit).where(*conditions).returning(HttpBridgeRetryCircuit.session_key_hash)
+            )
+            matched = result.scalar_one_or_none() is not None
             await self._session.commit()
-        # A fenced purge that matched nothing is a CAS miss: another replica
-        # moved the row after this worker's lookup, and the caller must
-        # reconcile against the surviving row instead of assuming deletion.
-        return bool(getattr(result, "rowcount", 0)) or expected_updated_at_epoch is None
+        return matched
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -3571,6 +3571,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch,
                     HttpBridgeRetryCircuit.admission_generation,
                 )
                 .where(stale_predicate)
@@ -3581,12 +3582,19 @@ class DurableBridgeRepository:
                 return deleted_count
             batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope, admission_generation in keys:
+                for (
+                    session_key_kind,
+                    session_key_hash,
+                    api_key_scope,
+                    updated_at_epoch,
+                    admission_generation,
+                ) in keys:
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch == updated_at_epoch)
                         .where(HttpBridgeRetryCircuit.admission_generation == admission_generation)
                         .where(stale_predicate)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)

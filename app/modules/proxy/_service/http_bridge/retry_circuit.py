@@ -191,6 +191,17 @@ class _HTTPBridgeRetryCircuitBoundedCall:
     value: Any = None
 
 
+def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
+    if reset_transient_cache is not None:
+        reset_transient_cache()
+    service._http_bridge_retry_circuits = {}
+    service._http_bridge_retry_circuit_loaded_keys = set()
+    service._http_bridge_retry_circuit_persisted_keys = set()
+    service._http_bridge_retry_circuit_purge_fence_misses = set()
+    service._http_bridge_retry_circuit_abandoned_tasks = set()
+    service._http_bridge_retry_circuit_lock = anyio.Lock()
+
+
 def _consume_abandoned_http_bridge_retry_circuit_task(
     service: Any,
     task: asyncio.Task[Any],
@@ -809,6 +820,7 @@ class _HTTPBridgeRetryCircuitMixin:
                             key,
                             generation=_http_bridge_quarantine_clear_fence(self, key),
                         )
+                self._http_bridge_retry_circuit_purge_fence_misses.discard(key)
             return True
 
         now_epoch = time.time()
@@ -844,6 +856,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     expected_last_detail=persisted.last_detail,
                 )
             except Exception:
+                self._http_bridge_retry_circuit_purge_fence_misses.add(key)
                 logger.warning(
                     "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                     key.affinity_kind,
@@ -894,7 +907,9 @@ class _HTTPBridgeRetryCircuitMixin:
                     # The surviving row vanished again or is itself stale:
                     # nothing current to adopt, and nothing was deleted this
                     # worker can vouch for.
-                    return True
+                    self._http_bridge_retry_circuit_purge_fence_misses.add(key)
+                    return False
+                self._http_bridge_retry_circuit_purge_fence_misses.discard(key)
             if stale_row_purged is not False:
                 async with self._http_bridge_retry_circuit_lock:
                     current_local_state = self._http_bridge_retry_circuits.get(key)
@@ -1097,6 +1112,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 key,
                 generation=_http_bridge_quarantine_clear_fence(self, key),
             )
+        self._http_bridge_retry_circuit_purge_fence_misses.discard(key)
         return True
 
     async def _persist_http_bridge_retry_circuit(
@@ -1313,7 +1329,13 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return True
 
-        await self._load_http_bridge_retry_circuit(session)
+        load_succeeded = await self._load_http_bridge_retry_circuit(session)
+        if not load_succeeded and session.key in self._http_bridge_retry_circuit_purge_fence_misses:
+            # A stale purge fence miss means another writer changed the row
+            # after our read. Durable state is unknown, so do not admit
+            # another pre-created request. Other lookup failures retain the
+            # existing local fallback behavior.
+            return False
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -1657,7 +1679,9 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return 0.0
 
-        await self._load_http_bridge_retry_circuit(session)
+        load_succeeded = await self._load_http_bridge_retry_circuit(session)
+        if not load_succeeded and session.key in self._http_bridge_retry_circuit_purge_fence_misses:
+            return 0.0
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
