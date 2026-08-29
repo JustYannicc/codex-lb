@@ -198,9 +198,10 @@ async def test_release_leader_lease_within_returns_when_release_wedged(
             self.gate = asyncio.Event()
             self.started = asyncio.Event()
 
-        async def release(self) -> None:
+        async def release(self) -> bool:
             self.started.set()
             await self.gate.wait()
+            return True
 
     election = _WedgedElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
@@ -226,8 +227,9 @@ async def test_release_leader_lease_within_awaits_quick_release(
         def __init__(self) -> None:
             self.released = False
 
-        async def release(self) -> None:
+        async def release(self) -> bool:
             self.released = True
+            return True
 
     election = _FastElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
@@ -242,7 +244,7 @@ async def test_release_leader_lease_within_swallows_release_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BrokenElection:
-        async def release(self) -> None:
+        async def release(self) -> bool:
             raise RuntimeError("db down")
 
     monkeypatch.setattr(app_main, "get_leader_election", lambda: _BrokenElection())
@@ -1129,7 +1131,10 @@ async def test_clean_shutdown_is_recorded_after_successful_disposal(
     monkeypatch.setattr(app_main, "close_db", _close_db)
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", lambda: order.append("mark_clean"))
 
-    await app_main._close_db_and_record_clean_shutdown()
+    await app_main._close_db_and_record_clean_shutdown(
+        database_tasks_drained=True,
+        leader_lease_release_completed=True,
+    )
 
     assert order == ["close_db", "mark_clean"]
 
@@ -1150,7 +1155,10 @@ async def test_clean_shutdown_is_not_recorded_when_wedged_teardown_is_abandoned(
     monkeypatch.setattr(app_main, "close_db", _close_db)
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
 
-    await app_main._close_db_and_record_clean_shutdown()
+    await app_main._close_db_and_record_clean_shutdown(
+        database_tasks_drained=True,
+        leader_lease_release_completed=True,
+    )
 
     assert marked is False
 
@@ -1174,9 +1182,15 @@ async def test_clean_shutdown_is_not_recorded_when_database_drain_is_incomplete(
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
 
     if gate == "database":
-        await app_main._close_db_and_record_clean_shutdown(database_tasks_drained=False)
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=False,
+            leader_lease_release_completed=True,
+        )
     else:
-        await app_main._close_db_and_record_clean_shutdown(leader_lease_release_completed=False)
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=True,
+            leader_lease_release_completed=False,
+        )
 
     assert marked is False
 
@@ -1208,6 +1222,9 @@ async def test_clean_shutdown_is_not_recorded_when_disposal_does_not_complete(
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
 
     with pytest.raises(expected):
-        await app_main._close_db_and_record_clean_shutdown()
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=True,
+            leader_lease_release_completed=True,
+        )
 
     assert marked is False

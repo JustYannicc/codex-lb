@@ -339,8 +339,8 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
 
 async def _close_db_and_record_clean_shutdown(
     *,
-    database_tasks_drained: bool = True,
-    leader_lease_release_completed: bool = True,
+    database_tasks_drained: bool,
+    leader_lease_release_completed: bool,
 ) -> None:
     """Dispose the database engines, then record the shutdown as clean.
 
