@@ -29,8 +29,9 @@ explicitly generation-fenced.
 - Clear a circuit only with the captured timestamp and generation, retain local
   admission state on lookup/CAS failure, and report whether the durable clear
   actually matched.
-- Fence stale retry-circuit purges on the captured admission generation so a
-  claim cannot be deleted and reinserted with a reset generation.
+- Fence stale retry-circuit purges on the captured failure timestamp and
+  admission generation so a delayed same-generation failure cannot be deleted
+  by an older cleanup read.
 
 ## Scope and non-goals
 

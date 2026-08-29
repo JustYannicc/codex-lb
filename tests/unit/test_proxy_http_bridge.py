@@ -28211,7 +28211,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
                 admission_generation=3,
             )
         ),
-        purge_retry_circuit=AsyncMock(),
+        purge_retry_circuit=AsyncMock(return_value=True),
     )
 
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
@@ -28251,7 +28251,7 @@ async def test_http_bridge_retry_circuit_keeps_newer_local_failure_after_stale_p
                 updated_at_epoch=expired_updated_at,
             )
         ),
-        purge_retry_circuit=AsyncMock(),
+        purge_retry_circuit=AsyncMock(return_value=True),
     )
 
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
@@ -28291,6 +28291,39 @@ async def test_http_bridge_retry_circuit_keeps_local_state_when_stale_purge_fail
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key] is local_state
     assert local_state.consecutive_failures == 2
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_fails_closed_when_stale_purge_fence_misses() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-expired-circuit-fence-miss")
+    expired_updated_at = (
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 1.0,
+                last_detail="stream_idle_timeout",
+                updated_at_epoch=expired_updated_at,
+                admission_generation=3,
+            )
+        ),
+        purge_retry_circuit=AsyncMock(return_value=False),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    # The durable row was present but its stale-delete fence lost a race;
+    # without a trustworthy post-race snapshot, admission remains fail-closed.
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+    service._durable_bridge.purge_retry_circuit.assert_awaited_once_with(
+        session_key_kind=hard_session.key.affinity_kind,
+        session_key_value=hard_session.key.affinity_key,
+        api_key_id=hard_session.key.api_key_id,
+        expected_updated_at_epoch=expired_updated_at,
+        expected_admission_generation=3,
+    )
 
 
 @pytest.mark.asyncio

@@ -32,5 +32,6 @@
 - [x] 4.2 Detach cancellation-resistant claim operations at the deadline and
   suppress concurrent reconciliation while the original write is still
   running.
-- [x] 4.3 Fence per-key and batch stale purges on `admission_generation` and
-  cover the claim-versus-purge race.
+- [x] 4.3 Fence per-key and batch stale purges on captured `updated_at_epoch`
+  plus `admission_generation`; cover claim-versus-purge and delayed-failure
+  races.
