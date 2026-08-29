@@ -219,6 +219,47 @@ async def test_known_subscription_model_with_missing_owner_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_known_subscription_model_candidate_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate lookup failure must keep the sanitized owner-miss contract."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service._load_balancer,
+        "list_selection_candidates",
+        AsyncMock(side_effect=RuntimeError("selection database unavailable")),
+    )
+
+    previous_response_id = "resp_known_subscription_candidate_lookup_failure"
+    payload = json.loads(_create_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = previous_response_id
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+    assert not any(previous_response_id in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
 async def test_known_subscription_model_owner_miss_uses_sole_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

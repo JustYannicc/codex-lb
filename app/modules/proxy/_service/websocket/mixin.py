@@ -2095,14 +2095,21 @@ class _WebSocketMixin:
                             selection_account_ids: Collection[str] | None = None
                             if selection_api_key is not None and selection_api_key.account_assignment_scope_enabled:
                                 selection_account_ids = selection_api_key.assigned_account_ids
-                            selection_candidates = await proxy._load_balancer.list_selection_candidates(
-                                model=request_state.model,
-                                service_tier=request_state.requested_service_tier,
-                                additional_limit_name=None,
-                                account_ids=selection_account_ids,
-                                exclude_account_ids=request_state.excluded_account_ids,
-                                require_security_work_authorized=request_state.require_security_work_authorized,
-                            )
+                            try:
+                                selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                                    model=request_state.model,
+                                    service_tier=request_state.requested_service_tier,
+                                    additional_limit_name=None,
+                                    account_ids=selection_account_ids,
+                                    exclude_account_ids=request_state.excluded_account_ids,
+                                    require_security_work_authorized=request_state.require_security_work_authorized,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to list WebSocket owner-miss candidates request_id=%s",
+                                    request_state.request_log_id or request_state.request_id,
+                                )
+                                selection_candidates = ()
                             owner_miss_requires_fail_closed = len(selection_candidates) != 1
                             if not owner_miss_requires_fail_closed:
                                 # The sole-candidate fallback is only safe if

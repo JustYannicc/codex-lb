@@ -61,6 +61,14 @@ its existing subscription fallback instead of converting the lookup failure into
 - **AND** the request is forwarded to that sole eligible subscription account
 - **AND** the `previous_response_id` is preserved in the upstream request
 
+#### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
+
+- **GIVEN** no subscription account is recorded as owner of `previous_response_id`
+- **AND** a turn-state header identifies a subscription account owner
+- **WHEN** the client submits an HTTP Responses or compact continuation
+- **THEN** the proxy reconciles the turn-state owner through normal owner resolution
+- **AND** the proxy does not apply the zero-or-multiple-candidate owner-miss failure
+
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 
 - **GIVEN** a source is also configured for the requested model
@@ -92,6 +100,15 @@ its existing subscription fallback instead of converting the lookup failure into
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
+
+#### Scenario: Direct WebSocket candidate lookup failure fails closed
+
+- **GIVEN** the requested model is known to subscription routing
+- **AND** no subscription account is recorded as owner of `previous_response_id`
+- **AND** loading eligible subscription candidates fails
+- **WHEN** a direct Responses WebSocket client submits the follow-up
+- **THEN** the proxy emits the sanitized `previous_response_owner_unavailable` terminal error
+- **AND** the lookup failure is not exposed to the client
 
 #### Scenario: Sole eligible subscription account preserves a WebSocket continuation
 

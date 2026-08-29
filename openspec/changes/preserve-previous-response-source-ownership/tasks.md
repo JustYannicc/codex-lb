@@ -17,3 +17,4 @@
 ## 4. Verification
 
 - [x] 4.1 Run focused tests, Ruff, ty, and scoped/strict OpenSpec validation; inspect the final diff and worktree status.
+- [x] 4.2 Preserve turn-state ownership before owner-miss fallback and fail closed when WebSocket candidate lookup is unavailable.

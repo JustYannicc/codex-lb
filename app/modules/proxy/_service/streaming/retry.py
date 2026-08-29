@@ -1144,7 +1144,7 @@ class _StreamingRetryMixin:
                 # remains hard owner-bound even when the request also carries a
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
-                if preferred_account_id is None:
+                if preferred_account_id is None and turn_state_owner_account_id is None:
                     # A file pin is structural ownership evidence, so it stays
                     # strict even when the subscription pool has one candidate.
                     if rewritten_file_account_id is not None:
