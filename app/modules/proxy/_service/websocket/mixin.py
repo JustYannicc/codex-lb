@@ -6612,6 +6612,7 @@ class _WebSocketMixin:
                         account=account,
                         account_id_value=account_id_value,
                         remaining=remaining,
+                        pending_lock=pending_lock,
                         error_code=error_code,
                         error_message=error_message,
                         api_key=api_key,
@@ -6657,6 +6658,7 @@ class _WebSocketMixin:
         account: Account | None,
         account_id_value: str | None,
         remaining: list[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
         error_code: str,
         error_message: str,
         api_key: ApiKeyData | None,
@@ -6760,7 +6762,11 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
-            if request_state.event_queue is not None:
+            async with pending_lock:
+                event_queue = request_state.event_queue
+                consumer_started = getattr(request_state, "event_queue_consumer_started", False)
+                revoked_before_terminal = request_state.event_queue_revoked.is_set()
+            if event_queue is not None:
                 try:
                     terminal_event = format_sse_event(
                         response_failed_event(
@@ -6773,7 +6779,7 @@ class _WebSocketMixin:
                     )
                     await _enqueue_http_bridge_event(
                         request_state,
-                        request_state.event_queue,
+                        event_queue,
                         terminal_event,
                         terminal=True,
                     )
@@ -6783,6 +6789,26 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+                # A liveness claimant revokes pre-consumer sibling queues while
+                # it still owns the pending lock. Once terminal bookkeeping has
+                # run, no delayed stream can attach to that queue, so release
+                # its unread payload credits instead of retaining them forever.
+                # Keep unrevoked pre-consumer queues available for their normal
+                # delayed terminal consumer, and never discard an attached queue.
+                queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                discard_revoked_preconsumer = not consumer_started and (
+                    revoked_before_terminal or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
+                )
+                if discard_revoked_preconsumer:
+                    async with pending_lock:
+                        if request_state.event_queue is event_queue and not getattr(
+                            request_state, "event_queue_consumer_started", False
+                        ):
+                            request_state.event_queue = None
+                            request_state.event_queue_revoked.set()
+                            discard = getattr(event_queue, "discard", None)
+                            if callable(discard):
+                                discard()
             if (
                 websocket is not None
                 and client_send_lock is not None

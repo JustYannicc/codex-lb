@@ -827,11 +827,10 @@ async def _settle_claimed_http_bridge_liveness_failure(
             penalize_account=False,
             force_retire=True,
         )
-    # The failed sender returns a 502 before its stream consumer can attach,
-    # so no downstream actor can ever drain this queue.  Keep pre-consumer
-    # sibling queues available for their delayed consumers, but detach and
-    # discard only this sender-owned queue after terminal finalization has
-    # published its failure event and EOS.
+    # Terminal finalization discards every queue that was revoked before its
+    # consumer attached, releasing unread payload credits for the failed sender
+    # and any pre-consumer siblings.  The failed sender still receives the
+    # 502 directly; attached queues remain deliverable and are never discarded.
     async with session.pending_lock:
         failed_event_queue = failed_request_state.event_queue
         if failed_event_queue is not None and not getattr(failed_request_state, "event_queue_consumer_started", False):

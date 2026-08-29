@@ -582,6 +582,22 @@ async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_wi
 
         await asyncio.wait_for(wait_for_consumer_attachment(), timeout=1.0)
         await event_queue.put("too-large-for-budget")
+        late_terminal = proxy_service.format_sse_event(
+            proxy_service.response_failed_event(
+                "upstream_unavailable",
+                "late upstream failure",
+                response_id="resp-budget-rejection-stream",
+            )
+        )
+        assert (
+            await http_bridge_upstream_events_module._enqueue_http_bridge_event(
+                request_state,
+                event_queue,
+                late_terminal,
+                terminal=True,
+            )
+            is False
+        )
         terminal_event = await asyncio.wait_for(stream_task, timeout=1.0)
         assert '"type":"response.failed"' in terminal_event
         assert '"code":"upstream_unavailable"' in terminal_event
@@ -832,8 +848,8 @@ async def test_http_bridge_reader_failure_does_not_wedge_full_preconsumer_queue(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_event() -> None:
-    """A delayed sibling keeps its failure while the failed sender queue is released."""
+async def test_http_bridge_liveness_settlement_discards_revoked_preconsumer_queue() -> None:
+    """A revoked pre-consumer sibling releases unread payload credits."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -854,9 +870,11 @@ async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_eve
             skip_request_log=True,
         )
 
+    sibling_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
     sibling_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
         maxsize=2,
         revoked=asyncio.Event(),
+        byte_budget=sibling_budget,
     )
     sibling_queue.put_nowait("buffered-1")
     sibling_queue.put_nowait("buffered-2")
@@ -912,12 +930,10 @@ async def test_http_bridge_liveness_settlement_preserves_preconsumer_failure_eve
     )
 
     assert sibling_state.event_queue_revoked.is_set()
-    assert sibling_queue.get_nowait() == "buffered-1"
-    assert sibling_queue.get_nowait() == "buffered-2"
-    sibling_terminal = sibling_queue.get_nowait()
-    assert sibling_terminal is not None
-    assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in sibling_terminal
-    assert sibling_queue.get_nowait() is None
+    assert sibling_state.event_queue is None
+    assert sibling_queue.empty()
+    assert sibling_queue.queued_bytes == 0
+    assert sibling_budget.used_bytes == 0
     assert failed_state.event_queue is None
     assert failed_queue.empty()
     assert failed_queue.queued_bytes == 0

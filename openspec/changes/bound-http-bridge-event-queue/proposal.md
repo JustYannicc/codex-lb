@@ -9,8 +9,12 @@ An admitted HTTP-bridge Responses stream currently stores upstream events in an 
   concurrent sessions cannot multiply the per-queue envelope into worker OOM.
 - Make the existing awaited producer enqueue apply backpressure when that queue is full.
 - When the process budget is exhausted, fail closed for that queue and record the
-  pressure without adding an operator-configurable memory setting.
-- Preserve ordered event delivery, terminal settlement, durable spool/replay, disconnect cleanup, and paced-consumer behavior.
+  pressure without adding an operator-configurable memory setting. An attached
+  stream receives one explicit upstream-unavailable terminal result; a revoked
+  pre-consumer queue may be discarded after terminal bookkeeping and expose only
+  the public bare-EOS/truncated-stream result.
+- Preserve ordered event delivery for attached consumers, terminal settlement,
+  durable spool/replay, disconnect cleanup, and paced-consumer behavior.
 - Add deterministic integration coverage for paused, resumed, and paced consumers without adding a user setting.
 
 ## Capabilities

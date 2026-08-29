@@ -2,9 +2,9 @@
 
 ### Requirement: HTTP bridge live event buffering is bounded
 
-Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. The relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure.
+Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. In this finite-queue backpressure path, the relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure. This no-drop guarantee does not apply after the process-wide byte budget rejects a payload and revokes the queue.
 
-Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; the service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
+Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; an attached stream MUST surface one `response.failed` terminal result with `upstream_unavailable` (or the equivalent HTTP 503 error when the route propagates HTTP errors), while a later upstream `response.failed` publication MAY be ignored by the revoked queue. A pre-consumer queue that is already revoked or abandoned MAY be discarded and therefore expose only EOS to a delayed reader. The service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
 
 Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
 
@@ -45,3 +45,11 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 - **THEN** only the affected queue revokes producers and does not retain the rejected payload
 - **AND** the retained payloads remain accounted until their queues dequeue them
 - **AND** settlement, persistence, logging, and cleanup continue without an operator-configurable memory knob
+
+#### Scenario: Budget revocation has one explicit terminal result
+
+- **GIVEN** an HTTP-bridge stream has an attached downstream SSE consumer
+- **WHEN** a live event cannot reserve bytes from the process-wide budget
+- **THEN** the stream emits one `response.failed` event with `upstream_unavailable` (or returns HTTP 503 when HTTP errors are propagated)
+- **AND** a later upstream `response.failed` event is not required to be delivered through the revoked queue
+- **AND** the rejected payload and any unread queue bytes are released during cleanup
