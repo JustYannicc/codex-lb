@@ -9,7 +9,7 @@ cleanup MUST NOT replace the original recovery path with a
 rebind remains responsible for clearing stale attempt material before the
 replacement dispatch.
 
-#### Scenario: Optional reset refusal does not abort local recovery
+### Scenario: Optional reset refusal does not abort local recovery
 
 - **GIVEN** an anchored operation belongs to the failed durable session
 - **AND** local recovery has not dispatched a replacement request
@@ -18,7 +18,7 @@ replacement dispatch.
 - **AND** the replacement is allowed to reach the normal fenced operation
   rebind path.
 
-#### Scenario: Optional reset exception does not mask the upstream failure
+### Scenario: Optional reset exception does not mask the upstream failure
 
 - **GIVEN** the same anchored local recovery path
 - **WHEN** the optional spool reset raises
@@ -34,7 +34,7 @@ An unavailable, refused, or raising required reset MUST return the typed
 `bridge_continuity_persistence_failed` error and MUST NOT dispatch the
 unanchored replacement request.
 
-#### Scenario: Required reset refusal blocks unanchored replay
+### Scenario: Required reset refusal blocks unanchored replay
 
 - **GIVEN** a verified stale-anchor full-resend replay
 - **WHEN** the required operation-spool reset is unavailable or returns
