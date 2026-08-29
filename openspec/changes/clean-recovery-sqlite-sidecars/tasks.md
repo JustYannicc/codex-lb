@@ -14,6 +14,8 @@
 - [x] 2.3 Cover a write attempt during the fenced preparation boundary.
 - [x] 2.4 Cover Windows-style sidecar unlink and rename behavior with a
   tracked-handle seam, including a sidecar recreated around source move.
-- [x] 2.5 Cover partial cleanup and busy-source failures.
-- [x] 2.6 Cover second-rename failure and source restoration.
-- [x] 2.7 Run focused recovery tests, Ruff, formatting, `ty`, and strict OpenSpec.
+- [x] 2.5 Cover pre-move partial cleanup and busy-source failures.
+- [x] 2.6 Cover post-move cleanup/second-rename failures and source
+  restoration.
+- [x] 2.7 Cover recovery-handle closure when rollback itself raises.
+- [x] 2.8 Run focused recovery tests, Ruff, formatting, `ty`, and strict OpenSpec.

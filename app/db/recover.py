@@ -80,9 +80,13 @@ def _sqlite_recovery_lock(db_path: Path) -> Iterator[None]:
             raise RuntimeError(f"could not acquire exclusive SQLite recovery lock for {db_path}: {exc}") from exc
         yield
     finally:
-        if acquired:
-            connection.rollback()
-        connection.close()
+        try:
+            if acquired:
+                connection.rollback()
+        finally:
+            # Do not let a rollback failure strand the recovery handle. The
+            # rollback exception is preserved while close remains guaranteed.
+            connection.close()
 
 
 def _replace_recovered_database(source: Path, output: Path, backup: Path) -> None:

@@ -14,7 +14,10 @@ with those sidecars present can attach stale state to the replacement.
   before final sidecar cleanup or either database rename so Windows can perform
   the file mutations; repeat source cleanup after the source move to catch
   sidecars recreated around that move. Fail closed if the lock or any sidecar
-  cleanup cannot complete. If the second replacement rename fails, restore the
+  cleanup cannot complete before the source move. If repeat source cleanup
+  fails after the source move, restore the original source path before
+  reporting the error and leave the recovered output as an uninstalled
+  recovery artifact. If the second replacement rename fails, restore the
   original source path before reporting the error. Closing the transaction
   leaves a bounded post-probe window before cleanup and renames, so the
   operator must keep external writers quiescent throughout it.

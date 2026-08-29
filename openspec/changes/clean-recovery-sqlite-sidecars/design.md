@@ -20,8 +20,12 @@ not part of the dump, so they must be removed at each replacement boundary.
   before any rename. Closing the probe necessarily leaves a bounded post-probe
   window before the cleanup and renames; the operator must keep external
   writers quiescent throughout that window.
-- Fail recovery rather than install an ambiguous replacement when sidecar
-  removal reports an error.
+- Fail recovery rather than install an ambiguous replacement when pre-move
+  sidecar removal reports an error. If the repeat source cleanup after the
+  source move fails, restore the backup to the source path before reporting
+  the cleanup error; leave the recovered output and any partial cleanup in
+  place as operator-recovery artifacts rather than installing it as the live
+  source.
 - Treat the two filesystem renames as a small transaction: if installing the
   output fails after the source moved to its backup, restore the backup to the
   source path and report the original failure. If restoration also fails,
@@ -31,13 +35,16 @@ not part of the dump, so they must be removed at each replacement boundary.
 
 Recovery tests hold a source WAL open across dump creation, seed output
 sidecars, and verify the installed database and both sidecar sets. A boundary
-test attempts a write while the exclusive lock is held and verifies that a
-fresh connection writes to the installed database. A filesystem seam tracks
+test attempts a write while the exclusive lock is held, closes that external
+writer before lock release, and verifies that a fresh connection writes to the
+installed database. A filesystem seam tracks
 every sidecar unlink and database rename, asserting that every tracked recovery
 connection is closed first; it also recreates a source sidecar around the
 source move to prove the repeat cleanup. Partial cleanup, busy-source, and
 second-rename failures prove the replacement fails closed, and a wildcard
-filename test proves unrelated master journals remain untouched.
+filename test proves unrelated master journals remain untouched. A rollback
+seam injects a repeat-cleanup failure and verifies source restoration; the lock
+seam also verifies the handle closes when rollback itself raises.
 
 ## Dependencies
 

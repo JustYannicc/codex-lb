@@ -24,6 +24,11 @@ class _TrackedConnection(sqlite3.Connection):
         super().close()
 
 
+class _RollbackFailingConnection(_TrackedConnection):
+    def rollback(self) -> None:
+        raise sqlite3.OperationalError("simulated rollback failure")
+
+
 def _track_connections(monkeypatch: pytest.MonkeyPatch) -> list[_TrackedConnection]:
     connections: list[_TrackedConnection] = []
 
@@ -131,6 +136,28 @@ def test_recover_cli_closes_connections_before_replacing_database(
         _close_connections(connections)
 
 
+def test_recovery_lock_closes_connection_when_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "store.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+
+    recovery_connection = _RollbackFailingConnection(str(db_path))
+
+    def connect_with_rollback_failure(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        return recovery_connection
+
+    monkeypatch.setattr(recover_module.sqlite3, "connect", connect_with_rollback_failure)
+
+    with pytest.raises(sqlite3.OperationalError, match="simulated rollback failure"):
+        with recover_module._sqlite_recovery_lock(db_path):
+            pass
+
+    assert recovery_connection.closed
+
+
 def test_recover_replace_removes_sqlite_sidecars_before_installing_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -199,9 +226,11 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
 
     writer = sqlite3.connect(db_path, timeout=0, isolation_level=None)
     write_attempts: list[str] = []
+    writer_closed_before_replace = False
     real_write_dump = recover_module._write_dump
 
     def _write_dump_then_attempt_source_write(output: Path, dump: str) -> None:
+        nonlocal writer_closed_before_replace
         try:
             writer.execute("BEGIN IMMEDIATE")
             writer.execute("INSERT INTO items (name) VALUES ('raced')")
@@ -210,6 +239,10 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
         except sqlite3.OperationalError as exc:
             writer.rollback()
             write_attempts.append(str(exc).lower())
+            # The operator contract requires external writer handles to be
+            # closed before the probe is released and replacement begins.
+            writer.close()
+            writer_closed_before_replace = True
         real_write_dump(output, dump)
 
     monkeypatch.setattr(recover_module, "_write_dump", _write_dump_then_attempt_source_write)
@@ -222,6 +255,7 @@ def test_recover_replace_blocks_writes_across_the_install_boundary(
         writer.close()
 
     assert write_attempts == ["database is locked"]
+    assert writer_closed_before_replace
     with closing(sqlite3.connect(db_path)) as connection:
         connection.execute("INSERT INTO items (name) VALUES ('after')")
         assert connection.execute("SELECT name FROM items ORDER BY rowid").fetchall() == [
@@ -267,6 +301,43 @@ def test_recover_replace_fails_closed_on_partial_sidecar_cleanup(
     assert not (tmp_path / "store.db-wal").exists()
     assert not (tmp_path / "store.db-shm").exists()
     assert not (tmp_path / "store.db-journal").exists()
+
+
+def test_recover_replace_restores_source_when_post_move_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat cleanup error must roll back the source move."""
+    db_path = tmp_path / "store.db"
+    output_path = tmp_path / "recovered.db"
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+
+    real_remove_sidecars = recover_module._remove_sqlite_sidecars
+    source_cleanup_calls = 0
+
+    def fail_post_move_cleanup(path: Path) -> None:
+        nonlocal source_cleanup_calls
+        if path == db_path:
+            source_cleanup_calls += 1
+            if source_cleanup_calls == 2:
+                raise RuntimeError("simulated post-move sidecar cleanup failure")
+        real_remove_sidecars(path)
+
+    monkeypatch.setattr(recover_module, "_remove_sqlite_sidecars", fail_post_move_cleanup)
+
+    with pytest.raises(RuntimeError, match="simulated post-move sidecar cleanup failure"):
+        recover_module.recover_sqlite_db(
+            recover_module.RecoveryOptions(source=db_path, output=output_path, replace=True)
+        )
+
+    assert source_cleanup_calls == 2
+    assert db_path.exists()
+    assert output_path.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute("SELECT name FROM items").fetchall() == [("base",)]
 
 
 def test_recover_replace_fails_closed_when_source_is_busy(tmp_path: Path) -> None:

@@ -17,9 +17,13 @@ database basename literally. Recovery MUST close every recovery-opened SQLite
 connection before each sidecar unlink or database rename. The operator MUST
 keep external writers quiescent from lock release through completion of both
 renames; this is the bounded post-probe window required by platforms that
-reject filesystem mutation with open SQLite handles.
-If an active connection prevents the lock, or sidecar cleanup fails, recovery
-MUST fail without moving the source or installing the output.
+reject filesystem mutation with open SQLite handles. If an active connection
+prevents the lock, or any pre-move sidecar cleanup fails, recovery MUST fail
+without moving the source or installing the output. If the repeat source
+cleanup after the source move fails, recovery MUST restore the source from its
+corrupt backup before reporting the cleanup failure; the recovered output MUST
+NOT be installed as the live source, though the output and any partially
+cleaned sidecars MAY remain for operator recovery.
 
 #### Scenario: A stale source WAL cannot attach to the replacement
 
@@ -34,6 +38,8 @@ MUST fail without moving the source or installing the output.
 #### Scenario: An active writer cannot cross the fenced preparation boundary
 
 - **GIVEN** a source connection is open while recovery is replacing the database
+- **AND** the external writer closes its connection before recovery releases
+  the lock and starts replacement renames
 - **WHEN** that connection attempts a write during final import and cleanup
 - **THEN** the write MUST fail with the source's exclusive recovery lock held
 - **AND** a fresh connection MUST be able to write to the installed database
@@ -59,6 +65,15 @@ MUST fail without moving the source or installing the output.
 - **WHEN** recovery prepares a replacement
 - **THEN** recovery MUST fail before moving the source or installing the output
 - **AND** the source MUST remain at its original path
+
+#### Scenario: Post-move sidecar cleanup restores the source
+
+- **GIVEN** recovery has moved the source to its corrupt backup
+- **AND** the repeat source sidecar cleanup fails
+- **WHEN** recovery handles the cleanup error
+- **THEN** the corrupt backup MUST be restored to the original source path
+- **AND** the recovered output MUST remain uninstalled as the live source
+- **AND** recovery MUST report the cleanup failure
 
 #### Scenario: Output installation failure restores the source
 
