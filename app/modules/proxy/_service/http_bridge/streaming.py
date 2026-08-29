@@ -4686,9 +4686,13 @@ class _HTTPBridgeStreamingMixin:
                 await detach_downstream_request()
                 raise
             break
-        event_queue = request_state.event_queue
-        assert event_queue is not None
         try:
+            # Terminal cleanup may revoke and detach a pre-consumer queue
+            # between submission and this handoff. Keep the assertion inside
+            # the cleanup funnel so that race still releases the request
+            # ownership before the failure is propagated.
+            event_queue = request_state.event_queue
+            assert event_queue is not None
             initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
         except BaseException:
             await detach_downstream_request()

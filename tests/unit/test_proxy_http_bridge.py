@@ -726,6 +726,73 @@ async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_preconsumer_cleanup_before_queue_lookup_still_detaches_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-consumer terminal cleanup must still run downstream detachment."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="preconsumer-cleanup-before-lookup")
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-preconsumer-cleanup-before-lookup",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+    )
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        # Model terminal cleanup revoking a pre-consumer queue while the
+        # request remains in pending ownership for the sender's detach path.
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+            request_state.event_queue = None
+            request_state.event_queue_revoked.set()
+
+    detach = AsyncMock(wraps=service._detach_http_bridge_request)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+
+    try:
+        with pytest.raises(AssertionError):
+            await asyncio.wait_for(anext(stream), timeout=1.0)
+
+        detach.assert_awaited_once_with(session, request_state=request_state)
+        assert request_state.draining_until_terminal is True
+        assert session.queued_request_count == 0
+        assert session.upstream_control.reconnect_requested is True
+        assert session.upstream_control.retire_after_drain is True
+        assert request_state.event_queue is None
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
