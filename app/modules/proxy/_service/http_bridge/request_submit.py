@@ -1369,8 +1369,9 @@ class _HTTPBridgeRequestSubmitMixin:
         # is cooling down.  Gate new submissions before any reconnect/send so
         # the circuit turns this into a bounded 503 instead of another
         # response.create attempt.  A proof-gated full resend remains allowed
-        # because it is the client's own replay-safe request, not an opaque
-        # continuation replay.
+        # when the retry-circuit state is known because it is the client's
+        # own replay-safe request, not an opaque continuation replay.  An
+        # uncertain stale purge still fails closed before any bypass applies.
         allow_proof_gated_continuity_replay = bool(
             request_state.previous_response_id is not None
             and request_state.fresh_upstream_request_is_retry_safe
@@ -2385,6 +2386,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=request_state.bridge_request_deadline,
                             )
                         )
                         if not generation_claimed:
@@ -2393,6 +2395,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 math.ceil(
                                     await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
                                         circuit_key or session.key,
+                                        deadline=request_state.bridge_request_deadline,
                                     )
                                 ),
                             )

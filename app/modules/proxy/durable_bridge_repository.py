@@ -10,7 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,9 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Keep the five-column tuple predicate below under SQLite's 999 bind-variable
+# limit while retaining a single writer transaction for each selected batch.
+_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 150
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -653,18 +656,16 @@ class DurableBridgeRepository:
             "admission_generation": 1,
         }
         dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
+        if expected_updated_at_epoch is None and expected_admission_generation != 0:
+            return None
         async with sqlite_writer_section():
             if expected_updated_at_epoch is None:
-                if expected_admission_generation != 0:
-                    return None
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
-                elif dialect == "sqlite":
-                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 else:
-                    raise RuntimeError(
-                        f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
-                    )
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
             else:
                 statement = (
                     update(HttpBridgeRetryCircuit)
@@ -679,16 +680,18 @@ class DurableBridgeRepository:
                     )
                     .values(admission_generation=expected_admission_generation + 1)
                 )
-            result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            # Return the updated row from the compare-and-set statement itself.
+            # Reading it after commit creates a cancellation window where the
+            # admission generation is consumed but the caller observes a
+            # timeout and suppresses the replay. RETURNING makes the durable
+            # claim receipt part of the same atomic write operation.
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
                 await self._session.rollback()
                 return None
             await self._session.commit()
-        return await self.get_retry_circuit(
-            session_key_kind=session_key_kind,
-            session_key_value=session_key_value,
-            api_key_scope=api_key_scope,
-        )
+        return _to_retry_circuit_snapshot(row)
 
     async def delete_retry_circuit(
         self,
@@ -697,7 +700,8 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -705,8 +709,10 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
@@ -717,6 +723,7 @@ class DurableBridgeRepository:
                 )
             )
             await self._session.commit()
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
     async def purge_retry_circuit(
         self,
@@ -725,7 +732,9 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
+        """Delete a stale retry row only when every captured fence matches."""
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -733,9 +742,15 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            result = await self._session.execute(
+                delete(HttpBridgeRetryCircuit).where(*conditions).returning(HttpBridgeRetryCircuit.session_key_hash)
+            )
+            matched = result.scalar_one_or_none() is not None
             await self._session.commit()
+        return matched
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -3067,6 +3082,7 @@ class DurableBridgeRepository:
         *,
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
     ) -> int:
+        """Delete expired retry rows without racing a generation claim."""
         deleted_count = 0
         while True:
             result = await self._session.execute(
@@ -3074,6 +3090,8 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch,
+                    HttpBridgeRetryCircuit.admission_generation,
                 )
                 .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
                 .limit(batch_size)
@@ -3081,14 +3099,21 @@ class DurableBridgeRepository:
             keys = [tuple(row) for row in result.fetchall()]
             if not keys:
                 return deleted_count
-            batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope in keys:
+                batch_deleted_count = 0
+                for offset in range(0, len(keys), _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE):
+                    key_chunk = keys[offset : offset + _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE]
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
-                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
-                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
-                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(
+                            tuple_(
+                                HttpBridgeRetryCircuit.session_key_kind,
+                                HttpBridgeRetryCircuit.session_key_hash,
+                                HttpBridgeRetryCircuit.api_key_scope,
+                                HttpBridgeRetryCircuit.updated_at_epoch,
+                                HttpBridgeRetryCircuit.admission_generation,
+                            ).in_(key_chunk)
+                        )
                         .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
