@@ -827,9 +827,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
-                        raw_error_type = error.type if error else None
-                        raw_error_message = error.message if error else None
-                        raw_error_param = error.param_state if error else None
+                        raw_error_type, raw_error_message, raw_error_param = (None, None, None)
                         if preserve_raw_sse_line and error is None:
                             raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
                                 event_type,
@@ -837,10 +835,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             )
                             upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
-                            raw_error_code = _normalize_error_code(
-                                error.code if error else None,
-                                raw_error_type,
-                            )
+                            raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)
                         raw_error_code = _raw_stream_error_code_or_upstream(
                             event_type,
