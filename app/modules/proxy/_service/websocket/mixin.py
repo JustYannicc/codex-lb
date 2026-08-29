@@ -2096,6 +2096,7 @@ class _WebSocketMixin:
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None
+                            and turn_state_owner_account_id is None
                             and not request_state.source_route_excluded
                         ):
                             await self._resolve_cached_websocket_source_ownership(
@@ -2107,6 +2108,7 @@ class _WebSocketMixin:
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None
+                            and turn_state_owner_account_id is None
                             and not owner_miss_requires_fail_closed
                             and request_state.source_model_ownership is ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
                         ):
@@ -2150,6 +2152,7 @@ class _WebSocketMixin:
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None
+                            and turn_state_owner_account_id is None
                             and owner_miss_requires_fail_closed
                         ):
                             message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE

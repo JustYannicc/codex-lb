@@ -211,6 +211,12 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
     owner_lookup = AsyncMock(return_value=None)
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", owner_lookup)
 
+    async def fail_selection_candidates(self, **kwargs):  # noqa: ANN001, ANN003
+        del self, kwargs
+        raise RuntimeError("selection database unavailable")
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", fail_selection_candidates)
+
     response = await async_client.post(
         "/backend-api/codex/responses/compact",
         headers={"Authorization": f"Bearer {key}"},
