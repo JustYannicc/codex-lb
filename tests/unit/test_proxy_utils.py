@@ -4814,8 +4814,110 @@ async def test_compact_fails_closed_when_turn_state_and_file_owners_conflict(
 
 
 @pytest.mark.asyncio
-async def test_compact_owner_lookup_error_survives_settlement_failure(
+async def test_compact_owner_conflict_settles_api_key_reservation_before_raise(
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    turn_owner = _make_account("acc_compact_turn_reservation_conflict")
+    file_owner = _make_account("acc_compact_file_reservation_conflict")
+    api_key = _make_api_key_data("key_compact_owner_conflict")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_owner_conflict",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    turn_state = "turn-compact-reservation-conflict"
+    alias_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, api_key.id)
+    service._http_bridge_turn_state_index[alias_key] = "bridge-reservation-conflict"  # type: ignore[assignment]
+    service._http_bridge_sessions["bridge-reservation-conflict"] = SimpleNamespace(account=turn_owner)  # type: ignore[index]
+    service._durable_bridge = SimpleNamespace(lookup_turn_state_target=AsyncMock(return_value=None))
+    selection = AsyncMock()
+    settle_compact_usage = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=file_owner.id))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_reservation_conflict"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"x-codex-turn-state": turn_state},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "continuity_owner_conflict"
+    selection.assert_not_awaited()
+    settle_compact_usage.assert_awaited_once()
+    assert settle_compact_usage.await_args is not None
+    assert settle_compact_usage.await_args.kwargs["api_key"] is api_key
+    assert settle_compact_usage.await_args.kwargs["api_key_reservation"] is reservation
+    assert settle_compact_usage.await_args.kwargs["response"] is None
+
+
+@pytest.mark.asyncio
+async def test_compact_forwarded_error_leaves_reservation_with_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_forwarded_error")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_forwarded_error",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    selection = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No active accounts available",
+            error_code="no_accounts",
+        )
+    )
+    settle_compact_usage = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_forwarded_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+            forwarded_request=True,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "no_accounts"
+    settle_compact_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reservation_released", "expected_code"),
+    [(False, "usage_settlement_failed"), (True, "file_owner_unavailable")],
+    ids=["unconfirmed-release", "confirmed-release"],
+)
+async def test_compact_owner_lookup_surfaces_unconfirmed_settlement_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    reservation_released: bool,
+    expected_code: str,
 ) -> None:
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -4840,6 +4942,7 @@ async def test_compact_owner_lookup_error_survives_settlement_failure(
             502,
             openai_error("usage_settlement_failed", "Compact API key usage could not be settled"),
             failure_phase="usage_settlement",
+            reservation_released=reservation_released,
         )
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -4856,8 +4959,16 @@ async def test_compact_owner_lookup_error_survives_settlement_failure(
             api_key_reservation=reservation,
         )
 
-    assert exc_info.value is owner_error
-    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    # An owner failure may be preserved only after the reservation release is
+    # confirmed. An unconfirmed settlement failure must take precedence so the
+    # caller cannot mistake an unresolved quota reservation for a settled one.
+    assert _proxy_error_code(exc_info.value) == expected_code
+    if reservation_released:
+        assert exc_info.value is owner_error
+    else:
+        assert exc_info.value is not owner_error
+        assert exc_info.value.failure_phase == "usage_settlement"
+        assert exc_info.value.reservation_released is False
 
 
 @pytest.mark.asyncio
@@ -13557,12 +13668,11 @@ async def test_compact_responses_does_not_infer_previous_response_id_from_sessio
 
 
 @pytest.mark.asyncio
-async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypatch):
+async def test_compact_owner_miss_uses_one_scoped_candidate(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_compact_scoped_owner_miss")
-    seen_account_ids: list[list[str] | None] = []
 
     api_key = ApiKeyData(
         id="key_compact_scope",
@@ -13584,18 +13694,13 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
 
-    async def fake_load_selection_inputs(**kwargs):
-        seen_account_ids.append(kwargs.get("account_ids"))
-        return SimpleNamespace(accounts=[account])
-
-    monkeypatch.setattr(service._load_balancer, "_load_selection_inputs", fake_load_selection_inputs)
-    monkeypatch.setattr(
-        service._load_balancer,
-        "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
-    )
+    list_selection_candidates = AsyncMock(return_value=(account,))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
-    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
 
     async def fake_compact(payload, headers, access_token, account_id):
         del payload, headers, access_token, account_id
@@ -13612,11 +13717,213 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
         }
     )
 
-    result = await service.compact_responses(payload, {"session_id": "turn_compact_scope"}, api_key=api_key)
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_compact_scope",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "turn_compact_scope"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
 
     assert result.object == "response.compaction"
     assert result.model_extra == {"output": []}
-    assert seen_account_ids == [[account.id]]
+    list_selection_candidates.assert_awaited_once()
+    assert list_selection_candidates.await_args is not None
+    assert list_selection_candidates.await_args.kwargs["account_ids"] == [account.id]
+    select_account.assert_awaited_once()
+    settle_compact_usage.assert_awaited_once()
+    assert settle_compact_usage.await_args is not None
+    assert settle_compact_usage.await_args.kwargs["api_key"] is api_key
+    assert settle_compact_usage.await_args.kwargs["api_key_reservation"] is reservation
+    assert settle_compact_usage.await_args.kwargs["response"] is result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_count", [0, 2])
+async def test_compact_owner_miss_fails_closed_and_settles_reservation(monkeypatch, candidate_count: int):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_owner_miss")
+    candidates = [account] if candidate_count in {1, 2} else []
+    if candidate_count == 2:
+        candidates.append(_make_account("acc_compact_owner_miss_second"))
+
+    api_key = ApiKeyData(
+        id="key_compact_owner_miss",
+        name="compact owner miss",
+        key_prefix="sk-clb-owner-miss",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        account_assignment_scope_enabled=True,
+        assigned_account_ids=[candidate.id for candidate in candidates],
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id=f"resv_compact_owner_miss_{candidate_count}",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    settlement_events: list[str] = []
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    list_selection_candidates = AsyncMock(return_value=tuple(candidates))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    async def settle_compact_usage(**kwargs: object) -> None:
+        del kwargs
+        settlement_events.append("settle")
+
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+    monkeypatch.setattr(
+        proxy_service,
+        "_record_continuity_fail_closed",
+        lambda **kwargs: settlement_events.append("continuity"),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": "resp_missing_owner_compact",
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "turn_compact_owner_miss"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert exc_info.value.payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    list_selection_candidates.assert_awaited_once()
+    assert list_selection_candidates.await_args is not None
+    select_account.assert_not_awaited()
+    assert settlement_events == ["settle", "continuity"]
+
+
+@pytest.mark.asyncio
+async def test_compact_owner_miss_does_not_record_health_when_settlement_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_owner_miss_unconfirmed")
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_compact_owner_miss_unconfirmed",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    owner_lookup = AsyncMock(return_value=None)
+    list_selection_candidates = AsyncMock(return_value=())
+    settlement_events: list[str] = []
+
+    async def fail_settlement(**kwargs: object) -> None:
+        del kwargs
+        settlement_events.append("settle:start")
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("usage_settlement_failed", "Compact API key usage could not be settled"),
+            failure_phase="usage_settlement",
+            reservation_released=False,
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", owner_lookup)
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", fail_settlement)
+    monkeypatch.setattr(
+        proxy_service,
+        "_record_continuity_fail_closed",
+        lambda **kwargs: settlement_events.append("continuity"),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": "resp_missing_owner_unconfirmed",
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "turn_compact_owner_miss_unconfirmed"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "usage_settlement_failed"
+    assert exc_info.value.failure_phase == "usage_settlement"
+    assert exc_info.value.reservation_released is False
+    assert settlement_events == ["settle:start"]
+    owner_lookup.assert_awaited_once()
+    list_selection_candidates.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_owner_candidate_lookup")
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_compact_owner_candidate_lookup",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    lookup_error = RuntimeError("selection catalog unavailable")
+    list_selection_candidates = AsyncMock(side_effect=lookup_error)
+    settle_compact_usage = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": "resp_missing_owner_compact",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="selection catalog unavailable"):
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    list_selection_candidates.assert_awaited_once()
+    settle_compact_usage.assert_awaited_once()
+    assert settle_compact_usage.await_args is not None
+    assert settle_compact_usage.await_args.kwargs["api_key"] is api_key
+    assert settle_compact_usage.await_args.kwargs["api_key_reservation"] is reservation
+    assert settle_compact_usage.await_args.kwargs["response"] is None
 
 
 @pytest.mark.asyncio
@@ -39034,7 +39341,11 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
 
 
 @pytest.mark.asyncio
-async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_selection(monkeypatch):
+@pytest.mark.parametrize("candidate_count", [0, 1, 2])
+async def test_stream_previous_response_owner_miss_uses_sole_candidate_or_fails_closed(
+    monkeypatch,
+    candidate_count: int,
+):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -39053,11 +39364,11 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(return_value=SimpleNamespace(accounts=[account_other, _make_account("acc_second_stream")])),
-    )
+    candidates = [] if candidate_count == 0 else [account_other]
+    if candidate_count == 2:
+        candidates.append(_make_account("acc_second_stream"))
+    list_selection_candidates = AsyncMock(return_value=tuple(candidates))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_other))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
@@ -39075,21 +39386,30 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.failed"
-    assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
     assert request_logs.lookup_calls == [("resp_missing_owner", None, "sid-stream")]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
-    assert request_logs.calls[0]["account_id"] is None
-    select_account.assert_not_awaited()
-    assert stream_calls == []
-    assert counter.samples == [
-        {
-            "labels": {"surface": "http_stream", "reason": "owner_account_unavailable"},
-            "value": 1.0,
-        }
-    ]
+    if candidate_count == 1:
+        assert event["type"] == "response.completed"
+        assert event["response"]["id"] == "resp_wrong_account"
+        assert request_logs.calls[0]["status"] == "success"
+        assert request_logs.calls[0]["account_id"] == account_other.id
+        select_account.assert_awaited_once()
+        assert stream_calls == [account_other.id]
+        assert counter.samples == []
+    else:
+        assert event["type"] == "response.failed"
+        assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
+        assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+        assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+        assert request_logs.calls[0]["account_id"] is None
+        select_account.assert_not_awaited()
+        assert stream_calls == []
+        assert counter.samples == [
+            {
+                "labels": {"surface": "http_stream", "reason": "owner_account_unavailable"},
+                "value": 1.0,
+            }
+        ]
 
 
 @pytest.mark.asyncio

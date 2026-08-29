@@ -45,6 +45,8 @@ class ResponseFailedEvent(TypedDict):
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
 PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
 PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE = "previous_response_owner_unavailable"
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE = "Previous response owner account is unavailable; retry later."
 
 
 def openai_error(
