@@ -1028,16 +1028,23 @@ class _CompactMixin:
                         # the count; an unscoped key uses the normal model pool. A
                         # missing owner with multiple or zero candidates still fails
                         # closed because selection would otherwise guess an account.
-                        selection_candidates = await proxy._load_balancer.list_selection_candidates(
-                            model=payload.model,
-                            service_tier=_service_tier_from_compact_payload(payload),
-                            additional_limit_name=None,
-                            account_ids=(
-                                api_key.assigned_account_ids
-                                if api_key is not None and api_key.account_assignment_scope_enabled
-                                else None
-                            ),
-                        )
+                        try:
+                            selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                                model=payload.model,
+                                service_tier=_service_tier_from_compact_payload(payload),
+                                additional_limit_name=None,
+                                account_ids=(
+                                    api_key.assigned_account_ids
+                                    if api_key is not None and api_key.account_assignment_scope_enabled
+                                    else None
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to list compact owner-miss candidates request_id=%s",
+                                request_id,
+                            )
+                            selection_candidates = ()
                     if len(selection_candidates) != 1:
                         await settle_compact_usage_before_owner_exit(
                             "Failed to settle compact API key reservation after previous-response owner fail-closed"
