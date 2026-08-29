@@ -1018,7 +1018,7 @@ class _CompactMixin:
                     session_id=previous_response_lookup_session_id,
                     surface="compact",
                 )
-                if previous_response_preferred_account_id is None:
+                if previous_response_preferred_account_id is None and turn_state_owner_account_id is None:
                     # A file pin is structural ownership evidence, so it stays
                     # strict even when the subscription pool has one candidate.
                     if rewritten_file_account_id is not None:
