@@ -6764,7 +6764,6 @@ class _WebSocketMixin:
                     )
             async with pending_lock:
                 event_queue = request_state.event_queue
-                consumer_started = getattr(request_state, "event_queue_consumer_started", False)
                 revoked_before_terminal = request_state.event_queue_revoked.is_set()
             if event_queue is not None:
                 try:
@@ -6796,19 +6795,28 @@ class _WebSocketMixin:
                 # Keep unrevoked pre-consumer queues available for their normal
                 # delayed terminal consumer, and never discard an attached queue.
                 queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
-                discard_revoked_preconsumer = not consumer_started and (
-                    revoked_before_terminal or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
-                )
-                if discard_revoked_preconsumer:
-                    async with pending_lock:
-                        if request_state.event_queue is event_queue and not getattr(
-                            request_state, "event_queue_consumer_started", False
-                        ):
-                            request_state.event_queue = None
-                            request_state.event_queue_revoked.set()
-                            discard = getattr(event_queue, "discard", None)
-                            if callable(discard):
-                                discard()
+                async with pending_lock:
+                    # Recheck revocation after terminal publication: a
+                    # sibling can lose its delayed-consumer owner while this
+                    # finalizer waits to reacquire the shared pending lock.
+                    discard_revoked_preconsumer = (
+                        request_state.event_queue is event_queue
+                        and not getattr(request_state, "event_queue_consumer_started", False)
+                        and (
+                            revoked_before_terminal
+                            or (
+                                request_state.event_queue_revoked.is_set()
+                                and not getattr(event_queue, "terminal_pending", False)
+                            )
+                            or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
+                        )
+                    )
+                    if discard_revoked_preconsumer:
+                        request_state.event_queue = None
+                        request_state.event_queue_revoked.set()
+                        discard = getattr(event_queue, "discard", None)
+                        if callable(discard):
+                            discard()
             if (
                 websocket is not None
                 and client_send_lock is not None
