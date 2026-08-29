@@ -36,5 +36,7 @@ untouched.
 
 ## Dependencies
 
-None. The implementation and proof stand on the beta.4 base without the
-startup run-state candidate.
+The implementation and proof stand on the beta.4 base without the startup
+run-state candidate. The hosted Contributors attribution check is a merge
+dependency on #1902, the sole carrier of contributor metadata; this change
+must not duplicate `.all-contributorsrc` or README edits.

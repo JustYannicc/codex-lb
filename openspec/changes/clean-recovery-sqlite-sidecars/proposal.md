@@ -26,5 +26,8 @@ or runtime startup behavior.
 
 ## Dependencies
 
-None. This focused change is based directly on beta.4 and does not require the
-SQLite startup run-state changes from the other local candidate.
+The implementation is self-contained and does not require the SQLite startup
+run-state changes from the other local candidate. The hosted Contributors
+attribution check is intentionally carried by #1902, which is the sole PR
+allowed to change contributor metadata; merge #1902 first (or otherwise satisfy
+that check) before merging this PR.
