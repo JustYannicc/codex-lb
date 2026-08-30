@@ -8,9 +8,13 @@ including after per-key removal, TTL/size-cap pruning, registry
 reinitialization, or an allocator reset; any allocator reset MUST resume above
 every generation already observed during that service lifetime. TTL and
 size-cap pruning MUST NOT allow a later arm for a reused session key to receive
-a generation already observed by an earlier completion. Each entry MUST retain
-only a weak reference to the session that armed it, so the bounded registry
-cannot retain detached websocket sessions until TTL expiry.
+a generation already observed by an earlier completion. Each HTTP bridge
+session lifetime MUST have an immutable, unique session-identity token
+represented by that session object's object identity, distinct from reusable
+bridge keys, account IDs, and session headers. Each entry MUST retain only a
+weak reference to the session that armed it, so the bounded registry cannot
+retain detached websocket sessions until TTL expiry; that weak reference is the
+session-identity token used for fallback equality checks.
 
 A primary-key completion MAY clear quarantine only when its completing session
 is the current canonical session for a registered key, or when no canonical
@@ -19,9 +23,11 @@ the key is registered to a different session, the canonical registry wins and a
 detached predecessor MUST NOT clear any entry or first-strike evidence for that
 key, and an ownerless entry MUST remain uncleared when no canonical primary is
 registered, regardless of a mutable per-session marker or recycled object id.
-The completion MUST capture the primary-key quarantine generation, including an
-observed absence, before any await that can arm a replacement entry. Only the
-exact captured generation MAY be cleared; an observed absence or generation
+The completion MUST capture its immutable session-identity token together with
+the primary-key quarantine generation, including an observed absence, before
+taking its first await that can arm a replacement entry. Cleanup and equality
+checks MUST use only those captured identity and generation/absence values. Only
+the exact captured generation MAY be cleared; an observed absence or generation
 mismatch MUST leave a raced entry active.
 
 A stale-anchor recovery MUST capture the quarantine generation for its
