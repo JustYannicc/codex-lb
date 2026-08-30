@@ -62,8 +62,18 @@ def _is_sqlite_sidecar_path(database: Path, candidate: Path) -> bool:
 
 
 def _validate_recovery_paths(source: Path, output: Path) -> None:
-    normalized_source = source.expanduser().resolve(strict=False)
-    normalized_output = output.expanduser().resolve(strict=False)
+    # Check lexical names before resolving symlinks. A sidecar path can itself
+    # be a symlink to a real database; resolving it first would hide the
+    # source/output overlap and let cleanup unlink the caller's symlink.
+    lexical_source = Path(os.path.abspath(source.expanduser()))
+    lexical_output = Path(os.path.abspath(output.expanduser()))
+    if _is_sqlite_sidecar_path(lexical_source, lexical_output):
+        raise ValueError(f"output path overlaps a SQLite sidecar of source: {source} -> {output}")
+    if _is_sqlite_sidecar_path(lexical_output, lexical_source):
+        raise ValueError(f"source path overlaps a SQLite sidecar of output: {source} -> {output}")
+
+    normalized_source = lexical_source.resolve(strict=False)
+    normalized_output = lexical_output.resolve(strict=False)
     if normalized_source == normalized_output:
         raise ValueError(f"source and output paths must differ: {source}")
     if _is_sqlite_sidecar_path(normalized_source, normalized_output):

@@ -452,3 +452,23 @@ def test_recover_rejects_source_output_sidecar_overlap(
     assert source.exists()
     assert not output.exists()
     assert not list(tmp_path.glob("store.db.corrupt-*"))
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_recover_rejects_symlink_sidecar_before_cleanup(tmp_path: Path, replace: bool) -> None:
+    """A sidecar symlink must not be unlinked as part of recovery cleanup."""
+    real_source = tmp_path / "real.db"
+    source = tmp_path / "store.db-wal"
+    output = tmp_path / "store.db"
+    with closing(sqlite3.connect(real_source)) as connection, connection:
+        connection.execute("CREATE TABLE items (name TEXT NOT NULL)")
+        connection.execute("INSERT INTO items (name) VALUES ('base')")
+    source.symlink_to(real_source)
+
+    with pytest.raises(ValueError, match="overlaps a SQLite sidecar"):
+        recover_module.recover_sqlite_db(recover_module.RecoveryOptions(source=source, output=output, replace=replace))
+
+    assert source.is_symlink()
+    assert source.resolve() == real_source
+    assert not output.exists()
+    assert not list(tmp_path.glob("store.db.corrupt-*"))
