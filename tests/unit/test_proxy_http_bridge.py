@@ -1157,6 +1157,118 @@ async def test_http_bridge_finalizer_discards_queue_revoked_while_reacquiring_pe
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_finalizer_preserves_terminal_budget_failure_for_preconsumer_handoff() -> None:
+    """A terminal budget failure stays visible until the stream classifies it."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    terminal_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1)
+    queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=terminal_budget,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-budget-preconsumer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=queue,
+        event_queue_revoked=queue.revoked,
+        transport="http",
+        skip_request_log=True,
+    )
+    # A liveness claimant may revoke the pre-consumer queue before terminal
+    # cleanup.  If the terminal payload then cannot fit in the shared budget,
+    # keep the queue so the attached stream can classify that failure.
+    queue.revoke()
+    session = _make_bridge_session(
+        key_value="terminal-budget-preconsumer",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._finalize_claimed_websocket_requests(
+        account=None,
+        account_id_value=None,
+        remaining=[request_state],
+        pending_lock=session.pending_lock,
+        error_code="upstream_request_timeout",
+        error_message="reader failed",
+        api_key=None,
+        websocket=None,
+        client_send_lock=None,
+        response_create_gate=None,
+        downstream_activity=None,
+        status="error",
+        penalize_account=False,
+        suppress_sequenced_downstream_errors=False,
+    )
+
+    assert queue.terminal_budget_exceeded is True
+    assert request_state.event_queue is queue
+    assert request_state.event_queue_revoked.is_set()
+    with pytest.raises(http_bridge_streaming_module._HTTPBridgeLiveEventQueueBudgetExceeded):
+        await http_bridge_streaming_module._next_http_bridge_event_block(queue, timeout=0.1)
+
+    queue.discard()
+    assert terminal_budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_finalizer_discards_revoked_preconsumer_queue_when_terminal_budget_succeeds() -> None:
+    """A revoked pre-consumer queue is still discarded after terminal success."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    terminal_budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
+    queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=terminal_budget,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-revoked-terminal-success",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=queue,
+        event_queue_revoked=queue.revoked,
+        transport="http",
+        skip_request_log=True,
+    )
+    queue.revoke()
+    session = _make_bridge_session(
+        key_value="revoked-terminal-success",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._finalize_claimed_websocket_requests(
+        account=None,
+        account_id_value=None,
+        remaining=[request_state],
+        pending_lock=session.pending_lock,
+        error_code="upstream_request_timeout",
+        error_message="reader failed",
+        api_key=None,
+        websocket=None,
+        client_send_lock=None,
+        response_create_gate=None,
+        downstream_activity=None,
+        status="error",
+        penalize_account=False,
+        suppress_sequenced_downstream_errors=False,
+    )
+
+    assert request_state.event_queue is None
+    assert queue.empty()
+    assert terminal_budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling_queue() -> None:
     """Attached sibling and failed queues keep buffered events ahead of terminal EOS."""
 

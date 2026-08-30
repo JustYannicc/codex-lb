@@ -6797,9 +6797,11 @@ class _WebSocketMixin:
                             exc_info=True,
                         )
                     queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                    terminal_budget_exceeded = bool(getattr(event_queue, "terminal_budget_exceeded", False))
                     discard_revoked_preconsumer = (
                         request_state.event_queue is event_queue
                         and not getattr(request_state, "event_queue_consumer_started", False)
+                        and not terminal_budget_exceeded
                         and (
                             revoked_before_terminal
                             or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
