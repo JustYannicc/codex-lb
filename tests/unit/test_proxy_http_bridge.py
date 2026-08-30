@@ -20229,6 +20229,24 @@ async def test_drain_http_bridge_background_cleanup_reports_task_failure() -> No
 
 
 @pytest.mark.asyncio
+async def test_drain_http_bridge_background_cleanup_reports_cancelled_task_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    async def cancelled_cleanup() -> None:
+        raise asyncio.CancelledError
+
+    cleanup_task = asyncio.create_task(cancelled_cleanup(), name="http-bridge-close-cancelled")
+    service._background_cleanup_tasks.add(cleanup_task)
+
+    try:
+        assert await service._drain_http_bridge_background_cleanup_tasks(reason="test") is False
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup_task
+    finally:
+        service._background_cleanup_tasks.discard(cleanup_task)
+
+
+@pytest.mark.asyncio
 async def test_close_all_http_bridge_sessions_closes_detached_generations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
