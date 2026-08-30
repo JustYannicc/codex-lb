@@ -14555,7 +14555,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         if half_open_probe_return:
             assert retained_circuit.cooldown_until <= time.monotonic()
             assert retained_circuit.half_open_until == 0.0
-            assert retained_circuit.half_open_owner_session_id is None
+            assert retained_circuit.half_open_owner_session is None
         else:
             assert retained_circuit.cooldown_until > time.monotonic()
         durable_clear_retry_circuit.assert_not_awaited()

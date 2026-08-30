@@ -28,17 +28,51 @@ honors any real future durable cooldown and any durable failure updates.
   owning session. A continuity-loss return clears the active lease and sets
   `cooldown_until` to the current monotonic time; the next admission sees an
   elapsed, non-zero marker and installs one fresh lease, while siblings are
-  suppressed by that lease.
+  suppressed by that lease. A local release timestamp keeps that marker across
+  a transient durable miss until the next admission can claim the new lease.
 - Equal-version reloads do not erase an active local lease. The reload can
   reconcile the durable cooldown and failure count, but it cannot prove that a
   local probe is stale. This preserves the single-flight signal used by later
   poison/quarantine work.
+- A newer durable reset or lower failure count also cannot erase an active
+  local lease or lower its local failure fence while the probe is in flight.
+  When no local probe is active, a newer durable reset clears stale local
+  failure detail together with the count and cooldown.
 - Reset ordering is lifecycle ownership -> bridge registry -> pending attempts:
   claim the session lifecycle, detach it from active routing, mark its pending
   response-create attempts disarmed, then return the owner lease and settle/close
   the resources. The critical transition is shielded from cancellation; the
   caller's cancellation is observed after the cleanup task has published the
   detached and settled state.
+
+## Issue and vehicle map
+
+This change is intentionally split from the neighboring current-head
+vehicles. The comparison was made against `upstream/main`
+`2268f8caf1fe9d74a8734bd3f9cd8bd5152b5d3f` and these exact heads:
+
+- #1908 `ed8ee1222999bf6b58164529af3ae5724e09c4ec` contains the accepted
+  elapsed/absent-row arithmetic root cause, but its equal/newer lease-clearing
+  behavior is superseded here because it breaks #1394 single-flight.
+- #1947 `2a1ce9962b7daccd335f1f10fc2595f6ea9ab702` is the focused vehicle for
+  #1943 cooldown-created undispatched WebSocket session freshness/retirement;
+  it does not own this retry-circuit arithmetic or probe-return contract.
+- #1857's accepted semantic source is limited to commits
+  `d007582968d0c9b41ed29a6002226bbd63d07313`,
+  `9a7dc342148cf471b13a9980d411ea96d654e19e`, and
+  `2a822b4f9b522d4972e12a357d019a033b900805`: owner-tracked release, cancellation-safe
+  teardown, and replica-boundary reasoning. Its broad/relanded branch is not
+  carried as a vehicle.
+- #1891 owns poisoned-anchor quarantine and episode/generation-proven
+  replacement invalidation; this change preserves equal/unchanged elapsed
+  snapshots and does not import quarantine.
+- #1867 remains the broad stale-anchor hardening vehicle; no migration,
+  attribution, or broad anchor changes belong here.
+- #1902 is the sole attribution carrier. This change does not edit contributor
+  files or recreate closed #1951.
+
+The successor PR must cite maintainer comments #1908 `5423573461` and #1857
+`5423566424`, and the issue-separation statement in #1943, alongside this map.
 
 ## Failure modes and controls
 
@@ -47,7 +81,9 @@ honors any real future durable cooldown and any durable failure updates.
 - A continuity-owner failure does not increment `consecutive_failures` or
   persist a new row. An actual `stream_incomplete`, `stream_idle_timeout`, or
   `clean_close` still increments and opens the circuit at the configured
-  threshold.
+  threshold. A previous-response rejection is neutral only when request state
+  proves proxy anchor injection or a dead durable owner; a client-supplied
+  unknown anchor remains chargeable upstream failure.
 - Disarming before the first await prevents the reader from classifying reset
   teardown as an eligible eventless send. Acquiring `lifecycle_lock` closes the
   submit-vs-reset gap in which a late submit could append an undisarmed attempt.

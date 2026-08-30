@@ -32,6 +32,10 @@ The durable retry row remains the replica-wide source for failure counts and
 future cooldown deadlines. The active half-open owner is intentionally
 process-local because the owner is the process holding the upstream socket; a
 different replica may admit its own local probe after loading an elapsed row.
+If a newer durable reset or lower failure count arrives while a local probe is
+active, the process MUST retain that active lease and its local failure fence
+until the probe settles. A newer durable reset MUST clear stale local detail
+only when no local probe is active.
 
 #### Scenario: Real expiry admits one local probe
 
@@ -91,6 +95,10 @@ continuity-ownership loss, including `continuity_owner_unavailable`,
 `bridge_instance_mismatch`. It MUST continue to increment and persist genuine
 upstream `stream_incomplete`, `stream_idle_timeout`, and `clean_close` failures
 when their attempt is eligible.
+The `previous_response_not_found` forms are proxy continuity loss only when the
+request state proves that the rejected anchor was injected by this bridge or
+that a durable owner was already known dead; a client-supplied unknown anchor
+MUST remain a genuine upstream rejection.
 
 #### Scenario: Proxy continuity loss is neutral
 

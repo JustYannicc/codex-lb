@@ -1161,6 +1161,7 @@ class _HTTPBridgeRequestSubmitMixin:
         admission_claimed_leases: list[float] = []
         retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
+            probe_owner=request_state,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
             allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
             claimed_lease_out=admission_claimed_leases,
@@ -3893,6 +3894,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
+        probe_owner = request_state
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -3900,8 +3902,24 @@ class _HTTPBridgeRequestSubmitMixin:
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal and request_is_retryable(request_state)
                 ]
+                if request_state is None and len(retryable_candidates) != 1:
+                    # A half-open lease must always have a concrete pending
+                    # request owner. Fail closed before admission when the
+                    # reader cannot identify exactly one candidate.
+                    return False
+                if request_state is not None and all(
+                    candidate is not request_state for candidate in retryable_candidates
+                ):
+                    return False
                 if len(retryable_candidates) == 1:
                     candidate = retryable_candidates[0]
+                    if probe_owner is None:
+                        # The reader path does not always know which pending
+                        # request it is recovering. Bind a newly admitted
+                        # half-open lease to the unique candidate before
+                        # releasing the pending lock; a later owner-token
+                        # release must not fall back to the session identity.
+                        probe_owner = candidate
                     fresh_hard_request_account_switch_candidate = (
                         candidate.previous_response_id is None
                         and not candidate.hard_continuity_anchor
@@ -3919,6 +3937,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
         if not await self._http_bridge_precreated_retry_allowed(
             session,
+            probe_owner=probe_owner,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
             allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
             claimed_lease_out=admission_claimed_leases,
