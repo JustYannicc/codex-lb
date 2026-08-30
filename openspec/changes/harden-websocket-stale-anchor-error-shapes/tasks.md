@@ -31,8 +31,8 @@
 - [x] 4.1 Run focused Responses, WebSocket, Chat Completions, and proxy utility
       unit suites.
 - [x] 4.2 Run Ruff, formatting, `ty`, and `git diff --check` on the candidate.
-- [ ] 4.3 Run strict OpenSpec validation when the CLI is available; this
-      environment currently has no `openspec` binary and network package
-      fallback is disabled.
+- [x] 4.3 Run strict OpenSpec validation when the CLI is available; this
+      candidate passed `pnpm --silent dlx @fission-ai/openspec@1.10.0
+      validate harden-websocket-stale-anchor-error-shapes --strict`.
 - [ ] 4.4 Obtain current-hosted CI, CodeRabbit, mergeability, and maintainer
       review for the exact pushed head before calling the PR merge-ready.
