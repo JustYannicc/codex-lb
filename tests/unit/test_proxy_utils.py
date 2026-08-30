@@ -41371,6 +41371,57 @@ async def test_stream_previous_response_owner_miss_uses_sole_candidate_or_fails_
 
 
 @pytest.mark.asyncio
+async def test_stream_previous_response_owner_candidate_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(side_effect=AssertionError("selection must not follow lookup failure"))
+    stream_calls: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        stream_calls.append("unexpected")
+        yield 'data: {"type":"response.completed","response":{"id":"resp_unexpected"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "list_selection_candidates",
+        AsyncMock(side_effect=RuntimeError("selection catalog unavailable")),
+    )
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "opaque-owner-miss",
+        }
+    )
+
+    caplog.set_level(logging.WARNING)
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert request_logs.lookup_calls == [("opaque-owner-miss", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    select_account.assert_not_awaited()
+    assert stream_calls == []
+    assert "Failed to list HTTP stream owner-miss candidates" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
