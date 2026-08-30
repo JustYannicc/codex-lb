@@ -37,23 +37,29 @@ Convert a durable wall-clock deadline to a monotonic deadline only when the
 remaining duration is positive. Otherwise merge `0.0`. This avoids creating a
 synthetic expired transition from a row that is already open for admission.
 Equal-version reloads reconcile durable fields but do not clear a live local
-half-open lease: the reload cannot prove which local session owns it. A lookup
-failure leaves the existing local state untouched.
+half-open lease: the reload cannot prove which local session owns it. A newer
+durable reset or lower failure count also preserves an active local lease and
+its failure fence; only an inactive local state is cleared by a durable reset.
+A lookup failure leaves the existing local state untouched.
 
 ### Fence a process-local lease by session identity
 
 When admission crosses a real cooldown boundary, store the session identity
 alongside `half_open_until`. Release requires the same identity and an active
 lease. Release clears the lease and records an elapsed local cooldown marker;
-it does not change durable failure fields. The marker preserves the local
-single-flight transition for the next admission without making a durable claim.
+it does not change durable failure fields. A local release timestamp keeps that
+marker when a subsequent durable lookup misses, so the next admission can still
+install exactly one fresh lease without making a durable claim.
 
 ### Reuse the existing failure funnel for classification
 
 Classify the six known proxy continuity-loss details before the genuine failure
 set. Continuity loss invokes the owner-fenced release and returns without a
-durable write. Genuine `stream_incomplete`, `stream_idle_timeout`, and
-`clean_close` continue through the existing attempt-scoped accounting path.
+durable write. The previous-response forms are classified as proxy loss only
+with bridge-injected-anchor or dead-owner provenance; client-supplied unknown
+anchors remain upstream failures. Genuine `stream_incomplete`,
+`stream_idle_timeout`, and `clean_close` continue through the existing
+attempt-scoped accounting path.
 
 ### Serialize reset's critical section
 
