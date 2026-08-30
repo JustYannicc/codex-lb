@@ -263,33 +263,59 @@ class _HTTPBridgeMixin(
             )
 
     async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> bool:
-        tasks = [
-            task
-            for task in self._background_cleanup_tasks
-            if (
-                task.get_name().startswith("proxy-http_bridge_session_close-")
-                or task.get_name().startswith("http-bridge-close-")
-                or task.get_name().startswith("cancelled-task-cleanup-")
-                or task.get_name().startswith("http-bridge-retry-circuit-")
-            )
-        ]
-        if not tasks:
-            return not self._http_bridge_background_cleanup_failed
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
-                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                reason,
-                len(tasks),
-                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-            return False
-        self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
-        return not self._http_bridge_background_cleanup_failed
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS
+        no_tasks_turn = False
+        while True:
+            tasks = {
+                task
+                for task in self._background_cleanup_tasks
+                if not task.done()
+                and (
+                    task.get_name().startswith("proxy-http_bridge_session_close-")
+                    or task.get_name().startswith("http-bridge-close-")
+                    or task.get_name().startswith("cancelled-task-cleanup-")
+                    or task.get_name().startswith("http-bridge-retry-circuit-")
+                )
+            }
+            abandoned_tasks = getattr(self, "_http_bridge_retry_circuit_abandoned_tasks", None)
+            if abandoned_tasks is not None:
+                tasks.update(task for task in abandoned_tasks if not task.done())
+            if not tasks:
+                if no_tasks_turn:
+                    return not self._http_bridge_background_cleanup_failed
+                # A done callback can remove an abandoned durable operation and
+                # schedule its marker-release cleanup in the same loop turn.
+                no_tasks_turn = True
+                await asyncio.sleep(0)
+                continue
+            no_tasks_turn = False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
+                    reason,
+                    len(tasks),
+                    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+                )
+                return False
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
+                    reason,
+                    len(tasks),
+                    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+                )
+                return False
+            self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
+            # Let done callbacks register any cleanup spawned by a completed
+            # abandoned operation before taking the next snapshot.
+            await asyncio.sleep(0)
 
     async def _fail_http_bridge_inflight_session_creation(
         self,

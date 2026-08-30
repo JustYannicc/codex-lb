@@ -30903,6 +30903,47 @@ async def test_http_bridge_abandoned_retry_claim_cleanup_drains_during_shutdown(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_abandoned_retry_claim_late_completion_is_drained_during_shutdown() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    durable_started = asyncio.Event()
+    durable_release = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def delayed_claim() -> Any:
+        durable_started.set()
+        await durable_release.wait()
+        return SimpleNamespace(admission_claimed_generation=1)
+
+    async def release_claim(_result: Any) -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+
+    abandoned_task = asyncio.create_task(delayed_claim())
+    http_bridge_retry_circuit_module._track_abandoned_http_bridge_retry_circuit_task(
+        service,
+        abandoned_task,
+        label="late-claim",
+        on_result=release_claim,
+    )
+    await durable_started.wait()
+
+    drain_task = asyncio.create_task(service._drain_http_bridge_background_cleanup_tasks(reason="shutdown"))
+    await asyncio.sleep(0)
+    assert not drain_task.done()
+
+    durable_release.set()
+    await cleanup_started.wait()
+    assert not drain_task.done()
+
+    cleanup_release.set()
+    await drain_task
+    assert service._background_cleanup_tasks == set()
+    assert cast(Any, service)._http_bridge_retry_circuit_abandoned_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_claim_marker_cleanup_is_fenced() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cleanup")
