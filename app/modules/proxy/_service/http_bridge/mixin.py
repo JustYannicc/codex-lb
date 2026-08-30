@@ -270,6 +270,7 @@ class _HTTPBridgeMixin(
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
+                or task.get_name().startswith("http-bridge-retry-circuit-")
             )
         ]
         if not tasks:

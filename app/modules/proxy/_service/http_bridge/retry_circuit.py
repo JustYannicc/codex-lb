@@ -12,6 +12,10 @@ import anyio
 
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
+from app.modules.proxy._service.http_bridge.helpers import (
+    _await_task_deferring_cancellation,
+    _schedule_http_bridge_background_cleanup,
+)
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _http_bridge_quarantine_clear_fence,
@@ -44,6 +48,7 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_CLEANUP_GRACE_SECONDS = 60.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX = "http-bridge-retry-circuit-"
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -332,20 +337,18 @@ def _track_abandoned_http_bridge_retry_circuit_task(
         async def run_cleanup() -> None:
             await handler(result)
 
-        cleanup_task = asyncio.create_task(run_cleanup(), name=f"{label}-abandoned-result-cleanup")
-
-        def consume_cleanup_task(done_task: asyncio.Task[None]) -> None:
-            try:
-                done_task.result()
-            except BaseException:
-                logger.debug("Abandoned retry-circuit result cleanup failed label=%s", label, exc_info=True)
-
-        cleanup_task.add_done_callback(consume_cleanup_task)
+        _schedule_http_bridge_background_cleanup(
+            service,
+            run_cleanup(),
+            name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}{label}-abandoned-result-cleanup",
+            error_message=f"Abandoned retry-circuit result cleanup failed label={label}",
+        )
 
     task.add_done_callback(consume_completed_task)
 
 
 def _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+    service: Any,
     awaitable: Awaitable[None],
     *,
     label: str,
@@ -353,15 +356,12 @@ def _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
     async def run_cleanup() -> None:
         await awaitable
 
-    cleanup_task = asyncio.create_task(run_cleanup(), name=f"{label}-abandoned-result-cleanup")
-
-    def consume_cleanup_task(done_task: asyncio.Task[None]) -> None:
-        try:
-            done_task.result()
-        except BaseException:
-            logger.debug("Abandoned retry-circuit result cleanup failed label=%s", label, exc_info=True)
-
-    cleanup_task.add_done_callback(consume_cleanup_task)
+    _schedule_http_bridge_background_cleanup(
+        service,
+        run_cleanup(),
+        name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}{label}-abandoned-result-cleanup",
+        error_message=f"Abandoned retry-circuit result cleanup failed label={label}",
+    )
 
 
 @dataclass(slots=True)
@@ -629,6 +629,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         result = None
                     if result is not None:
                         _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+                            self,
                             on_abandoned_result(result),
                             label=label,
                         )
@@ -666,6 +667,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 result = None
             if result is not None:
                 _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+                    self,
                     on_abandoned_result(result),
                     label=label,
                 )
@@ -852,46 +854,89 @@ class _HTTPBridgeRetryCircuitMixin:
             claim_receipt["claimed_at_epoch"] = result_claimed_at_epoch
             claim_receipt["claimed_until_epoch"] = result_claimed_until_epoch
 
-        local_state_changed = False
-        async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.get(key)
-            local_state_changed = state is not None and (
-                state.consecutive_failures > expected_local_failures
-                or state.last_failure_monotonic > expected_last_failure
-                or state.cooldown_until > expected_local_cooldown
+        claim_released = False
+
+        async def release_claim_after_interruption() -> None:
+            nonlocal claim_released
+            release_task = asyncio.create_task(
+                self._clear_http_bridge_retry_circuit_admission_claim(
+                    key=key,
+                    claimed_generation=claimed_generation,
+                    claimed_at_epoch=result_claimed_at_epoch,
+                    claimed_until_epoch=result_claimed_until_epoch,
+                ),
+                name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}claim-cancelled-release",
             )
-            # A stateless claim can create a durable admission row without a
-            # local circuit state. Do not retain marker-only keys: pruning
-            # walks local states, so those markers would otherwise grow for
-            # every unique stale-anchor replay until process restart.
-            if state is not None and not local_state_changed:
-                self._http_bridge_retry_circuit_loaded_keys.add(key)
-                self._http_bridge_retry_circuit_persisted_keys.add(key)
-                state.persisted_admission_generation = max(
-                    state.persisted_admission_generation,
-                    claimed_generation,
-                )
-                state.persisted_admission_claimed_at_epoch = result_claimed_at_epoch
-                state.persisted_admission_claimed_generation = (
-                    getattr(
-                        claimed,
-                        "admission_claimed_generation",
+            try:
+                released, cleanup_cancellation = await _await_task_deferring_cancellation(release_task)
+                claim_released = released is True
+                if cleanup_cancellation is not None:
+                    logger.warning(
+                        "Cancellation interrupted HTTP bridge retry-circuit claim release; "
+                        "release completed before propagating the original cancellation bridge_kind=%s "
+                        "bridge_key=%s generation=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
                         claimed_generation,
                     )
-                    or claimed_generation
+            except BaseException:
+                logger.warning(
+                    "Failed to release HTTP bridge retry-circuit claim after interruption bridge_kind=%s "
+                    "bridge_key=%s generation=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    claimed_generation,
+                    exc_info=True,
                 )
-                state.persisted_admission_claimed_until_epoch = result_claimed_until_epoch
-        if local_state_changed:
-            await self._clear_http_bridge_retry_circuit_admission_claim(
-                key=key,
-                claimed_generation=claimed_generation,
-                claimed_at_epoch=result_claimed_at_epoch,
-                claimed_until_epoch=result_claimed_until_epoch,
-            )
-            if claim_receipt is not None:
-                claim_receipt.clear()
-            return False
-        return True
+            finally:
+                if claim_receipt is not None:
+                    claim_receipt.clear()
+
+        try:
+            local_state_changed = False
+            async with self._http_bridge_retry_circuit_lock:
+                state = self._http_bridge_retry_circuits.get(key)
+                local_state_changed = state is not None and (
+                    state.consecutive_failures > expected_local_failures
+                    or state.last_failure_monotonic > expected_last_failure
+                    or state.cooldown_until > expected_local_cooldown
+                )
+                # A stateless claim can create a durable admission row without a
+                # local circuit state. Do not retain marker-only keys: pruning
+                # walks local states, so those markers would otherwise grow for
+                # every unique stale-anchor replay until process restart.
+                if state is not None and not local_state_changed:
+                    self._http_bridge_retry_circuit_loaded_keys.add(key)
+                    self._http_bridge_retry_circuit_persisted_keys.add(key)
+                    state.persisted_admission_generation = max(
+                        state.persisted_admission_generation,
+                        claimed_generation,
+                    )
+                    state.persisted_admission_claimed_at_epoch = result_claimed_at_epoch
+                    state.persisted_admission_claimed_generation = (
+                        getattr(
+                            claimed,
+                            "admission_claimed_generation",
+                            claimed_generation,
+                        )
+                        or claimed_generation
+                    )
+                    state.persisted_admission_claimed_until_epoch = result_claimed_until_epoch
+            if local_state_changed:
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim(
+                    key=key,
+                    claimed_generation=claimed_generation,
+                    claimed_at_epoch=result_claimed_at_epoch,
+                    claimed_until_epoch=result_claimed_until_epoch,
+                )
+                if claim_released and claim_receipt is not None:
+                    claim_receipt.clear()
+                return False
+            return True
+        except BaseException:
+            if not claim_released:
+                await release_claim_after_interruption()
+            raise
 
     async def _reconcile_timed_out_retry_circuit_generation_claim(
         self: Any,

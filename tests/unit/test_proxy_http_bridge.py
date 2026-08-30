@@ -30793,6 +30793,116 @@ async def test_http_bridge_retry_circuit_claim_uses_exact_request_deadline_as_le
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_claim_releases_receipt_when_cancelled_after_durable_cas() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cancelled-after-cas")
+    post_cas_lock_held = asyncio.Event()
+
+    class _PostCasLock:
+        def __init__(self) -> None:
+            self._entries = 0
+
+        async def __aenter__(self) -> "_PostCasLock":
+            self._entries += 1
+            if self._entries == 2:
+                post_cas_lock_held.set()
+                await asyncio.Event().wait()
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def claim_generation(**_kwargs: Any) -> Any:
+        return claimed
+
+    clear_claim = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        claim_retry_circuit_generation=claim_generation,
+        clear_retry_circuit_admission_claim=clear_claim,
+    )
+    cast(Any, service)._http_bridge_retry_circuit_lock = _PostCasLock()
+    receipt: dict[str, Any] = {}
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            claim_receipt=receipt,
+        )
+    )
+    await post_cas_lock_held.wait()
+    claim_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+
+    clear_claim.assert_awaited_once_with(
+        session_key_kind=hard_session.key.affinity_kind,
+        session_key_value=hard_session.key.affinity_key,
+        api_key_id=hard_session.key.api_key_id,
+        claimed_generation=1,
+        claimed_at_epoch=1_000.0,
+        claimed_until_epoch=1_077.0,
+    )
+    assert receipt == {}
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_abandoned_retry_claim_cleanup_drains_during_shutdown() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    first_release = asyncio.Event()
+    second_release = asyncio.Event()
+
+    async def release_first(_result: Any) -> None:
+        first_started.set()
+        await first_release.wait()
+
+    async def release_second() -> None:
+        second_started.set()
+        await second_release.wait()
+
+    async def completed_claim() -> Any:
+        return SimpleNamespace(admission_claimed_generation=1)
+
+    abandoned_task = asyncio.create_task(completed_claim())
+    http_bridge_retry_circuit_module._track_abandoned_http_bridge_retry_circuit_task(
+        service,
+        abandoned_task,
+        label="claim",
+        on_result=release_first,
+    )
+    http_bridge_retry_circuit_module._schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+        service,
+        release_second(),
+        label="reconcile",
+    )
+
+    await abandoned_task
+    await first_started.wait()
+    await second_started.wait()
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 2
+    assert all(task.get_name().endswith("-abandoned-result-cleanup") for task in cleanup_tasks)
+
+    drain_task = asyncio.create_task(service._drain_http_bridge_background_cleanup_tasks(reason="shutdown"))
+    await asyncio.sleep(0)
+    assert not drain_task.done()
+    first_release.set()
+    second_release.set()
+    await drain_task
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_claim_marker_cleanup_is_fenced() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cleanup")
