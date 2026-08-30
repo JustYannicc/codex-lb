@@ -6,7 +6,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import anyio
 import pytest
@@ -55,6 +55,12 @@ class _DummyWebSocketService(_WebSocketMixin):
         return True
 
     async def _release_websocket_request_state_reservation(self, _request_state: _WebSocketRequestState) -> None:
+        return None
+
+    async def _clear_http_bridge_retry_circuit_admission_claim_for_request(
+        self,
+        _request_state: _WebSocketRequestState,
+    ) -> None:
         return None
 
     def _remember_websocket_previous_response_owner(
@@ -121,7 +127,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         return expected_upstream
 
     class _DirectWebSocketFacade(_DummyFacade):
-        connect_responses_websocket: Any
+        connect_responses_websocket: ClassVar[Any]
 
         @staticmethod
         async def _call_with_supported_optional_kwargs(
