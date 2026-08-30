@@ -822,6 +822,10 @@ class _HTTPBridgeRetryCircuitMixin:
                 or persisted.consecutive_failures != state.consecutive_failures
                 or persisted.last_detail != state.last_detail
             )
+            active_local_probe = self._http_bridge_retry_circuit_has_active_half_open_lease(
+                state,
+                now=now_monotonic,
+            )
             if not local_failure_is_newer:
                 # No local strike is waiting on its durable write, so the row
                 # is strictly newer knowledge and is adopted wholesale.
@@ -829,6 +833,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 # lagging replica clock still replaces the local episode
                 # instead of leaving a settled key suppressed for the rest
                 # of its stale cooldown with a base that no longer exists.
+                durable_reset = (
+                    max(0, persisted.consecutive_failures) == 0
+                    and persisted_cooldown_until == 0.0
+                    and persisted.last_detail is None
+                )
+                returned_local_probe = state.last_half_open_release_monotonic > state.last_durable_load_monotonic
                 if episode_replaced:
                     # A write this worker did not produce: either the same
                     # episode struck elsewhere (then a set marker means the
@@ -855,9 +865,32 @@ class _HTTPBridgeRetryCircuitMixin:
                     # belonged to the ended episode.
                     state.poison_anchor_cleared = False
                     state.owed_poison_detail = None
-                state.consecutive_failures = max(0, persisted.consecutive_failures)
-                state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                state.last_detail = persisted.last_detail
+                if durable_reset and persisted.updated_at_epoch > state.persisted_updated_at_epoch and not active_local_probe:
+                    # A newer durable clear is authoritative when no local
+                    # probe owns the key. Do not let an old in-memory cooldown
+                    # keep suppressing this key after a remote settle.
+                    state.consecutive_failures = 0
+                    state.cooldown_until = 0.0
+                    state.last_detail = None
+                elif active_local_probe:
+                    # A remote writer may clear or lower its row while this
+                    # process is probing. Preserve the local lease and fence;
+                    # only stronger durable protection may merge into it.
+                    state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
+                    state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                    state.last_detail = state.last_detail or persisted.last_detail
+                else:
+                    state.consecutive_failures = max(0, persisted.consecutive_failures)
+                    # A returned probe leaves an elapsed local marker that
+                    # establishes the next single-flight boundary. Preserve
+                    # that marker while accepting a real future cooldown;
+                    # otherwise the newer durable row is authoritative,
+                    # including a below-threshold row with no suppression.
+                    if returned_local_probe:
+                        state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                    else:
+                        state.cooldown_until = persisted_cooldown_until
+                    state.last_detail = persisted.last_detail
                 if state.consecutive_failures == 0:
                     # A zero-failure row is a durable reset: the episode the
                     # marker belonged to is over, and the next poison episode
@@ -881,7 +914,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_until = 0.0
                 state.half_open_owner_session = None
                 state.half_open_owner_token = None
-            elif episode_replaced and not local_failure_is_newer:
+            elif episode_replaced and not local_failure_is_newer and not active_local_probe:
                 # The adopted row belongs to a replacement episode whose
                 # cooldown has already elapsed. A lease left over from the
                 # ended episode would read as this worker's in-flight probe
@@ -1085,6 +1118,24 @@ class _HTTPBridgeRetryCircuitMixin:
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
+                        local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+                        active_local_probe = self._http_bridge_retry_circuit_has_active_half_open_lease(
+                            state,
+                            now=now_monotonic,
+                        )
+                        returned_local_probe = (
+                            state.last_half_open_release_monotonic > state.last_durable_load_monotonic
+                        )
+                        episode_replaced = (
+                            persisted.updated_at_epoch != state.persisted_updated_at_epoch
+                            or persisted.consecutive_failures != state.consecutive_failures
+                            or persisted.last_detail != state.last_detail
+                        )
+                        durable_reset = (
+                            max(0, persisted.consecutive_failures) == 0
+                            and persisted_cooldown_until == 0.0
+                            and persisted.last_detail is None
+                        )
                         # The upsert returns the post-write row: when this
                         # write landed the row reflects it, and when its base
                         # mismatched the row is the lineage that owns the key
@@ -1137,19 +1188,49 @@ class _HTTPBridgeRetryCircuitMixin:
                             # abandonment.
                             state.poison_anchor_cleared = False
                             state.owed_poison_detail = None
-                        state.consecutive_failures = max(0, persisted.consecutive_failures)
-                        state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                        state.last_detail = persisted.last_detail
+                        if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
+                            if durable_reset and not active_local_probe:
+                                # A newer durable clear is authoritative when
+                                # no local probe owns the key.
+                                state.consecutive_failures = 0
+                                state.cooldown_until = 0.0
+                                state.last_detail = None
+                            elif active_local_probe:
+                                # Preserve the local probe lease and failure
+                                # fence while merging stronger durable state.
+                                state.consecutive_failures = max(
+                                    state.consecutive_failures,
+                                    max(0, persisted.consecutive_failures),
+                                )
+                                state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                                state.last_detail = state.last_detail or persisted.last_detail
+                            else:
+                                state.consecutive_failures = max(0, persisted.consecutive_failures)
+                                if returned_local_probe:
+                                    state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                                else:
+                                    state.cooldown_until = persisted_cooldown_until
+                                state.last_detail = persisted.last_detail
+                        else:
+                            state.consecutive_failures = max(0, persisted.consecutive_failures)
+                            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                            state.last_detail = persisted.last_detail
                         if state.consecutive_failures == 0:
                             # A zero-failure row is a durable reset ending
                             # the marker's episode.
                             state.poison_anchor_cleared = False
                             state.owed_poison_detail = None
-                        if state.cooldown_until > now_monotonic:
+                        if state.cooldown_until > now_monotonic and not active_local_probe:
                             # A cooling key is not probing: drop any leftover
                             # half-open lease so the admission gate cannot
                             # read it as an in-flight probe after this
                             # cooldown expires.
+                            state.half_open_until = 0.0
+                            state.half_open_owner_session = None
+                            state.half_open_owner_token = None
+                        elif episode_replaced and not local_failure_is_newer and not active_local_probe:
+                            # A replacement row with an elapsed cooldown must
+                            # not inherit a lease opened by the ended episode.
                             state.half_open_until = 0.0
                             state.half_open_owner_session = None
                             state.half_open_owner_token = None
