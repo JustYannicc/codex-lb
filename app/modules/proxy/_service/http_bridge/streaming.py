@@ -273,6 +273,8 @@ from app.modules.proxy.replay_safety import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
+_HTTP_BRIDGE_EVENT_TIMEOUT_RECONCILE_SECONDS = 0.01
+
 
 class _HTTPBridgeLiveEventQueueBudgetExceeded(RuntimeError):
     """Raised to wake an attached stream when live queue retention fails."""
@@ -293,16 +295,20 @@ async def _next_http_bridge_event_block(
     revoked = getattr(event_queue, "revoked", None)
     terminal_ready = getattr(event_queue, "terminal_ready", None)
     if revoked is not None and revoked.is_set() and event_queue.empty():
-        if budget_exceeded.is_set():
-            raise _HTTPBridgeLiveEventQueueBudgetExceeded
         if getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set()):
             return await event_queue.get()
+        if budget_exceeded.is_set():
+            raise _HTTPBridgeLiveEventQueueBudgetExceeded
         if terminal_ready is None:
             return None
 
     # A budget failure revokes producers. Drain already-buffered events first
     # so the failure does not reorder an upstream response; with no buffered
     # event, fail immediately.
+    if event_queue.empty() and (
+        getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set())
+    ):
+        return await event_queue.get()
     if budget_exceeded.is_set() and event_queue.empty():
         raise _HTTPBridgeLiveEventQueueBudgetExceeded
 
@@ -341,6 +347,22 @@ async def _next_http_bridge_event_block(
             ):
                 return await event_queue.get()
             return None
+        if timeout_task is not None and timeout_task in done:
+            # A queue producer can wake the nested get task in the same loop
+            # turn in which the timeout wins.  Reconcile that task briefly
+            # before the cleanup below cancels it, so a claimed event is
+            # delivered instead of silently discarded.  Shielding keeps the
+            # nested queue get alive while wait_for bounds the grace period.
+            try:
+                event_block = await asyncio.wait_for(
+                    asyncio.shield(get_task),
+                    timeout=_HTTP_BRIDGE_EVENT_TIMEOUT_RECONCILE_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise
+            if event_block is None and budget_task.done():
+                raise _HTTPBridgeLiveEventQueueBudgetExceeded
+            return event_block
         raise asyncio.TimeoutError
     finally:
         for task in tasks:

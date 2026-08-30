@@ -351,6 +351,60 @@ async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_wait_preserves_event_after_timeout_wins_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event claimed after timeout selection must still reach the stream."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    original_wait = asyncio.wait
+    race_triggered = False
+
+    async def wait_with_timeout_race(
+        awaitables: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal race_triggered
+        tasks = tuple(awaitables)
+        result = await original_wait(tasks, *args, **kwargs)
+        task_names = {task.get_name() for task in tasks if isinstance(task, asyncio.Task)}
+        if not race_triggered and "http-bridge-event-timeout" in task_names:
+            race_triggered = True
+            event_queue.put_nowait("raced-timeout-event")
+        return result
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", wait_with_timeout_race)
+
+    assert (
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.001)
+        == "raced-timeout-event"
+    )
+    assert race_triggered
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_wait_delivers_terminal_before_budget_failure() -> None:
+    """A queued terminal event remains ahead of a concurrent budget signal."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    assert event_queue.enqueue_terminal_event_nowait("terminal-event") is True
+    event_queue.budget_exceeded.set()
+
+    assert (
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.1) == "terminal-event"
+    )
+    assert await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.1) is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
@@ -1239,6 +1293,7 @@ async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
         request_text='{"type":"response.create","previous_response_id":"resp-parent"}',
         transport="http",
         skip_request_log=True,
+        event_queue_revoked=live_queue.revoked,
     )
     operation = SimpleNamespace(
         created=False,
@@ -1279,6 +1334,9 @@ async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
     assert replay_queue.maxsize == len(replay_events) + 1
     assert [replay_queue.get_nowait() for _ in range(replay_queue.qsize())] == [*replay_events, None]
     assert request_state.operation_replay is True
+    assert live_queue.revoked.is_set()
+    assert request_state.event_queue_revoked is not live_queue.revoked
+    assert not request_state.event_queue_revoked.is_set()
     assert live_queue.empty()
     assert live_queue.queued_bytes == 0
     assert live_budget.used_bytes == 0

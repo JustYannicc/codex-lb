@@ -1919,6 +1919,13 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.operation_registered = True
                             replay_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=len(replay_events) + 1)
                             old_event_queue = request_state.event_queue
+                            # The replay queue replaces the live queue after
+                            # its previous owner has been revoked.  Give the
+                            # replacement its own lifecycle signal before
+                            # discarding the old queue; otherwise the old
+                            # queue's revocation would leave this replay
+                            # request permanently closed to event writes.
+                            request_state.event_queue_revoked = asyncio.Event()
                             request_state.event_queue = replay_queue
                             discard = getattr(old_event_queue, "discard", None)
                             if callable(discard):
