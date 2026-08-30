@@ -22,5 +22,4 @@
       checking, proxy architecture checks, and `git diff --check`.
 - [x] 4.2 Run strict OpenSpec validation when the CLI is available; validation
       passed with `pnpm --silent dlx @fission-ai/openspec@1.10.0 validate
-      preserve-http-bridge-recovery-operation-spool --type change --strict
-      --no-interactive`.
+      preserve-http-bridge-recovery-operation-spool --strict --no-interactive`.
