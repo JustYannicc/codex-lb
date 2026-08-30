@@ -955,8 +955,8 @@ class _CompactMixin:
                     return
                 raise
 
-        proxy._raise_for_unsupported_input_image_references(payload)
         try:
+            proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_forwarded_file_account_for_responses(
                 payload,
                 headers,
