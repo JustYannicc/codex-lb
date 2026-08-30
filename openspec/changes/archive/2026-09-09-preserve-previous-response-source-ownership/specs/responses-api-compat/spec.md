@@ -6,20 +6,23 @@ When a Responses request carries `previous_response_id`, the proxy MUST resolve
 recorded subscription-account ownership independently from model-source catalog
 ownership. The proxy MUST NOT infer either outcome from the response identifier's
 syntax. A recorded subscription owner MUST keep the request on subscription
-routing. A missing subscription owner MUST NOT fail the request by itself: when
-subscription routing remains eligible, the proxy MUST count eligible subscription
-accounts after applying API-key account-assignment scoping. Exactly one eligible
-account MUST be allowed to proceed through normal subscription selection; zero or
-multiple eligible accounts MUST fail closed with the sanitized
+routing. A missing subscription owner MUST first be evaluated against the
+model-source catalog. If the source catalog confirms source ownership, the
+configured model source remains authoritative even when exactly one subscription
+account is eligible; the request MUST NOT use subscription candidate fallback.
+Only when the source catalog lookup succeeds without confirming source ownership
+may subscription routing count eligible accounts after applying API-key
+account-assignment scoping. Exactly one eligible account MUST be allowed to
+proceed through normal subscription selection; zero or multiple eligible
+accounts MUST fail closed with the sanitized
 `previous_response_owner_unavailable` error. Account-pinned file requests remain
 strict and do not use the sole-candidate fallback. Codex compaction remains
 subscription-only; its dedicated compact HTTP selection uses the same
-sole-candidate compatibility fallback. If the source catalog confirms source
-ownership and no subscription owner is recorded, the configured model source remains
-authoritative for HTTP; the direct Responses WebSocket transport MUST retain its
-`model_source_requires_http_transport` fallback. An unavailable source-catalog
-lookup is distinct from an owner miss: the direct WebSocket path MUST preserve
-its existing subscription fallback instead of converting the lookup failure into
+sole-candidate compatibility fallback. The direct Responses WebSocket transport
+MUST retain its `model_source_requires_http_transport` fallback for confirmed
+source ownership. An unavailable source-catalog lookup is distinct from an owner
+miss: the direct WebSocket path MUST preserve its existing subscription fallback
+instead of converting the lookup failure into
 `previous_response_owner_unavailable`.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
@@ -39,9 +42,31 @@ its existing subscription fallback instead of converting the lookup failure into
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the request is forwarded to the configured model source
 
+#### Scenario: Opaque source response ID remains source-routed over HTTP
+
+- **GIVEN** a Responses-compatible source is configured for the requested model
+- **AND** no subscription account is recorded as owner of `source-turn-opaque-42`
+- **AND** the source catalog confirms that the requested model is source-owned
+- **AND** `previous_response_id` is the opaque non-canonical value `source-turn-opaque-42`
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the request is forwarded to the configured model source
+- **AND** routing is based on recorded ownership rather than identifier syntax
+
+#### Scenario: Confirmed source ownership outranks a sole subscription candidate
+
+- **GIVEN** a Responses-compatible source is configured for the requested model
+- **AND** no subscription account is recorded as owner of `source-turn-sole-candidate`
+- **AND** the source catalog confirms that the requested model is source-owned
+- **AND** exactly one eligible subscription account remains after applying
+  API-key account-assignment scoping
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the request is forwarded to the configured model source
+- **AND** the sole subscription candidate is not selected
+
 #### Scenario: Known subscription-model owner miss fails closed over HTTP
 
 - **GIVEN** the requested model is known to subscription routing
+- **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** zero or multiple eligible subscription accounts remain after applying
   API-key account-assignment scoping
@@ -54,6 +79,7 @@ its existing subscription fallback instead of converting the lookup failure into
 #### Scenario: Sole eligible subscription account preserves an HTTP continuation
 
 - **GIVEN** the requested model is known to subscription routing
+- **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** exactly one eligible subscription account remains after applying
   API-key account-assignment scoping
@@ -87,6 +113,16 @@ its existing subscription fallback instead of converting the lookup failure into
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the proxy emits `model_source_requires_http_transport`
 - **AND** the service-level error uses HTTP status `503`
+- **AND** the request is not sent to a subscription upstream
+
+#### Scenario: Opaque source response ID falls back to HTTP on direct WebSocket
+
+- **GIVEN** a source is configured for the requested model
+- **AND** the source catalog confirms that the requested model is source-owned
+- **AND** no subscription account is recorded as owner of `source-turn-opaque-ws`
+- **AND** `previous_response_id` is the opaque non-canonical value `source-turn-opaque-ws`
+- **WHEN** a direct Responses WebSocket client submits the follow-up
+- **THEN** the proxy emits `model_source_requires_http_transport`
 - **AND** the request is not sent to a subscription upstream
 
 #### Scenario: Known subscription-model owner miss fails closed on direct WebSocket
