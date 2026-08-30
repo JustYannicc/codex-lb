@@ -37,8 +37,8 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
-from app.core.openai.requests import ResponsesRequest
 from app.core.openai.models import OpenAIError
+from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
