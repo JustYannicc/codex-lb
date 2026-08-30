@@ -1548,6 +1548,57 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_streaming_missing_previous_response_owner_returns_http_error(
+    async_client,
+    monkeypatch,
+):
+    for raw_account_id, email in (
+        ("acc_prev_http_stream_missing_owner_1", "prev-http-stream-missing-owner-1@example.com"),
+        ("acc_prev_http_stream_missing_owner_2", "prev-http-stream-missing-owner-2@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        raise AssertionError("missing previous_response_id owner must fail before upstream stream attempt")
+        if False:
+            yield ""
+
+    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return None
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_resolve_owner)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_prev_http_stream_missing_owner",
+            "stream": True,
+        },
+        headers={"session_id": "sid_prev_http_stream_missing_owner"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_preserves_legacy_raw_owner_conflict(async_client, monkeypatch):
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 

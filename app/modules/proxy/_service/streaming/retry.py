@@ -1187,7 +1187,6 @@ class _StreamingRetryMixin:
                             message,
                             response_id=request_id,
                         )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             account_id=None,
                             api_key=api_key,
@@ -1207,6 +1206,12 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE, message),
+                            )
+                        yield format_sse_event(event)
                         return
             # File and previous-response ownership are peers, not fallback
             # preferences. Resolve both before selection so a conflict cannot
