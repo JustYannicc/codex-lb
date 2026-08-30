@@ -1094,8 +1094,8 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
 @pytest.mark.parametrize(
     ("code", "message", "expected"),
     [
-        ("previous_response_not_found", "missing", "previous_response_not_found"),
-        ("bridge_previous_response_not_found", "missing", "previous_response_not_found"),
+        ("previous_response_not_found", "missing", None),
+        ("bridge_previous_response_not_found", "missing", None),
         ("bridge_owner_unreachable", "owner unavailable", "bridge_owner_unreachable"),
         ("bridge_instance_mismatch", "owner moved", "bridge_instance_mismatch"),
         ("stream_incomplete", "closed", None),
@@ -1115,6 +1115,45 @@ def test_http_bridge_server_continuity_loss_detail_excludes_ambiguous_transport(
             ProxyResponseError(502, error),
         )
         == expected
+    )
+
+
+def test_http_bridge_server_continuity_loss_detail_requires_proxy_anchor_provenance() -> None:
+    error = proxy_service.openai_error("previous_response_not_found", "missing")
+    client_anchor_state = proxy_service._WebSocketRequestState(
+        request_id="req-client-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp-client-anchor",
+    )
+    assert (
+        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
+            ProxyResponseError(400, error),
+            request_state=client_anchor_state,
+        )
+        is None
+    )
+
+    client_anchor_state.proxy_injected_previous_response_id = True
+    assert (
+        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
+            ProxyResponseError(400, error),
+            request_state=client_anchor_state,
+        )
+        == "previous_response_not_found"
+    )
+
+    client_anchor_state.proxy_injected_previous_response_id = False
+    client_anchor_state.durable_owner_dead = True
+    assert (
+        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
+            ProxyResponseError(400, error),
+            request_state=client_anchor_state,
+        )
+        == "previous_response_not_found"
     )
 
 
@@ -1631,6 +1670,20 @@ def _make_bridge_session(
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
     )
+
+
+def _activate_half_open_probe(service: Any, session: proxy_service._HTTPBridgeSession) -> Any:
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        half_open_until=now + 600.0,
+        half_open_owner_session=session,
+    )
+    service._http_bridge_retry_circuits[session.key] = state
+    return state
 
 
 def test_http_bridge_account_neutral_replay_rejects_namespaced_tool_call_history() -> None:
@@ -13143,10 +13196,11 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_ca
     # given
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(
-        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-miss", None),
-        key_value="sid-soft-file-1011-miss",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-hard-file-1011-miss", None),
+        key_value="sid-hard-file-1011-miss",
     )
     session.last_upstream_close_code = 1011
+    circuit_state = _activate_half_open_probe(service, session)
 
     async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(
@@ -13192,6 +13246,10 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_ca
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+    assert circuit_state.consecutive_failures == 2
+    assert circuit_state.half_open_until == 0.0
+    assert circuit_state.half_open_owner_session is None
+    assert circuit_state.cooldown_until > 0.0
 
 
 @pytest.mark.asyncio
@@ -13327,10 +13385,11 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_co
     # given
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(
-        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-connect", None),
-        key_value="sid-soft-file-1011-connect",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-hard-file-1011-connect", None),
+        key_value="sid-hard-file-1011-connect",
     )
     session.last_upstream_close_code = 1011
+    circuit_state = _activate_half_open_probe(service, session)
 
     async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(account=session.account, error_message=None, error_code=None)
@@ -13379,6 +13438,10 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_co
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+    assert circuit_state.consecutive_failures == 2
+    assert circuit_state.half_open_until == 0.0
+    assert circuit_state.half_open_owner_session is None
+    assert circuit_state.cooldown_until > 0.0
 
 
 @pytest.mark.asyncio
@@ -13388,10 +13451,11 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_tr
     # given
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(
-        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-timeout", None),
-        key_value="sid-soft-file-1011-timeout",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-hard-file-1011-timeout", None),
+        key_value="sid-hard-file-1011-timeout",
     )
     session.last_upstream_close_code = 1011
+    circuit_state = _activate_half_open_probe(service, session)
 
     async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(account=session.account, error_message=None, error_code=None)
@@ -13444,6 +13508,10 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_tr
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+    assert circuit_state.consecutive_failures == 2
+    assert circuit_state.half_open_until == 0.0
+    assert circuit_state.half_open_owner_session is None
+    assert circuit_state.cooldown_until > 0.0
 
 
 @pytest.mark.asyncio
@@ -13453,10 +13521,11 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_re
     # given
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(
-        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-refresh", None),
-        key_value="sid-soft-file-1011-refresh",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-hard-file-1011-refresh", None),
+        key_value="sid-hard-file-1011-refresh",
     )
     session.last_upstream_close_code = 1011
+    circuit_state = _activate_half_open_probe(service, session)
 
     async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(account=session.account, error_message=None, error_code=None)
@@ -13506,6 +13575,10 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_re
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+    assert circuit_state.consecutive_failures == 2
+    assert circuit_state.half_open_until == 0.0
+    assert circuit_state.half_open_owner_session is None
+    assert circuit_state.cooldown_until > 0.0
 
 
 @pytest.mark.asyncio
@@ -32109,7 +32182,7 @@ async def test_http_bridge_retry_circuit_durable_miss_preserves_active_local_lea
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
         persisted_updated_at_epoch=time.time(),
         last_durable_load_monotonic=now,
     )
@@ -32119,7 +32192,7 @@ async def test_http_bridge_retry_circuit_durable_miss_preserves_active_local_lea
 
     assert await service._load_http_bridge_retry_circuit(session) is True
     assert cast(Any, service)._http_bridge_retry_circuits[session.key] is state
-    assert state.half_open_owner_session_id == id(session)
+    assert state.half_open_owner_session is session
     assert await service._http_bridge_precreated_retry_allowed(session) is False
 
 
@@ -32134,7 +32207,7 @@ async def test_http_bridge_retry_circuit_stale_purge_preserves_active_local_leas
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
         persisted_updated_at_epoch=time.time() - 100.0,
         last_durable_load_monotonic=now,
     )
@@ -32155,7 +32228,7 @@ async def test_http_bridge_retry_circuit_stale_purge_preserves_active_local_leas
 
     assert await service._load_http_bridge_retry_circuit(session) is True
     assert cast(Any, service)._http_bridge_retry_circuits[session.key] is state
-    assert state.half_open_owner_session_id == id(session)
+    assert state.half_open_owner_session is session
     assert await service._http_bridge_precreated_retry_allowed(session) is False
 
 
@@ -32171,7 +32244,7 @@ async def test_http_bridge_retry_circuit_equal_and_newer_reload_keep_active_leas
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
         persisted_updated_at_epoch=updated_at,
         last_durable_load_monotonic=now,
     )
@@ -32186,12 +32259,79 @@ async def test_http_bridge_retry_circuit_equal_and_newer_reload_keep_active_leas
 
     assert await service._load_http_bridge_retry_circuit(session) is True
     assert state.half_open_until > time.monotonic()
-    assert state.half_open_owner_session_id == id(session)
+    assert state.half_open_owner_session is session
 
     persisted.updated_at_epoch = updated_at + 1.0
     assert await service._load_http_bridge_retry_circuit(session) is True
     assert state.half_open_until > time.monotonic()
-    assert state.half_open_owner_session_id == id(session)
+    assert state.half_open_owner_session is session
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_newer_durable_reset_clears_inactive_local_state() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-newer-reset-inactive")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now + 60.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=time.time(),
+        last_durable_load_monotonic=now,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    reset = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=state.persisted_updated_at_epoch + 1.0,
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=reset))
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+
+    assert state.consecutive_failures == 0
+    assert state.cooldown_until == 0.0
+    assert state.last_detail is None
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_newer_durable_reset_preserves_active_probe_and_suppression() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_bridge_session(key_value="bridge-newer-reset-active")
+    sibling = _make_bridge_session(key_value="bridge-newer-reset-active")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        half_open_until=now + 60.0,
+        half_open_owner_session=owner,
+        persisted_updated_at_epoch=time.time(),
+        last_durable_load_monotonic=now,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[owner.key] = state
+    reset = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=state.persisted_updated_at_epoch + 1.0,
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=reset))
+
+    assert await service._load_http_bridge_retry_circuit(owner) is True
+    assert state.consecutive_failures == 2
+    assert state.last_detail == "stream_incomplete"
+    assert state.half_open_until > time.monotonic()
+    assert state.half_open_owner_session is owner
+
+    assert await service._http_bridge_precreated_retry_allowed(sibling) is False
+    assert state.consecutive_failures == 2
+    assert state.half_open_owner_session is owner
 
 
 @pytest.mark.asyncio
@@ -32205,7 +32345,7 @@ async def test_http_bridge_retry_circuit_lookup_failure_keeps_active_lease() -> 
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     service._durable_bridge = SimpleNamespace(
@@ -32214,7 +32354,7 @@ async def test_http_bridge_retry_circuit_lookup_failure_keeps_active_lease() -> 
 
     assert await service._http_bridge_precreated_retry_allowed(session) is False
     assert state.half_open_until > time.monotonic()
-    assert state.half_open_owner_session_id == id(session)
+    assert state.half_open_owner_session is session
 
 
 @pytest.mark.asyncio
@@ -32233,7 +32373,7 @@ async def test_http_bridge_retry_circuit_returned_probe_is_owner_fenced_and_sing
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
 
     assert await service._http_bridge_precreated_retry_allowed(owner) is True
-    assert state.half_open_owner_session_id == id(owner)
+    assert state.half_open_owner_session is owner
     assert (
         await service._release_http_bridge_retry_circuit_half_open(
             sibling,
@@ -32283,8 +32423,8 @@ async def test_http_bridge_retry_circuit_local_leases_are_not_replica_wide() -> 
 
     assert await first_service._http_bridge_precreated_retry_allowed(first) is True
     assert await second_service._http_bridge_precreated_retry_allowed(second) is True
-    assert first_state.half_open_owner_session_id == id(first)
-    assert second_state.half_open_owner_session_id == id(second)
+    assert first_state.half_open_owner_session is first
+    assert second_state.half_open_owner_session is second
 
 
 async def _reset_for_continuity_loss(service: Any, session: Any, *, server_continuity_loss: bool) -> None:
@@ -32315,7 +32455,7 @@ async def test_http_bridge_stale_anchor_reset_disarms_before_release_and_does_no
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     service._durable_bridge = SimpleNamespace(
@@ -32359,7 +32499,7 @@ async def test_http_bridge_reset_cleanup_defers_cancellation_until_detach_and_cl
         last_detail="stream_incomplete",
         last_touched_monotonic=now,
         half_open_until=now + 60.0,
-        half_open_owner_session_id=id(session),
+        half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     settle_started = asyncio.Event()
