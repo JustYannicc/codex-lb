@@ -2005,7 +2005,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
 
     def _schema_state(sync_conn):
