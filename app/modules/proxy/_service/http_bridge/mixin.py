@@ -75,6 +75,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
+    _http_bridge_background_cleanup_tasks,
     _http_bridge_can_local_recover_without_ring,
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
@@ -267,55 +268,33 @@ class _HTTPBridgeMixin(
         deadline = loop.time() + _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS
         no_tasks_turn = False
         while True:
-            tasks = {
-                task
-                for task in self._background_cleanup_tasks
-                if not task.done()
-                and (
-                    task.get_name().startswith("proxy-http_bridge_session_close-")
-                    or task.get_name().startswith("http-bridge-close-")
-                    or task.get_name().startswith("cancelled-task-cleanup-")
-                    or task.get_name().startswith("http-bridge-retry-circuit-")
-                )
-            }
-            abandoned_tasks = getattr(self, "_http_bridge_retry_circuit_abandoned_tasks", None)
-            if abandoned_tasks is not None:
-                tasks.update(task for task in abandoned_tasks if not task.done())
+            tasks = _http_bridge_background_cleanup_tasks(self)
             if not tasks:
                 if no_tasks_turn:
                     return not self._http_bridge_background_cleanup_failed
-                # A done callback can remove an abandoned durable operation and
-                # schedule its marker-release cleanup in the same loop turn.
                 no_tasks_turn = True
                 await asyncio.sleep(0)
                 continue
             no_tasks_turn = False
             remaining = deadline - loop.time()
             if remaining <= 0:
-                logger.warning(
-                    "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                    reason,
-                    len(tasks),
-                    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-                )
-                return False
+                break
             try:
                 results = await asyncio.wait_for(
                     asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
                     timeout=remaining,
                 )
             except TimeoutError:
-                logger.warning(
-                    "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                    reason,
-                    len(tasks),
-                    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-                )
-                return False
+                break
             self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
-            # Let done callbacks register any cleanup spawned by a completed
-            # abandoned operation before taking the next snapshot.
             await asyncio.sleep(0)
+        logger.warning(
+            "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
+            reason,
+            len(tasks),
+            _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+        )
+        return False
 
     async def _fail_http_bridge_inflight_session_creation(
         self,
