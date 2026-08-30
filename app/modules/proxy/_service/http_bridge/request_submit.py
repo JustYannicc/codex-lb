@@ -326,6 +326,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         # this second signal so a delayed consumer cannot observe bare EOS
         # while terminal bookkeeping is still in flight.
         self._terminal_ready = asyncio.Event()
+        self._terminal_budget_exceeded = False
         self._discarded = False
 
     @property
@@ -356,12 +357,19 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
         return self._terminal_ready
 
+    @property
+    def terminal_budget_exceeded(self) -> bool:
+        """Whether terminal payload retention failed at the process budget."""
+
+        return self._terminal_budget_exceeded
+
     def _queue_terminal_items(self, items: tuple[str | None, ...]) -> bool:
         if self._terminal_pending:
             return True
         item_bytes = sum(_http_bridge_live_event_queue_item_bytes(item) for item in items)
         if not self._byte_budget.reserve(item_bytes):
             self._budget_exceeded.set()
+            self._terminal_budget_exceeded = True
             logger.warning(
                 "HTTP bridge live event queue byte budget exhausted terminal_bytes=%s queue_bytes=%s budget_bytes=%s",
                 item_bytes,
@@ -373,6 +381,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._terminal_items.append(None)
             self._terminal_ready.set()
             return False
+        self._terminal_budget_exceeded = False
         self._terminal_pending = True
         self._terminal_items.extend(items)
         self._queued_bytes += item_bytes
@@ -480,6 +489,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             item_bytes = _http_bridge_live_event_queue_item_bytes(item)
             self._queued_bytes = max(0, self._queued_bytes - item_bytes)
             self._byte_budget.release(item_bytes)
+        self._terminal_budget_exceeded = False
         self._terminal_pending = True
         self._terminal_items.append(None)
         self._terminal_ready.set()

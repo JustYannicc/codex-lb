@@ -405,6 +405,25 @@ async def test_http_bridge_event_wait_delivers_terminal_before_budget_failure() 
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_wait_reports_terminal_budget_failure() -> None:
+    """A terminal payload rejected before attachment still fails the stream explicitly."""
+
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+
+    assert event_queue.enqueue_terminal_event_nowait("terminal-event") is False
+    assert event_queue.terminal_budget_exceeded is True
+    assert event_queue.terminal_pending is True
+
+    with pytest.raises(http_bridge_streaming_module._HTTPBridgeLiveEventQueueBudgetExceeded):
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.1)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)

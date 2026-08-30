@@ -294,7 +294,10 @@ async def _next_http_bridge_event_block(
         return await asyncio.wait_for(event_queue.get(), timeout=timeout)
     revoked = getattr(event_queue, "revoked", None)
     terminal_ready = getattr(event_queue, "terminal_ready", None)
+    terminal_budget_exceeded = getattr(event_queue, "terminal_budget_exceeded", False)
     if revoked is not None and revoked.is_set() and event_queue.empty():
+        if terminal_budget_exceeded:
+            raise _HTTPBridgeLiveEventQueueBudgetExceeded
         if getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set()):
             return await event_queue.get()
         if budget_exceeded.is_set():
@@ -308,6 +311,8 @@ async def _next_http_bridge_event_block(
     if event_queue.empty() and (
         getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set())
     ):
+        if terminal_budget_exceeded:
+            raise _HTTPBridgeLiveEventQueueBudgetExceeded
         return await event_queue.get()
     if budget_exceeded.is_set() and event_queue.empty():
         raise _HTTPBridgeLiveEventQueueBudgetExceeded
