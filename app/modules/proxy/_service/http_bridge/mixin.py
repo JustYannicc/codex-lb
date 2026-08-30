@@ -273,7 +273,7 @@ class _HTTPBridgeMixin(
             )
         ]
         if not tasks:
-            return True
+            return not self._http_bridge_background_cleanup_failed
         try:
             results = await asyncio.wait_for(
                 asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
@@ -287,7 +287,8 @@ class _HTTPBridgeMixin(
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
             return False
-        return not any(isinstance(result, BaseException) for result in results)
+        failed = self._http_bridge_background_cleanup_failed
+        return not failed and not any(isinstance(result, BaseException) for result in results)
 
     async def _fail_http_bridge_inflight_session_creation(
         self,

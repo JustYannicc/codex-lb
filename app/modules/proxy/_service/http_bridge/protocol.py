@@ -33,6 +33,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _pending_lock: Any
     _inflight_session_creates: Any
     _background_cleanup_tasks: Any
+    _http_bridge_background_cleanup_failed: bool
     _http_bridge_draining: bool
     _http_bridge_lock: Any
     _work_admission: Any

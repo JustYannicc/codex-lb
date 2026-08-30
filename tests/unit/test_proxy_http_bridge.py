@@ -13859,6 +13859,50 @@ async def test_close_http_bridge_session_bounded_timeout_keeps_close_task_runnin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_type",
+    [RuntimeError, asyncio.CancelledError],
+    ids=["exception", "cancellation"],
+)
+async def test_close_http_bridge_session_bounded_records_late_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value=f"close-late-{failure_type.__name__.lower()}")
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def close_http_bridge_session(target: proxy_service._HTTPBridgeSession) -> None:
+        assert target is session
+        close_started.set()
+        await release_close.wait()
+        if failure_type is asyncio.CancelledError:
+            raise asyncio.CancelledError
+        raise RuntimeError("late cleanup failed")
+
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
+
+    await service._close_http_bridge_session_bounded(session, reason="test")
+
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+    tracked_close_task = next(iter(service._background_cleanup_tasks))
+    release_close.set()
+    with pytest.raises(failure_type):
+        await tracked_close_task
+
+    for _ in range(10):
+        if not service._background_cleanup_tasks:
+            break
+        await asyncio.sleep(0)
+
+    assert service._background_cleanup_tasks == set()
+    assert service._http_bridge_background_cleanup_failed is True
+    assert await service._drain_http_bridge_background_cleanup_tasks(reason="test") is False
+
+
+@pytest.mark.asyncio
 async def test_await_cancelled_task_consumes_child_cancellation() -> None:
     child = asyncio.create_task(asyncio.sleep(60))
 

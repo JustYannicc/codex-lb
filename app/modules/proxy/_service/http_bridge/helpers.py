@@ -1668,15 +1668,11 @@ async def _close_http_bridge_session_bounded(
     )
 
     def track_after_interruption(*, interruption: str) -> None:
-        if close_task.done():
-            return
-        service._background_cleanup_tasks.add(close_task)
-
         def close_done(done_task: asyncio.Task[None]) -> None:
-            service._background_cleanup_tasks.discard(done_task)
             try:
                 done_task.result()
             except asyncio.CancelledError:
+                service._http_bridge_background_cleanup_failed = True
                 logger.warning(
                     "http_bridge_session_close_cancelled_after_%s reason=%s bridge_kind=%s "
                     "bridge_key=%s account_id=%s model=%s",
@@ -1687,7 +1683,8 @@ async def _close_http_bridge_session_bounded(
                     session.account.id,
                     session.request_model,
                 )
-            except Exception:
+            except BaseException:
+                service._http_bridge_background_cleanup_failed = True
                 logger.warning(
                     "http_bridge_session_close_failed_after_%s reason=%s bridge_kind=%s "
                     "bridge_key=%s account_id=%s model=%s",
@@ -1699,7 +1696,13 @@ async def _close_http_bridge_session_bounded(
                     session.request_model,
                     exc_info=True,
                 )
+            finally:
+                service._background_cleanup_tasks.discard(done_task)
 
+        if close_task.done():
+            close_done(close_task)
+            return
+        service._background_cleanup_tasks.add(close_task)
         close_task.add_done_callback(close_done)
 
     try:
