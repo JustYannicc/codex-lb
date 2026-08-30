@@ -403,10 +403,10 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
             generation=_next_http_bridge_quarantine_generation(service, registry),
         )
         registry[session.key] = entry
-    elif entry.generation == 0:
-        # Restored/legacy entries may lack a generation. Allocate one before
-        # mutating the strike so a completion can never observe a reusable
-        # zero-generation fence.
+    else:
+        # Mutating an existing strike/quarantine entry changes the evidence a
+        # captured completion is allowed to clear. Allocate a new generation so
+        # a stale completion cannot remove a post-capture first strike.
         entry.generation = _next_http_bridge_quarantine_generation(service, registry)
     # The strike entry is shared with the eventual quarantine record. Keep an
     # owner token from the first strike onward so a detached predecessor can

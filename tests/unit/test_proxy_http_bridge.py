@@ -34889,6 +34889,37 @@ def test_http_bridge_quarantine_recovery_absence_preserves_first_strike() -> Non
     assert entry.consecutive_eventless_timeouts == 1
 
 
+def test_http_bridge_quarantine_first_strike_advances_existing_entry_generation() -> None:
+    """A completion that captured the old generation cannot remove a new strike."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-existing-first-strike")
+    service._http_bridge_sessions = {session.key: session}
+    registry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+    registry[session.key] = http_bridge_quarantine_module._HTTPBridgeQuarantineEntry(
+        generation=1,
+        consecutive_eventless_timeouts=0,
+        last_touched_monotonic=time.monotonic(),
+    )
+
+    captured_generation = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence(service, session.key)
+    assert captured_generation == 1
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+
+    entry = registry[session.key]
+    assert entry.generation != captured_generation
+    assert entry.consecutive_eventless_timeouts == 1
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured_generation,
+        key_generation_captured=True,
+    )
+
+    assert registry[session.key] is entry
+
+
 def test_http_bridge_quarantine_same_key_clear_denied_when_no_generation_observed() -> None:
     """The same-key recovery shape is fenced by an observed absence too."""
     service = SimpleNamespace()
