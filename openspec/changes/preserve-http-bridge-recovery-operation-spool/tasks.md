@@ -20,6 +20,7 @@
 
 - [x] 4.1 Run focused HTTP bridge unit/integration tests, Ruff, formatting, type
       checking, proxy architecture checks, and `git diff --check`.
-- [x] 4.2 Run strict OpenSpec validation when the CLI is available; otherwise
-      record the environment blocker in the delivery evidence (the `openspec`
-      CLI is unavailable in this environment).
+- [x] 4.2 Run strict OpenSpec validation when the CLI is available; validation
+      passed with `pnpm --silent dlx @fission-ai/openspec@1.10.0 validate
+      preserve-http-bridge-recovery-operation-spool --type change --strict
+      --no-interactive`.
