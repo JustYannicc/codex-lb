@@ -64,9 +64,9 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
-    STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+    STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     openai_error,
