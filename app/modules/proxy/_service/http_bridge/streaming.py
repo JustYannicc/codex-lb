@@ -3095,6 +3095,12 @@ class _HTTPBridgeStreamingMixin:
                             exc_info=True,
                         )
                         return
+                    logger.warning(
+                        "Required HTTP bridge recovery spool reset failed request_id=%s operation_id=%s",
+                        recovery_request_state.request_id,
+                        recovery_request_state.operation_id,
+                        exc_info=True,
+                    )
                     raise spool_reset_failure() from reset_exc
                 if not reset_ok:
                     if not required:
@@ -3104,6 +3110,11 @@ class _HTTPBridgeStreamingMixin:
                             recovery_request_state.operation_id,
                         )
                         return
+                    logger.warning(
+                        "Required HTTP bridge recovery spool reset declined request_id=%s operation_id=%s",
+                        recovery_request_state.request_id,
+                        recovery_request_state.operation_id,
+                    )
                     raise spool_reset_failure()
 
             async def capture_verified_stale_anchor_circuit_generation(
