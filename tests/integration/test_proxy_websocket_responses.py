@@ -51,6 +51,7 @@ from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
     _capability_lineage_unavailable_error,
 )
+from app.modules.proxy.load_balancer import SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
 
 pytestmark = pytest.mark.integration
 
@@ -12386,7 +12387,7 @@ def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_
     assert upstream_opened is False
 
 
-def test_backend_responses_websocket_durable_capability_model_rejection_keeps_typed_empty_pool(
+def test_backend_responses_websocket_durable_capability_model_rejection_surfaces_original_error(
     app_instance,
     monkeypatch,
 ):
@@ -12464,8 +12465,8 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
             )
         return proxy_module.AccountSelection(
             account=None,
-            error_message="No accounts marked as authorized for security work",
-            error_code="no_security_work_authorized_accounts",
+            error_message="All accounts marked as authorized for security work were excluded",
+            error_code=SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
         )
 
     async def open_model_rejecting_upstream(self, account, headers, **_kwargs):
@@ -12506,15 +12507,14 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
             headers={"Authorization": "Bearer capability-model-rejection"},
         ) as websocket:
             websocket.send_text(json.dumps(request))
-            warning = json.loads(websocket.receive_text())
             terminal = json.loads(websocket.receive_text())
 
-    assert warning["warning"]["code"] == "no_security_work_authorized_accounts"
-    assert warning["warning"]["action"] == "fail_closed_capability_routing"
-    assert "did not fall back to an ordinary account" in warning["warning"]["message"]
     assert terminal["type"] == "error"
-    assert terminal["status"] == 503
-    assert terminal["error"]["code"] == "no_security_work_authorized_accounts"
+    assert terminal["status"] == 400
+    assert terminal["error"]["code"] == "invalid_request_error"
+    assert terminal["error"]["message"] == (
+        "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+    )
     assert selection_requirements == [True, True]
     assert selection_exclusions == [set(), {"acct_ws_capability_model_rejection"}]
     assert opened_account_ids == ["acct_ws_capability_model_rejection"]
