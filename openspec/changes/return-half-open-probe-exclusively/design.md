@@ -1,0 +1,91 @@
+## Context
+
+The HTTP bridge retry circuit merges durable failure/cooldown rows into a
+process-local monotonic state. Admission and upstream session teardown run in
+the same process, but durable rows may be read by several replicas. The
+implementation therefore needs a local lease owner without pretending that a
+database row can identify the socket or pending attempts that own it.
+
+See `proposal.md` for the motivation and `specs/responses-api-compat/spec.md`
+for the normative behavior.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Keep elapsed durable deadlines at the existing `0.0` not-cooling sentinel.
+- Make a real post-cooldown probe single-flight within one process and fence
+  its return to the session that acquired it.
+- Make local continuity recovery neutral to upstream failure accounting while
+  preserving genuine eventless failure accounting.
+- Make stale-session reset atomic with respect to submit/teardown ownership,
+  then perform potentially blocking settlement outside the lifecycle lock.
+
+**Non-Goals:**
+
+- No durable lease schema, cross-replica lock, attribution metadata, or new
+  configuration.
+- No session retirement for cooldown suppression (#1947), poison/quarantine
+  behavior (#1891), denied-anchor retirement (#1902), or broad stale-anchor
+  hardening (#1867).
+
+## Decisions
+
+### Normalize before merging
+
+Convert a durable wall-clock deadline to a monotonic deadline only when the
+remaining duration is positive. Otherwise merge `0.0`. This avoids creating a
+synthetic expired transition from a row that is already open for admission.
+Equal-version reloads reconcile durable fields but do not clear a live local
+half-open lease: the reload cannot prove which local session owns it. A lookup
+failure leaves the existing local state untouched.
+
+### Fence a process-local lease by session identity
+
+When admission crosses a real cooldown boundary, store the session identity
+alongside `half_open_until`. Release requires the same identity and an active
+lease. Release clears the lease and records an elapsed local cooldown marker;
+it does not change durable failure fields. The marker preserves the local
+single-flight transition for the next admission without making a durable claim.
+
+### Reuse the existing failure funnel for classification
+
+Classify the six known proxy continuity-loss details before the genuine failure
+set. Continuity loss invokes the owner-fenced release and returns without a
+durable write. Genuine `stream_incomplete`, `stream_idle_timeout`, and
+`clean_close` continue through the existing attempt-scoped accounting path.
+
+### Serialize reset's critical section
+
+The stale-anchor reset takes `session.lifecycle_lock`, detaches the session
+under `_http_bridge_lock`, marks all pending response-create attempts disarmed,
+and only then returns the half-open lease. It snapshots the work to settle and
+closes the session after releasing the lifecycle lock. A shielded cleanup task
+owns the critical transition so cancellation is reported to the caller only
+after the registry and lease state are consistent.
+
+### Port only the accepted #1857 recovery exits
+
+The mixin/protocol/streaming changes are limited to owner-unavailable and stale
+anchor reset paths from commits `d0075829`, `9a7dc342`, and `2a822b4f`. No
+session-retirement, poison/quarantine, denied-anchor, attribution, or broad
+continuity changes are copied from the overlapping vehicles.
+
+## Risks / Trade-offs
+
+- [Local leases are not replica-wide] → Keep durable failure/cooldown state as
+  the shared authority and document that each process may admit its own probe
+  after a real elapsed deadline.
+- [A stale owner could attempt a late release] → Require active lease and exact
+  session identity; ignore non-owner releases.
+- [Reset cancellation could strand resources] → Shield the detach/disarm/
+  release transition and await the cleanup task before propagating cancellation.
+- [Holding lifecycle ownership across network-like awaits could deadlock] →
+  limit the lock to detach/disarm/release and settle/close afterwards.
+
+## Migration Plan
+
+No data migration is required. Deploying the code changes only local state
+interpretation and recovery ordering. Rollback is a normal code rollback; the
+durable failure/cooldown row remains compatible because no schema or serialized
+field changes.

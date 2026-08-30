@@ -83,6 +83,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _bind_http_bridge_proxy_injected_anchor,
     _capture_http_bridge_denied_anchor_fence,
+    _await_task_deferring_cancellation,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
@@ -600,6 +601,30 @@ def _http_bridge_error_is_ambiguous_transport(exc: ProxyResponseError) -> bool:
 
     code, _message = _proxy_error_code_message(exc)
     return code in _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES
+
+
+_HTTP_BRIDGE_PROXY_CONTINUITY_LOSS_CODES = frozenset(
+    {
+        "bridge_owner_unreachable",
+        "bridge_instance_mismatch",
+        "previous_response_owner_unavailable",
+    }
+)
+
+
+def _http_bridge_server_continuity_loss_detail(exc: ProxyResponseError) -> str | None:
+    """Return a reset marker only for a proven proxy-side continuity loss.
+
+    The server recovery modes also accept ambiguous transport failures. Those
+    failures may be genuine upstream faults, so tagging their reset as
+    continuity loss would disarm the attempt and hide a retry-circuit strike.
+    """
+    if _http_bridge_is_explicit_previous_response_rejection(exc):
+        return "previous_response_not_found"
+    code, _message = _proxy_error_code_message(exc)
+    if code in _HTTP_BRIDGE_PROXY_CONTINUITY_LOSS_CODES:
+        return code
+    return None
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -3522,6 +3547,7 @@ class _HTTPBridgeStreamingMixin:
                 effective_payload.previous_response_id is not None
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
             )
+            server_continuity_loss_detail = _http_bridge_server_continuity_loss_detail(exc)
             previous_response_rejected_same_owner_full_resend = bool(
                 explicit_previous_response_rejection
                 and verified_stale_anchor_operation_fenced
@@ -3623,6 +3649,7 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    server_continuity_loss_detail="previous_response_not_found",
                 )
                 switch_to_account_neutral_replay(
                     event="previous_response_recover_fresh_resend",
@@ -3672,6 +3699,7 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    server_continuity_loss_detail="previous_response_not_found",
                 )
                 recovery_path = "local_previous_response_same_owner_fresh_replay"
                 retry_previous_response_id = None
@@ -3699,6 +3727,7 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    server_continuity_loss_detail=server_continuity_loss_detail,
                 )
                 recovery_path = "local_previous_response_error"
                 retry_payload = effective_payload
@@ -4039,27 +4068,58 @@ class _HTTPBridgeStreamingMixin:
         error_code: str,
         error_message: str,
         preserve_durable_lease: bool = False,
+        server_continuity_loss_detail: str | None = None,
     ) -> None:
-        async with self._http_bridge_lock:
-            # Pending settlement below may block or fail before resource close
-            # starts. Transfer canonical routing into detached lifecycle
-            # ownership first so capacity, invalidation, and shutdown continue
-            # to see the live socket and leases throughout that interval.
-            self._detach_http_bridge_session_locked(session.key, expected_session=session)
-        async with session.pending_lock:
-            session.queued_request_count = 0
-        await self._fail_pending_websocket_requests(
-            account=session.account,
-            account_id_value=session.account.id,
-            pending_requests=session.pending_requests,
-            pending_lock=session.pending_lock,
-            error_code=error_code,
-            error_message=error_message,
-            api_key=None,
-            response_create_gate=session.response_create_gate,
-            penalize_account=False,
+        async def cleanup() -> None:
+            # A submitter may append an attempt until it observes the same
+            # lifecycle state. Keep ownership across detach/disarm/release so
+            # reset cannot leave a late undisarmed send behind.
+            async with session.lifecycle_lock:
+                session.closed = True
+                async with self._http_bridge_lock:
+                    # Pending settlement below may block or fail before
+                    # resource close starts. Transfer canonical routing into
+                    # detached lifecycle ownership first so capacity,
+                    # invalidation, and shutdown continue to see the live
+                    # socket and leases throughout that interval.
+                    self._detach_http_bridge_session_locked(session.key, expected_session=session)
+                async with session.pending_lock:
+                    session.queued_request_count = 0
+                    if server_continuity_loss_detail is not None:
+                        for pending_request_state in session.pending_requests:
+                            pending_attempt = getattr(pending_request_state, "response_create_attempt", None)
+                            if pending_attempt is not None:
+                                pending_attempt.disarmed = True
+                if server_continuity_loss_detail is not None:
+                    await self._release_http_bridge_retry_circuit_half_open(
+                        session,
+                        detail=server_continuity_loss_detail,
+                    )
+
+            # Settlement and socket close can await user-facing queues and
+            # transport cleanup. They intentionally run after lifecycle
+            # ownership is released, but remain inside this shielded cleanup
+            # task so cancellation cannot strand the detached session or lease.
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=session.pending_requests,
+                pending_lock=session.pending_lock,
+                error_code=error_code,
+                error_message=error_message,
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+                penalize_account=False,
+            )
+            await self._close_http_bridge_session(session, release_durable_session=not preserve_durable_lease)
+
+        cleanup_task = asyncio.create_task(
+            cleanup(),
+            name=f"http-bridge-local-reset-{_hash_identifier(session.key.affinity_key)}",
         )
-        await self._close_http_bridge_session(session, release_durable_session=not preserve_durable_lease)
+        _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+        if cancellation is not None:
+            raise cancellation
 
     async def _stream_http_bridge_session_events(
         self: Any,

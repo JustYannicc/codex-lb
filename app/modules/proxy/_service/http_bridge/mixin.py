@@ -2013,6 +2013,18 @@ class _HTTPBridgeMixin(
         setattr(handoff_future, "_http_bridge_handoff", True)
         session.handoff_future = handoff_future
         session.closed = True
+
+        def complete_failed_handoff() -> None:
+            session.closed = True
+            _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
+            _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+
+        async def fail_owner_unavailable_after_probe(detail: str = "previous_response_owner_unavailable") -> None:
+            try:
+                await self._release_http_bridge_retry_circuit_half_open(session, detail=detail)
+            finally:
+                complete_failed_handoff()
+
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
@@ -2057,8 +2069,7 @@ class _HTTPBridgeMixin(
                 session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
             )
             if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
-                session.closed = True
-                _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+                await fail_owner_unavailable_after_probe()
                 raise _http_bridge_previous_response_owner_unavailable_error()
             _require_http_bridge_bound_account_not_excluded(
                 hard_close_account_bound, session.account.id, excluded_account_ids
@@ -2132,11 +2143,6 @@ class _HTTPBridgeMixin(
                 session.closed = True
                 raise
 
-        def complete_failed_handoff() -> None:
-            session.closed = True
-            _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
-            _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
-
         def require_bound_account() -> None:
             try:
                 _require_http_bridge_bound_account_not_excluded(
@@ -2187,7 +2193,7 @@ class _HTTPBridgeMixin(
                     complete_failed_handoff()
                     raise
                 if required_preferred_account_id is not None and selection.continuity_owner_no_longer_exists:
-                    complete_failed_handoff()
+                    await fail_owner_unavailable_after_probe(CONTINUITY_OWNER_UNAVAILABLE)
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
                     reuse_current_account_lease
@@ -2200,7 +2206,7 @@ class _HTTPBridgeMixin(
                 if selection.error_code == USAGE_LIMIT_REACHED and (
                     required_preferred_account_id is not None or hard_close_account_bound
                 ):
-                    complete_failed_handoff()
+                    await fail_owner_unavailable_after_probe()
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if selection.error_code == USAGE_LIMIT_REACHED:
                     record_selected_account_takeover(None)
@@ -2223,7 +2229,7 @@ class _HTTPBridgeMixin(
                 if should_retry_selection:
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
-                        complete_failed_handoff()
+                        await fail_owner_unavailable_after_probe()
                         raise _http_bridge_previous_response_owner_unavailable_error()
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
@@ -2252,7 +2258,7 @@ class _HTTPBridgeMixin(
                     selected_account_lease = selection.lease
                     await release_selected_account_lease()
                 record_selected_account_takeover(account.id, required_preferred_account_id)
-                complete_failed_handoff()
+                await fail_owner_unavailable_after_probe()
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease

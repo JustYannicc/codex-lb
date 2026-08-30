@@ -14047,6 +14047,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "account-neutral",
         "forwarded-account-neutral",
         "owner-bound-tool-history",
+        "owner-bound-half-open-probe-return",
         "forwarded-owner-bound-tool-history",
         "missing-prior-output",
         "transport-only",
@@ -14113,9 +14114,11 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "account-neutral-newer-circuit-before-submit",
     }
     circuit_advances_during_admission = replay_case == "circuit-advances-during-admission"
+    half_open_probe_return = replay_case == "owner-bound-half-open-probe-return"
     transport_only = replay_case == "transport-only"
     owner_bound_replay = replay_case in {
         "owner-bound-tool-history",
+        "owner-bound-half-open-probe-return",
         "forwarded-owner-bound-tool-history",
         "newer-circuit-before-submit",
         "inactive-unknown-owner-bound-journal",
@@ -14215,7 +14218,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             cast(Any, service)._http_bridge_retry_circuits[session.key] = (
                 http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
                     consecutive_failures=2,
-                    cooldown_until=time.monotonic() + 60.0,
+                    cooldown_until=(time.monotonic() - 1.0 if half_open_probe_return else time.monotonic() + 60.0),
                     last_detail="stream_incomplete",
                     last_touched_monotonic=time.monotonic(),
                     # This fixture injects an in-memory circuit directly;
@@ -14549,7 +14552,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             assert retained_circuit.consecutive_failures >= 3
         else:
             assert retained_circuit.consecutive_failures == 2
-        assert retained_circuit.cooldown_until > time.monotonic()
+        if half_open_probe_return:
+            assert retained_circuit.cooldown_until <= time.monotonic()
+            assert retained_circuit.half_open_until == 0.0
+            assert retained_circuit.half_open_owner_session_id is None
+        else:
+            assert retained_circuit.cooldown_until > time.monotonic()
         durable_clear_retry_circuit.assert_not_awaited()
         clear_http_bridge_quarantine.assert_called_once()
     else:
