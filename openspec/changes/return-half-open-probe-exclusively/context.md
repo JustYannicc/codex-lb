@@ -33,7 +33,7 @@ honors any real future durable cooldown and any durable failure updates.
 - Equal-version reloads do not erase an active local lease. The reload can
   reconcile the durable cooldown and failure count, but it cannot prove that a
   local probe is stale. This preserves the single-flight signal used by later
-  poison/quarantine work.
+  recovery work.
 - A newer durable reset or lower failure count also cannot erase an active
   local lease or lower its local failure fence while the probe is in flight.
   When no local probe is active, a newer durable reset clears stale local
@@ -81,9 +81,8 @@ The successor PR must cite maintainer comments #1908 `5423573461` and #1857
 - A continuity-owner failure does not increment `consecutive_failures` or
   persist a new row. An actual `stream_incomplete`, `stream_idle_timeout`, or
   `clean_close` still increments and opens the circuit at the configured
-  threshold. A previous-response rejection is neutral only when request state
-  proves proxy anchor injection or a dead durable owner; a client-supplied
-  unknown anchor remains chargeable upstream failure.
+  threshold. Existing anchor replay and error-provenance rules remain outside
+  this change.
 - Disarming before the first await prevents the reader from classifying reset
   teardown as an eligible eventless send. Acquiring `lifecycle_lock` closes the
   submit-vs-reset gap in which a late submit could append an undisarmed attempt.
@@ -94,13 +93,12 @@ The successor PR must cite maintainer comments #1908 `5423573461` and #1857
 ## Example
 
 Two failures open a hard key for 60 seconds. After the deadline, local session
-A is the only admitted probe. The upstream rejects the proxy's stale anchor;
-the reset detaches A, disarms its pending attempt, and returns the lease as an
-elapsed cooldown. A concurrent reconnect on the same process is suppressed
-until the next request acquires a fresh probe. A different replica may admit a
-local probe after loading the same elapsed durable row, but both replicas still
-honor a future durable cooldown and merge genuine failures through the durable
-row.
+A is the only admitted probe. The proxy loses continuity ownership; its reset
+detaches A, disarms its pending attempt, and returns the lease as an elapsed
+cooldown. A concurrent reconnect on the same process is suppressed until the
+next request acquires a fresh probe. A different replica may admit a local
+probe after loading the same elapsed durable row, but both replicas still honor
+a future durable cooldown and merge genuine failures through the durable row.
 
 ## Validation note
 
