@@ -16,9 +16,9 @@ for the normative behavior.
 - Keep elapsed durable deadlines at the existing `0.0` not-cooling sentinel.
 - Make a real post-cooldown probe single-flight within one process and fence
   its return to the session that acquired it.
-- Make local continuity recovery neutral to upstream failure accounting while
-  preserving genuine eventless failure accounting.
-- Make stale-session reset atomic with respect to submit/teardown ownership,
+- Make explicitly identified proxy continuity recovery neutral to upstream
+  failure accounting while preserving genuine eventless failure accounting.
+- Make proxy-owned session reset atomic with respect to submit/teardown ownership,
   then perform potentially blocking settlement outside the lifecycle lock.
 
 **Non-Goals:**
@@ -53,17 +53,16 @@ install exactly one fresh lease without making a durable claim.
 
 ### Reuse the existing failure funnel for classification
 
-Classify the six known proxy continuity-loss details before the genuine failure
-set. Continuity loss invokes the owner-fenced release and returns without a
-durable write. The previous-response forms are classified as proxy loss only
-with bridge-injected-anchor or dead-owner provenance; client-supplied unknown
-anchors remain upstream failures. Genuine `stream_incomplete`,
-`stream_idle_timeout`, and `clean_close` continue through the existing
-attempt-scoped accounting path.
+Classify the established proxy continuity-loss details before the genuine
+failure set. Continuity loss invokes the owner-fenced release and returns
+without a durable write. Genuine `stream_incomplete`, `stream_idle_timeout`,
+and `clean_close` continue through the existing attempt-scoped accounting
+path. Anchor replay and error provenance remain owned by their existing
+vehicles.
 
 ### Serialize reset's critical section
 
-The stale-anchor reset takes `session.lifecycle_lock`, detaches the session
+The proxy-owned reset takes `session.lifecycle_lock`, detaches the session
 under `_http_bridge_lock`, marks all pending response-create attempts disarmed,
 and only then returns the half-open lease. It snapshots the work to settle and
 closes the session after releasing the lifecycle lock. A shielded cleanup task
@@ -72,10 +71,10 @@ after the registry and lease state are consistent.
 
 ### Port only the accepted #1857 recovery exits
 
-The mixin/protocol/streaming changes are limited to owner-unavailable and stale
-anchor reset paths from commits `d0075829`, `9a7dc342`, and `2a822b4f`. No
-session-retirement, poison/quarantine, denied-anchor, attribution, or broad
-continuity changes are copied from the overlapping vehicles.
+The mixin/protocol/streaming changes are limited to owner-unavailable and
+proxy-owned reset paths from commits `d0075829`, `9a7dc342`, and `2a822b4f`.
+No session-retirement, poison/quarantine, denied-anchor, attribution, or broad
+anchor-recovery changes are copied from the overlapping vehicles.
 
 ## Risks / Trade-offs
 

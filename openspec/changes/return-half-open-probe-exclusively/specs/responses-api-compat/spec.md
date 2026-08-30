@@ -64,20 +64,20 @@ only when no local probe is active.
 - **AND** after the durable deadline has elapsed, each process may manage only
   its own process-local half-open lease
 
-### Requirement: Continuity-loss reset teardown is ordered and cancellation-safe
+### Requirement: Proxy continuity reset teardown is ordered and cancellation-safe
 
-When a local stale-anchor or continuity-owner reset returns a half-open probe,
-the proxy MUST hold the session lifecycle ownership while detaching the session
-from active bridge routing and marking every pending response-create attempt on
-that session as disarmed. It MUST return the probe only after detachment and
-disarming, then settle pending requests and close the session through a
- cancellation-shielded cleanup path. A late submit MUST NOT append an
-undisarmed attempt between the reset's disarm and detach steps.
+When a proxy-owned continuity reset returns a half-open probe, the proxy MUST
+hold the session lifecycle ownership while detaching the session from active
+bridge routing and marking every pending response-create attempt on that session
+as disarmed. It MUST return the probe only after detachment and disarming, then
+settle pending requests and close the session through a cancellation-shielded
+cleanup path. A late submit MUST NOT append an undisarmed attempt between the
+reset's disarm and detach steps.
 
 #### Scenario: Reset teardown cannot manufacture a circuit strike
 
-- **GIVEN** a stale-anchor reset has an active half-open probe and pending
-  response-create attempts
+- **GIVEN** a proxy-owned continuity reset has an active half-open probe and
+  pending response-create attempts
 - **WHEN** the reset runs
 - **THEN** the session is detached and its attempts are disarmed before the
   probe is returned
@@ -88,17 +88,15 @@ undisarmed attempt between the reset's disarm and detach steps.
 
 ### Requirement: Retry-circuit failure accounting distinguishes proxy continuity loss
 
-The proxy MUST NOT increment or persist retry-circuit failures for its own
-continuity-ownership loss, including `continuity_owner_unavailable`,
-`previous_response_owner_unavailable`, `previous_response_not_found`,
-`bridge_previous_response_not_found`, `bridge_owner_unreachable`, and
-`bridge_instance_mismatch`. It MUST continue to increment and persist genuine
-upstream `stream_incomplete`, `stream_idle_timeout`, and `clean_close` failures
-when their attempt is eligible.
-The `previous_response_not_found` forms are proxy continuity loss only when the
-request state proves that the rejected anchor was injected by this bridge or
-that a durable owner was already known dead; a client-supplied unknown anchor
-MUST remain a genuine upstream rejection.
+The proxy MUST NOT increment or persist retry-circuit failures for explicitly
+identified proxy continuity-ownership loss, including
+`continuity_owner_unavailable`, `previous_response_owner_unavailable`,
+`previous_response_not_found`, `bridge_previous_response_not_found`,
+`bridge_owner_unreachable`, and `bridge_instance_mismatch`. It MUST continue to
+increment and persist genuine upstream `stream_incomplete`,
+`stream_idle_timeout`, and `clean_close` failures when their attempt is
+eligible. Anchor replay and error-provenance policy remain governed by their
+existing contracts.
 
 #### Scenario: Proxy continuity loss is neutral
 
