@@ -6012,6 +6012,174 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_cooldown_retirement_drains_pending_public_request(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """A public cooldown rejection retires only after the prior request drains."""
+
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id=socket.gethostname(),
+    )
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 10.0)
+    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 100)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_cooldown_public",
+        "backend-http-bridge-cooldown-public@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    first_upstream = _SilentUpstreamWebSocket()
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_cooldown_half_open")
+    upstreams = [first_upstream, replacement_upstream]
+    connect_count = 0
+    initial_cooldown_checks_returned = asyncio.Event()
+    first_cooldown_check_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        **kwargs,
+    ):
+        del headers, access_token, account_id_header, kwargs
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    original_precreated_retry_cooldown_seconds = service._http_bridge_precreated_retry_cooldown_seconds
+
+    async def synchronized_precreated_retry_cooldown_seconds(session):
+        nonlocal first_cooldown_check_count
+        cooldown_seconds = await original_precreated_retry_cooldown_seconds(session)
+        if session.upstream is first_upstream and not initial_cooldown_checks_returned.is_set():
+            first_cooldown_check_count += 1
+            if first_cooldown_check_count >= 2:
+                initial_cooldown_checks_returned.set()
+        return cooldown_seconds
+
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_precreated_retry_cooldown_seconds",
+        synchronized_precreated_retry_cooldown_seconds,
+    )
+
+    turn_state = "hard-cooldown-public-regression"
+    headers = {"x-codex-turn-state": turn_state}
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "hold this request",
+        "stream": True,
+    }
+    first_task = asyncio.create_task(
+        async_client.post(
+            "/backend-api/codex/responses",
+            json=payload,
+            headers=headers,
+        )
+    )
+    first_session: proxy_module._HTTPBridgeSession | None = None
+    try:
+        deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            async with service._http_bridge_lock:
+                first_session = next(
+                    (
+                        session
+                        for session in service._http_bridge_sessions.values()
+                        if session.upstream is first_upstream
+                    ),
+                    None,
+                )
+            if first_session is not None and first_upstream.sent_text:
+                break
+            await asyncio.sleep(0.01)
+
+        assert first_session is not None
+        assert first_upstream.sent_text
+        assert await service._http_bridge_pending_count(first_session) == 1
+        await asyncio.wait_for(initial_cooldown_checks_returned.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+
+        now = time.monotonic()
+        cast(Any, service)._http_bridge_retry_circuits[first_session.key] = (
+            http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+                consecutive_failures=2,
+                cooldown_until=now + 0.05,
+                last_detail="stream_idle_timeout",
+                last_touched_monotonic=now,
+            )
+        )
+        monkeypatch.setattr(service, "_load_http_bridge_retry_circuit", AsyncMock(return_value=True))
+
+        rejected = await async_client.post(
+            "/backend-api/codex/responses",
+            json={**payload, "input": "cooldown-suppressed request"},
+            headers=headers,
+        )
+        assert rejected.status_code == 503
+        assert rejected.json()["error"]["code"] == "upstream_request_timeout"
+        assert first_session.upstream_control.reconnect_requested is True
+        assert first_session.upstream_control.retire_after_drain is True
+        assert first_session.closed is False
+        assert first_upstream.closed is False
+        assert first_task.done() is False
+
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+
+        deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            pending_count = await service._http_bridge_pending_count(first_session)
+            if first_session.closed and first_upstream.closed and pending_count == 0:
+                break
+            await asyncio.sleep(0.01)
+
+        assert first_session.closed is True
+        assert first_upstream.closed is True
+        assert await service._http_bridge_pending_count(first_session) == 0
+
+        await asyncio.sleep(0.08)
+        admitted_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={**payload, "input": "after cooldown"},
+            headers=headers,
+        )
+        admitted_response = admitted_events[-1]["response"]
+        assert admitted_response["output"][0]["content"][0]["text"] == "OK"
+        assert connect_count == 2
+        assert len(replacement_upstream.sent_text) == 1
+        assert replacement_upstream is not first_session.upstream
+        async with service._http_bridge_lock:
+            replacement_session = service._http_bridge_sessions[first_session.key]
+            assert replacement_session is not first_session
+            assert replacement_session.upstream is replacement_upstream
+    finally:
+        if not first_task.done():
+            first_task.cancel()
+        await asyncio.gather(first_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_prefers_codex_session_header_over_prompt_cache_key(
     async_client,
     monkeypatch,
