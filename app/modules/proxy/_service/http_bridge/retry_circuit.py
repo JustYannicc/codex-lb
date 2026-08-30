@@ -70,7 +70,7 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     # signature, so at threshold it authorizes the same fenced abandonment.
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE: "repeated_zero_event_idle_timeout",
 }
-_HTTP_BRIDGE_RETRY_CIRCUIT_SERVER_CONTINUITY_DETAILS = frozenset(
+_HTTP_BRIDGE_RETRY_CIRCUIT_PROXY_CONTINUITY_DETAILS = frozenset(
     {
         # These outcomes describe continuity ownership lost by this proxy.
         # They are not evidence that the upstream transport failed, and a
@@ -1630,7 +1630,7 @@ class _HTTPBridgeRetryCircuitMixin:
         never asserts it, so its "upstream answered" guard is unchanged.
         """
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
-        if detail in _HTTP_BRIDGE_RETRY_CIRCUIT_SERVER_CONTINUITY_DETAILS:
+        if detail in _HTTP_BRIDGE_RETRY_CIRCUIT_PROXY_CONTINUITY_DETAILS:
             await self._release_http_bridge_retry_circuit_half_open(
                 session,
                 detail=detail,

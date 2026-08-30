@@ -1060,83 +1060,6 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
 
 
-@pytest.mark.parametrize(
-    ("code", "message", "expected"),
-    [
-        ("previous_response_not_found", "missing", None),
-        ("bridge_previous_response_not_found", "missing", None),
-        ("bridge_owner_unreachable", "owner unavailable", "bridge_owner_unreachable"),
-        ("bridge_instance_mismatch", "owner moved", "bridge_instance_mismatch"),
-        ("stream_incomplete", "closed", None),
-        ("stream_idle_timeout", "timed out", None),
-        ("upstream_request_timeout", "timed out", None),
-    ],
-)
-def test_http_bridge_server_continuity_loss_detail_excludes_ambiguous_transport(
-    code: str,
-    message: str,
-    expected: str | None,
-) -> None:
-    error = proxy_service.openai_error(code, message)
-
-    assert (
-        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
-            ProxyResponseError(502, error),
-        )
-        == expected
-    )
-
-
-def test_http_bridge_server_continuity_loss_detail_requires_proxy_anchor_provenance() -> None:
-    error = proxy_service.openai_error("previous_response_not_found", "missing")
-    client_anchor_state = proxy_service._WebSocketRequestState(
-        request_id="req-client-anchor",
-        model="gpt-5.6",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
-        previous_response_id="resp-client-anchor",
-    )
-    assert (
-        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
-            ProxyResponseError(400, error),
-            request_state=client_anchor_state,
-        )
-        is None
-    )
-
-    client_anchor_state.proxy_injected_previous_response_id = True
-    assert (
-        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
-            ProxyResponseError(400, error),
-            request_state=client_anchor_state,
-        )
-        == "previous_response_not_found"
-    )
-
-    client_anchor_state.proxy_injected_previous_response_id = False
-    client_anchor_state.durable_owner_dead = True
-    assert (
-        http_bridge_streaming_module._http_bridge_server_continuity_loss_detail(
-            ProxyResponseError(400, error),
-            request_state=client_anchor_state,
-        )
-        == "previous_response_not_found"
-    )
-
-
-@pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
-@pytest.mark.parametrize("param", [None, "", "   ", 0, False, {}, []])
-def test_http_bridge_stale_anchor_recovery_rejects_malformed_present_param(code: str, param: object) -> None:
-    error = proxy_service.openai_error(code, "Previous response with id 'resp_missing' not found.")
-    cast(Any, error["error"])["param"] = param
-    exc = ProxyResponseError(400, error)
-
-    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
-    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
-
-
 @pytest.mark.parametrize("param", ["", "   "])
 def test_previous_response_recovery_preserves_present_blank_param(param: str) -> None:
     error = proxy_service.openai_error("invalid_request_error", "Invalid previous_response_id.")
@@ -1145,20 +1068,20 @@ def test_previous_response_recovery_preserves_present_blank_param(param: str) ->
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
-    param_state = websocket_helpers_module._websocket_event_error_param(
-        "error",
-        {
-            "type": "error",
-            "status": 400,
-            "error_type": "invalid_request_error",
-            "code": "invalid_request_error",
-            "message": "Invalid previous_response_id.",
-            "param": param,
-        },
+    assert (
+        websocket_helpers_module._websocket_event_error_param(
+            "error",
+            {
+                "type": "error",
+                "status": 400,
+                "error_type": "invalid_request_error",
+                "code": "invalid_request_error",
+                "message": "Invalid previous_response_id.",
+                "param": param,
+            },
+        )
+        == ""
     )
-    assert param_state is not None
-    assert param_state.present
-    assert param_state.raw == param
 
 
 @pytest.mark.parametrize("param", [None, 0, False, {}, []])
@@ -1169,21 +1092,21 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
-    param_state = websocket_helpers_module._websocket_event_error_param(
-        "error",
-        cast(
-            dict[str, proxy_service.JsonValue],
-            {
-                "type": "error",
-                "code": "invalid_request_error",
-                "message": "Invalid previous_response_id.",
-                "param": param,
-            },
-        ),
+    assert (
+        websocket_helpers_module._websocket_event_error_param(
+            "error",
+            cast(
+                dict[str, proxy_service.JsonValue],
+                {
+                    "type": "error",
+                    "code": "invalid_request_error",
+                    "message": "Invalid previous_response_id.",
+                    "param": param,
+                },
+            ),
+        )
+        == ""
     )
-    assert param_state is not None
-    assert param_state.present
-    assert param_state.raw == param
 
     _event_block, normalized_payload, _event, event_type = (
         http_bridge_helpers_module._normalize_http_bridge_error_event(
@@ -1206,9 +1129,9 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert normalized_payload is not None
     normalized_response = cast(dict[str, Any], normalized_payload["response"])
     normalized_error = cast(dict[str, Any], normalized_response["error"])
-    assert "param" not in normalized_error
+    assert normalized_error["param"] == ""
     normalized_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(normalized_payload)
-    assert "param" not in normalized_envelope["error"]
+    assert normalized_envelope["error"]["param"] == ""
 
     nested_payload = cast(
         dict[str, proxy_service.JsonValue],
@@ -1226,7 +1149,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     parsed_event = cast(
         Any,
         SimpleNamespace(
-            error=OpenAIError(
+            error=SimpleNamespace(
                 code="invalid_request_error",
                 type="invalid_request_error",
                 message="Invalid previous_response_id.",
@@ -1244,7 +1167,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert nested_normalized is not None
     nested_response = cast(dict[str, Any], nested_normalized["response"])
     nested_error = cast(dict[str, Any], nested_response["error"])
-    assert "param" not in nested_error
+    assert nested_error["param"] == ""
 
     raw_failed_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(
         cast(
@@ -1262,7 +1185,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
             },
         )
     )
-    assert raw_failed_envelope["error"]["param"] == param
+    assert raw_failed_envelope["error"]["param"] == ""
 
 
 def test_parse_openai_error_retains_unrelated_error_with_nullable_param() -> None:
@@ -30570,7 +30493,7 @@ async def test_http_bridge_retry_circuit_allows_only_one_half_open_probe() -> No
     )
 
 
-def _make_anchored_bridge_request_state(request_id: str) -> Any:
+def _make_proxy_continuity_request_state(request_id: str) -> Any:
     request_state = proxy_service._WebSocketRequestState(
         request_id=request_id,
         model="gpt-5.6-luna",
@@ -30580,8 +30503,7 @@ def _make_anchored_bridge_request_state(request_id: str) -> Any:
         started_at=time.monotonic(),
         transport="http",
         awaiting_response_created=True,
-        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
-        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","input":"continue"}',
     )
     request_state.response_create_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
     request_state.response_create_sent_at = time.monotonic()
@@ -30869,22 +30791,20 @@ async def test_http_bridge_retry_circuit_local_leases_are_not_replica_wide() -> 
     assert second_state.half_open_owner_session is second
 
 
-async def _reset_for_continuity_loss(service: Any, session: Any, *, server_continuity_loss: bool) -> None:
-    service._detach_http_bridge_session_locked = Mock(return_value=session)
-    service._fail_pending_websocket_requests = AsyncMock(return_value=True)
-    service._close_http_bridge_session = AsyncMock()
+async def _reset_for_proxy_continuity_loss(service: Any, session: Any) -> None:
     await service._reset_http_bridge_session_after_local_terminal_error(
         session,
         error_code="stream_incomplete",
         error_message="Upstream websocket closed before response.completed",
-        **({"server_continuity_loss_detail": "previous_response_not_found"} if server_continuity_loss else {}),
+        probe_owner=next(iter(session.pending_requests), None),
+        proxy_continuity_loss_detail="continuity_owner_unavailable",
     )
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_stale_anchor_reset_disarms_before_release_and_does_not_strike() -> None:
+async def test_http_bridge_proxy_continuity_reset_disarms_before_release_and_does_not_strike() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    request_state = _make_anchored_bridge_request_state("req-stale-anchor-reset")
+    request_state = _make_proxy_continuity_request_state("req-proxy-continuity-reset")
     session = _make_bridge_session(
         key_value="bridge-stale-anchor-reset",
         pending_requests=deque([request_state]),
@@ -30900,14 +30820,50 @@ async def test_http_bridge_stale_anchor_reset_disarms_before_release_and_does_no
         half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._http_bridge_sessions[session.key] = session
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
     )
 
-    await _reset_for_continuity_loss(service, session, server_continuity_loss=True)
+    events: list[str] = []
+    original_detach = service._detach_http_bridge_session_locked
+
+    def detach_session(*args: Any, **kwargs: Any) -> Any:
+        events.append("detach")
+        return original_detach(*args, **kwargs)
+
+    service._detach_http_bridge_session_locked = Mock(side_effect=detach_session)
+    original_release = service._release_http_bridge_retry_circuit_half_open
+
+    async def release_probe(*args: Any, **kwargs: Any) -> bool:
+        events.append("release")
+        assert session.key not in service._http_bridge_sessions
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        assert request_state.response_create_attempt.disarmed is True
+        return await original_release(*args, **kwargs)
+
+    service._release_http_bridge_retry_circuit_half_open = AsyncMock(side_effect=release_probe)
+
+    async def settle_pending(**_kwargs: Any) -> bool:
+        events.append("settle")
+        assert request_state.response_create_attempt.disarmed is True
+        return True
+
+    setattr(service, "_fail_pending_websocket_requests", settle_pending)
+
+    async def close_session(closing_session: Any, **_kwargs: Any) -> None:
+        events.append("close")
+        service._http_bridge_detached_sessions.pop(id(closing_session), None)
+
+    service._close_http_bridge_session = AsyncMock(side_effect=close_session)
+
+    await _reset_for_proxy_continuity_loss(service, session)
 
     attempt = request_state.response_create_attempt
+    assert events == ["detach", "release", "settle", "close"]
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions == {}
     assert attempt.disarmed is True
     assert state.consecutive_failures == 2
     assert state.half_open_until == 0.0
@@ -30928,7 +30884,7 @@ async def test_http_bridge_stale_anchor_reset_disarms_before_release_and_does_no
 @pytest.mark.asyncio
 async def test_http_bridge_reset_cleanup_defers_cancellation_until_detach_and_close() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    request_state = _make_anchored_bridge_request_state("req-cancelled-reset")
+    request_state = _make_proxy_continuity_request_state("req-cancelled-reset")
     session = _make_bridge_session(
         key_value="bridge-cancelled-reset",
         pending_requests=deque([request_state]),
@@ -30953,9 +30909,20 @@ async def test_http_bridge_reset_cleanup_defers_cancellation_until_detach_and_cl
         return True
 
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
-    cast(Any, service)._detach_http_bridge_session_locked = Mock(return_value=session)
+    service._http_bridge_sessions[session.key] = session
+
+    original_detach = service._detach_http_bridge_session_locked
+
+    def detach_session(*args: Any, **kwargs: Any) -> Any:
+        return original_detach(*args, **kwargs)
+
+    cast(Any, service)._detach_http_bridge_session_locked = Mock(side_effect=detach_session)
     cast(Any, service)._fail_pending_websocket_requests = settle
-    close = AsyncMock()
+
+    async def close_session(closing_session: Any, **_kwargs: Any) -> None:
+        service._http_bridge_detached_sessions.pop(id(closing_session), None)
+
+    close = AsyncMock(side_effect=close_session)
     cast(Any, service)._close_http_bridge_session = close
 
     reset_task = asyncio.create_task(
@@ -30963,19 +30930,24 @@ async def test_http_bridge_reset_cleanup_defers_cancellation_until_detach_and_cl
             session,
             error_code="stream_incomplete",
             error_message="closed",
-            server_continuity_loss_detail="previous_response_not_found",
+            probe_owner=request_state,
+            proxy_continuity_loss_detail="continuity_owner_unavailable",
         )
     )
     await asyncio.wait_for(settle_started.wait(), timeout=0.5)
     reset_task.cancel()
     await asyncio.sleep(0)
     assert reset_task.done() is False
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions[id(session)] is session
     assert request_state.response_create_attempt.disarmed is True
     assert state.half_open_until == 0.0
     allow_settle.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(reset_task, timeout=0.5)
     close.assert_awaited_once()
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions == {}
 
 
 @pytest.mark.asyncio

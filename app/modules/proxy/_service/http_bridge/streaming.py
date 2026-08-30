@@ -83,7 +83,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _bind_http_bridge_proxy_injected_anchor,
     _capture_http_bridge_denied_anchor_fence,
-    _await_task_deferring_cancellation,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
@@ -601,41 +600,6 @@ def _http_bridge_error_is_ambiguous_transport(exc: ProxyResponseError) -> bool:
 
     code, _message = _proxy_error_code_message(exc)
     return code in _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES
-
-
-_HTTP_BRIDGE_PROXY_CONTINUITY_LOSS_CODES = frozenset(
-    {
-        "bridge_owner_unreachable",
-        "bridge_instance_mismatch",
-        "previous_response_owner_unavailable",
-    }
-)
-
-
-def _http_bridge_server_continuity_loss_detail(
-    exc: ProxyResponseError,
-    *,
-    request_state: _WebSocketRequestState | None = None,
-) -> str | None:
-    """Return a reset marker only for a proven proxy-side continuity loss.
-
-    The server recovery modes also accept ambiguous transport failures. Those
-    failures may be genuine upstream faults, so tagging their reset as
-    continuity loss would disarm the attempt and hide a retry-circuit strike.
-    A previous-response rejection is proxy-side only when this request carried
-    an anchor injected by the bridge or a durable owner was already proven
-    dead; a client-supplied unknown id remains a genuine upstream rejection.
-    """
-    if (
-        request_state is not None
-        and (request_state.proxy_injected_previous_response_id or request_state.durable_owner_dead)
-        and _http_bridge_is_explicit_previous_response_rejection(exc)
-    ):
-        return "previous_response_not_found"
-    code, _message = _proxy_error_code_message(exc)
-    if code in _HTTP_BRIDGE_PROXY_CONTINUITY_LOSS_CODES:
-        return code
-    return None
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -3558,10 +3522,6 @@ class _HTTPBridgeStreamingMixin:
                 effective_payload.previous_response_id is not None
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
             )
-            server_continuity_loss_detail = _http_bridge_server_continuity_loss_detail(
-                exc,
-                request_state=request_state,
-            )
             previous_response_rejected_same_owner_full_resend = bool(
                 explicit_previous_response_rejection
                 and verified_stale_anchor_operation_fenced
@@ -3664,7 +3624,7 @@ class _HTTPBridgeStreamingMixin:
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                     probe_owner=request_state,
-                    server_continuity_loss_detail="previous_response_not_found",
+                    proxy_continuity_loss_detail="previous_response_not_found",
                 )
                 switch_to_account_neutral_replay(
                     event="previous_response_recover_fresh_resend",
@@ -3715,7 +3675,7 @@ class _HTTPBridgeStreamingMixin:
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                     probe_owner=request_state,
-                    server_continuity_loss_detail="previous_response_not_found",
+                    proxy_continuity_loss_detail="previous_response_not_found",
                 )
                 recovery_path = "local_previous_response_same_owner_fresh_replay"
                 retry_previous_response_id = None
@@ -3743,8 +3703,6 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
-                    probe_owner=request_state,
-                    server_continuity_loss_detail=server_continuity_loss_detail,
                 )
                 recovery_path = "local_previous_response_error"
                 retry_payload = effective_payload
@@ -4086,7 +4044,7 @@ class _HTTPBridgeStreamingMixin:
         error_message: str,
         preserve_durable_lease: bool = False,
         probe_owner: object | None = None,
-        server_continuity_loss_detail: str | None = None,
+        proxy_continuity_loss_detail: str | None = None,
     ) -> None:
         async def cleanup() -> None:
             # A submitter may append an attempt until it observes the same
@@ -4103,15 +4061,15 @@ class _HTTPBridgeStreamingMixin:
                     self._detach_http_bridge_session_locked(session.key, expected_session=session)
                 async with session.pending_lock:
                     session.queued_request_count = 0
-                    if server_continuity_loss_detail is not None:
+                    if proxy_continuity_loss_detail is not None:
                         for pending_request_state in session.pending_requests:
                             pending_attempt = getattr(pending_request_state, "response_create_attempt", None)
                             if pending_attempt is not None:
                                 pending_attempt.disarmed = True
-                if server_continuity_loss_detail is not None:
+                if proxy_continuity_loss_detail is not None:
                     await self._release_http_bridge_retry_circuit_half_open(
                         session,
-                        detail=server_continuity_loss_detail,
+                        detail=proxy_continuity_loss_detail,
                         probe_owner=probe_owner,
                     )
 

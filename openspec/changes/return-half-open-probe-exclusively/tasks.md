@@ -12,16 +12,17 @@
 - [x] Normalize elapsed durable cooldowns to the zero sentinel without clearing
   equal/newer active local half-open leases.
 - [x] Record the owning session, return only that probe as an elapsed cooldown,
-  classify continuity loss as neutral, and preserve genuine upstream strikes.
-- [x] Order stale-anchor reset lifecycle ownership, detach, disarm, release,
+  classify proxy continuity loss as neutral, and preserve genuine upstream
+  strikes.
+- [x] Order proxy continuity reset lifecycle ownership, detach, disarm, release,
   settlement, and close through cancellation-safe cleanup.
 
 ## Coverage
 
 - [x] Cover elapsed/absent rows, real expiry single-flight, owner fencing,
   equal-version and lookup-failure lease retention, and replica-boundary state.
-- [x] Cover stale-anchor teardown ordering, cancellation, continuity neutrality,
-  and genuine upstream failure through unit and real bridge integration paths.
+- [x] Cover proxy continuity teardown ordering, cancellation, continuity
+  neutrality, and genuine upstream failure through unit and real bridge paths.
 
 ## Verification
 
