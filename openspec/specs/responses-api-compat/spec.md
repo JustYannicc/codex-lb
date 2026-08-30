@@ -3644,11 +3644,11 @@ routing. A missing subscription owner MUST first be evaluated against the
 model-source catalog. If the source catalog confirms source ownership, the
 configured model source remains authoritative even when exactly one subscription
 account is eligible; the request MUST NOT use subscription candidate fallback.
-Only when the source catalog lookup succeeds without confirming source ownership
-may subscription routing count eligible accounts after applying API-key
-account-assignment scoping. Exactly one eligible account MUST be allowed to
-proceed through normal subscription selection; zero or multiple eligible
-accounts MUST fail closed with the sanitized
+For HTTP and compact subscription routing, eligible-account counting is
+permitted only after the source catalog lookup succeeds without confirming
+source ownership, applying API-key account-assignment scoping. Exactly one
+eligible account MUST be allowed to proceed through normal subscription
+selection; zero or multiple eligible accounts MUST fail closed with the sanitized
 `previous_response_owner_unavailable` error. Account-pinned file requests remain
 strict and do not use the sole-candidate fallback. Codex compaction remains
 subscription-only; its dedicated compact HTTP selection uses the same
@@ -3656,8 +3656,8 @@ sole-candidate compatibility fallback. The direct Responses WebSocket transport
 MUST retain its `model_source_requires_http_transport` fallback for confirmed
 source ownership. An unavailable source-catalog lookup is distinct from an owner
 miss: the direct WebSocket path MUST preserve its existing subscription fallback
-instead of converting the lookup failure into
-`previous_response_owner_unavailable`.
+instead of applying the successful-catalog precondition or converting the lookup
+failure into `previous_response_owner_unavailable`.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
