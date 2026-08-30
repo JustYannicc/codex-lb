@@ -3776,6 +3776,7 @@ failure into `previous_response_owner_unavailable`.
 
 - **GIVEN** the requested model is known to subscription routing
 - **AND** no subscription account is recorded as owner of `previous_response_id`
+- **AND** the continuation is not already attached to its required open owner socket
 - **AND** loading eligible subscription candidates fails
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the proxy emits the sanitized `previous_response_owner_unavailable` terminal error

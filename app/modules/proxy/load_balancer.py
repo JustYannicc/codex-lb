@@ -187,6 +187,7 @@ _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inh
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
+SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED = "security_work_authorized_accounts_exhausted"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
@@ -344,8 +345,8 @@ def _apply_selection_account_filters(
                 accounts=[],
                 latest_primary={},
                 latest_secondary={},
-                error_message="No accounts marked as authorized for security work",
-                error_code="no_security_work_authorized_accounts",
+                error_message="All accounts marked as authorized for security work were excluded",
+                error_code=SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
             )
         selection_inputs = replace(selection_inputs, accounts=filtered_accounts)
     return selection_inputs

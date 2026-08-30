@@ -15267,6 +15267,49 @@ async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkey
 
 
 @pytest.mark.asyncio
+async def test_compact_unsupported_input_image_settles_reservation_before_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_unsupported_image")
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_compact_unsupported_image",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    settle_compact_usage = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [{"type": "input_image", "file_id": "file_unsupported_image"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert _proxy_error_code(exc_info.value) == "unsupported_input_image_format"
+    settle_compact_usage.assert_awaited_once()
+    assert settle_compact_usage.await_args is not None
+    assert settle_compact_usage.await_args.kwargs["api_key"] is api_key
+    assert settle_compact_usage.await_args.kwargs["api_key_reservation"] is reservation
+    assert settle_compact_usage.await_args.kwargs["response"] is None
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_propagates_selection_error_code(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

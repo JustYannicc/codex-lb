@@ -492,7 +492,11 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+    AccountLease,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -4065,6 +4069,7 @@ class _WebSocketMixin:
             and request_state.durable_capability_lineage_required
             and not require_preferred_account
             and not _facade()._is_local_account_cap_code(selection.error_code)
+            and selection.error_code != SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
         )
         if (
             defer_no_account_error
@@ -4085,8 +4090,9 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if durable_capability_pool_missing or (
-            require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+        if error_code != SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED and (
+            durable_capability_pool_missing
+            or (require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE)
         ):
             await proxy._emit_websocket_security_work_missing_pool(
                 websocket,
