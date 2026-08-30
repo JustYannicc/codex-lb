@@ -79,6 +79,12 @@ class _HTTPBridgeServiceProtocol(Protocol):
         *,
         lock_wait_timeout_seconds: float | None = None,
     ) -> bool: ...
+    async def _release_http_bridge_retry_circuit_half_open(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        detail: str,
+    ) -> bool: ...
     async def _release_http_bridge_admission_preregistration(
         self,
         session: _HTTPBridgeSession,
