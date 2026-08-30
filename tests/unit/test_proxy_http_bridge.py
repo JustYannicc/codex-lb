@@ -30821,6 +30821,7 @@ async def test_http_bridge_retire_stale_pending_reattempts_failed_poison_clear(
 @pytest.mark.parametrize("reset_outcome", [False, RuntimeError("durable spool reset failed")])
 async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection(
     reset_outcome: bool | RuntimeError,
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Issue #1830 product path: an anchored bridge request fails with the terse
@@ -30975,6 +30976,8 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
         instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
         owner_epoch=7,
     )
+    if reset_outcome is False:
+        assert "Best-effort HTTP bridge recovery spool reset declined" in caplog.text
 
 
 @pytest.mark.asyncio

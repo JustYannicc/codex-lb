@@ -3098,6 +3098,11 @@ class _HTTPBridgeStreamingMixin:
                     raise spool_reset_failure() from reset_exc
                 if not reset_ok:
                     if not required:
+                        logger.warning(
+                            "Best-effort HTTP bridge recovery spool reset declined request_id=%s operation_id=%s",
+                            recovery_request_state.request_id,
+                            recovery_request_state.operation_id,
+                        )
                         return
                     raise spool_reset_failure()
 
