@@ -20188,6 +20188,47 @@ async def test_close_all_http_bridge_sessions_fails_inflight_waiters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_reports_background_cleanup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    cleanup_release = asyncio.Event()
+
+    async def stuck_cleanup() -> None:
+        await cleanup_release.wait()
+
+    cleanup_task = asyncio.create_task(stuck_cleanup(), name="http-bridge-close-timeout")
+    service._background_cleanup_tasks.add(cleanup_task)
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    try:
+        assert await service.close_all_http_bridge_sessions() is False
+        assert cleanup_task in service._background_cleanup_tasks
+    finally:
+        cleanup_release.set()
+        await cleanup_task
+        service._background_cleanup_tasks.discard(cleanup_task)
+
+
+@pytest.mark.asyncio
+async def test_drain_http_bridge_background_cleanup_reports_task_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    async def failed_cleanup() -> None:
+        raise RuntimeError("cleanup failed")
+
+    cleanup_task = asyncio.create_task(failed_cleanup(), name="http-bridge-close-error")
+    service._background_cleanup_tasks.add(cleanup_task)
+
+    try:
+        assert await service._drain_http_bridge_background_cleanup_tasks(reason="test") is False
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await cleanup_task
+    finally:
+        service._background_cleanup_tasks.discard(cleanup_task)
+
+
+@pytest.mark.asyncio
 async def test_close_all_http_bridge_sessions_closes_detached_generations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
