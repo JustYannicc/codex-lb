@@ -424,6 +424,27 @@ async def test_http_bridge_event_wait_reports_terminal_budget_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_wait_keeps_prior_live_budget_failure_over_late_terminal() -> None:
+    """A dropped live event stays fail-closed even if a later terminal would fit."""
+
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+
+    event_queue.put_nowait("too-large")
+    assert event_queue.budget_exceeded.is_set()
+    assert event_queue.terminal_budget_exceeded is True
+
+    assert event_queue.enqueue_terminal_event_nowait("x") is False
+
+    with pytest.raises(http_bridge_streaming_module._HTTPBridgeLiveEventQueueBudgetExceeded):
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.1)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_detach_discards_unread_live_queue_credits() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
@@ -852,7 +873,7 @@ async def test_http_bridge_preconsumer_cleanup_before_queue_lookup_still_detache
     )
 
     try:
-        with pytest.raises(AssertionError):
+        with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(anext(stream), timeout=1.0)
 
         detach.assert_awaited_once_with(session, request_state=request_state)

@@ -364,6 +364,9 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         return self._terminal_budget_exceeded
 
     def _queue_terminal_items(self, items: tuple[str | None, ...]) -> bool:
+        if self._terminal_budget_exceeded:
+            self._terminal_ready.set()
+            return False
         if self._terminal_pending:
             return True
         item_bytes = sum(_http_bridge_live_event_queue_item_bytes(item) for item in items)
@@ -603,6 +606,9 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         """Stop producers while retaining queued bytes for their consumer."""
 
         self._revoked.set()
+        if self._budget_exceeded.is_set():
+            self._terminal_budget_exceeded = True
+            self._terminal_ready.set()
 
 
 @dataclass(frozen=True, slots=True)

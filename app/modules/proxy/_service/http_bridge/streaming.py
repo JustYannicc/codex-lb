@@ -4719,7 +4719,11 @@ class _HTTPBridgeStreamingMixin:
             # the cleanup funnel so that race still releases the request
             # ownership before the failure is propagated.
             event_queue = request_state.event_queue
-            assert event_queue is not None
+            if event_queue is None:
+                if request_state.event_queue_revoked.is_set():
+                    await detach_downstream_request()
+                    return
+                raise AssertionError("HTTP bridge stream reached handoff without an event queue")
             initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
         except BaseException:
             await detach_downstream_request()
