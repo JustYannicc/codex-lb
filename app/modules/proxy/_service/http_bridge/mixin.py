@@ -265,8 +265,7 @@ class _HTTPBridgeMixin(
         tasks = [
             task
             for task in self._background_cleanup_tasks
-            if not task.done()
-            and (
+            if (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
@@ -287,8 +286,8 @@ class _HTTPBridgeMixin(
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
             return False
-        failed = self._http_bridge_background_cleanup_failed
-        return not failed and not any(isinstance(result, BaseException) for result in results)
+        self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
+        return not self._http_bridge_background_cleanup_failed
 
     async def _fail_http_bridge_inflight_session_creation(
         self,

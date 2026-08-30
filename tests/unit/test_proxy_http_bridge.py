@@ -13903,6 +13903,27 @@ async def test_close_http_bridge_session_bounded_records_late_cleanup_failure(
 
 
 @pytest.mark.asyncio
+async def test_drain_http_bridge_cleanup_inspects_done_task_before_callback_runs() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    async def failed_close() -> None:
+        raise RuntimeError("late cleanup failed")
+
+    close_task = asyncio.create_task(failed_close(), name="http-bridge-close-done-before-callback")
+    await asyncio.sleep(0)
+    assert close_task.done()
+    service._background_cleanup_tasks.add(close_task)
+
+    def record_failure(_done_task: asyncio.Task[None]) -> None:
+        service._http_bridge_background_cleanup_failed = True
+
+    close_task.add_done_callback(record_failure)
+    assert service._http_bridge_background_cleanup_failed is False
+
+    assert await service._drain_http_bridge_background_cleanup_tasks(reason="test") is False
+
+
+@pytest.mark.asyncio
 async def test_await_cancelled_task_consumes_child_cancellation() -> None:
     child = asyncio.create_task(asyncio.sleep(60))
 
