@@ -1821,12 +1821,6 @@ class _StreamingRetryMixin:
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
                             upstream_error_code=upstream_error_code,
                         )
-                        event = response_failed_event(
-                            error_code,
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
@@ -1847,6 +1841,14 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(502, openai_error(error_code, message))
+                        event = response_failed_event(
+                            error_code,
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
                         return
                     # If a prior attempt stored a transient 500 and the caller
                     # expects HTTP error propagation, re-raise the original error
@@ -1975,12 +1977,6 @@ class _StreamingRetryMixin:
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
                             upstream_error_code=upstream_error_code,
                         )
-                        event = response_failed_event(
-                            error_code,
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
@@ -2001,6 +1997,14 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(502, openai_error(error_code, message))
+                        event = response_failed_event(
+                            error_code,
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
                         return
                 try:
                     remaining_budget = proxy._remaining_budget_seconds(deadline)
