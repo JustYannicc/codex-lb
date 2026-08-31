@@ -17,44 +17,30 @@ recovered or fenced cluster-wide without a schema/API change. A replica that
 loads an already elapsed durable row may admit its own local probe; it still
 honors any real future durable cooldown and any durable failure updates.
 
-## Decisions
+## Rationale
 
-- A durable cooldown with `cooldown_until_epoch <= now` is represented as the
-  in-memory zero sentinel, not as `now_monotonic`. A row written below the
-  failure threshold also commonly has a wall-clock value at write time, so the
-  same normalization applies there.
-- Expiry itself remains a single-flight boundary within a process. The first
-  local admission after a real cooldown sets `half_open_until` and records the
-  owning session. A continuity-loss return clears the active lease and sets
-  `cooldown_until` to the current monotonic time; the next admission sees an
-  elapsed, non-zero marker and installs one fresh lease, while siblings are
-  suppressed by that lease. A local release timestamp keeps that marker across
-  a transient durable miss until the next admission can claim the new lease.
-- Equal-version reloads do not erase an active local lease. The reload can
-  reconcile the durable cooldown and failure count, but it cannot prove that a
-  local probe is stale. This preserves the single-flight signal used by later
-  recovery work.
-- A newer durable reset or lower failure count also cannot erase an active
-  local lease or lower its local failure fence while the probe is in flight.
-  When no local probe is active, a newer durable reset clears stale local
-  failure detail together with the count and cooldown.
-- Reset ordering is lifecycle ownership -> bridge registry -> pending attempts:
-  claim the session lifecycle, detach it from active routing, mark its pending
-  response-create attempts disarmed, then return the owner lease and settle/close
-  the resources. The critical transition is shielded from cancellation; the
-  caller's cancellation is observed after the cleanup task has published the
-  detached and settled state.
+The durable row cannot identify the process-local websocket or request that
+owns an in-flight probe. Reusing that row as a distributed lease would add a
+schema and coordination contract that this focused change does not need.
+Instead, replicas share durable cooldown and failure state while each process
+fences its own probe with the concrete session and request-state identities it
+already owns.
+
+The reset path takes lifecycle ownership only for the non-blocking state
+transition. Pending-request settlement and transport close remain outside that
+lock, but inside cancellation-shielded cleanup, so a slow close cannot block a
+new submitter while cancellation also cannot strand the detached session.
 
 ## Issue and vehicle map
 
-This change is intentionally split from the neighboring current-head
-vehicles. The comparison was made against `upstream/main`
-`2268f8caf1fe9d74a8734bd3f9cd8bd5152b5d3f` and these exact heads:
+This change is intentionally split from the neighboring vehicles. Exact branch
+heads and merge-base belong in the PR's current-status evidence rather than in
+stable capability context:
 
-- #1908 `ed8ee1222999bf6b58164529af3ae5724e09c4ec` contains the accepted
+- #1908 contains the accepted
   elapsed/absent-row arithmetic root cause, but its equal/newer lease-clearing
   behavior is superseded here because it breaks #1394 single-flight.
-- #1947 `2a1ce9962b7daccd335f1f10fc2595f6ea9ab702` is the focused vehicle for
+- #1947 is the focused vehicle for
   #1943 cooldown-created undispatched WebSocket session freshness/retirement;
   it does not own this retry-circuit arithmetic or probe-return contract.
 - #1857's accepted semantic source is limited to commits
