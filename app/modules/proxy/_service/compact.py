@@ -1007,6 +1007,7 @@ class _CompactMixin:
                 )
             previous_response_id = getattr(payload, "previous_response_id", None)
             previous_response_preferred_account_id: str | None = None
+            owner_miss_fallback_account_id: str | None = None
             previous_response_lookup_session_id: str | None = None
             if isinstance(previous_response_id, str) and previous_response_id.strip():
                 previous_response_id = previous_response_id.strip()
@@ -1066,6 +1067,7 @@ class _CompactMixin:
                                 error_type="server_error",
                             ),
                         )
+                    owner_miss_fallback_account_id = selection_candidates[0].id
         except asyncio.CancelledError:
             await settle_compact_usage_before_owner_exit(
                 "Failed to settle compact API key reservation after cancelled owner lookup"
@@ -1097,6 +1099,12 @@ class _CompactMixin:
                 "Failed to settle compact API key reservation after owner conflict resolution"
             )
             raise
+
+        if owner_miss_fallback_account_id is not None:
+            preferred_account_id = resolve_required_account_id(
+                ("resolved owner", preferred_account_id),
+                ("sole owner-miss candidate", owner_miss_fallback_account_id),
+            )
 
         async def settle_on_terminal_exit() -> None:
             if settlement_attempted:
