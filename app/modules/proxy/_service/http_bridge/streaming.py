@@ -4810,14 +4810,15 @@ class _HTTPBridgeStreamingMixin:
             # Submission and upstream delivery can run before this generator
             # reaches its queue consumer. Snapshot the queue and publish
             # attachment under the same pending lock used by liveness
-            # settlement, so a revoke between the lookup and lock acquisition
-            # cannot leave this stream consuming a detached queue.
+            # settlement. A retained revoked queue still owns terminal
+            # delivery: its get path waits for terminal publication before
+            # returning EOS, so the delayed consumer must attach to it.
             async with session.pending_lock:
                 event_queue = request_state.event_queue
                 queue_revoked = request_state.event_queue_revoked.is_set()
-                if event_queue is not None and not queue_revoked:
+                if event_queue is not None:
                     request_state.event_queue_consumer_started = True
-            if event_queue is None or queue_revoked:
+            if event_queue is None:
                 # Terminal cleanup may revoke and detach a pre-consumer queue
                 # while the registration/ready awaits above are in flight.
                 # Treat that revoked missing queue as the expected terminal

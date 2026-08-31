@@ -420,9 +420,12 @@ async def _enqueue_http_bridge_event(
     nonblocking_preconsumer: bool = False,
 ) -> bool:
     """Deliver a bridge event with bounded pre-consumer terminal handling."""
-    if terminal and not getattr(request_state, "event_queue_consumer_started", False):
-        return _enqueue_http_bridge_terminal_event(request_state, event_queue, event_block)
     event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
+    if terminal and (
+        not getattr(request_state, "event_queue_consumer_started", False)
+        or (event_queue_revoked is not None and event_queue_revoked.is_set())
+    ):
+        return _enqueue_http_bridge_terminal_event(request_state, event_queue, event_block)
     if event_queue_revoked is not None and event_queue_revoked.is_set():
         return False
     if nonblocking_preconsumer and not getattr(request_state, "event_queue_consumer_started", False):
@@ -2530,18 +2533,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # consumer still owns this queue. Leave it live
                                 # so the stream's normal idle-timeout path can
                                 # emit a failure event; revoking it here would
-                                # turn the abort into a silent EOS. Pre-consumer
-                                # queues have no downstream owner and can be
-                                # released immediately.
-                                if (
-                                    completed_delivery_scope.terminal_enqueued
-                                    or not getattr(
-                                        request_state,
-                                        "event_queue_consumer_started",
-                                        False,
-                                    )
-                                    or request_state.event_queue_revoked.is_set()
-                                ):
+                                # turn the abort into a silent EOS. A visible
+                                # delayed consumer may still attach to a
+                                # terminal-enqueued queue; only an explicit
+                                # detach or missing terminal makes it orphaned.
+                                consumer_started = getattr(
+                                    request_state,
+                                    "event_queue_consumer_started",
+                                    False,
+                                )
+                                consumer_detached = consumer_started and request_state.event_queue_revoked.is_set()
+                                detached_before_consumer = not consumer_started and not request_state.downstream_visible
+                                terminal_missing_without_consumer = (
+                                    not completed_delivery_scope.terminal_enqueued and not consumer_started
+                                )
+                                if consumer_detached or detached_before_consumer or terminal_missing_without_consumer:
                                     request_state.event_queue = None
                                     request_state.event_queue_revoked.set()
                                     discard = getattr(event_queue, "discard", None)

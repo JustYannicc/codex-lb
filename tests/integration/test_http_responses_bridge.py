@@ -15918,12 +15918,12 @@ async def test_http_bridge_live_event_queue_applies_backpressure(
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_liveness_failure_discards_revoked_delayed_consumer_queue(
+async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delayed_consumer_terminal(
     async_client,
     app_instance,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A revoked delayed route consumer receives the public truncation error."""
+    """A delayed route consumer receives the terminal failure after queue revocation."""
 
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -16099,10 +16099,10 @@ async def test_v1_responses_http_bridge_liveness_failure_discards_revoked_delaye
         await asyncio.gather(first_task, return_exceptions=True)
 
     assert [event["type"] for event in first_events] == ["response.created", "response.failed"]
-    # The queue is revoked before the delayed consumer attaches, so terminal
-    # cleanup discards its unread failure frame.  The public streaming
-    # contract maps the resulting bare EOS to a truncation error.
-    assert first_events[-1]["response"]["error"]["code"] == "upstream_stream_truncated"
+    # The queue is revoked before the delayed consumer attaches, but remains
+    # retained while terminal finalization owns it. The consumer waits for and
+    # receives that exact terminal failure instead of a synthetic truncation.
+    assert first_events[-1]["response"]["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
     assert live_event_budget.used_bytes == baseline_budget_bytes
 
 
