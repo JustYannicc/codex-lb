@@ -1,6 +1,6 @@
 # responses-api-compat delta
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Hard bridge retry-circuit cooldowns use an explicit zero sentinel
 
