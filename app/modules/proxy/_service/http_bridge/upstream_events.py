@@ -3582,7 +3582,6 @@ class _HTTPBridgeUpstreamEventsMixin:
         # and any abandonment authorized before it fences on the old anchor
         # and cannot touch the one registered below.
         completion_circuit_settlement_failed = False
-        completion_quarantine_clear_fence: int | None = None
         completion_pre_settle_poison_detail: str | None = None
         completion_settles_onto_tombstone = False
         if (
@@ -3598,14 +3597,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # disprove, and the clear at the bottom must fence on what was
             # armed when this response proved the session healthy, not on
             # whatever owns the key by then.
-            # Adopt any durable-only poison row BEFORE the fences are
-            # captured: the settle's internal load would otherwise arm the
-            # quarantine after the fence read (leaving a healthy key
-            # suppressed for the TTL because the clear cannot match), and a
-            # failed registration would find no pre-settle poison detail to
-            # re-seed.
-            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(session)
-            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+            # Adopt any durable-only poison row for settlement bookkeeping.
+            # The quarantine fence was captured before this await and remains
+            # immutable: a row loaded here may arm a new quarantine, but this
+            # completion did not observe that evidence and cannot clear it.
+            await self._load_http_bridge_retry_circuit(session)
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
                 if pre_settle_state is not None:
@@ -3655,17 +3651,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         else None
                     ),
                 )
-                if not completion_pre_settle_load_succeeded:
-                    # The fence above was captured off a failed durable read;
-                    # the settle's own successful inner load may have armed
-                    # the poison quarantine AFTER that capture, and the final
-                    # fenced clear would then refuse to remove it — a healthy
-                    # key stuck for the whole poison window despite the fresh
-                    # anchor about to register. Recapture after the settle:
-                    # this still precedes the registration awaits, so a
-                    # quarantine armed by a genuinely concurrent strike
-                    # during those awaits stays outside the fence.
-                    completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
                 if not circuit_settled:
                     # The old poison episode was restored. Its owed clear is
                     # suppressed only once the fresh anchor actually

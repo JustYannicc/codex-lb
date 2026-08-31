@@ -34884,6 +34884,92 @@ def test_http_bridge_quarantine_generation_reset_does_not_reuse_observed_value()
     assert second_generation > first_generation
 
 
+@pytest.mark.parametrize(
+    "restore_via_suppressed_weaker_fence",
+    [False, True],
+    ids=["explicit-restore", "suppressed-weaker-fence"],
+)
+def test_http_bridge_quarantine_revoke_generation_uses_service_allocator(
+    restore_via_suppressed_weaker_fence: bool,
+) -> None:
+    service = SimpleNamespace()
+    origin = _make_bridge_session(key_value="quarantine-revoke-generation-origin")
+    sibling = _make_bridge_session(key_value="quarantine-revoke-generation-sibling")
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        origin,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    origin_poison_generation = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[
+        origin.key
+    ].generation
+    if restore_via_suppressed_weaker_fence:
+        http_bridge_quarantine_module._quarantine_http_bridge_session(
+            service,
+            origin,
+            reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+        )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        sibling,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    sibling_generation = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[sibling.key].generation
+
+    assert sibling_generation > origin_poison_generation
+    assert (
+        http_bridge_quarantine_module._revoke_http_bridge_poison_quarantine(
+            service,
+            origin.key,
+            generation=origin_poison_generation,
+            restore_reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+            restore_until=time.monotonic() + 60.0,
+        )
+        is True
+    )
+
+    restored_generation = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[origin.key].generation
+    assert restored_generation > sibling_generation, "revocation must not reuse another key's active generation"
+
+
+def test_http_bridge_quarantine_downgrade_generation_uses_service_allocator() -> None:
+    service = SimpleNamespace()
+    origin = _make_bridge_session(key_value="quarantine-downgrade-generation-origin")
+    sibling = _make_bridge_session(key_value="quarantine-downgrade-generation-sibling")
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        origin,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        origin,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+    poison_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence(service, origin.key)
+    assert poison_fence == 1
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        sibling,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    sibling_generation = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[sibling.key].generation
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        origin,
+        key_generation=poison_fence,
+        key_generation_captured=True,
+    )
+
+    downgraded_generation = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[
+        origin.key
+    ].generation
+    assert downgraded_generation > sibling_generation, "downgrade must not reuse another key's active generation"
+
+
 def test_http_bridge_quarantine_first_strike_generation_survives_prune_and_reset() -> None:
     """A stale first-strike completion cannot clear a post-prune replacement."""
     service = SimpleNamespace()
@@ -42760,14 +42846,14 @@ async def test_owed_debt_dies_with_foreign_writes_and_rearms_from_sticky_rows() 
 
 
 @pytest.mark.asyncio
-async def test_a_durable_only_poison_row_is_cleared_by_its_own_completion(
+async def test_a_durable_only_poison_row_stays_fenced_after_completion_observed_absence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # When the poison row exists only durably, the completion used to
-    # capture its quarantine fence before the settle's internal load armed
-    # the quarantine — the clear then never matched and a healthy key
-    # stayed suppressed for the whole TTL. The completion now adopts the
-    # row before capturing its fences.
+    # The completion observes no quarantine before its first await. Its
+    # settlement load then adopts a durable poison row and arms the
+    # process-local fence. The captured absence is exact evidence: cleanup
+    # must leave the raced quarantine active instead of recapturing it after
+    # the await and clearing evidence this completion never observed.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-durable-only-poison-clear")
     poison_row = SimpleNamespace(
@@ -42797,8 +42883,8 @@ async def test_a_durable_only_poison_row_is_cleared_by_its_own_completion(
         '{"type":"response.completed","response":{"id":"resp_durable_only_clear"}}',
     )
 
-    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False, (
-        "the completion must adopt the durable-only row before capturing the fence its clear presents"
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "a quarantine armed during the settlement load must survive the completion's captured absence fence"
     )
 
 
@@ -42919,15 +43005,13 @@ async def test_a_blind_pre_settle_capture_still_settles_onto_the_tombstone(
 
 
 @pytest.mark.asyncio
-async def test_a_blind_fence_recaptures_after_the_settle(
+async def test_a_blind_completion_fence_survives_settlement_load_quarantine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The completion's pre-load failed, so its quarantine-clear fence was
-    # captured blind; the settle's own successful inner load then adopted
-    # the poison row and armed the quarantine AFTER that capture. Without
-    # a recapture the final fenced clear refuses to remove it and a
-    # healthy key stays suppressed for the whole poison window despite
-    # the fresh anchor registering.
+    # The completion observes absence after a transient pre-load failure. The
+    # settlement's retry load adopts the poison row and arms quarantine after
+    # that capture. The completion must keep its original absence fence and
+    # cannot recapture the new evidence after an await.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-blind-fence-recapture")
     poison_row = SimpleNamespace(
@@ -42958,8 +43042,8 @@ async def test_a_blind_fence_recaptures_after_the_settle(
         '{"type":"response.completed","response":{"id":"resp_blind_fence"}}',
     )
 
-    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False, (
-        "the recaptured fence must cover the quarantine the settle's own load armed"
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "the pre-await absence fence must not clear quarantine armed by settlement's load"
     )
 
 
