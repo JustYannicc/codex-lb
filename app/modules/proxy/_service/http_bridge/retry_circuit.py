@@ -878,7 +878,11 @@ class _HTTPBridgeRetryCircuitMixin:
                     # belonged to the ended episode.
                     state.poison_anchor_cleared = False
                     state.owed_poison_detail = None
-                if durable_reset and persisted.updated_at_epoch > state.persisted_updated_at_epoch and not active_local_probe:
+                if (
+                    durable_reset
+                    and persisted.updated_at_epoch > state.persisted_updated_at_epoch
+                    and not active_local_probe
+                ):
                     # A newer durable clear is authoritative when no local
                     # probe owns the key. Do not let an old in-memory cooldown
                     # keep suppressing this key after a remote settle.
