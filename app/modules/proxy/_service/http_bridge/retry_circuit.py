@@ -223,12 +223,22 @@ def _http_bridge_retry_circuit_claim_marker_rank(
     )
 
 
-def _http_bridge_retry_circuit_claim_marker_advanced(
-    previous_generation: int | None,
-    current_generation: int | None,
+def _http_bridge_retry_circuit_claim_receipt_advanced(
+    previous_receipt: tuple[float | None, int | None, float | None],
+    current_receipt: tuple[float | None, int | None, float | None],
 ) -> bool:
-    """Return whether a local receipt moved to a newer admission generation."""
-    return current_generation is not None and (previous_generation is None or current_generation > previous_generation)
+    """Return whether a concurrent local claim installed a newer receipt.
+
+    A purge can remove a row and a new claim can recreate generation one, so
+    generation alone is not a unique claim identity. Claim timestamps break
+    that tie while an empty current receipt still means the prior marker was
+    released and must not outrank a durable cleared row.
+    """
+    if current_receipt[1] is None:
+        return False
+    current_rank = _http_bridge_retry_circuit_claim_marker_rank(*current_receipt)
+    previous_rank = _http_bridge_retry_circuit_claim_marker_rank(*previous_receipt)
+    return current_rank > previous_rank
 
 
 def _merge_http_bridge_retry_circuit_claim_marker(
@@ -504,9 +514,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 getattr(persisted, "admission_claimed_generation", None) if persisted is not None else None,
                 getattr(persisted, "admission_claimed_until_epoch", None) if persisted is not None else None,
             )
-            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_marker_advanced(
-                local_claim_receipt[1],
-                current_claim_receipt[1],
+            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_receipt_advanced(
+                local_claim_receipt,
+                current_claim_receipt,
             ):
                 current_claim_receipt = (None, None, None)
             (
@@ -1290,9 +1300,9 @@ class _HTTPBridgeRetryCircuitMixin:
                     if local_state is not None
                     else (None, None, None)
                 )
-                local_claim_advanced = _http_bridge_retry_circuit_claim_marker_advanced(
-                    local_claim_receipt[1],
-                    current_claim_receipt[1],
+                local_claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
+                    local_claim_receipt,
+                    current_claim_receipt,
                 )
                 # A confirmed miss past the stale-lookup guards is durable
                 # knowledge worth caching for the planning window; stamped
@@ -1563,9 +1573,9 @@ class _HTTPBridgeRetryCircuitMixin:
             # cleared.  Do not let an unchanged local cache resurrect that
             # marker; only a local claim that advanced while this lookup was
             # in flight may outrank the released durable state.
-            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_marker_advanced(
-                local_claim_receipt[1],
-                current_claim_receipt[1],
+            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_receipt_advanced(
+                local_claim_receipt,
+                current_claim_receipt,
             ):
                 current_claim_receipt = (None, None, None)
             (

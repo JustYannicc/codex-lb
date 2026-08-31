@@ -45207,6 +45207,64 @@ async def test_http_bridge_retry_circuit_load_keeps_claim_advanced_during_refres
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_load_keeps_recreated_same_generation_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not erase a fresh claim whose purged row reused generation one."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-claim-refresh-recreated")
+    now_epoch = time.time()
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=now_epoch,
+        persisted_admission_generation=1,
+        persisted_admission_claimed_at_epoch=100.0,
+        persisted_admission_claimed_generation=1,
+        persisted_admission_claimed_until_epoch=now_epoch + 60.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def lookup_before_recreated_claim(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await release_lookup.wait()
+        return SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=now_epoch,
+            admission_generation=1,
+            admission_claimed_at_epoch=None,
+            admission_claimed_generation=None,
+            admission_claimed_until_epoch=None,
+        )
+
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_retry_circuit",
+        lookup_before_recreated_claim,
+    )
+    load_task = asyncio.create_task(service._load_http_bridge_retry_circuit(hard_session))
+    await lookup_started.wait()
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        # A purge/recreate can restart admission_generation at one. The
+        # changed claim timestamps are the only identity this refresh can see.
+        state.persisted_admission_claimed_at_epoch = 200.0
+        state.persisted_admission_claimed_generation = 1
+        state.persisted_admission_claimed_until_epoch = now_epoch + 120.0
+    release_lookup.set()
+
+    assert await load_task is True
+    assert state.persisted_admission_claimed_generation == 1
+    assert state.persisted_admission_claimed_at_epoch == 200.0
+    assert state.persisted_admission_claimed_until_epoch == now_epoch + 120.0
+
+
+@pytest.mark.asyncio
 async def test_poison_quarantine_is_the_one_reason_that_proves_the_anchor_dead() -> None:
     # The other half of the contract: the retry circuit opening on repeated
     # eventless poison-class failures must satisfy the same predicate, or the
