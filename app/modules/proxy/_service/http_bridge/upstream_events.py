@@ -2612,9 +2612,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                         # A completed response can be claimed after the
                         # consumer attaches.  If terminal bookkeeping aborts
                         # before publishing its event, the active consumer
-                        # still needs an EOS marker; with keepalives disabled
-                        # there is no timeout wakeup to finish the stream.
-                        _enqueue_http_bridge_abort_eos(request_state, event_queue)
+                        # normally gets the explicit stream-idle failure from
+                        # its timeout path.  Keep that path when keepalives
+                        # are enabled so an aborted terminal delivery is not
+                        # turned into a silent EOS.  With keepalives disabled
+                        # there is no timeout wakeup, so publish the bare EOS
+                        # marker to finish the attached stream.
+                        completed_scope = request_state.completed_delivery_scope
+                        keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                        if completed_scope is None or completed_scope.terminal_enqueued or keepalive_interval <= 0:
+                            _enqueue_http_bridge_abort_eos(request_state, event_queue)
 
     async def _handle_or_defer_precreated_stream_health(
         self: Any,
