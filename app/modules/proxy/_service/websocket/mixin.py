@@ -66,13 +66,13 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
-    OpenAIErrorEnvelope,
-    OpenAIErrorParam,
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
     PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
     PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
+    OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     openai_error,
     response_failed_event,
 )
@@ -2082,21 +2082,34 @@ class _WebSocketMixin:
                                 model=request_state.model,
                                 api_key=request_state.api_key or api_key,
                             )
-                        owner_miss_requires_fail_closed = request_state.source_route_excluded
+                        # A terminal compaction trigger is excluded from model
+                        # source routing, but its continuation is still safe to
+                        # enumerate when exactly one subscription candidate
+                        # remains. An input-file owner is different: the file
+                        # lives on one account, so a missing owner must stay
+                        # fail-closed. Keep this distinction explicit instead
+                        # of treating every HTTP source-route exclusion as a
+                        # hard account pin.
+                        owner_miss_requires_fail_closed = request_state.file_required_preferred_account
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None
                             and turn_state_owner_account_id is None
                             and not owner_miss_requires_fail_closed
-                            and request_state.source_model_ownership is ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+                            and (
+                                request_state.source_route_excluded
+                                or request_state.source_model_ownership
+                                is ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+                            )
                         ):
                             # Preserve the compatibility fallback for a
                             # subscription-model owner miss when exactly one
                             # eligible account remains. Account-scoped API
                             # keys narrow the count; unscoped keys use the
-                            # normal model pool. Structural source exclusions
-                            # stay strict because their account pin is the
-                            # only ownership evidence on this path.
+                            # normal model pool. File ownership remains strict;
+                            # terminal compaction is deliberately allowed
+                            # through this cardinality check because it carries
+                            # no account pin.
                             selection_api_key = request_state.api_key or api_key
                             selection_account_ids: Collection[str] | None = None
                             if selection_api_key is not None and selection_api_key.account_assignment_scope_enabled:

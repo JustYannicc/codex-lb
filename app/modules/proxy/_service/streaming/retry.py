@@ -86,7 +86,11 @@ from app.modules.proxy.helpers import (
     classify_upstream_failure,
     is_upstream_model_capacity_error,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+    AccountLease,
+    AccountSelection,
+)
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
@@ -1329,7 +1333,11 @@ class _StreamingRetryMixin:
                     if (
                         not account
                         and require_security_work_authorized
-                        and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                        and selection.error_code
+                        in (
+                            _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                            SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+                        )
                     ):
                         _facade().logger.info(
                             "No security-work-authorized account available for stream retry; "

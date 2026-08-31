@@ -71,6 +71,7 @@ from app.modules.proxy.helpers import (
     classify_upstream_failure,
 )
 from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
     AccountConcurrencyCaps,
     AccountLease,
     AccountSelection,
@@ -1313,10 +1314,20 @@ class _CompactMixin:
             # account.
             owner_quota_failover_eligible = False
             require_security_work_authorized = False
+            # A security-work retry can consume the normal compact account
+            # budget on the ordinary account and the final authorized account
+            # before the selector reports that the authorized pool is
+            # exhausted. Reserve one bounded extra iteration for that
+            # transition back to ordinary failover; ordinary compact retries
+            # keep their existing account-attempt budget.
+            security_fallback_attempt_available = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
-            for _account_attempt in range(_compact_max_account_attempts()):
+            account_attempt = 0
+            while account_attempt < _compact_max_account_attempts() or security_fallback_attempt_available:
+                _account_attempt = account_attempt
+                account_attempt += 1
                 selection = await proxy._select_account_with_budget_compatible(
                     deadline,
                     request_id=request_id,
@@ -1339,7 +1350,11 @@ class _CompactMixin:
                 if not account:
                     if (
                         require_security_work_authorized
-                        and selection.error_code == _no_security_work_authorized_accounts_code()
+                        and selection.error_code
+                        in (
+                            _no_security_work_authorized_accounts_code(),
+                            SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+                        )
                         and last_exc is not None
                     ):
                         logger.info(
@@ -1348,6 +1363,7 @@ class _CompactMixin:
                             request_id,
                         )
                         require_security_work_authorized = False
+                        security_fallback_attempt_available = False
                         selection = await proxy._select_account_with_budget_compatible(
                             deadline,
                             request_id=request_id,
@@ -2011,6 +2027,7 @@ class _CompactMixin:
                                 last_exc = exc
                                 excluded_account_ids.add(account.id)
                                 require_security_work_authorized = True
+                                security_fallback_attempt_available = True
                                 transient_exhausted = True
                                 break
                             await settle_compact_usage(

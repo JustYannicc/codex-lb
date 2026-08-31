@@ -21377,6 +21377,101 @@ async def test_stream_responses_missing_security_work_pool_preserves_failover_bu
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_security_work_pool_exhaustion_falls_back_to_ordinary_account(monkeypatch):
+    """An exhausted authorized pool must reopen normal account failover."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_regular_security_exhaustion")
+    authorized_account = _make_account("acc_authorized_security_exhaustion")
+    authorized_account.security_work_authorized = True
+    fallback_account = _make_account("acc_fallback_security_exhaustion")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="All accounts marked as authorized for security work were excluded",
+                error_code=load_balancer_module.SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+    attempted_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        attempted_account_ids.append(account_id)
+        if account_id == regular_account.chatgpt_account_id:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_cyber_exhaustion",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        if account_id == authorized_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "account_response_create_cap",
+                    "Account response-create capacity is exhausted",
+                    error_type="server_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_ok_exhaustion"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert attempted_account_ids == [
+        regular_account.chatgpt_account_id,
+        authorized_account.chatgpt_account_id,
+        fallback_account.chatgpt_account_id,
+    ]
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {
+        regular_account.id,
+        authorized_account.id,
+    }
+    assert select_account.await_args_list[3].kwargs["exclude_account_ids"] == {
+        regular_account.id,
+        authorized_account.id,
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_move_file_pinned_security_work_request(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -23335,6 +23430,92 @@ async def test_compact_responses_treats_missing_security_work_pool_as_optional(m
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [fallback_account.id]
     assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_security_work_pool_exhaustion_falls_back_to_ordinary_account(monkeypatch):
+    """An exhausted authorized pool must reopen normal compact failover."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_compact_security_regular_exhaustion")
+    authorized_account = _make_account("acc_compact_security_authorized_exhaustion")
+    authorized_account.security_work_authorized = True
+    fallback_account = _make_account("acc_compact_security_fallback_exhaustion")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="All accounts marked as authorized for security work were excluded",
+                error_code=load_balancer_module.SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    attempted_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        attempted_account_ids.append(account_id)
+        if account_id == regular_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "invalid_request_error",
+                    cyber_message,
+                    error_type="invalid_request_error",
+                ),
+            )
+        if account_id == authorized_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "account_response_create_cap",
+                    "Account response-create capacity is exhausted",
+                    error_type="server_error",
+                ),
+            )
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert result.model_extra == {"output": []}
+    assert attempted_account_ids == [
+        regular_account.chatgpt_account_id,
+        authorized_account.chatgpt_account_id,
+        fallback_account.chatgpt_account_id,
+    ]
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {
+        regular_account.id,
+        authorized_account.id,
+    }
+    assert select_account.await_args_list[3].kwargs["exclude_account_ids"] == {
+        regular_account.id,
+        authorized_account.id,
+    }
 
 
 @pytest.mark.asyncio
