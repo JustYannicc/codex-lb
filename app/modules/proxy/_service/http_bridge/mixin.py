@@ -2086,20 +2086,23 @@ class _HTTPBridgeMixin(
         if skip_same_account:
             excluded_account_ids.add(session.account.id)
         retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
-        if skip_same_account:
-            preferred_candidate_id: str | None = None
-        elif hard_close_account_bound and session.account.id not in excluded_account_ids:
-            preferred_candidate_id = session.account.id
-        elif required_preferred_account_id is not None:
-            preferred_candidate_id = required_preferred_account_id
-        elif forced_refresh_account_id is not None:
-            preferred_candidate_id = forced_refresh_account_id
-        elif request_state.preferred_account_id is not None:
-            preferred_candidate_id = request_state.preferred_account_id
-        elif session.account.id not in excluded_account_ids:
-            preferred_candidate_id = session.account.id
-        else:
-            preferred_candidate_id = None
+
+        def resolve_preferred_candidate_id() -> str | None:
+            if skip_same_account:
+                return None
+            if hard_close_account_bound and session.account.id not in excluded_account_ids:
+                return session.account.id
+            if required_preferred_account_id is not None:
+                return required_preferred_account_id
+            if forced_refresh_account_id is not None:
+                return forced_refresh_account_id
+            if request_state.preferred_account_id is not None:
+                return request_state.preferred_account_id
+            if session.account.id not in excluded_account_ids:
+                return session.account.id
+            return None
+
+        preferred_candidate_id: str | None = resolve_preferred_candidate_id()
         selected_account_lease: AccountLease | None = None
         selected_account_model_replacement = False
         file_owner = request_state.file_required_preferred_account
@@ -2239,20 +2242,7 @@ class _HTTPBridgeMixin(
                         excluded_account_ids.add(session.account.id)
                     require_bound_account()
                     retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
-                    if skip_same_account:
-                        preferred_candidate_id = None
-                    elif hard_close_account_bound and session.account.id not in excluded_account_ids:
-                        preferred_candidate_id = session.account.id
-                    elif required_preferred_account_id is not None:
-                        preferred_candidate_id = required_preferred_account_id
-                    elif forced_refresh_account_id is not None:
-                        preferred_candidate_id = forced_refresh_account_id
-                    elif request_state.preferred_account_id is not None:
-                        preferred_candidate_id = request_state.preferred_account_id
-                    elif session.account.id not in excluded_account_ids:
-                        preferred_candidate_id = session.account.id
-                    else:
-                        preferred_candidate_id = None
+                    preferred_candidate_id = resolve_preferred_candidate_id()
                     continue
                 record_selected_account_takeover(None)
                 await fail_owner_unavailable_after_probe()

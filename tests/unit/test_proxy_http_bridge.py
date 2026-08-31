@@ -30814,7 +30814,7 @@ async def test_owner_unavailable_precreated_retry_disarms_attempt_before_retirem
         last_detail="stream_incomplete",
         last_touched_monotonic=time.monotonic(),
     )
-    service._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     persist_retry_circuit = AsyncMock()
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
@@ -31318,9 +31318,11 @@ async def test_http_bridge_server_anchored_replay_does_not_bypass_precreated_coo
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", retry_allowed)
 
     assert await service._retry_http_bridge_precreated_request(session) is False
-    retry_allowed_call = retry_allowed.await_args
-    assert retry_allowed_call is not None
-    assert retry_allowed_call.kwargs["allow_proof_gated_continuity_replay"] is False
+    # The fail-closed candidate gate rejects this ambiguous precreated
+    # continuation before the retry-circuit admission call. That ordering is
+    # intentional: no probe may be claimed when the pending request cannot be
+    # identified as a safe replay owner.
+    assert retry_allowed.await_args is None
 
 
 @pytest.mark.asyncio
