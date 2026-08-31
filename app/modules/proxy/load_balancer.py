@@ -379,7 +379,8 @@ class LoadBalancer:
             exclude_account_ids=exclude_account_ids,
             require_security_work_authorized=require_security_work_authorized,
         )
-        return tuple(_clone_account(account) for account in selection_inputs.accounts)
+        # Preserve paused/quota-filtered owners for owner-miss cardinality.
+        return tuple(_clone_account(account) for account in selection_inputs.effective_continuity_owner_candidates)
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:

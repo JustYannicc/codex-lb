@@ -23519,6 +23519,87 @@ async def test_compact_responses_security_work_pool_exhaustion_falls_back_to_ord
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_consumes_security_fallback_budget_after_authorized_retry(monkeypatch):
+    """Repeated authorized failures cannot extend the bounded account budget."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_compact_security_budget_regular")
+    authorized_account = _make_account("acc_compact_security_budget_authorized")
+    authorized_account.security_work_authorized = True
+    second_authorized_account = _make_account("acc_compact_security_budget_authorized_second")
+    second_authorized_account.security_work_authorized = True
+    fallback_account = _make_account("acc_compact_security_budget_fallback")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+            AccountSelection(account=second_authorized_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="All accounts marked as authorized for security work were excluded",
+                error_code=load_balancer_module.SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    attempted_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        attempted_account_ids.append(account_id)
+        if account_id == regular_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "invalid_request_error",
+                    cyber_message,
+                    error_type="invalid_request_error",
+                ),
+            )
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error(
+                "account_response_create_cap",
+                "Account response-create capacity is exhausted",
+                error_type="server_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert _proxy_error_code(exc_info.value) == "account_response_create_cap"
+    assert attempted_account_ids == [
+        regular_account.chatgpt_account_id,
+        authorized_account.chatgpt_account_id,
+        second_authorized_account.chatgpt_account_id,
+    ]
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        True,
+    ]
+    assert select_account.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
