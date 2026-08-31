@@ -42,11 +42,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    existing = _columns(bind)
-    if not existing.intersection(_COLUMNS):
-        return
-    with op.batch_alter_table(_TABLE) as batch_op:
-        for name in _COLUMNS:
-            if name in existing:
-                batch_op.drop_column(name)
+    # This is a forward-only expansion of the retry admission contract. The
+    # nullable receipt columns are the durable fence for an in-flight replay;
+    # dropping them during rollback would erase that fence and allow a second
+    # replay to be admitted for the same generation. Keep the columns and any
+    # receipts intact while Alembic moves its version marker backward.
+    pass

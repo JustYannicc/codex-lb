@@ -2064,14 +2064,25 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
 
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
         async with engine.connect() as conn:
-            after_downgrade = await conn.run_sync(
-                lambda sync_conn: {
-                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
-                }
-            )
-        assert "admission_claimed_at_epoch" not in after_downgrade
-        assert "admission_claimed_generation" not in after_downgrade
-        assert "admission_claimed_until_epoch" not in after_downgrade
+            after_downgrade = await conn.run_sync(_schema_state)
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(after_downgrade["columns"])
+        assert tuple(row) == (4, 1100.0, 4, 1200.0)
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
         async with engine.connect() as conn:
@@ -2089,9 +2100,9 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 )
             ).one()
         assert state["marker_nullable"] is True
-        # The forward-only migration preserves the durable row while the
-        # downgraded schema has no marker; re-upgrade restores a nullable NULL.
-        assert tuple(row) == (4, None, None, None)
+        # The forward-only migration preserves both the schema and the active
+        # receipt while Alembic's version marker moves backward and forward.
+        assert tuple(row) == (4, 1100.0, 4, 1200.0)
     finally:
         await engine.dispose()
 
