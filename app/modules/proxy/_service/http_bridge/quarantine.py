@@ -516,6 +516,23 @@ def _clear_http_bridge_quarantine(
             return True
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            and entry.generation != entry.poison_generation
+            and entry.consecutive_eventless_timeouts > 0
+            and entry.suppressed_weaker_reason is None
+        ):
+            # A first eventless strike only advances the raw generation; it
+            # does not arm a weaker quarantine until the threshold is reached.
+            # The captured poison provenance still authorizes clearing the
+            # poison arm, but the post-capture strike must remain as an
+            # inactive counter for the next timeout to observe.
+            entry.reason = None
+            entry.quarantined_until = 0.0
+            entry.poison_generation = 0
+            entry.poison_quarantined_until = 0.0
+            entry.suppressed_weaker_until = 0.0
+            return True
+        if (
+            entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
             and entry.suppressed_weaker_reason is not None
             and entry.suppressed_weaker_until > now
         ):

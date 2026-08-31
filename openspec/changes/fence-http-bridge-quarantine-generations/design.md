@@ -47,3 +47,6 @@ when the request itself does not carry a full resend.
 - Revoke and poison-downgrade transitions allocate generations above every
   active generation on other keys.
 - Weak references compare object lifetime rather than integer ids.
+- Clearing matched poison provenance after a later first eventless strike
+  removes only the poison arm and keeps the inactive strike counter for the
+  next timeout.

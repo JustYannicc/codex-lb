@@ -22,3 +22,6 @@
   quarantine armed during that load.
 - [x] 1.11 Allocate quarantine-generation transitions through the service
   allocator and cover revoke/downgrade cross-key uniqueness regressions.
+- [x] 1.12 Preserve a post-fence first eventless strike when clearing matched
+  poison provenance, define the full-resend/delta-only classifier boundaries
+  and precedence in the Responses contract, and add regressions.
