@@ -165,6 +165,7 @@ from app.modules.proxy._service.support import (
     _api_key_fair_share_threshold_pct_from_settings,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
+    _disarm_response_create_attempt,
     _event_type_from_payload,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -4232,6 +4233,14 @@ class _HTTPBridgeRequestSubmitMixin:
             raise
         except Exception as exc:
             request_state.clean_close_retry_result = False
+            if isinstance(exc, ProxyResponseError) and _http_bridge_is_previous_response_owner_unavailable(exc):
+                # Reconnect tears down the old socket before reporting that a
+                # continuity-bound owner cannot be reached. Keep that
+                # classification through the reader's retirement funnel: the
+                # pre-dispatch attempt is not an upstream failure and must not
+                # be charged as a ``stream_incomplete`` strike after the
+                # half-open probe has already been returned.
+                _disarm_response_create_attempt(request_state)
             (
                 request_state.error_http_status_override,
                 request_state.error_code_override,

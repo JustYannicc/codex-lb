@@ -30795,6 +30795,58 @@ async def test_http_bridge_retry_circuit_reacquires_probe_after_abandoned_lease_
 
 
 @pytest.mark.asyncio
+async def test_owner_unavailable_precreated_retry_disarms_attempt_before_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed owner handoff must not become a reader-failure strike."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-owner-unavailable-reader")
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.response_create_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    session = _make_bridge_session(
+        key_value="bridge-owner-unavailable-reader",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=time.monotonic() - 1.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+    )
+    service._http_bridge_retry_circuits[session.key] = state
+    persist_retry_circuit = AsyncMock()
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_retry_circuit,
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    owner_unavailable = http_bridge_helpers_module._http_bridge_previous_response_owner_unavailable_error()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock(side_effect=owner_unavailable))
+
+    selection = http_bridge_helpers_module._http_bridge_retry_circuit_attempt_selection_for_pending_requests((owner,))
+    assert selection.kind == "eligible"
+    assert await service._retry_http_bridge_precreated_request(session) is False
+    assert owner.response_create_attempt.disarmed is True
+    assert owner.error_code_override == "previous_response_owner_unavailable"
+
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+        retired_request_count=1,
+        retired_request_states=[owner],
+        retry_circuit_attempt_selection=selection,
+    )
+
+    assert state.consecutive_failures == 2
+    assert owner.response_create_attempt.retry_circuit_failure_recorded is False
+    persist_retry_circuit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_durable_miss_keeps_returned_probe_marker() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-returned-probe-durable-miss")
