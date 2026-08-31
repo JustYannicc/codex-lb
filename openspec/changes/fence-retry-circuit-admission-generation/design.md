@@ -18,7 +18,11 @@ generation CAS. The migration leaves all three columns nullable so existing
 rows remain valid. Its downgrade first checks for an unexpired receipt and
 refuses before DDL or Alembic version stamping when one exists; once no live
 receipt remains, it drops the marker columns so the parent revision's ORM
-schema does not trip startup drift checks.
+schema does not trip startup drift checks. The check and drop run under one
+critical section: PostgreSQL uses `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`,
+while SQLite uses `BEGIN IMMEDIATE` to take the writer slot. A direct Alembic
+rollback therefore cannot race a durable claim that does not use the broader
+migration lock.
 
 ## Claim path
 

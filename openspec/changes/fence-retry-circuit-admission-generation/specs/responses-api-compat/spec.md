@@ -56,6 +56,11 @@ MUST make the downgrade fail before DDL or version stamping. When no live
 receipt remains (all receipt epochs are null or expired), the downgrade MUST
 remove the marker columns so the parent revision remains compatible with its
 ORM model and startup schema-drift check.
+The receipt inspection and column removal MUST be serialized in one critical
+section: PostgreSQL MUST hold an `ACCESS EXCLUSIVE` lock on the retry-circuit
+table, and SQLite MUST acquire `BEGIN IMMEDIATE` before inspecting receipts.
+This serialization MUST cover direct Alembic downgrade invocations that bypass
+the application migration mutex.
 
 #### Scenario: An active receipt blocks migration rollback
 
@@ -74,6 +79,16 @@ ORM model and startup schema-drift check.
   to the parent
 - **AND** re-upgrading the marker migration MUST restore nullable columns with
   no invented receipt
+
+#### Scenario: A concurrent claim cannot race migration rollback
+
+- **GIVEN** the marker migration is applied and no retry row has an unexpired
+  claim receipt
+- **WHEN** a durable claim races the downgrade's receipt check and marker drop
+- **THEN** the downgrade's table or writer lock MUST serialize the claim
+- **AND** a claim committed before the check MUST make the downgrade refuse
+- **AND** a claim started after the lock MUST NOT be silently dropped by the
+  marker-column removal
 
 ### Requirement: Retry-circuit settlement is generation-fenced
 

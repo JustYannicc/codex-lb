@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 from anyio import to_thread
@@ -1999,9 +2003,10 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path):
+async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import OperationalError
 
     from app.db.migrate import _build_alembic_config
 
@@ -2107,7 +2112,63 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     """
                 )
             )
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+        migration_module = importlib.import_module(
+            "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+        )
+        batch_entered = threading.Event()
+        release_batch = threading.Event()
+        original_batch_alter_table = migration_module.op.batch_alter_table
+
+        @contextmanager
+        def _hold_batch_alter_table(*args, **kwargs):
+            batch_entered.set()
+            if not release_batch.wait(timeout=5):
+                raise AssertionError("timed out waiting to release migration DDL")
+            with original_batch_alter_table(*args, **kwargs) as batch_op:
+                yield batch_op
+
+        monkeypatch.setattr(migration_module.op, "batch_alter_table", _hold_batch_alter_table)
+
+        def _attempt_claim_during_downgrade() -> None:
+            from sqlalchemy import create_engine
+
+            claim_engine = create_engine(
+                f"sqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}",
+                future=True,
+                connect_args={"timeout": 0},
+            )
+            try:
+                with claim_engine.begin() as claim_conn:
+                    claim_conn.execute(
+                        text(
+                            """
+                            UPDATE http_bridge_retry_circuits
+                            SET admission_claimed_at_epoch = :claimed_at_epoch,
+                                admission_claimed_generation = 5,
+                                admission_claimed_until_epoch = :claimed_until_epoch
+                            WHERE session_key_hash = 'legacy-hash'
+                            """
+                        ),
+                        {
+                            "claimed_at_epoch": time.time(),
+                            "claimed_until_epoch": time.time() + 3600.0,
+                        },
+                    )
+            finally:
+                claim_engine.dispose()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            downgrade_future = pool.submit(command.downgrade, _build_alembic_config(db_url), parent_revision)
+            try:
+                assert batch_entered.wait(timeout=5), "downgrade did not reach the guarded DDL"
+                claim_future = pool.submit(_attempt_claim_during_downgrade)
+                with pytest.raises(OperationalError, match="database is locked"):
+                    claim_future.result(timeout=5)
+            finally:
+                release_batch.set()
+            downgrade_future.result(timeout=5)
+
         async with engine.connect() as conn:
             after_release_downgrade = await conn.run_sync(
                 lambda sync_conn: {

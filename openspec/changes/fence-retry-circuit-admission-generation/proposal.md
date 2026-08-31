@@ -32,7 +32,9 @@ explicitly generation-fenced.
   to be purged. The migration's downgrade is guarded: an unexpired receipt
   refuses rollback before DDL or version stamping, while a database with no
   live receipt may drop the marker columns and remain compatible with the
-  parent revision.
+  parent revision. The receipt inspection and marker drop are serialized as
+  one critical section: PostgreSQL takes an `ACCESS EXCLUSIVE` table lock and
+  SQLite takes `BEGIN IMMEDIATE` before inspecting receipts.
 - Carry the independent `admission_generation` through local loads and delayed
   failure merges; failure observation timestamps remain merge metadata only.
 - Clear a circuit only with the captured timestamp and generation, release a

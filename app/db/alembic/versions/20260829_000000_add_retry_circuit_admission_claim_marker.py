@@ -32,6 +32,18 @@ def _columns(bind) -> set[str]:
     return {str(column["name"]) for column in inspector.get_columns(_TABLE)}
 
 
+def _acquire_downgrade_lock(bind) -> None:
+    """Serialize claim writes with the receipt check and marker drop."""
+    if bind.dialect.name == "postgresql":
+        # ACCESS EXCLUSIVE conflicts with the UPDATE used by replay claims and
+        # remains held through the surrounding Alembic transaction.
+        bind.execute(sa.text(f"LOCK TABLE {_TABLE} IN ACCESS EXCLUSIVE MODE"))
+    elif bind.dialect.name == "sqlite":
+        # SQLite has no table lock; BEGIN IMMEDIATE takes the database writer
+        # slot before the receipt read and holds it through batch DDL.
+        bind.execute(sa.text("BEGIN IMMEDIATE"))
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if _TABLE not in sa.inspect(bind).get_table_names():
@@ -45,6 +57,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    existing = _columns(bind)
+    if not existing.intersection(_COLUMNS):
+        return
+    _acquire_downgrade_lock(bind)
+    # Re-read under the write/table lock so a concurrent migration cannot
+    # change the marker set between the initial existence check and DDL.
     existing = _columns(bind)
     if not existing.intersection(_COLUMNS):
         return
