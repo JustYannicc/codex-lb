@@ -7,7 +7,7 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
@@ -131,6 +131,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _disarm_pending_response_create_attempts,
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -231,6 +232,32 @@ class _HTTPBridgeDeniedAnchorFence:
     # positive denial tombstone must survive request-pin release until a
     # current owner confirms that durable anchor is gone.
     retain_until_durable_clear: bool = False
+
+
+async def _fail_http_bridge_owner_unavailable_after_probe(
+    session: "_HTTPBridgeSession",
+    *,
+    detail: str,
+    request_state: "_WebSocketRequestState",
+    release_account_lease: Callable[[], Awaitable[None]] | None,
+    complete_failed_handoff: Callable[[], None],
+    release_probe: Callable[..., Awaitable[bool]],
+) -> None:
+    """Finish owner-loss cleanup before surfacing cancellation or failure."""
+
+    async def cleanup() -> None:
+        await _disarm_pending_response_create_attempts(session)
+        try:
+            if release_account_lease is not None:
+                await release_account_lease()
+        finally:
+            complete_failed_handoff()
+            await release_probe(session, detail=detail, probe_owner=request_state)
+
+    cleanup_task = asyncio.create_task(cleanup())
+    _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+    if cancellation is not None:
+        raise cancellation
 
 
 def _http_bridge_denied_anchor_fence_entry(

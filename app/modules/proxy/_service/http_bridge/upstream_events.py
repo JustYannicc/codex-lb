@@ -4156,6 +4156,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session,
                     detail=error_code,
                     attempt=terminal_request_state.response_create_attempt,
+                    probe_owner=terminal_request_state,
                     terminal_pre_response_frame=True,
                 )
                 terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)

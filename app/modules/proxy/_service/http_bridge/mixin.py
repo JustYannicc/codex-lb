@@ -72,6 +72,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _alias_fallback_key,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
+    _fail_http_bridge_owner_unavailable_after_probe,
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
@@ -168,7 +169,6 @@ from app.modules.proxy._service.support import (
     _complete_http_bridge_handoff,
     _copy_websocket_route_metadata_to_session,
     _DeferredAccountBackoffLifecycle,
-    _disarm_pending_response_create_attempts,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
@@ -2017,18 +2017,17 @@ class _HTTPBridgeMixin(
             _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
 
-        release_probe = self._release_http_bridge_retry_circuit_half_open
-
         async def fail_owner_unavailable_after_probe(
             detail: str = "previous_response_owner_unavailable", *, release_account_lease: bool = False
         ) -> None:
-            await _disarm_pending_response_create_attempts(session)
-            try:
-                if release_account_lease:
-                    await release_selected_account_lease()
-            finally:
-                complete_failed_handoff()
-                await release_probe(session, detail=detail, probe_owner=request_state)
+            await _fail_http_bridge_owner_unavailable_after_probe(
+                session,
+                detail=detail,
+                request_state=request_state,
+                release_account_lease=release_selected_account_lease if release_account_lease else None,
+                complete_failed_handoff=complete_failed_handoff,
+                release_probe=self._release_http_bridge_retry_circuit_half_open,
+            )
 
         if old_reader is not None:
             if old_reader is not asyncio.current_task():

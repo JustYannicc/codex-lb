@@ -11381,6 +11381,7 @@ async def test_reconnect_cancellation_during_wrong_owner_lease_release_completes
         acquired_at=2.0,
     )
     release_started = asyncio.Event()
+    allow_release = asyncio.Event()
 
     async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(
@@ -11392,7 +11393,7 @@ async def test_reconnect_cancellation_during_wrong_owner_lease_release_completes
 
     async def release_lease(_lease: proxy_service.AccountLease | None) -> None:
         release_started.set()
-        await asyncio.Event().wait()
+        await allow_release.wait()
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-wrong-owner-cancelled",
@@ -11428,6 +11429,7 @@ async def test_reconnect_cancellation_during_wrong_owner_lease_release_completes
     )
     await asyncio.wait_for(release_started.wait(), timeout=1.0)
     reconnect_task.cancel()
+    allow_release.set()
 
     with pytest.raises(asyncio.CancelledError):
         await reconnect_task
@@ -12312,6 +12314,112 @@ async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert owner_attempt.disarmed is True
     assert sibling_attempt.disarmed is True
+    assert circuit_state.half_open_until == 0.0
+    assert circuit_state.half_open_owner_session is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_owner_unavailable_defers_cancellation_through_pending_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-owner-unavailable-cancel")
+    session.last_upstream_close_code = 1011
+    owner_request = proxy_service._WebSocketRequestState(
+        request_id="req-owner-unavailable-cancel-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc-required",
+        file_required_preferred_account=True,
+    )
+    sibling_request = proxy_service._WebSocketRequestState(
+        request_id="req-owner-unavailable-cancel-sibling",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    owner_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    sibling_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    owner_request.response_create_attempt = owner_attempt
+    sibling_request.response_create_attempt = sibling_attempt
+    session.pending_requests.extend((owner_request, sibling_request))
+    session.queued_request_count = 2
+    circuit_state = _activate_half_open_probe(service, session)
+    replacement_account = cast(
+        Any,
+        SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    replacement_lease = proxy_service.AccountLease(
+        lease_id="lease-owner-unavailable-cancel",
+        account_id=replacement_account.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    disarm_started = asyncio.Event()
+    events: list[str] = []
+    original_disarm = http_bridge_helpers_module._disarm_pending_response_create_attempts
+
+    async def track_disarm(target: proxy_service._HTTPBridgeSession) -> None:
+        disarm_started.set()
+        await original_disarm(target)
+        events.append("disarm")
+
+    async def select_replacement(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=replacement_account,
+            error_message=None,
+            error_code=None,
+            lease=replacement_lease,
+        )
+
+    async def release_lease(_lease: proxy_service.AccountLease) -> None:
+        events.append("lease")
+
+    original_release_probe = service._release_http_bridge_retry_circuit_half_open
+
+    async def release_probe(*args: Any, **kwargs: Any) -> bool:
+        events.append("probe")
+        return await original_release_probe(*args, **kwargs)
+
+    monkeypatch.setattr(http_bridge_helpers_module, "_disarm_pending_response_create_attempts", track_disarm)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_replacement)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(service, "_release_http_bridge_retry_circuit_half_open", release_probe)
+
+    await session.pending_lock.acquire()
+    reconnect_task = asyncio.create_task(service._reconnect_http_bridge_session(session, request_state=owner_request))
+    await asyncio.wait_for(disarm_started.wait(), timeout=1.0)
+    reconnect_task.cancel()
+    await asyncio.sleep(0)
+    assert reconnect_task.done() is False
+
+    session.pending_lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(reconnect_task, timeout=1.0)
+
+    assert events == ["disarm", "lease", "probe"]
+    assert owner_attempt.disarmed is True
+    assert sibling_attempt.disarmed is True
+    assert session.handoff_in_progress is False
+    assert session.key not in service._http_bridge_inflight_sessions
     assert circuit_state.half_open_until == 0.0
     assert circuit_state.half_open_owner_session is None
 
@@ -38428,6 +38536,7 @@ async def test_eventless_terminal_error_records_attempt_scoped_circuit_strike(
     assert await_args.args[0] is session
     assert await_args.kwargs["detail"] == "stream_incomplete"
     assert await_args.kwargs["attempt"] is request_state.response_create_attempt
+    assert await_args.kwargs["probe_owner"] is request_state
 
 
 @pytest.mark.asyncio
