@@ -3896,6 +3896,7 @@ class _HTTPBridgeRequestSubmitMixin:
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
         probe_owner = request_state
+        admitted_probe_candidate: _WebSocketRequestState | None = None
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -3921,6 +3922,13 @@ class _HTTPBridgeRequestSubmitMixin:
                         # releasing the pending lock; a later owner-token
                         # release must not fall back to the session identity.
                         probe_owner = candidate
+                    if request_state is None:
+                        # Admission awaits the circuit's durable snapshot. A
+                        # concurrent cleanup can replace the unique pending
+                        # request during that await; keep the identity that
+                        # owns the lease so dispatch cannot switch to a
+                        # different request and strand the owner token.
+                        admitted_probe_candidate = candidate
                     fresh_hard_request_account_switch_candidate = (
                         candidate.previous_response_id is None
                         and not candidate.hard_continuity_anchor
@@ -3968,7 +3976,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 ]
                 if len(retryable_requests) != 1:
                     return False
-                request_state = retryable_requests[0]
+                candidate = retryable_requests[0]
+                if admitted_probe_candidate is not None and candidate is not admitted_probe_candidate:
+                    # The half-open lease was admitted for another pending
+                    # request. Fail closed and let the outer finalizer return
+                    # that exact lease instead of dispatching the replacement.
+                    return False
+                request_state = candidate
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries
                 # prior attempts, so the release keys on advancement past

@@ -916,7 +916,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
                 state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
                 state.last_detail = state.last_detail or persisted.last_detail
-            if state.cooldown_until > now_monotonic:
+            if state.cooldown_until > now_monotonic and not active_local_probe:
                 # A cooling key is not probing. Without this, a merged
                 # persisted cooldown leaves a leftover half-open lease
                 # armed, and once the cooldown expires the admission gate

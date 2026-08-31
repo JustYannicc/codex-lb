@@ -1617,6 +1617,12 @@ def _disarm_response_create_attempt(request_state: _WebSocketRequestState | None
         attempt.disarmed = True
 
 
+async def _disarm_pending_response_create_attempts(session: _HTTPBridgeSession) -> None:
+    async with session.pending_lock:
+        for request_state in session.pending_requests:
+            _disarm_response_create_attempt(request_state)
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return

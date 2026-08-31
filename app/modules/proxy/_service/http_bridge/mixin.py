@@ -168,7 +168,7 @@ from app.modules.proxy._service.support import (
     _complete_http_bridge_handoff,
     _copy_websocket_route_metadata_to_session,
     _DeferredAccountBackoffLifecycle,
-    _disarm_response_create_attempt,
+    _disarm_pending_response_create_attempts,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
@@ -2022,7 +2022,7 @@ class _HTTPBridgeMixin(
         async def fail_owner_unavailable_after_probe(
             detail: str = "previous_response_owner_unavailable", *, release_account_lease: bool = False
         ) -> None:
-            _disarm_response_create_attempt(request_state)
+            await _disarm_pending_response_create_attempts(session)
             try:
                 if release_account_lease:
                     await release_selected_account_lease()
@@ -2340,7 +2340,11 @@ class _HTTPBridgeMixin(
                         continue
                     await abandon_selected_account_retry(account)
                     continue
-                await fail_owner_unavailable_after_probe(release_account_lease=True)
+                if required_preferred_account_id is not None:
+                    await fail_owner_unavailable_after_probe(release_account_lease=True)
+                else:
+                    await release_selected_account_lease()
+                    complete_failed_handoff()
                 raise _http_bridge_reconnect_connect_failure(transport_exc, required_preferred_account_id)
             except asyncio.CancelledError:
                 session.closed = True
