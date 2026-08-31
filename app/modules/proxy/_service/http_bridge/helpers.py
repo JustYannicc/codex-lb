@@ -2056,8 +2056,8 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
             return True
         if len(input_value) == 1:
             try:
-                return len(json.dumps(input_value[0], ensure_ascii=True, separators=(",", ":"))) >= 4096
-            except TypeError:
+                return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
+            except (OverflowError, TypeError, ValueError):
                 return False
     return False
 

@@ -305,8 +305,8 @@ def test_http_bridge_prepares_full_resend_shape_for_late_hard_anchor_injection()
     [
         pytest.param("x" * 4095, False, id="short-string"),
         pytest.param("x" * 4096, True, id="boundary-string"),
-        pytest.param(["x" * 4093], False, id="short-one-item-array"),
-        pytest.param(["x" * 4094], True, id="boundary-one-item-array"),
+        pytest.param(["x" * 4091], False, id="short-one-item-array"),
+        pytest.param(["x" * 4092], True, id="boundary-one-item-array"),
         pytest.param(["x", "y"], True, id="multiple-items"),
         pytest.param([], False, id="empty-array"),
     ],
@@ -35118,21 +35118,23 @@ def test_http_bridge_quarantine_poison_clear_preserves_post_fence_first_strike()
         session,
         reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     )
-    captured_poison_generation = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence(
+    captured_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(
         service,
         session.key,
     )
-    assert captured_poison_generation is not None
+    assert captured_fence.generation is not None
+    assert captured_fence.raw_generation is not None
 
     http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
     entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
     assert entry.consecutive_eventless_timeouts == 1
-    assert entry.generation != captured_poison_generation
+    assert entry.generation != captured_fence.raw_generation
 
     http_bridge_quarantine_module._clear_http_bridge_quarantine(
         service,
         session,
-        key_generation=captured_poison_generation,
+        key_generation=captured_fence.generation,
+        key_raw_generation=captured_fence.raw_generation,
         key_generation_captured=True,
     )
 
@@ -35144,6 +35146,37 @@ def test_http_bridge_quarantine_poison_clear_preserves_post_fence_first_strike()
     http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
     assert entry.consecutive_eventless_timeouts == 2
     assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON
+
+
+def test_http_bridge_quarantine_poison_clear_resets_pre_fence_first_strike() -> None:
+    """A first strike already observed at capture is reset with the poison arm."""
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-poison-pre-fence-first-strike")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+
+    captured_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(
+        service,
+        session.key,
+    )
+    assert captured_fence.generation is not None
+    assert captured_fence.raw_generation is not None
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.consecutive_eventless_timeouts == 1
+
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured_fence.generation,
+        key_raw_generation=captured_fence.raw_generation,
+        key_generation_captured=True,
+    )
+
+    assert session.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
 
 
 def test_http_bridge_quarantine_same_key_clear_denied_when_no_generation_observed() -> None:

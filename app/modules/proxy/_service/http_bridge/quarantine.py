@@ -73,6 +73,14 @@ class _HTTPBridgeQuarantineEntry:
     suppressed_weaker_until: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeQuarantineClearFence:
+    """The provenance and raw generation observed for a cleanup fence."""
+
+    generation: int | None = None
+    raw_generation: int | None = None
+
+
 def _http_bridge_quarantine_owner_ref(
     session: Any,
 ) -> weakref.ReferenceType[_HTTPBridgeSession] | None:
@@ -269,12 +277,25 @@ def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey)
 def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
     """Capture the provenance fence a later completion clear must present.
 
+    Callers that need to preserve first-strike evidence should use
+    ``_http_bridge_quarantine_clear_fence_details`` so they also retain the
+    raw entry generation observed at the same instant.
+    """
+    return _http_bridge_quarantine_clear_fence_details(service, key).generation
+
+
+def _http_bridge_quarantine_clear_fence_details(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+) -> _HTTPBridgeQuarantineClearFence:
+    """Capture both quarantine provenance and raw generation atomically.
+
     Poison entries fence on their poison provenance so a weaker arm during
     the completion's durable awaits cannot block the clear; other entries
-    fence on the raw generation. ``None`` records that nothing was active at
-    capture, so a quarantine armed afterwards survives the clear.
-    The first eventless timeout is retained as an inactive strike entry with
-    its own generation. It still needs an observation fence: an older
+    fence on the raw generation. An absent entry returns ``None`` for both
+    values, so a quarantine armed afterwards survives the clear. The first
+    eventless timeout is retained as an inactive strike entry with its own
+    generation and therefore still gets an observation fence: an older
     completion that observed no entry must not pop that strike after a
     settlement await.
     """
@@ -283,10 +304,16 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     if entry is None:
-        return None
+        return _HTTPBridgeQuarantineClearFence()
     if entry.quarantined_until > now and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
-        return entry.poison_generation
-    return entry.generation
+        return _HTTPBridgeQuarantineClearFence(
+            generation=entry.poison_generation,
+            raw_generation=entry.generation,
+        )
+    return _HTTPBridgeQuarantineClearFence(
+        generation=entry.generation,
+        raw_generation=entry.generation,
+    )
 
 
 def _quarantine_http_bridge_session(
@@ -445,9 +472,11 @@ def _clear_http_bridge_quarantine(
     session: _HTTPBridgeSession,
     *,
     key_generation: int | None = None,
+    key_raw_generation: int | None = None,
     key_generation_captured: bool = False,
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
+    additional_key_raw_generation: int | None = None,
 ) -> None:
     """Clear only quarantine evidence this completion is authorized to clear.
 
@@ -459,7 +488,8 @@ def _clear_http_bridge_quarantine(
     pre-await fence capture one immediately before clearing. Poison entries
     fence on their own provenance, so a weaker arm during the completion's
     durable awaits does not block a matched clear or get evicted with the
-    disproved poison arm.
+    disproved poison arm. The raw generation is captured alongside poison
+    provenance so only a first strike recorded after capture is retained.
     """
     registry = _http_bridge_quarantine_registry(service)
     if additional_key == session.key:
@@ -469,14 +499,18 @@ def _clear_http_bridge_quarantine(
         # an absence fence instead of being replaced by an auto-captured
         # generation for the entry armed during recovery.
         key_generation = additional_key_generation
+        key_raw_generation = additional_key_raw_generation
         key_generation_captured = True
     elif not key_generation_captured:
-        key_generation = _http_bridge_quarantine_clear_fence(service, session.key)
+        fence = _http_bridge_quarantine_clear_fence_details(service, session.key)
+        key_generation = fence.generation
+        key_raw_generation = fence.raw_generation
     now = time.monotonic()
 
     def clear_fenced(
         key: _HTTPBridgeSessionKey,
         captured_generation: int | None,
+        captured_raw_generation: int | None,
         *,
         is_primary: bool = False,
     ) -> bool:
@@ -514,9 +548,10 @@ def _clear_http_bridge_quarantine(
             # generation still matches.
             registry.pop(key, None)
             return True
+        captured_raw = captured_raw_generation if captured_raw_generation is not None else captured_generation
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-            and entry.generation != entry.poison_generation
+            and entry.generation != captured_raw
             and entry.consecutive_eventless_timeouts > 0
             and entry.suppressed_weaker_reason is None
         ):
@@ -559,7 +594,7 @@ def _clear_http_bridge_quarantine(
         )
         return True
 
-    if clear_fenced(session.key, key_generation, is_primary=True):
+    if clear_fenced(session.key, key_generation, key_raw_generation, is_primary=True):
         session.quarantined = False
     if additional_key is not None and additional_key != session.key:
-        clear_fenced(additional_key, additional_key_generation)
+        clear_fenced(additional_key, additional_key_generation, additional_key_raw_generation)

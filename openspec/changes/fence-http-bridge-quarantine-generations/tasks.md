@@ -25,3 +25,6 @@
 - [x] 1.12 Preserve a post-fence first eventless strike when clearing matched
   poison provenance, define the full-resend/delta-only classifier boundaries
   and precedence in the Responses contract, and add regressions.
+- [x] 1.13 Capture raw generation alongside poison provenance so pre-fence
+  first strikes reset correctly, and classify one-item arrays using the
+  compact serialization of the entire array.
