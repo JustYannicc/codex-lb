@@ -26,8 +26,10 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
-    synthetic_stream_failure_event as response_failed_event,
     synthetic_transport_failure_event,
+)
+from app.core.errors import (
+    synthetic_stream_failure_event as response_failed_event,
 )
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import (
