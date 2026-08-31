@@ -240,7 +240,7 @@ class _ReleaseHTTPBridgeRetryCircuitProbe(Protocol):
         session: "_HTTPBridgeSession",
         *,
         detail: str,
-        probe_owner: "_WebSocketRequestState | None" = None,
+        probe_owner: object | None = None,
     ) -> Awaitable[bool]: ...
 
 

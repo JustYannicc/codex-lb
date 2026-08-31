@@ -26,7 +26,6 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
-    _WebSocketRequestState,
 )
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 
@@ -187,7 +186,10 @@ class _HTTPBridgeRetryCircuitState:
     # A session can carry multiple concurrent request states. Keep the
     # admitting request as the episode fence so a bypassed sibling cannot
     # return somebody else's probe.
-    half_open_owner_token: _WebSocketRequestState | None = None
+    # This is an opaque identity fence, not a payload contract. Production
+    # passes a request state, while tests use plain sentinels to prove that no
+    # fields or equality semantics participate in ownership.
+    half_open_owner_token: object | None = None
 
 
 @dataclass(slots=True)
@@ -1293,7 +1295,7 @@ class _HTTPBridgeRetryCircuitMixin:
         self: Any,
         session: _HTTPBridgeSession,
         *,
-        probe_owner: _WebSocketRequestState | None = None,
+        probe_owner: object | None = None,
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
         allow_operation_fenced_continuity_replay: bool = False,
@@ -1673,7 +1675,7 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         detail: str,
-        probe_owner: _WebSocketRequestState | None = None,
+        probe_owner: object | None = None,
     ) -> bool:
         """Return an active local probe only from its owning session.
 
@@ -1740,7 +1742,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
         attempt: _HTTPBridgeResponseCreateAttempt | None = None,
-        probe_owner: _WebSocketRequestState | None = None,
+        probe_owner: object | None = None,
         terminal_pre_response_frame: bool = False,
     ) -> int | None:
         """Count one hard-key failure against the retry circuit.

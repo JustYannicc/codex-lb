@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account
-from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey, _WebSocketRequestState
+from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
 from app.modules.proxy.durable_bridge_repository import DurableBridgeAliasRegistrationReceipt
 from app.modules.proxy.load_balancer import AccountSelection
 
@@ -75,7 +75,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
         session: _HTTPBridgeSession,
         *,
         detail: str,
-        probe_owner: _WebSocketRequestState | None = None,
+        probe_owner: object | None = None,
     ) -> bool: ...
     async def _release_http_bridge_admission_preregistration(
         self,
