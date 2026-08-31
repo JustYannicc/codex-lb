@@ -847,9 +847,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 defer_durable_snapshot = (
                     persisted.updated_at_epoch > state.persisted_updated_at_epoch
                     and active_local_probe
-                    and (
-                        durable_reset or max(0, persisted.consecutive_failures) < state.consecutive_failures
-                    )
+                    and (durable_reset or max(0, persisted.consecutive_failures) < state.consecutive_failures)
                 )
                 returned_local_probe = state.last_half_open_release_monotonic > state.last_durable_load_monotonic
                 if episode_replaced:
@@ -878,11 +876,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     # belonged to the ended episode.
                     state.poison_anchor_cleared = False
                     state.owed_poison_detail = None
-                if (
-                    durable_reset
-                    and persisted.updated_at_epoch > state.persisted_updated_at_epoch
-                    and not active_local_probe
-                ):
+                if durable_reset and not active_local_probe:
                     # A newer durable clear is authoritative when no local
                     # probe owns the key. Do not let an old in-memory cooldown
                     # keep suppressing this key after a remote settle.
@@ -931,7 +925,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_until = 0.0
                 state.half_open_owner_session = None
                 state.half_open_owner_token = None
-            elif episode_replaced and not local_failure_is_newer and not active_local_probe:
+            elif (
+                episode_replaced
+                and not local_failure_is_newer
+                and (not active_local_probe or state.half_open_owner_session is None)
+            ):
                 # The adopted row belongs to a replacement episode whose
                 # cooldown has already elapsed. A lease left over from the
                 # ended episode would read as this worker's in-flight probe
@@ -1164,10 +1162,7 @@ class _HTTPBridgeRetryCircuitMixin:
                             persisted.updated_at_epoch > state.persisted_updated_at_epoch
                             and not local_failure_is_newer
                             and active_local_probe
-                            and (
-                                durable_reset
-                                or max(0, persisted.consecutive_failures) < state.consecutive_failures
-                            )
+                            and (durable_reset or max(0, persisted.consecutive_failures) < state.consecutive_failures)
                         )
                         # The upsert returns the post-write row: when this
                         # write landed the row reflects it, and when its base
