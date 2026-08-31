@@ -320,6 +320,23 @@ async def test_public_selection_applies_candidate_gates(
 
 
 @pytest.mark.asyncio
+async def test_list_selection_candidates_preserves_transiently_unroutable_owner(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    paused_owner = _account("contract-paused-owner-candidate")
+    paused_owner.status = AccountStatus.PAUSED
+    active_account = _account("contract-active-owner-candidate")
+    balancer, _, _, _ = _balancer([paused_owner, active_account], selection_cache)
+
+    candidates = await balancer.list_selection_candidates(model=None)
+
+    # Owner-miss cardinality must include paused accounts: their temporary
+    # routing state cannot prove that they did not own the upstream object.
+    assert [account.id for account in candidates] == [paused_owner.id, active_account.id]
+    assert candidates[0] is not paused_owner
+
+
+@pytest.mark.asyncio
 async def test_required_continuity_owner_miss_does_not_mark_healthy_pool_degraded(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
