@@ -31316,6 +31316,42 @@ async def test_http_bridge_aborted_terminal_cleanup_leaves_pending_retry_claim_o
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_aborted_terminal_cleanup_schedules_failed_claim_release_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-aborted-claim-release-retry",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        verified_stale_anchor_retry_circuit_claimed_generation=3,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-aborted-claim-release-retry",
+        pending_requests=deque(),
+        queued_request_count=0,
+    )
+    clear_claim = AsyncMock(return_value=False)
+    schedule_retry = Mock()
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", clear_claim)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    await service._settle_aborted_http_bridge_terminal_states(session, [request_state])
+
+    clear_claim.assert_awaited_once_with(request_state)
+    schedule_retry.assert_called_once_with(service, request_state)
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 3
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_verified_stale_anchor_claim_times_out_and_releases_circuit_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

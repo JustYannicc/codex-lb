@@ -91,6 +91,7 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_anchor_poison_detail,
+    _schedule_http_bridge_retry_circuit_admission_claim_release_retry,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -2499,13 +2500,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                             exc_info=True,
                         )
                 try:
-                    await self._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+                    claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request(
+                        request_state
+                    )
                 except Exception:
                     logger.warning(
                         "Failed to release aborted HTTP bridge retry-circuit admission claim request_id=%s",
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+                else:
+                    if not claim_released:
+                        _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
                 if not needs_reservation_settlement:
                     continue
                 # Best effort: unblock the downstream waiter so it observes
