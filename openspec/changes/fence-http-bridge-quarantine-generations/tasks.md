@@ -17,3 +17,8 @@
   retry-circuit settlement awaits.
 - [x] 1.9 Run focused tests, lint, type checks, diff checks, and strict
   OpenSpec validation where the executable is available.
+- [x] 1.10 Preserve the pre-await completion fence through durable load and
+  settlement awaits, including an observed absence, with a regression for a
+  quarantine armed during that load.
+- [x] 1.11 Allocate quarantine-generation transitions through the service
+  allocator and cover revoke/downgrade cross-key uniqueness regressions.

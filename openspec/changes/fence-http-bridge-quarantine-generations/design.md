@@ -42,4 +42,8 @@ when the request itself does not carry a full resend.
   flight, for both distinct-key and same-key cleanup.
 - A primary completion that yields during retry-circuit settlement cannot clear
   a quarantine armed during that await.
+- A primary completion that observes absence cannot clear a quarantine armed
+  by a later durable load or settlement await.
+- Revoke and poison-downgrade transitions allocate generations above every
+  active generation on other keys.
 - Weak references compare object lifetime rather than integer ids.

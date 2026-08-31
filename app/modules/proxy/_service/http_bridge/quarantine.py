@@ -190,12 +190,12 @@ def _revoke_http_bridge_poison_quarantine(
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return True
         if restore_reason is not None and restore_until > clock_for(service).monotonic():
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return True
         registry.pop(key, None)
         return True
@@ -531,7 +531,7 @@ def _clear_http_bridge_quarantine(
             entry.suppressed_weaker_until = 0.0
             entry.poison_generation = 0
             entry.poison_quarantined_until = 0.0
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return False
         registry.pop(key, None)
         _log_http_bridge_event(
