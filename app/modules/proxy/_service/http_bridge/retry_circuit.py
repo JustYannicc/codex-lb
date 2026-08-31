@@ -1299,7 +1299,7 @@ class _HTTPBridgeRetryCircuitMixin:
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
         allow_operation_fenced_continuity_replay: bool = False,
-        claimed_lease_out: list[float] | None = None,
+        claimed_lease_out: list[tuple[float, object]] | None = None,
     ) -> bool:
         """Avoid replaying a repeatedly failing hard-affinity request in a tight loop."""
         if session.key.strength != "hard":
@@ -1336,13 +1336,14 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.cooldown_until = 0.0
                     state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
                     state.half_open_owner_session = session
-                    state.half_open_owner_token = probe_owner if probe_owner is not None else session
+                    owner_token = probe_owner if probe_owner is not None else session
+                    state.half_open_owner_token = owner_token
                     if claimed_lease_out is not None:
                         # The exact lease this admission claimed, handed out
                         # under the same lock that installed it, so a
                         # fail-closed caller can return precisely its own
                         # probe under any interleaving.
-                        claimed_lease_out.append(state.half_open_until)
+                        claimed_lease_out.append((state.half_open_until, owner_token))
                     logger.info(
                         "http_bridge_retry_circuit event=half_open bridge_kind=%s bridge_key=%s failures=%s",
                         session.key.affinity_kind,

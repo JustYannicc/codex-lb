@@ -42180,6 +42180,69 @@ async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> 
 
 
 @pytest.mark.asyncio
+async def test_submit_cancellation_after_admission_returns_the_claimed_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-submit-cancel-after-admission")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now - 1.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=time.time() - 30.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-cancel-after-admission",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=now,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"continue"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    admission_claimed = asyncio.Event()
+    original_admission = service._http_bridge_precreated_retry_allowed
+
+    async def pause_after_admission(*args: Any, **kwargs: Any) -> bool:
+        allowed = await original_admission(*args, **kwargs)
+        if kwargs.get("claimed_lease_out"):
+            admission_claimed.set()
+            await asyncio.Event().wait()
+        return allowed
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", pause_after_admission)
+    submit_task = asyncio.create_task(
+        service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+    )
+    await admission_claimed.wait()
+    submit_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert state.last_half_open_release_monotonic > 0.0
+
+
+@pytest.mark.asyncio
 async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None:
     # A remotely written abandonment tombstone arms no quarantine by
     # design; when planning served a cached view that predates it, the
@@ -43913,6 +43976,55 @@ async def test_a_pending_retry_removed_after_admission_returns_its_exact_probe(
 
 
 @pytest.mark.asyncio
+async def test_internal_retry_cancellation_after_admission_returns_the_claimed_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-retry-cancel-after-admission")
+    owner.request_text = '{"type":"response.create","model":"gpt-5.4","input":"continue"}'
+    session = _make_bridge_session(
+        key_value="bridge-retry-cancel-after-admission",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now - 1.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=time.time() - 30.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    admission_claimed = asyncio.Event()
+    original_admission = service._http_bridge_precreated_retry_allowed
+
+    async def pause_after_admission(*args: Any, **kwargs: Any) -> bool:
+        allowed = await original_admission(*args, **kwargs)
+        if kwargs.get("claimed_lease_out"):
+            admission_claimed.set()
+            await asyncio.Event().wait()
+        return allowed
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", pause_after_admission)
+    retry_task = asyncio.create_task(service._retry_http_bridge_precreated_request(session))
+    await admission_claimed.wait()
+    retry_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert state.last_half_open_release_monotonic > 0.0
+
+
+@pytest.mark.asyncio
 async def test_the_poison_restore_transitions_its_own_tombstone() -> None:
     # A poison-backed completion settles onto the tombstone, then its
     # registration fails: the re-seed's strike merge cannot rewrite the
@@ -44667,7 +44779,7 @@ async def test_the_gate_returns_a_probe_reclaimed_over_a_stale_lease(
         gate_state.half_open_owner_token = kwargs.get("probe_owner", session)
         claimed_out = kwargs.get("claimed_lease_out")
         if claimed_out is not None:
-            claimed_out.append(gate_state.half_open_until)
+            claimed_out.append((gate_state.half_open_until, gate_state.half_open_owner_token))
         return True
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", reclaiming_admission)
