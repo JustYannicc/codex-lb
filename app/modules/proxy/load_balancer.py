@@ -284,25 +284,13 @@ def _apply_selection_account_filters(
     exclude_account_ids: Collection[str] | None = None,
     require_security_work_authorized: bool = False,
 ) -> _SelectionInputs:
-    """Apply request-scoped account policy to a loaded selection plan.
-
-    The loader owns model, service-tier, account-assignment, and quota
-    admission.  This seam owns the remaining request policy that must be
-    shared by normal selection and owner-miss cardinality checks: security
-    authorization and retry exclusions.
-    """
-
+    """Apply security authorization and retry exclusions shared by selection and owner-miss checks."""
     if require_security_work_authorized:
-        # Ownership scope and routing availability are separate. Even an
-        # already-empty routing pool must have its owner candidates
-        # security-filtered before conversation ambiguity is decided.
+        # Filter owner candidates before deciding ambiguity, even if routing is empty.
         security_scope_accounts = (
             selection_inputs.runtime_accounts
             if selection_inputs.runtime_accounts is not None
-            else [
-                *selection_inputs.effective_continuity_owner_candidates,
-                *selection_inputs.accounts,
-            ]
+            else [*selection_inputs.effective_continuity_owner_candidates, *selection_inputs.accounts]
         )
         security_authorized_account_ids = frozenset(
             account.id for account in security_scope_accounts if bool(account.security_work_authorized)
@@ -335,7 +323,6 @@ def _apply_selection_account_filters(
             continuity_owner_candidates=authorized_owner_candidates,
             sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
         )
-
     excluded_ids = set(exclude_account_ids or ())
     if excluded_ids and selection_inputs.accounts:
         filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]

@@ -407,6 +407,66 @@ async def test_known_subscription_model_owner_miss_uses_sole_candidate(
 
 
 @pytest.mark.asyncio
+async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compaction owner miss can use the one account in the subscription pool.
+
+    Terminal compaction is excluded from model-source routing but carries no
+    account pin of its own. When its previous-response owner lookup misses, a
+    sole subscription candidate is therefore safe to use; an input-file
+    request follows the stricter file-owner path instead.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    account = _make_account("acc_ws_compaction_owner_miss")
+    previous_response_id = "resp_ws_compaction_owner_miss"
+    upstream = _TurnDrivenUpstream(
+        [_completed_turn("resp_ws_compaction_first"), _completed_turn("resp_ws_compaction_second")]
+    )
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
+        del self, args, kwargs
+        return account, upstream
+
+    second_payload = json.loads(_compaction_trigger_frame("qwen3.8-max"))
+    second_payload["previous_response_id"] = previous_response_id
+    downstream = _TurnSerializedDownstream(
+        [
+            _create_frame("gpt-5.6-sol"),
+            json.dumps(second_payload, separators=(",", ":")),
+        ]
+    )
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    list_selection_candidates.assert_awaited_once()
+    assert len(upstream.sent_text) == 2, "the compaction continuation must reach the subscription account"
+    sent_payload = json.loads(upstream.sent_text[1])
+    assert sent_payload["previous_response_id"] == previous_response_id
+    assert any("resp_ws_compaction_second" in text for text in downstream.sent_text)
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
 async def test_owner_miss_rebinds_existing_socket_to_refreshed_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
