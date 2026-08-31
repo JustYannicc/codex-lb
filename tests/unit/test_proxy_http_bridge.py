@@ -41740,6 +41740,7 @@ async def test_terminal_settlement_survives_cancellation_during_publication(
     blocked_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
     blocked_queue.put_nowait("data: occupied\n\n")
     request_state.event_queue = blocked_queue
+    request_state.event_queue_consumer_started = True
 
     async def _record(*_args: Any, **_kwargs: Any) -> int:
         # The stub registers the at-threshold episode the real recorder
