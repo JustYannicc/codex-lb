@@ -49,6 +49,17 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_CLEANUP_GRACE_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX = "http-bridge-retry-circuit-"
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+    30.0,
+    60.0,
+)
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -428,6 +439,65 @@ def _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
         name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}{label}-abandoned-result-cleanup",
         error_message=f"Abandoned retry-circuit result cleanup failed label={label}",
     )
+
+
+async def _retry_http_bridge_retry_circuit_admission_claim_release(
+    service: Any,
+    request_state: Any,
+) -> None:
+    """Retry a terminal claim release while its request-owned receipt is live."""
+    try:
+        for delay_seconds in _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS:
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            if getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_generation", None) is None:
+                return
+            claimed_until_epoch = getattr(
+                request_state,
+                "verified_stale_anchor_retry_circuit_claimed_until_epoch",
+                None,
+            )
+            if claimed_until_epoch is not None and claimed_until_epoch <= time.time():
+                return
+            try:
+                released = await service._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to retry HTTP bridge retry-circuit admission claim release request_id=%s",
+                    getattr(request_state, "request_id", None),
+                    exc_info=True,
+                )
+                continue
+            if released:
+                return
+    finally:
+        request_state.retry_circuit_claim_release_retry_scheduled = False
+    logger.error(
+        "HTTP bridge retry-circuit admission claim release retry budget exhausted request_id=%s",
+        getattr(request_state, "request_id", None),
+    )
+
+
+def _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+    service: Any,
+    request_state: Any,
+) -> None:
+    """Track a bounded terminal claim-release retry for the request owner."""
+    if getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_generation", None) is None:
+        return
+    if getattr(request_state, "retry_circuit_claim_release_retry_scheduled", False):
+        return
+    request_state.retry_circuit_claim_release_retry_scheduled = True
+    task = _schedule_http_bridge_background_cleanup(
+        service,
+        _retry_http_bridge_retry_circuit_admission_claim_release(service, request_state),
+        name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}terminal-claim-release",
+        error_message="HTTP bridge retry-circuit terminal claim release retry failed",
+    )
+    if task is None:
+        request_state.retry_circuit_claim_release_retry_scheduled = False
 
 
 @dataclass(slots=True)

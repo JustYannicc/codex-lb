@@ -62,6 +62,7 @@ from app.modules.proxy._service.http_bridge import session_registry as http_brid
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
+from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -31194,6 +31195,92 @@ async def test_http_bridge_retry_circuit_claim_marker_cleanup_is_fenced() -> Non
         api_key_id=hard_session.key.api_key_id,
         claimed_generation=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_claim_release_retry_keeps_the_receipt_until_durable_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    hard_session = _make_bridge_session(key_value="bridge-terminal-claim-release-retry")
+    clear_claim = AsyncMock(side_effect=[False, True])
+    service._durable_bridge = SimpleNamespace(clear_retry_circuit_admission_claim=clear_claim)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-claim-release-retry",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        verified_stale_anchor_retry_circuit_key=hard_session.key,
+        verified_stale_anchor_retry_circuit_claimed_generation=4,
+        verified_stale_anchor_retry_circuit_claimed_at_epoch=time.time() - 1.0,
+        verified_stale_anchor_retry_circuit_claimed_until_epoch=time.time() + 60.0,
+    )
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS",
+        (0.0, 0.0),
+    )
+
+    http_bridge_retry_circuit_module._schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+        service,
+        request_state,
+    )
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
+
+    assert clear_claim.await_count == 2
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation is None
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch is None
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch is None
+    assert request_state.retry_circuit_claim_release_retry_scheduled is False
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_draining_terminal_finalizer_schedules_a_failed_claim_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-draining-terminal-claim-release",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        draining_until_terminal=True,
+        verified_stale_anchor_retry_circuit_claimed_generation=2,
+    )
+    clear_claim = AsyncMock(return_value=False)
+    schedule_retry = Mock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", clear_claim)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=cast(Any, None),
+        account_id_value="acc-terminal-claim-release",
+        event=None,
+        event_type=None,
+        payload=None,
+        api_key=None,
+        upstream_control=cast(Any, None),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    clear_claim.assert_awaited_once_with(request_state)
+    schedule_retry.assert_called_once_with(service, request_state)
 
 
 @pytest.mark.asyncio

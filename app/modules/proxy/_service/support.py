@@ -1102,6 +1102,7 @@ class _WebSocketRequestState:
     verified_stale_anchor_retry_circuit_claimed_generation: int | None = None
     verified_stale_anchor_retry_circuit_claimed_at_epoch: float | None = None
     verified_stale_anchor_retry_circuit_claimed_until_epoch: float | None = None
+    retry_circuit_claim_release_retry_scheduled: bool = False
     verified_stale_anchor_quarantine_generation: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when
     # it claimed none); released by the submit finalizer whenever the probe
