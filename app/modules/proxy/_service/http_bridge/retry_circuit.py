@@ -72,6 +72,10 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
 # Sentinel: the consult could not capture the durable anchor; the
 # abandonment then clears continuity unfenced (degraded, logged).
 _POISON_ANCHOR_CAPTURE_UNAVAILABLE: object = object()
+# Sentinel: a timed-out claim could not be reconciled. A durable CAS result of
+# ``None`` is a confirmed compare-and-set loss and must remain distinct from
+# this infrastructure-unknown outcome.
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED: object = object()
 _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
@@ -907,6 +911,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return None
+        if claimed is _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED:
+            return None
         if claimed is None:
             return False
 
@@ -1029,7 +1035,7 @@ class _HTTPBridgeRetryCircuitMixin:
         """Re-run a timed-out compare-and-set within the remaining request budget."""
         reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
         if reconcile_timeout_seconds is None:
-            return None
+            return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
         try:
             reconciliation = await self._await_http_bridge_retry_circuit_call(
                 run_durable_claim(),
@@ -1045,7 +1051,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         key.affinity_kind,
                         _hash_identifier(key.affinity_key),
                     )
-                return None
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
             return reconciliation.value
         except Exception:
             logger.warning(
@@ -1054,7 +1060,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(key.affinity_key),
                 exc_info=True,
             )
-            return None
+            return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
 
     async def _ensure_http_bridge_retry_circuit_loaded_for_key(
         self: Any,
@@ -1555,10 +1561,14 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.last_detail = state.last_detail or persisted.last_detail
                 else:
                     state.last_detail = persisted.last_detail or state.last_detail
-                state.persisted_admission_generation = max(
-                    state.persisted_admission_generation,
-                    max(0, getattr(persisted, "admission_generation", 0)),
-                )
+            # Claim-only durable writes advance the admission generation
+            # without changing the episode columns above. Preserve that
+            # high-water mark on both merge paths so a later settle carries
+            # the generation fence and cannot clear beneath an unseen claim.
+            state.persisted_admission_generation = max(
+                state.persisted_admission_generation,
+                max(0, getattr(persisted, "admission_generation", 0)),
+            )
             current_claim_receipt = (
                 state.persisted_admission_claimed_at_epoch,
                 state.persisted_admission_claimed_generation,

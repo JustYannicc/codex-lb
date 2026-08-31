@@ -3474,8 +3474,12 @@ class _HTTPBridgeRequestSubmitMixin:
         timer the fresh row actually carries instead of a 600-second wait no
         probe owns.
         """
-        captured_admission_generation = captured_generation[0] if captured_generation else 0
-        captured_lineage_epoch = captured_generation[1] if captured_generation else 0.0
+        captured_admission_generation = (
+            captured_generation.admission_generation if captured_generation is not None else 0
+        )
+        captured_lineage_epoch = (
+            captured_generation.persisted_updated_at_epoch if captured_generation is not None else 0.0
+        )
         try:
             moved_row = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=circuit_key.affinity_kind,
