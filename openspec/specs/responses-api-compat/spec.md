@@ -3775,6 +3775,7 @@ failure into `previous_response_owner_unavailable`.
 #### Scenario: Direct WebSocket candidate lookup failure fails closed
 
 - **GIVEN** the requested model is known to subscription routing
+- **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** the continuation is not already attached to its required open owner socket
 - **AND** loading eligible subscription candidates fails

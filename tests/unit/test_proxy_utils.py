@@ -21454,6 +21454,11 @@ async def test_stream_responses_security_work_pool_exhaustion_falls_back_to_ordi
         authorized_account.chatgpt_account_id,
         fallback_account.chatgpt_account_id,
     ]
+    assert all(
+        json.loads(chunk.split("data: ", 1)[1])["type"] != "response.failed"
+        for chunk in chunks
+        if chunk.startswith("data: {")
+    )
     assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
     assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
         False,
