@@ -2029,6 +2029,12 @@ class _HTTPBridgeMixin(
                 release_probe=self._release_http_bridge_retry_circuit_half_open,
             )
 
+        async def fail_connect_after_probe() -> None:
+            if required_preferred_account_id is not None:
+                return await fail_owner_unavailable_after_probe(release_account_lease=True)
+            await release_selected_account_lease()
+            complete_failed_handoff()
+
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
@@ -2287,7 +2293,7 @@ class _HTTPBridgeMixin(
                 break
             except ProxyResponseError as exc:
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
-                    await fail_owner_unavailable_after_probe(release_account_lease=True)
+                    await fail_connect_after_probe()
                     raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id) from exc
                 try:
                     account = await self._ensure_fresh_with_budget(
@@ -2309,7 +2315,7 @@ class _HTTPBridgeMixin(
                     break
                 except ProxyResponseError as retry_exc:
                     if retry_exc.status_code != 401:
-                        await fail_owner_unavailable_after_probe(release_account_lease=True)
+                        await fail_connect_after_probe()
                         raise _http_bridge_reconnect_connect_failure(retry_exc, required_preferred_account_id)
                     await self._handle_proxy_error(account, retry_exc)
                     await abandon_selected_account_retry(account)
@@ -2339,11 +2345,7 @@ class _HTTPBridgeMixin(
                         continue
                     await abandon_selected_account_retry(account)
                     continue
-                if required_preferred_account_id is not None:
-                    await fail_owner_unavailable_after_probe(release_account_lease=True)
-                else:
-                    await release_selected_account_lease()
-                    complete_failed_handoff()
+                await fail_connect_after_probe()
                 raise _http_bridge_reconnect_connect_failure(transport_exc, required_preferred_account_id)
             except asyncio.CancelledError:
                 session.closed = True

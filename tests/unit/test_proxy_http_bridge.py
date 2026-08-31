@@ -12254,6 +12254,77 @@ async def test_reconnect_transport_failure_keeps_half_open_probe_armed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("connect_statuses", [(503,), (401, 503)])
+async def test_reconnect_proxy_failure_keeps_half_open_probe_armed(
+    monkeypatch: pytest.MonkeyPatch,
+    connect_statuses: tuple[int, ...],
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-proxy-failure-probe-armed")
+    other_account = cast(Any, SimpleNamespace(id="acc-other", status=AccountStatus.ACTIVE))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-proxy-failure-probe-armed",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=other_account.id,
+    )
+    attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    request_state.response_create_attempt = attempt
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    circuit_state = _activate_half_open_probe(service, session)
+    connect_failures = [
+        proxy_service.ProxyResponseError(
+            status,
+            proxy_service.openai_error("upstream_proxy_unavailable", "Upstream proxy unavailable"),
+        )
+        for status in connect_statuses
+    ]
+    open_attempt = 0
+
+    async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(account=other_account, error_message=None, error_code=None)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    async def open_upstream(*_args: object, **_kwargs: object) -> Any:
+        nonlocal open_attempt
+        failure = connect_failures[open_attempt]
+        open_attempt += 1
+        raise failure
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert exc_info.value is connect_failures[-1]
+    assert open_attempt == len(connect_failures)
+    assert circuit_state.half_open_until > time.monotonic()
+    assert circuit_state.half_open_owner_session is session
+    assert attempt.disarmed is False
+
+
+@pytest.mark.asyncio
 async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
