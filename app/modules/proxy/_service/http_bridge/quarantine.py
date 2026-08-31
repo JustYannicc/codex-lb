@@ -73,6 +73,22 @@ class _HTTPBridgeQuarantineEntry:
     suppressed_weaker_until: float = 0.0
 
 
+def _http_bridge_quarantine_owner_ref(
+    session: Any,
+) -> weakref.ReferenceType[_HTTPBridgeSession] | None:
+    """Return an owner token when the quarantine source supports weak refs.
+
+    Planning-time retry-circuit loads use a lightweight key probe rather than
+    a real bridge session. That probe is intentionally not weak-referenceable;
+    leaving an existing token untouched preserves the identity fence for a
+    real session that already owns the key.
+    """
+    try:
+        return weakref.ref(session)
+    except TypeError:
+        return None
+
+
 def _http_bridge_quarantine_registry(
     service: Any,
 ) -> dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry]:
@@ -268,10 +284,7 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
     entry = registry.get(key)
     if entry is None:
         return None
-    if (
-        entry.quarantined_until > now
-        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-    ):
+    if entry.quarantined_until > now and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
         return entry.poison_generation
     return entry.generation
 
@@ -308,7 +321,9 @@ def _quarantine_http_bridge_session(
     # Store object lifetime, not ``id(session)``: a detached predecessor can
     # finish after a replacement reuses this key, and CPython may recycle an
     # integer id before that completion arrives.
-    entry.owner_ref = weakref.ref(session)
+    owner_ref = _http_bridge_quarantine_owner_ref(session)
+    if owner_ref is not None:
+        entry.owner_ref = owner_ref
     ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
     if minimum_seconds is not None:
         ttl_seconds = max(ttl_seconds, minimum_seconds)
@@ -411,7 +426,9 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     # The strike entry is shared with the eventual quarantine record. Keep an
     # owner token from the first strike onward so a detached predecessor can
     # never clear or reset state after the key has been reused.
-    entry.owner_ref = weakref.ref(session)
+    owner_ref = _http_bridge_quarantine_owner_ref(session)
+    if owner_ref is not None:
+        entry.owner_ref = owner_ref
     entry.consecutive_eventless_timeouts += 1
     entry.last_touched_monotonic = now
     if entry.consecutive_eventless_timeouts < _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD:
@@ -445,7 +462,15 @@ def _clear_http_bridge_quarantine(
     disproved poison arm.
     """
     registry = _http_bridge_quarantine_registry(service)
-    if not key_generation_captured:
+    if additional_key == session.key:
+        # A same-key recovery carries the origin fence separately from the
+        # completing session's primary fence. It is the stronger authority:
+        # use it before the primary clear runs, so an observed absence stays
+        # an absence fence instead of being replaced by an auto-captured
+        # generation for the entry armed during recovery.
+        key_generation = additional_key_generation
+        key_generation_captured = True
+    elif not key_generation_captured:
         key_generation = _http_bridge_quarantine_clear_fence(service, session.key)
     now = time.monotonic()
 
@@ -470,26 +495,25 @@ def _clear_http_bridge_quarantine(
                 # reused the key. The canonical registry wins over the stale
                 # object's mutable marker.
                 return False
-            if not is_current_primary_session and (
-                entry.owner_ref is None or entry.owner_ref() is not session
-            ):
+            if not is_current_primary_session and (entry.owner_ref is None or entry.owner_ref() is not session):
                 # If no canonical primary is present, the weak owner token
                 # is the only identity authority. Restored/legacy ownerless
                 # entries cannot be cleared by a completion guessing its
                 # ownership.
                 return False
-        if entry.quarantined_until <= now:
-            # An inactive entry still carries the eventless strike counter;
-            # a healthy completion resets it regardless of the fence.
-            registry.pop(key, None)
-            return True
         fence_generation = (
             entry.poison_generation
-            if entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            if (entry.quarantined_until > now and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON)
             else entry.generation
         )
         if captured_generation is None or fence_generation != captured_generation:
             return False
+        if entry.quarantined_until <= now:
+            # An inactive entry still carries the eventless strike counter;
+            # a healthy completion resets it only when the observed
+            # generation still matches.
+            registry.pop(key, None)
+            return True
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
             and entry.suppressed_weaker_reason is not None

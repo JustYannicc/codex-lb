@@ -6657,7 +6657,10 @@ async def test_http_bridge_completion_preserves_first_strike_recorded_during_ret
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock())
     monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
 
-    async def arm_quarantine_during_settlement(completing_session: proxy_service._HTTPBridgeSession) -> None:
+    async def arm_quarantine_during_settlement(
+        completing_session: proxy_service._HTTPBridgeSession,
+        **_: Any,
+    ) -> None:
         http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, completing_session)
 
     monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit", arm_quarantine_during_settlement)
@@ -6725,6 +6728,7 @@ async def test_http_bridge_completion_preserves_existing_first_strike_generation
 
     async def record_first_strike_after_settlement_yields(
         completing_session: proxy_service._HTTPBridgeSession,
+        **_: Any,
     ) -> None:
         settlement_started.set()
         await release_settlement.wait()
@@ -40370,7 +40374,12 @@ def test_a_completion_clear_spares_a_strike_armed_during_settlement() -> None:
         minimum_seconds=700.0,
     )
 
-    http_bridge_quarantine_module._clear_http_bridge_quarantine(service, session, key_generation=captured_fence)
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured_fence,
+        key_generation_captured=True,
+    )
 
     assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
         "a poison quarantine armed during the completion's durable awaits is fresh evidence the clear must spare"
