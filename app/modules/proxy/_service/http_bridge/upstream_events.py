@@ -2608,10 +2608,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if not getattr(request_state, "event_queue_consumer_started", False):
                         _revoke_http_bridge_event_queue(request_state)
                         _enqueue_http_bridge_abort_eos(request_state, event_queue)
-                    elif (
-                        request_state.completed_delivery_scope is None
-                        or request_state.completed_delivery_scope.terminal_enqueued
-                    ):
+                    else:
+                        # A completed response can be claimed after the
+                        # consumer attaches.  If terminal bookkeeping aborts
+                        # before publishing its event, the active consumer
+                        # still needs an EOS marker; with keepalives disabled
+                        # there is no timeout wakeup to finish the stream.
                         _enqueue_http_bridge_abort_eos(request_state, event_queue)
 
     async def _handle_or_defer_precreated_stream_health(

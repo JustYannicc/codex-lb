@@ -189,6 +189,75 @@ async def test_http_bridge_event_put_delivers_after_capacity_frees() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_put_reserves_budget_while_blocked_and_releases_on_revoke() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("first")
+
+    put_task = asyncio.create_task(event_queue.put("blocked-payload"))
+    await asyncio.sleep(0)
+    assert put_task.done() is False
+    assert budget.used_bytes == len("first") + len("blocked-payload")
+
+    event_queue.revoke()
+    await asyncio.wait_for(put_task, timeout=0.1)
+
+    assert event_queue.qsize() == 1
+    assert event_queue.queued_bytes == len("first")
+    assert budget.used_bytes == len("first")
+    assert event_queue.get_nowait() == "first"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_put_releases_blocked_budget_on_cancellation() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("first")
+
+    put_task = asyncio.create_task(event_queue.put("blocked-payload"))
+    await asyncio.sleep(0)
+    assert budget.used_bytes == len("first") + len("blocked-payload")
+
+    put_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await put_task
+
+    assert event_queue.qsize() == 1
+    assert event_queue.queued_bytes == len("first")
+    assert budget.used_bytes == len("first")
+    assert event_queue.get_nowait() == "first"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_blocked_budget_failure_dominates_late_terminal() -> None:
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=asyncio.Event(),
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("12345")
+
+    await event_queue.put("late-live-event")
+
+    assert event_queue.budget_exceeded.is_set()
+    assert event_queue.terminal_budget_exceeded is True
+    assert event_queue.enqueue_terminal_event_nowait("small-terminal") is False
+    assert event_queue.get_nowait() == "12345"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_abort_terminal_cancels_blocked_producer_after_buffered_events() -> None:
     revoked = asyncio.Event()
     event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
@@ -706,6 +775,87 @@ async def test_http_bridge_stream_fails_attached_consumer_on_budget_rejection_wi
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_aborted_attached_stream_gets_eos_without_keepalives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort settlement must wake an attached stream when keepalives are disabled."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="aborted-attached-no-keepalive")
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-aborted-attached-no-keepalive",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-aborted-attached-no-keepalive",
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+    )
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(sse_keepalive_interval_seconds=0, stream_idle_timeout_seconds=1),
+    )
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    stream_task = asyncio.create_task(anext(stream))
+    try:
+        while not request_state.event_queue_consumer_started:
+            await asyncio.sleep(0)
+        assert not stream_task.done()
+
+        # Model a completed request claimed for terminal bookkeeping and then
+        # removed from pending ownership before durable completion can publish.
+        completed_delivery_scope = proxy_support_module._HTTPBridgeCompletedDeliveryScope()
+        completed_delivery_scope.active = False
+        request_state.completed_delivery_scope = completed_delivery_scope
+        request_state.terminal_settlement_phase = "claimed"
+        async with session.pending_lock:
+            session.pending_requests.remove(request_state)
+            session.queued_request_count = 0
+
+        await service._settle_aborted_http_bridge_terminal_states(session, [request_state])
+
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(stream_task, timeout=1.0)
+        assert event_queue.revoked.is_set()
+        assert request_state.event_queue is None
+    finally:
+        stream_task.cancel()
+        await asyncio.gather(stream_task, return_exceptions=True)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
     revoked = asyncio.Event()
     event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)
@@ -883,6 +1033,97 @@ async def test_http_bridge_preconsumer_cleanup_before_queue_lookup_still_detache
         assert session.upstream_control.retire_after_drain is True
         assert request_state.event_queue is None
     finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_second_attachment_lookup_handles_revoked_queue_during_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queue revoked while turn-state registration awaits is an expected handoff."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="second-attachment-revoked")
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-second-attachment-revoked",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+    )
+    registration_started = asyncio.Event()
+    registration_release = asyncio.Event()
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    async def register_turn_state(
+        target_session: proxy_service._HTTPBridgeSession,
+        turn_state: str,
+    ) -> None:
+        assert target_session is session
+        assert turn_state == "turn-state"
+        registration_started.set()
+        await registration_release.wait()
+
+    detach = AsyncMock(wraps=service._detach_http_bridge_request)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_register_http_bridge_turn_state", register_turn_state)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state="turn-state",
+    )
+    handoff_task = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(registration_started.wait(), timeout=1.0)
+
+        # Model terminal cleanup revokes and detaches this still-pre-consumer
+        # queue during the registration await above.
+        async with session.pending_lock:
+            request_state.event_queue = None
+            request_state.event_queue_revoked.set()
+            event_queue.discard()
+        registration_release.set()
+
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(handoff_task, timeout=1.0)
+
+        detach.assert_any_await(session, request_state=request_state)
+        assert detach.await_count == 2
+        assert request_state.draining_until_terminal is True
+        assert request_state.event_queue is None
+        assert event_queue.empty()
+        assert event_queue.revoked.is_set()
+        assert session.pending_requests == deque()
+        assert session.queued_request_count == 0
+    finally:
+        registration_release.set()
+        handoff_task.cancel()
+        await asyncio.gather(handoff_task, return_exceptions=True)
         await stream.aclose()
 
 

@@ -4808,7 +4808,15 @@ class _HTTPBridgeStreamingMixin:
             if request_state.capacity_startup_ready_event is not None:
                 request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
-            assert event_queue is not None
+            # Terminal cleanup may revoke and detach a pre-consumer queue while
+            # the registration/ready awaits above are in flight.  Treat that
+            # revoked missing queue as the expected terminal handoff, just as
+            # the earlier post-submit lookup does.
+            if event_queue is None:
+                if request_state.event_queue_revoked.is_set():
+                    await detach_downstream_request()
+                    return
+                raise AssertionError("HTTP bridge stream reached attachment without an event queue")
             # Submission and upstream delivery can run before this generator
             # reaches its queue consumer. Publish attachment under the same
             # pending lock used by liveness settlement so a full pre-consumer
