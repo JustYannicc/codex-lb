@@ -505,6 +505,14 @@ class _HTTPBridgeRetryCircuitMixin:
     ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         async with self._http_bridge_retry_circuit_lock:
             local_state_before_lookup = self._http_bridge_retry_circuits.get(key)
+            local_persisted_observation = (
+                (
+                    local_state_before_lookup.persisted_updated_at_epoch,
+                    local_state_before_lookup.persisted_admission_generation,
+                )
+                if local_state_before_lookup is not None
+                else None
+            )
             local_claim_receipt = (
                 (
                     local_state_before_lookup.persisted_admission_claimed_at_epoch,
@@ -546,10 +554,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 getattr(persisted, "admission_claimed_generation", None) if persisted is not None else None,
                 getattr(persisted, "admission_claimed_until_epoch", None) if persisted is not None else None,
             )
-            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_receipt_advanced(
+            local_claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
                 local_claim_receipt,
                 current_claim_receipt,
-            ):
+            )
+            if persisted_claim_receipt == (None, None, None) and not local_claim_advanced:
                 current_claim_receipt = (None, None, None)
             (
                 persisted_admission_claimed_at_epoch,
@@ -563,22 +572,37 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_admission_claimed_at_epoch = persisted_admission_claimed_at_epoch
                 state.persisted_admission_claimed_generation = persisted_admission_claimed_generation
                 state.persisted_admission_claimed_until_epoch = persisted_admission_claimed_until_epoch
-            persisted_updated_at_epoch = (
-                max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
-                if state is not None and persisted is not None
-                else (
-                    persisted.updated_at_epoch
-                    if persisted is not None
-                    else (state.persisted_updated_at_epoch if state is not None else 0.0)
-                )
-            )
             persisted_admission_generation = _http_bridge_retry_circuit_admission_generation_for_load(
                 state,
                 persisted,
                 local_claim_receipt=local_claim_receipt,
                 current_claim_receipt=current_claim_receipt,
             )
+            persisted_updated_at_epoch = (
+                persisted.updated_at_epoch
+                if persisted is not None
+                else (state.persisted_updated_at_epoch if state is not None else 0.0)
+            )
+            if state is not None and persisted is not None:
+                current_persisted_observation = (
+                    state.persisted_updated_at_epoch,
+                    state.persisted_admission_generation,
+                )
+                concurrent_observation_advanced = (
+                    local_persisted_observation is not None
+                    and current_persisted_observation != local_persisted_observation
+                    and not local_claim_advanced
+                    and state.persisted_updated_at_epoch != persisted.updated_at_epoch
+                )
+                if concurrent_observation_advanced:
+                    # A same-key durable write completed while this lookup
+                    # was in flight. Keep its epoch and generation together;
+                    # pairing either half with the older lookup result would
+                    # manufacture a CAS fence that no durable row ever held.
+                    persisted_updated_at_epoch = state.persisted_updated_at_epoch
+                    persisted_admission_generation = state.persisted_admission_generation
             if state is not None:
+                state.persisted_updated_at_epoch = persisted_updated_at_epoch
                 state.persisted_admission_generation = persisted_admission_generation
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0

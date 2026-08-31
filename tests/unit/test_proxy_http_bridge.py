@@ -30714,6 +30714,83 @@ async def test_http_bridge_server_anchored_replay_does_not_bypass_precreated_coo
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_generation_adopts_recreated_row_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-circuit-recreated-row-epoch")
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        persisted_updated_at_epoch=200.0,
+        persisted_admission_generation=7,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    recreated = SimpleNamespace(
+        updated_at_epoch=100.0,
+        admission_generation=1,
+        admission_claimed_at_epoch=None,
+        admission_claimed_generation=None,
+        admission_claimed_until_epoch=None,
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=recreated))
+
+    load_succeeded, generation = await service._http_bridge_retry_circuit_generation(session)
+
+    assert load_succeeded is True
+    assert generation is not None
+    assert generation.admission_generation == 1
+    assert generation.persisted_updated_at_epoch == 100.0
+    assert state.persisted_admission_generation == 1
+    assert state.persisted_updated_at_epoch == 100.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_generation_keeps_concurrent_observation_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-circuit-concurrent-observation")
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        persisted_updated_at_epoch=100.0,
+        persisted_admission_generation=1,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def lookup_stale_row(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await release_lookup.wait()
+        return SimpleNamespace(
+            updated_at_epoch=100.0,
+            admission_generation=1,
+            admission_claimed_at_epoch=None,
+            admission_claimed_generation=None,
+            admission_claimed_until_epoch=None,
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+        )
+
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", lookup_stale_row)
+    load_task = asyncio.create_task(service._http_bridge_retry_circuit_generation(session))
+    await lookup_started.wait()
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        state.persisted_updated_at_epoch = 300.0
+        state.persisted_admission_generation = 3
+    release_lookup.set()
+
+    load_succeeded, generation = await load_task
+
+    assert load_succeeded is True
+    assert generation is not None
+    assert generation.persisted_updated_at_epoch == 300.0
+    assert generation.admission_generation == 3
+    assert state.persisted_updated_at_epoch == 300.0
+    assert state.persisted_admission_generation == 3
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_verified_stale_anchor_bypasses_only_captured_circuit_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
