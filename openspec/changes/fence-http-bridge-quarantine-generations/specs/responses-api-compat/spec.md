@@ -37,6 +37,12 @@ expired, pruned, or replaced generation MUST NOT clear an entry armed while the
 recovery is in flight. This fence MUST apply when the origin key is distinct
 from the completing session's key and when both keys are the same.
 
+For a poison quarantine, the cleanup fence MUST capture both the poison
+provenance generation and the entry's raw generation at the same observation.
+Clearing matched poison provenance MUST retain an inactive first-strike counter
+only when the raw generation advanced after that capture; a strike already
+present at capture MUST be reset with the poison arm.
+
 Quarantine cleanup MUST remain independent from retry-circuit state, account
 health, routing score, account eligibility, and durable bridge ownership. A
 successful replay MAY clear quarantine without clearing or settling a retry
@@ -92,6 +98,17 @@ untrimmed input. A genuine delta-only continuation MUST retain access to its
 durable anchor, because quarantine does not erase durable context and the
 request has no equivalent replacement context source. This distinction MUST
 not mutate account health, routing, or durable ownership.
+
+For this requirement, the canonical full-resend-shape predicate MUST inspect
+the decoded Responses request's `input` before durable lookup or replay
+projection. It is true for a string with at least 4096 characters, an array
+with more than one item, or a one-item array whose compact serialization of the
+entire array (`ensure_ascii=true` and no separator whitespace) is at least 4096
+characters. Shorter strings and arrays, empty or null input, and any other
+shape MUST remain delta-only; exactly 4096 is included and 4095 is not. A
+serialization failure MUST classify the one-item array as delta-only. This is
+only a payload-shape signal and does not establish durable full-resend proof,
+prefix identity, or account-neutral replay safety.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 

@@ -84,7 +84,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
-    _http_bridge_quarantine_clear_fence,
+    _http_bridge_quarantine_clear_fence_details,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -2635,9 +2635,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         # Alias persistence, operation updates, and recovery settlement can
         # yield while a concurrent failure arms a newer same-key quarantine;
         # that completion must not capture and clear evidence it did not see.
-        completion_quarantine_clear_fence = (
-            _http_bridge_quarantine_clear_fence(self, session.key) if event_type == "response.completed" else None
-        )
+        completion_quarantine_clear_fence: int | None = None
+        completion_quarantine_clear_raw_generation: int | None = None
+        if event_type == "response.completed":
+            completion_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
+            completion_quarantine_clear_fence = completion_fence.generation
+            completion_quarantine_clear_raw_generation = completion_fence.raw_generation
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -3846,9 +3849,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 self,
                 session,
                 key_generation=completion_quarantine_clear_fence,
+                key_raw_generation=completion_quarantine_clear_raw_generation,
                 key_generation_captured=True,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+                additional_key_raw_generation=terminal_request_state.verified_stale_anchor_quarantine_raw_generation,
             )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)
