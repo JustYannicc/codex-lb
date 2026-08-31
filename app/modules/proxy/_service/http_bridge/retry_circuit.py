@@ -899,7 +899,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     # that marker while accepting a real future cooldown;
                     # otherwise the newer durable row is authoritative,
                     # including a below-threshold row with no suppression.
-                    if returned_local_probe:
+                    if returned_local_probe or persisted.updated_at_epoch <= state.persisted_updated_at_epoch:
                         state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
                     else:
                         state.cooldown_until = persisted_cooldown_until
