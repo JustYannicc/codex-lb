@@ -1649,7 +1649,14 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
-                        if propagate_http_errors:
+                        # Native Codex clients consume terminal SSE events on
+                        # the backend route. Preserve the established
+                        # continuity-conflict event shape there, while HTTP
+                        # compatibility callers still receive the 502
+                        # response required for preferred-owner failures.
+                        if propagate_http_errors and (
+                            error_code != "continuity_owner_conflict" or enforce_openai_sdk_contract
+                        ):
                             raise ProxyResponseError(502, openai_error(error_code, message))
                         event = response_failed_event(
                             error_code,
@@ -1802,7 +1809,14 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
-                        if propagate_http_errors:
+                        # Native Codex clients consume terminal SSE events on
+                        # the backend route. Preserve the established
+                        # continuity-conflict event shape there, while HTTP
+                        # compatibility callers still receive the 502
+                        # response required for preferred-owner failures.
+                        if propagate_http_errors and (
+                            error_code != "continuity_owner_conflict" or enforce_openai_sdk_contract
+                        ):
                             raise ProxyResponseError(502, openai_error(error_code, message))
                         event = response_failed_event(
                             error_code,
