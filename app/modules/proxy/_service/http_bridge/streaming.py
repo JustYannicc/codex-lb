@@ -4807,23 +4807,25 @@ class _HTTPBridgeStreamingMixin:
                 request_state.capacity_startup_wait_event.clear()
             if request_state.capacity_startup_ready_event is not None:
                 request_state.capacity_startup_ready_event.set()
-            event_queue = request_state.event_queue
-            # Terminal cleanup may revoke and detach a pre-consumer queue while
-            # the registration/ready awaits above are in flight.  Treat that
-            # revoked missing queue as the expected terminal handoff, just as
-            # the earlier post-submit lookup does.
-            if event_queue is None:
-                if request_state.event_queue_revoked.is_set():
+            # Submission and upstream delivery can run before this generator
+            # reaches its queue consumer. Snapshot the queue and publish
+            # attachment under the same pending lock used by liveness
+            # settlement, so a revoke between the lookup and lock acquisition
+            # cannot leave this stream consuming a detached queue.
+            async with session.pending_lock:
+                event_queue = request_state.event_queue
+                queue_revoked = request_state.event_queue_revoked.is_set()
+                if event_queue is not None and not queue_revoked:
+                    request_state.event_queue_consumer_started = True
+            if event_queue is None or queue_revoked:
+                # Terminal cleanup may revoke and detach a pre-consumer queue
+                # while the registration/ready awaits above are in flight.
+                # Treat that revoked missing queue as the expected terminal
+                # handoff, just as the earlier post-submit lookup does.
+                if queue_revoked:
                     await detach_downstream_request()
                     return
                 raise AssertionError("HTTP bridge stream reached attachment without an event queue")
-            # Submission and upstream delivery can run before this generator
-            # reaches its queue consumer. Publish attachment under the same
-            # pending lock used by liveness settlement so a full pre-consumer
-            # sibling can be revoked without revoking a paused consumer.
-            async with session.pending_lock:
-                if request_state.event_queue is event_queue and not request_state.event_queue_revoked.is_set():
-                    request_state.event_queue_consumer_started = True
 
             yielded_any = False
             keepalive_sent = False

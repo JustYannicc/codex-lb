@@ -1128,6 +1128,102 @@ async def test_http_bridge_second_attachment_lookup_handles_revoked_queue_during
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_second_attachment_rechecks_revocation_before_marking_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queue revoked while attachment waits for the pending lock is not consumed."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="second-attachment-lock-race")
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("data: stale\n\n")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-second-attachment-lock-race",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+    )
+    registration_started = asyncio.Event()
+    registration_release = asyncio.Event()
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    async def register_turn_state(
+        target_session: proxy_service._HTTPBridgeSession,
+        turn_state: str,
+    ) -> None:
+        assert target_session is session
+        assert turn_state == "turn-state"
+        registration_started.set()
+        await registration_release.wait()
+
+    detach = AsyncMock(wraps=service._detach_http_bridge_request)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_register_http_bridge_turn_state", register_turn_state)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state="turn-state",
+    )
+    handoff_task = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(registration_started.wait(), timeout=1.0)
+        await session.pending_lock.acquire()
+        registration_release.set()
+
+        # Let the stream capture the queue and block trying to mark attachment.
+        for _ in range(10):
+            if session.pending_lock.statistics().tasks_waiting:
+                break
+            await asyncio.sleep(0)
+        assert session.pending_lock.statistics().tasks_waiting == 1
+
+        # Model terminal cleanup winning after the second queue lookup but
+        # before attachment can publish ownership.
+        request_state.event_queue = None
+        request_state.event_queue_revoked.set()
+        session.pending_lock.release()
+
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(handoff_task, timeout=1.0)
+
+        detach.assert_any_await(session, request_state=request_state)
+        assert request_state.event_queue_consumer_started is False
+        assert request_state.event_queue is None
+    finally:
+        registration_release.set()
+        if session.pending_lock.locked():
+            session.pending_lock.release()
+        handoff_task.cancel()
+        await asyncio.gather(handoff_task, return_exceptions=True)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_late_send_failure_revokes_full_queue_before_terminal_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
