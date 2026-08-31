@@ -1676,6 +1676,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
         probe_owner: object | None = None,
+        expected_half_open_until: float | None = None,
     ) -> bool:
         """Return an active local probe only from its owning session.
 
@@ -1690,6 +1691,8 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.half_open_until <= now:
+                return False
+            if expected_half_open_until is not None and state.half_open_until != expected_half_open_until:
                 return False
             if state.half_open_owner_session is not session:
                 return False
