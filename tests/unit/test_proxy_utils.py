@@ -41476,6 +41476,79 @@ async def test_stream_prompt_cache_key_does_not_soften_previous_response_owner(m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("selection_case", ["empty", "alternate"])
+async def test_stream_preferred_owner_failure_propagates_http_error_after_logging(monkeypatch, selection_case: str):
+    """HTTP callers get the owner failure after the request log is recorded.
+
+    The empty-selection case exercises the terminal owner-unavailable branch;
+    the alternate-selection case exercises the guard that rejects a balancer
+    result which violates the required previous-response owner.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner_account = _make_account("acc_stream_http_owner_failure")
+    alternate_account = _make_account("acc_stream_http_alternate_failure")
+    selected_account = None if selection_case == "empty" else alternate_account
+    log_calls: list[dict[str, object]] = []
+    selection = AsyncMock(
+        return_value=AccountSelection(
+            account=selected_account,
+            error_message="Previous-response owner is unavailable" if selected_account is None else None,
+        )
+    )
+
+    async def record_log(**kwargs: object) -> None:
+        log_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=owner_account.id),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_write_request_log", record_log)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_http_owner_failure",
+        }
+    )
+
+    stream = service._stream_with_retry(
+        payload,
+        {"session_id": "sid-http-owner-failure"},
+        codex_session_affinity=False,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        request_transport="http",
+        file_account_resolution_complete=True,
+        upstream_stream_transport_override="http",
+    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        async for _chunk in stream:
+            pytest.fail("owner failure must propagate as an HTTP error")
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert exc_info.value.payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert len(log_calls) == 1
+    assert log_calls[0]["account_id"] == owner_account.id
+    assert log_calls[0]["status"] == "error"
+    assert log_calls[0]["error_code"] == "previous_response_owner_unavailable"
+    selection.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stream_selection_fail_closed_records_owner_unavailable_metric(monkeypatch, caplog):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
