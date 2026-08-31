@@ -343,16 +343,6 @@ class _HTTPBridgeRetryCircuitLoadOutcome:
     stale_purge_uncertain: bool = False
 
 
-def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
-    if reset_transient_cache is not None:
-        reset_transient_cache()
-    service._http_bridge_retry_circuits = {}
-    service._http_bridge_retry_circuit_loaded_keys = set()
-    service._http_bridge_retry_circuit_persisted_keys = set()
-    service._http_bridge_retry_circuit_abandoned_tasks = set()
-    service._http_bridge_retry_circuit_lock = anyio.Lock()
-
-
 def _consume_abandoned_http_bridge_retry_circuit_task(
     service: Any,
     task: asyncio.Task[Any],
@@ -460,7 +450,9 @@ async def _retry_http_bridge_retry_circuit_admission_claim_release(
             if claimed_until_epoch is not None and claimed_until_epoch <= time.time():
                 return
             try:
-                released = await service._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+                released = await service._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    request_state
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
