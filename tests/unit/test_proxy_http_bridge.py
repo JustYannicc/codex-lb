@@ -1068,20 +1068,20 @@ def test_previous_response_recovery_preserves_present_blank_param(param: str) ->
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
-    assert (
-        websocket_helpers_module._websocket_event_error_param(
-            "error",
-            {
-                "type": "error",
-                "status": 400,
-                "error_type": "invalid_request_error",
-                "code": "invalid_request_error",
-                "message": "Invalid previous_response_id.",
-                "param": param,
-            },
-        )
-        == ""
+    param_state = websocket_helpers_module._websocket_event_error_param(
+        "error",
+        {
+            "type": "error",
+            "status": 400,
+            "error_type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Invalid previous_response_id.",
+            "param": param,
+        },
     )
+    assert param_state is not None
+    assert param_state.present
+    assert param_state.raw == param
 
 
 @pytest.mark.parametrize("param", [None, 0, False, {}, []])
@@ -1092,21 +1092,21 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
-    assert (
-        websocket_helpers_module._websocket_event_error_param(
-            "error",
-            cast(
-                dict[str, proxy_service.JsonValue],
-                {
-                    "type": "error",
-                    "code": "invalid_request_error",
-                    "message": "Invalid previous_response_id.",
-                    "param": param,
-                },
-            ),
-        )
-        == ""
+    param_state = websocket_helpers_module._websocket_event_error_param(
+        "error",
+        cast(
+            dict[str, proxy_service.JsonValue],
+            {
+                "type": "error",
+                "code": "invalid_request_error",
+                "message": "Invalid previous_response_id.",
+                "param": param,
+            },
+        ),
     )
+    assert param_state is not None
+    assert param_state.present
+    assert param_state.raw == param
 
     _event_block, normalized_payload, _event, event_type = (
         http_bridge_helpers_module._normalize_http_bridge_error_event(
@@ -1129,9 +1129,9 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert normalized_payload is not None
     normalized_response = cast(dict[str, Any], normalized_payload["response"])
     normalized_error = cast(dict[str, Any], normalized_response["error"])
-    assert normalized_error["param"] == ""
+    assert "param" not in normalized_error
     normalized_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(normalized_payload)
-    assert normalized_envelope["error"]["param"] == ""
+    assert "param" not in normalized_envelope["error"]
 
     nested_payload = cast(
         dict[str, proxy_service.JsonValue],
@@ -1149,7 +1149,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     parsed_event = cast(
         Any,
         SimpleNamespace(
-            error=SimpleNamespace(
+            error=OpenAIError(
                 code="invalid_request_error",
                 type="invalid_request_error",
                 message="Invalid previous_response_id.",
@@ -1167,7 +1167,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
     assert nested_normalized is not None
     nested_response = cast(dict[str, Any], nested_normalized["response"])
     nested_error = cast(dict[str, Any], nested_response["error"])
-    assert nested_error["param"] == ""
+    assert "param" not in nested_error
 
     raw_failed_envelope = proxy_support_module._openai_error_envelope_from_response_failed_payload(
         cast(
@@ -1185,7 +1185,7 @@ def test_previous_response_recovery_rejects_present_non_string_param(param: obje
             },
         )
     )
-    assert raw_failed_envelope["error"]["param"] == ""
+    assert raw_failed_envelope["error"]["param"] == param
 
 
 def test_parse_openai_error_retains_unrelated_error_with_nullable_param() -> None:
