@@ -42164,11 +42164,15 @@ async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> 
     assert gate_state.half_open_until == 0.0, (
         "failing closed without dispatching must hand the claimed half-open probe back"
     )
+    assert gate_state.half_open_owner_session is None
+    assert gate_state.half_open_owner_token is None
+    assert gate_state.last_half_open_release_monotonic > gate_state.last_durable_load_monotonic
     assert 0.0 < gate_state.cooldown_until <= time.monotonic(), (
         "the consumed transition marker is restored so the corrected resend re-claims the probe"
     )
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
     assert await service._http_bridge_precreated_retry_allowed(session) is True, (
-        "the corrected resend claims the returned probe"
+        "a durable miss must preserve the returned marker so the corrected resend claims one fresh probe"
     )
     assert await service._http_bridge_precreated_retry_allowed(session) is False, (
         "a concurrent follow-up is suppressed behind the re-claimed lease"
@@ -43851,6 +43855,64 @@ async def test_a_failed_internal_retry_hands_the_claimed_probe_back() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_pending_retry_removed_after_admission_returns_its_exact_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-retry-removed-after-admission")
+    owner.request_text = '{"type":"response.create","model":"gpt-5.4","input":"continue"}'
+    session = _make_bridge_session(
+        key_value="bridge-retry-removed-after-admission",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now - 1.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=time.time() - 30.0,
+        last_durable_load_monotonic=now,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+    durable_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() - 1.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=state.persisted_updated_at_epoch,
+        admission_generation=0,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=[durable_row, None]),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    original_admission = service._http_bridge_precreated_retry_allowed
+
+    async def remove_owner_after_admission(*args: Any, **kwargs: Any) -> bool:
+        allowed = await original_admission(*args, **kwargs)
+        if allowed:
+            session.pending_requests.clear()
+            session.queued_request_count = 0
+        return allowed
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", remove_owner_after_admission)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert state.last_half_open_release_monotonic > state.last_durable_load_monotonic
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", original_admission)
+    replacement_owner = object()
+    assert await service._http_bridge_precreated_retry_allowed(session, probe_owner=replacement_owner) is True
+    assert state.half_open_owner_session is session
+    assert state.half_open_owner_token is replacement_owner
+
+
+@pytest.mark.asyncio
 async def test_the_poison_restore_transitions_its_own_tombstone() -> None:
     # A poison-backed completion settles onto the tombstone, then its
     # registration fails: the re-seed's strike merge cannot rewrite the
@@ -44601,6 +44663,8 @@ async def test_the_gate_returns_a_probe_reclaimed_over_a_stale_lease(
         # stale lease, and claims a fresh probe for this request — handing
         # the claimed token out under the claim, like the real gate.
         gate_state.half_open_until = time.monotonic() + 600.0
+        gate_state.half_open_owner_session = session
+        gate_state.half_open_owner_token = kwargs.get("probe_owner", session)
         claimed_out = kwargs.get("claimed_lease_out")
         if claimed_out is not None:
             claimed_out.append(gate_state.half_open_until)

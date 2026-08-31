@@ -76,6 +76,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
         *,
         detail: str,
         probe_owner: object | None = None,
+        expected_half_open_until: float | None = None,
     ) -> bool: ...
     async def _release_http_bridge_admission_preregistration(
         self,
