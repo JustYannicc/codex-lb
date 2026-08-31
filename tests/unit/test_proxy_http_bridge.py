@@ -24350,6 +24350,79 @@ async def test_cleanup_http_bridge_submit_interruption_does_not_release_unacquir
     gate.release()
 
 
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_detaches_stalled_claim_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    response_create_gate = asyncio.Semaphore(0)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-stalled-claim-release",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_create_gate=response_create_gate,
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        verified_stale_anchor_retry_circuit_key=_make_bridge_session(
+            key_value="bridge-submit-stalled-claim-release"
+        ).key,
+        verified_stale_anchor_retry_circuit_claimed_generation=3,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-submit-stalled-claim-release",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.response_create_gate = response_create_gate
+    clear_started = asyncio.Event()
+    release_clear = asyncio.Event()
+
+    async def cancellation_resistant_clear(**_kwargs: Any) -> bool:
+        clear_started.set()
+        try:
+            await release_clear.wait()
+        except asyncio.CancelledError:
+            await release_clear.wait()
+        return True
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(clear_retry_circuit_admission_claim=cancellation_resistant_clear),
+    )
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    started_at = time.monotonic()
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=True,
+        request_enqueued=True,
+        counted_in_queue=True,
+    )
+
+    assert await asyncio.wait_for(clear_started.wait(), timeout=0.1)
+    assert time.monotonic() - started_at < 0.25
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert session.response_create_gate.locked() is False
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 3
+
+    abandoned = cast(Any, service)._http_bridge_retry_circuit_abandoned_tasks
+    assert len(abandoned) == 1
+    release_clear.set()
+    await asyncio.wait_for(asyncio.gather(*tuple(abandoned)), timeout=0.5)
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation is None
+
+
 def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_release() -> None:
     source = inspect.getsource(proxy_service.ProxyService.proxy_responses_websocket)
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
@@ -30790,6 +30863,63 @@ async def test_http_bridge_retry_circuit_claim_uses_exact_request_deadline_as_le
         "claimed_at_epoch": 1_000.0,
         "claimed_until_epoch": 1_077.0,
     }
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_passes_request_deadline_to_generation_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="bridge-stale-anchor-claim-deadline")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-anchor-claim-deadline",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"replay"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    service._http_bridge_sessions[session.key] = session
+    request_state.bridge_request_deadline = time.monotonic() + 17.0
+    request_state.verified_stale_anchor_replay = True
+    request_state.verified_stale_anchor_retry_circuit_generation_captured = True
+    request_state.verified_stale_anchor_retry_circuit_key = session.key
+    claim_kwargs: dict[str, Any] = {}
+
+    async def record_claim(**kwargs: Any) -> bool:
+        claim_kwargs.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", record_claim)
+
+    try:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+        assert claim_kwargs["deadline"] == request_state.bridge_request_deadline
+        send_text.assert_awaited_once_with(request_state.request_text)
+    finally:
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=True,
+            request_enqueued=True,
+            counted_in_queue=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -44971,6 +45101,109 @@ def test_only_a_poison_quarantine_proves_the_bridge_anchor_dead() -> None:
     assert poison_quarantined(service, eventless_session.key) is False, (
         "repeated eventless timeouts fence the session; they never proved the anchor dead"
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_load_accepts_durable_claim_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-claim-release-refresh")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=time.time(),
+        persisted_admission_generation=1,
+        persisted_admission_claimed_at_epoch=100.0,
+        persisted_admission_claimed_generation=1,
+        persisted_admission_claimed_until_epoch=time.time() + 60.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_retry_circuit",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=0,
+                cooldown_until_epoch=0.0,
+                last_detail=None,
+                updated_at_epoch=time.time(),
+                admission_generation=1,
+                admission_claimed_at_epoch=None,
+                admission_claimed_generation=None,
+                admission_claimed_until_epoch=None,
+            )
+        ),
+    )
+
+    generation_loaded, generation = await service._http_bridge_retry_circuit_generation(hard_session)
+    assert generation_loaded is True
+    assert generation is not None
+    assert generation.admission_claimed_generation is None
+    assert state.persisted_admission_claimed_generation is None
+
+    assert await service._load_http_bridge_retry_circuit(hard_session) is True
+
+    assert state.persisted_admission_claimed_at_epoch is None
+    assert state.persisted_admission_claimed_generation is None
+    assert state.persisted_admission_claimed_until_epoch is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_load_keeps_claim_advanced_during_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-claim-refresh-race")
+    now_epoch = time.time()
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=now,
+        persisted_updated_at_epoch=now_epoch,
+        persisted_admission_generation=1,
+        persisted_admission_claimed_at_epoch=100.0,
+        persisted_admission_claimed_generation=1,
+        persisted_admission_claimed_until_epoch=now_epoch + 60.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def lookup_after_local_claim_advance(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await release_lookup.wait()
+        return SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=now_epoch,
+            admission_generation=1,
+            admission_claimed_at_epoch=None,
+            admission_claimed_generation=None,
+            admission_claimed_until_epoch=None,
+        )
+
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_retry_circuit",
+        lookup_after_local_claim_advance,
+    )
+    load_task = asyncio.create_task(service._load_http_bridge_retry_circuit(hard_session))
+    await lookup_started.wait()
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        state.persisted_admission_claimed_at_epoch = 200.0
+        state.persisted_admission_claimed_generation = 2
+        state.persisted_admission_claimed_until_epoch = now_epoch + 120.0
+    release_lookup.set()
+
+    assert await load_task is True
+    assert state.persisted_admission_claimed_generation == 2
+    assert state.persisted_admission_claimed_at_epoch == 200.0
+    assert state.persisted_admission_claimed_until_epoch == now_epoch + 120.0
 
 
 @pytest.mark.asyncio

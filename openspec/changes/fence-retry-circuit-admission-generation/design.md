@@ -51,6 +51,9 @@ sets intact. A confirmed miss may remove only a local marker that has not been
 updated since the lookup began. A present row is cleared by a conditional
 update matching both its observed timestamp and admission generation. A false
 row-count result means a newer durable writer won and the local state is kept.
+A same-key success may reset the failure observation while an active replay
+receipt remains in place; the receipt is cleared only by its owning replay's
+generation-matched release.
 Only after a successful CAS does the local state get removed, and a local
 failure that arrived after the lookup still wins the post-CAS check.
 

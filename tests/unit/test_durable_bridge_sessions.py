@@ -3482,7 +3482,7 @@ async def test_durable_bridge_retry_circuit_claim_lease_blocks_purge_and_allows_
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_retry_circuit_admission_claim_clear_preserves_failure_state(
+async def test_durable_bridge_retry_circuit_reset_preserves_active_admission_claim(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
     await coordinator.persist_retry_circuit(
@@ -3506,9 +3506,9 @@ async def test_durable_bridge_retry_circuit_admission_claim_clear_preserves_fail
     assert claimed is not None
     assert claimed.admission_claimed_generation == 1
 
-    # Ordinary response settlement cannot erase a replay-owned marker.  The
-    # replay's dedicated marker release below is the only operation allowed to
-    # leave the failure state in place while making the generation claimable.
+    # Ordinary response settlement resets the failure observation without
+    # erasing a replay-owned marker. The replay's dedicated marker release
+    # below still makes the generation claimable.
     assert (
         await coordinator.clear_retry_circuit(
             session_key_kind="session_header",
@@ -3517,7 +3517,7 @@ async def test_durable_bridge_retry_circuit_admission_claim_clear_preserves_fail
             expected_updated_at_epoch=1200.0,
             expected_admission_generation=1,
         )
-        is False
+        is True
     )
 
     assert (
@@ -3536,6 +3536,9 @@ async def test_durable_bridge_retry_circuit_admission_claim_clear_preserves_fail
     )
     assert still_claimed is not None
     assert still_claimed.admission_claimed_generation == 1
+    assert still_claimed.consecutive_failures == 0
+    assert still_claimed.cooldown_until_epoch == 0.0
+    assert still_claimed.last_detail is None
 
     assert (
         await coordinator.clear_retry_circuit_admission_claim(
@@ -3554,17 +3557,16 @@ async def test_durable_bridge_retry_circuit_admission_claim_clear_preserves_fail
     assert released is not None
     assert released.admission_claimed_generation is None
     assert released.admission_generation == 1
-    assert released.updated_at_epoch == 1200.0
-    assert released.consecutive_failures == 3
-    assert released.cooldown_until_epoch == 1300.0
-    assert released.last_detail == "stream_idle_timeout"
+    assert released.consecutive_failures == 0
+    assert released.cooldown_until_epoch == 0.0
+    assert released.last_detail is None
 
     assert (
         await coordinator.purge_retry_circuit(
             session_key_kind="session_header",
             session_key_value="sid-retry-circuit-claim-clear",
             api_key_id="key-claim-clear",
-            expected_updated_at_epoch=1200.0,
+            expected_updated_at_epoch=released.updated_at_epoch,
             expected_admission_generation=1,
         )
         is True

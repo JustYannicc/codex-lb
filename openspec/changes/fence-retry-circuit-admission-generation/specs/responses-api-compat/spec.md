@@ -75,6 +75,15 @@ older receipt MUST NOT clear a reclaimed marker.
 - **THEN** settlement MUST leave the local circuit and marker sets intact
 - **AND** the request MUST not claim that the circuit was cleared
 
+#### Scenario: Same-key success preserves an active replay receipt
+
+- **GIVEN** an authorized stale-anchor replay owns an active claim receipt
+- **WHEN** another same-key request completes successfully
+- **THEN** the retry-circuit failure count, cooldown, and detail MUST reset
+- **AND** the active claim generation and receipt MUST remain unchanged
+- **AND** the replay owner MUST still release that receipt explicitly at
+  terminal settlement
+
 ### Requirement: Retry-circuit stale purges are generation-fenced
 
 Expired retry-circuit purges MUST compare the captured `updated_at_epoch` and

@@ -2815,28 +2815,12 @@ class _HTTPBridgeRequestSubmitMixin:
     ) -> None:
         claimed_generation = request_state.verified_stale_anchor_retry_circuit_claimed_generation
         claim_key = request_state.verified_stale_anchor_retry_circuit_key
-        if (
+        release_pre_dispatch_claim = (
             claimed_generation is not None
             and claim_key is not None
             and not request_state.recovery_attempt_dispatched
             and not request_state.operation_dispatched
-        ):
-            clear_claim_kwargs: dict[str, Any] = {
-                "key": claim_key,
-                "claimed_generation": claimed_generation,
-            }
-            if request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch is not None:
-                clear_claim_kwargs["claimed_at_epoch"] = (
-                    request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch
-                )
-            if request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch is not None:
-                clear_claim_kwargs["claimed_until_epoch"] = (
-                    request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch
-                )
-            if await self._clear_http_bridge_retry_circuit_admission_claim(**clear_claim_kwargs):
-                request_state.verified_stale_anchor_retry_circuit_claimed_generation = None
-                request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
-                request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
+        )
         retire_closed_session = False
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:
@@ -2847,6 +2831,34 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                 request_state.admission_waiter_preregistered = False
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+        if request_state.response_create_gate is not None:
+            if gate_acquired or request_state.response_create_gate_acquired:
+                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            else:
+                account_response_create_lease = request_state.account_response_create_lease
+                account_response_create_release = request_state.account_response_create_release
+                request_state.account_response_create_lease = None
+                request_state.account_response_create_release = None
+                if account_response_create_lease is not None and account_response_create_release is not None:
+                    await account_response_create_release(account_response_create_lease)
+                if request_state.response_create_admission is not None:
+                    request_state.response_create_admission.release()
+                    request_state.response_create_admission = None
+                request_state.awaiting_response_created = False
+                request_state.response_create_gate = None
+                request_state.response_create_gate_acquired = False
+        elif gate_acquired:
+            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        if release_pre_dispatch_claim:
+            try:
+                await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state)
+            except Exception:
+                logger.warning(
+                    "Failed to release HTTP bridge retry-circuit admission claim during submit cleanup request_id=%s",
+                    request_state.request_id,
+                    exc_info=True,
+                )
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_claimed
@@ -2948,25 +2960,6 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.operation_id = None
                         request_state.operation_fingerprint = None
                         request_state.operation_parent_response_id = None
-        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        if request_state.response_create_gate is not None:
-            if gate_acquired or request_state.response_create_gate_acquired:
-                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
-            else:
-                account_response_create_lease = request_state.account_response_create_lease
-                account_response_create_release = request_state.account_response_create_release
-                request_state.account_response_create_lease = None
-                request_state.account_response_create_release = None
-                if account_response_create_lease is not None and account_response_create_release is not None:
-                    await account_response_create_release(account_response_create_lease)
-                if request_state.response_create_admission is not None:
-                    request_state.response_create_admission.release()
-                    request_state.response_create_admission = None
-                request_state.awaiting_response_created = False
-                request_state.response_create_gate = None
-                request_state.response_create_gate_acquired = False
-        elif gate_acquired:
-            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if retire_closed_session:
             await self._retire_stale_pending_http_bridge_session(
                 session,

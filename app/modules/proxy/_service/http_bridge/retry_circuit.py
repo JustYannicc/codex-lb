@@ -91,6 +91,8 @@ def _http_bridge_retry_circuit_claim_timeout_seconds(deadline: float | None) -> 
     if remaining_seconds <= 0:
         return None
     return min(_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS, remaining_seconds)
+
+
 # Written over a surviving at-threshold row when a completion registered a
 # fresh anchor but its settlement failed. Deliberately outside the poison
 # detail map: a replica loading the row keeps the cooldown but neither arms
@@ -208,6 +210,27 @@ class _HTTPBridgeRetryCircuitState:
     owed_poison_detail: str | None = None
 
 
+def _http_bridge_retry_circuit_claim_marker_rank(
+    claimed_at_epoch: float | None,
+    claimed_generation: int | None,
+    claimed_until_epoch: float | None,
+) -> tuple[int, float, float]:
+    """Order claim receipts so a concurrent local generation can win a merge."""
+    return (
+        claimed_generation if claimed_generation is not None else -1,
+        claimed_at_epoch if claimed_at_epoch is not None else -1.0,
+        claimed_until_epoch if claimed_until_epoch is not None else -1.0,
+    )
+
+
+def _http_bridge_retry_circuit_claim_marker_advanced(
+    previous_generation: int | None,
+    current_generation: int | None,
+) -> bool:
+    """Return whether a local receipt moved to a newer admission generation."""
+    return current_generation is not None and (previous_generation is None or current_generation > previous_generation)
+
+
 def _merge_http_bridge_retry_circuit_claim_marker(
     local_claimed_at_epoch: float | None,
     local_claimed_generation: int | None,
@@ -225,19 +248,12 @@ def _merge_http_bridge_retry_circuit_claim_marker(
     fail-closed and cannot clear a newer durable claim.
     """
 
-    def marker_rank(
-        claimed_at_epoch: float | None,
-        claimed_generation: int | None,
-        claimed_until_epoch: float | None,
-    ) -> tuple[int, float, float]:
-        return (
-            claimed_generation if claimed_generation is not None else -1,
-            claimed_at_epoch if claimed_at_epoch is not None else -1.0,
-            claimed_until_epoch if claimed_until_epoch is not None else -1.0,
-        )
-
-    local_rank = marker_rank(local_claimed_at_epoch, local_claimed_generation, local_claimed_until_epoch)
-    persisted_rank = marker_rank(
+    local_rank = _http_bridge_retry_circuit_claim_marker_rank(
+        local_claimed_at_epoch,
+        local_claimed_generation,
+        local_claimed_until_epoch,
+    )
+    persisted_rank = _http_bridge_retry_circuit_claim_marker_rank(
         persisted_claimed_at_epoch,
         persisted_claimed_generation,
         persisted_claimed_until_epoch,
@@ -437,6 +453,17 @@ class _HTTPBridgeRetryCircuitMixin:
         self: Any,
         key: _HTTPBridgeSessionKey,
     ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
+        async with self._http_bridge_retry_circuit_lock:
+            local_state_before_lookup = self._http_bridge_retry_circuits.get(key)
+            local_claim_receipt = (
+                (
+                    local_state_before_lookup.persisted_admission_claimed_at_epoch,
+                    local_state_before_lookup.persisted_admission_claimed_generation,
+                    local_state_before_lookup.persisted_admission_claimed_until_epoch,
+                )
+                if local_state_before_lookup is not None
+                else (None, None, None)
+            )
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -463,18 +490,37 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_admission_generation if state is not None else 0,
                 getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
             )
+            current_claim_receipt = (
+                (
+                    state.persisted_admission_claimed_at_epoch,
+                    state.persisted_admission_claimed_generation,
+                    state.persisted_admission_claimed_until_epoch,
+                )
+                if state is not None
+                else (None, None, None)
+            )
+            persisted_claim_receipt = (
+                getattr(persisted, "admission_claimed_at_epoch", None) if persisted is not None else None,
+                getattr(persisted, "admission_claimed_generation", None) if persisted is not None else None,
+                getattr(persisted, "admission_claimed_until_epoch", None) if persisted is not None else None,
+            )
+            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_marker_advanced(
+                local_claim_receipt[1],
+                current_claim_receipt[1],
+            ):
+                current_claim_receipt = (None, None, None)
             (
                 persisted_admission_claimed_at_epoch,
                 persisted_admission_claimed_generation,
                 persisted_admission_claimed_until_epoch,
             ) = _merge_http_bridge_retry_circuit_claim_marker(
-                state.persisted_admission_claimed_at_epoch if state is not None else None,
-                state.persisted_admission_claimed_generation if state is not None else None,
-                state.persisted_admission_claimed_until_epoch if state is not None else None,
-                getattr(persisted, "admission_claimed_at_epoch", None) if persisted is not None else None,
-                getattr(persisted, "admission_claimed_generation", None) if persisted is not None else None,
-                getattr(persisted, "admission_claimed_until_epoch", None) if persisted is not None else None,
+                *current_claim_receipt,
+                *persisted_claim_receipt,
             )
+            if state is not None:
+                state.persisted_admission_claimed_at_epoch = persisted_admission_claimed_at_epoch
+                state.persisted_admission_claimed_generation = persisted_admission_claimed_generation
+                state.persisted_admission_claimed_until_epoch = persisted_admission_claimed_until_epoch
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
@@ -518,6 +564,7 @@ class _HTTPBridgeRetryCircuitMixin:
             and current_generation.last_failure_monotonic <= generation.last_failure_monotonic
             and current_generation.local_cooldown_until <= generation.local_cooldown_until
         )
+
     async def _clear_http_bridge_retry_circuit_admission_claim(
         self: Any,
         *,
@@ -597,6 +644,29 @@ class _HTTPBridgeRetryCircuitMixin:
             request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
             request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
         return cleared
+
+    async def _clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+        self: Any,
+        request_state: Any,
+    ) -> bool:
+        """Release a pre-dispatch claim without pinning submit cleanup.
+
+        A durable driver can ignore cancellation after its bound.  Keep the
+        local submit ownership cleanup independent from that operation while
+        retaining the request receipt until the detached task settles.
+        """
+        bounded = await self._await_http_bridge_retry_circuit_call(
+            self._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state),
+            timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+            label="submit-interruption-claim-release",
+        )
+        if not bounded.completed:
+            logger.warning(
+                "Timed out releasing HTTP bridge retry-circuit admission claim during submit cleanup request_id=%s",
+                getattr(request_state, "request_id", None),
+            )
+            return False
+        return bounded.value is True
 
     async def _await_http_bridge_retry_circuit_call(
         self: Any,
@@ -1162,6 +1232,15 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(key)
+            local_claim_receipt = (
+                (
+                    local_state.persisted_admission_claimed_at_epoch,
+                    local_state.persisted_admission_claimed_generation,
+                    local_state.persisted_admission_claimed_until_epoch,
+                )
+                if local_state is not None
+                else (None, None, None)
+            )
             if local_state is not None:
                 local_state.last_touched_monotonic = now_monotonic
         try:
@@ -1202,6 +1281,19 @@ class _HTTPBridgeRetryCircuitMixin:
                     local_state is not None
                     and local_state.last_failure_monotonic > local_state.last_durable_load_monotonic
                 )
+                current_claim_receipt = (
+                    (
+                        local_state.persisted_admission_claimed_at_epoch,
+                        local_state.persisted_admission_claimed_generation,
+                        local_state.persisted_admission_claimed_until_epoch,
+                    )
+                    if local_state is not None
+                    else (None, None, None)
+                )
+                local_claim_advanced = _http_bridge_retry_circuit_claim_marker_advanced(
+                    local_claim_receipt[1],
+                    current_claim_receipt[1],
+                )
                 # A confirmed miss past the stale-lookup guards is durable
                 # knowledge worth caching for the planning window; stamped
                 # with the load's start so it expires conservatively, and
@@ -1219,15 +1311,17 @@ class _HTTPBridgeRetryCircuitMixin:
                     del self._http_bridge_retry_circuit_planning_misses[
                         next(iter(self._http_bridge_retry_circuit_planning_misses))
                     ]
+                if (
+                    key in self._http_bridge_retry_circuit_persisted_keys
+                    and not locally_updated
+                    and local_claim_advanced
+                ):
+                    # A claim committed locally after this lookup began. The
+                    # miss predates that durable marker, so keep its receipt
+                    # and local circuit instead of resurrecting a released
+                    # marker or dropping an in-flight replay's protection.
+                    return True
                 if key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
-                    locally_claimed = bool(
-                        local_state is not None
-                        and local_state.persisted_admission_claimed_generation is not None
-                        and local_state.persisted_admission_claimed_until_epoch is not None
-                        and local_state.persisted_admission_claimed_until_epoch > time.time()
-                    )
-                    if locally_claimed:
-                        return True
                     self._http_bridge_retry_circuits.pop(key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(key)
@@ -1455,17 +1549,32 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.persisted_admission_generation,
                     max(0, getattr(persisted, "admission_generation", 0)),
                 )
+            current_claim_receipt = (
+                state.persisted_admission_claimed_at_epoch,
+                state.persisted_admission_claimed_generation,
+                state.persisted_admission_claimed_until_epoch,
+            )
+            persisted_claim_receipt = (
+                getattr(persisted, "admission_claimed_at_epoch", None),
+                getattr(persisted, "admission_claimed_generation", None),
+                getattr(persisted, "admission_claimed_until_epoch", None),
+            )
+            # A durable release is represented by a row whose receipt is
+            # cleared.  Do not let an unchanged local cache resurrect that
+            # marker; only a local claim that advanced while this lookup was
+            # in flight may outrank the released durable state.
+            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_marker_advanced(
+                local_claim_receipt[1],
+                current_claim_receipt[1],
+            ):
+                current_claim_receipt = (None, None, None)
             (
                 state.persisted_admission_claimed_at_epoch,
                 state.persisted_admission_claimed_generation,
                 state.persisted_admission_claimed_until_epoch,
             ) = _merge_http_bridge_retry_circuit_claim_marker(
-                state.persisted_admission_claimed_at_epoch,
-                state.persisted_admission_claimed_generation,
-                state.persisted_admission_claimed_until_epoch,
-                getattr(persisted, "admission_claimed_at_epoch", None),
-                getattr(persisted, "admission_claimed_generation", None),
-                getattr(persisted, "admission_claimed_until_epoch", None),
+                *current_claim_receipt,
+                *persisted_claim_receipt,
             )
             if state.cooldown_until > now_monotonic:
                 # A cooling key is not probing. Without this, a merged

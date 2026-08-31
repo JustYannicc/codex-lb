@@ -892,19 +892,11 @@ class DurableBridgeRepository:
         expected_consecutive_failures: int | None = None,
         reset_detail: str | None = None,
     ) -> bool:
+        reset_now_epoch = time.time()
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
-            # A live generation claim belongs to an in-flight stale-anchor
-            # replay; ordinary response settlement must not clear that
-            # replay's admission fence. Expired or legacy marker rows are
-            # reclaimable and can be cleared by the normal reset path.
-            or_(
-                HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
-                HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
-                HttpBridgeRetryCircuit.admission_claimed_until_epoch <= time.time(),
-            ),
         ]
         if expected_consecutive_failures is not None:
             # A lagging-clock strike merges a higher count without moving
@@ -913,12 +905,13 @@ class DurableBridgeRepository:
             conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
-            if expected_admission_generation is not None:
-                # A replay claim bumps only ``admission_generation``, leaving
-                # the failure-observation epoch untouched; without this fence
-                # a reset authorized before the claim would clear the circuit
-                # beneath the admitted replay that depends on it.
-                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        active_claim = and_(
+            HttpBridgeRetryCircuit.admission_claimed_generation.is_not(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_not(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch > reset_now_epoch,
+        )
         async with sqlite_writer_section():
             result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
@@ -931,10 +924,23 @@ class DurableBridgeRepository:
                     # delta-only follow-ups closed; a completion's settle
                     # writes None, erasing it on real recovery.
                     last_detail=reset_detail,
-                    updated_at_epoch=time.time(),
-                    admission_claimed_at_epoch=None,
-                    admission_claimed_generation=None,
-                    admission_claimed_until_epoch=None,
+                    updated_at_epoch=reset_now_epoch,
+                    # An active stale-anchor replay owns its receipt even
+                    # when another same-key request resets the failure
+                    # observation. Expired or legacy markers are reclaimed
+                    # by clearing all receipt columns together.
+                    admission_claimed_at_epoch=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_at_epoch),
+                        else_=None,
+                    ),
+                    admission_claimed_generation=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_generation),
+                        else_=None,
+                    ),
+                    admission_claimed_until_epoch=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_until_epoch),
+                        else_=None,
+                    ),
                 )
             )
             await self._session.commit()
