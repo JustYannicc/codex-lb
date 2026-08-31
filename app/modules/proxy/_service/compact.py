@@ -1326,6 +1326,13 @@ class _CompactMixin:
             )
             account_attempt = 0
             while account_attempt < _compact_max_account_attempts() or security_fallback_attempt_available:
+                # The authorized retry pool gets at most one iteration beyond
+                # the normal compact account budget.  Consume that allowance
+                # as soon as the extra iteration starts; otherwise each
+                # authorized-account failure leaves the flag set and can keep
+                # the loop running past the bounded fallback budget.
+                if security_fallback_attempt_available and account_attempt >= _compact_max_account_attempts():
+                    security_fallback_attempt_available = False
                 _account_attempt = account_attempt
                 account_attempt += 1
                 selection = await proxy._select_account_with_budget_compatible(
