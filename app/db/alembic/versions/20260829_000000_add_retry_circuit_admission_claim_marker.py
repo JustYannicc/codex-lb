@@ -7,6 +7,8 @@ Create Date: 2026-08-29
 
 from __future__ import annotations
 
+import time
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -42,9 +44,25 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # This is a forward-only expansion of the retry admission contract. The
-    # nullable receipt columns are the durable fence for an in-flight replay;
-    # dropping them during rollback would erase that fence and allow a second
-    # replay to be admitted for the same generation. Keep the columns and any
-    # receipts intact while Alembic moves its version marker backward.
-    pass
+    bind = op.get_bind()
+    existing = _columns(bind)
+    if not existing.intersection(_COLUMNS):
+        return
+    # The nullable receipt columns are the durable fence for an in-flight
+    # replay; dropping them while a lease is live would allow a second replay
+    # to be admitted for the same generation. Refuse before any DDL or version
+    # stamping, then allow a complete downgrade once every lease has expired.
+    active_claim = None
+    if "admission_claimed_until_epoch" in existing:
+        active_claim = bind.execute(
+            sa.text(f"SELECT 1 FROM {_TABLE} WHERE admission_claimed_until_epoch > :now_epoch LIMIT 1"),
+            {"now_epoch": time.time()},
+        ).first()
+    if active_claim is not None:
+        raise RuntimeError(
+            "cannot downgrade retry-circuit admission claim marker migration while active receipts exist"
+        )
+    with op.batch_alter_table(_TABLE) as batch_op:
+        for name in _COLUMNS:
+            if name in existing:
+                batch_op.drop_column(name)

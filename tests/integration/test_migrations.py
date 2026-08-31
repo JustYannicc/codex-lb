@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 import pytest
@@ -2019,6 +2020,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
+    claim_until_epoch = time.time() + 3600.0
     try:
         async with engine.connect() as conn:
             before_has_table = await conn.run_sync(
@@ -2056,13 +2058,18 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                         admission_claimed_until_epoch
                     ) VALUES (
                         'session_header', 'legacy-hash', '__anonymous__',
-                        2, 1300.0, 'stream_incomplete', 1200.0, 4, 1100.0, 4, 1200.0
+                        2, 1300.0, 'stream_incomplete', 1200.0, 4, 1100.0, 4, :claim_until_epoch
                     )
                     """
-                )
+                ),
+                {"claim_until_epoch": claim_until_epoch},
             )
 
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade retry-circuit admission claim marker migration",
+        ):
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
         async with engine.connect() as conn:
             after_downgrade = await conn.run_sync(_schema_state)
             row = (
@@ -2077,12 +2084,43 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     )
                 )
             ).one()
+            revision_after_refused_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
         assert {
             "admission_claimed_at_epoch",
             "admission_claimed_generation",
             "admission_claimed_until_epoch",
         }.issubset(after_downgrade["columns"])
-        assert tuple(row) == (4, 1100.0, 4, 1200.0)
+        assert tuple(row) == (4, 1100.0, 4, claim_until_epoch)
+        assert revision_after_refused_downgrade == marker_revision
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE http_bridge_retry_circuits
+                    SET admission_claimed_at_epoch = NULL,
+                        admission_claimed_generation = NULL,
+                        admission_claimed_until_epoch = NULL
+                    WHERE session_key_hash = 'legacy-hash'
+                    """
+                )
+            )
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            after_release_downgrade = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+            revision_after_release_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert "admission_claimed_at_epoch" not in after_release_downgrade
+        assert "admission_claimed_generation" not in after_release_downgrade
+        assert "admission_claimed_until_epoch" not in after_release_downgrade
+        assert revision_after_release_downgrade == parent_revision
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
         async with engine.connect() as conn:
@@ -2100,9 +2138,9 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 )
             ).one()
         assert state["marker_nullable"] is True
-        # The forward-only migration preserves both the schema and the active
-        # receipt while Alembic's version marker moves backward and forward.
-        assert tuple(row) == (4, 1100.0, 4, 1200.0)
+        # A released receipt permits a complete downgrade; re-upgrade restores
+        # nullable marker columns without inventing a claim.
+        assert tuple(row) == (4, None, None, None)
     finally:
         await engine.dispose()
 

@@ -29,7 +29,10 @@ explicitly generation-fenced.
   bounded lease. The request path carries its remaining budget plus cleanup
   grace; direct repository callers use the two-hour budget plus the same
   grace, so a crashed owner is reclaimable without allowing an active replay
-  to be purged.
+  to be purged. The migration's downgrade is guarded: an unexpired receipt
+  refuses rollback before DDL or version stamping, while a database with no
+  live receipt may drop the marker columns and remain compatible with the
+  parent revision.
 - Carry the independent `admission_generation` through local loads and delayed
   failure merges; failure observation timestamps remain merge metadata only.
 - Clear a circuit only with the captured timestamp and generation, release a
@@ -47,11 +50,12 @@ explicitly generation-fenced.
 ## Scope and non-goals
 
 This change touches retry-circuit state and its direct durable repository/
-coordinator boundary, adds one forward-only nullable-column migration for the
-claim receipt, and updates the call-site deadline/type plumbing and regression
-coverage. It does not alter the existing admission-generation column, change
-cooldown policy, or include operation, quarantine, replay, account-routing,
-attribution, or container work from the other PR lanes.
+coordinator boundary, adds one nullable-column migration with a guarded
+downgrade for the claim receipt, and updates the call-site deadline/type
+plumbing and regression coverage. It does not alter the existing
+admission-generation column, change cooldown policy, or include operation,
+quarantine, replay, account-routing, attribution, or container work from the
+other PR lanes.
 
 The stale-anchor recovery behavior remains a partial vehicle for #1867; this
 delta does not claim to close that broad PR or either continuity issue wholesale.

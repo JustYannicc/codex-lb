@@ -14,8 +14,11 @@ nullable columns. The default lease is the two-hour HTTP bridge request budget
 plus 60 seconds of cleanup grace. A request with a shorter configured budget
 uses that exact remaining budget plus the same grace. The marker is active only
 until its expiry; legacy rows with a null expiry are reclaimable by the normal
-generation CAS. The forward-only migration leaves all three columns nullable
-so existing rows remain valid.
+generation CAS. The migration leaves all three columns nullable so existing
+rows remain valid. Its downgrade first checks for an unexpired receipt and
+refuses before DDL or Alembic version stamping when one exists; once no live
+receipt remains, it drops the marker columns so the parent revision's ORM
+schema does not trip startup drift checks.
 
 ## Claim path
 

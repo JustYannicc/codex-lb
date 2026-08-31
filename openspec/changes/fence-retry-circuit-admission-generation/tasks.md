@@ -3,8 +3,9 @@
 - [x] 1.1 Define the immutable generation, atomic claim, deadline, and reset
   contracts in the delta spec.
 - [x] 1.2 Define the nullable claim receipt, expiry/reclaim, terminal release,
-  and purge-fence contracts; record that a forward-only migration extends the
-  current-main model from merged #1863.
+  and purge-fence contracts; record that the guarded migration extends the
+  current-main model from merged #1863 and refuses rollback while a receipt is
+  live.
 
 ## 2. Implementation
 

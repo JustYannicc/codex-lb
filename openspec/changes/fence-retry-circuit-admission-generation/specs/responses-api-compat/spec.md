@@ -46,6 +46,35 @@ provided), and an active lease MUST block a second claim.
 - **AND** it MUST NOT issue a concurrent reconciliation write
 - **AND** the replay MUST remain fail-closed even if the detached operation later commits
 
+### Requirement: Claim-receipt migration rollback is guarded
+
+The migration that adds `admission_claimed_at_epoch`,
+`admission_claimed_generation`, and `admission_claimed_until_epoch` MUST keep
+the columns nullable. Its downgrade MUST inspect the durable claim-until
+epochs before changing the schema or Alembic version: any unexpired receipt
+MUST make the downgrade fail before DDL or version stamping. When no live
+receipt remains (all receipt epochs are null or expired), the downgrade MUST
+remove the marker columns so the parent revision remains compatible with its
+ORM model and startup schema-drift check.
+
+#### Scenario: An active receipt blocks migration rollback
+
+- **GIVEN** the marker migration is applied and a retry row has a claim-until
+  epoch later than the current epoch
+- **WHEN** an operator downgrades to the parent revision
+- **THEN** the downgrade MUST refuse before dropping any marker column
+- **AND** the receipt row and marker migration version MUST remain intact
+
+#### Scenario: A released or expired receipt permits migration rollback
+
+- **GIVEN** the marker migration is applied and no retry row has an unexpired
+  claim receipt
+- **WHEN** an operator downgrades to the parent revision
+- **THEN** the downgrade MUST remove the marker columns and advance the version
+  to the parent
+- **AND** re-upgrading the marker migration MUST restore nullable columns with
+  no invented receipt
+
 ### Requirement: Retry-circuit settlement is generation-fenced
 
 When a hard-key retry circuit is cleared, the service MUST retain local
