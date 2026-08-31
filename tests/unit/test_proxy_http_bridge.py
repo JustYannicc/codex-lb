@@ -38999,6 +38999,46 @@ async def test_grouped_continuity_failure_records_a_strike_per_eventless_request
 
 
 @pytest.mark.asyncio
+async def test_grouped_continuity_failure_returns_the_owning_half_open_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session, owner = _make_terminal_error_bridge_fixture(
+        request_id="req-grouped-probe-owner",
+        key_value="sid-grouped-probe-owner",
+        response_event_count=0,
+    )
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    owner.expose_stale_previous_response_classifier = True
+    sibling = proxy_service._WebSocketRequestState(
+        request_id="req-grouped-probe-sibling",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.5,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        expose_stale_previous_response_classifier=True,
+    )
+    sibling.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(sibling)
+    session.queued_request_count = 2
+    state = _activate_half_open_probe(service, session)
+    state.half_open_owner_token = owner
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert state.consecutive_failures == 2
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert state.cooldown_until > 0.0
+
+
+@pytest.mark.asyncio
 async def test_a_grouped_settlement_excludes_internal_warmup_states(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -44663,8 +44703,15 @@ async def test_a_healthy_key_settle_leaves_no_reconcile_watermark() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("survivor_present", [True, False], ids=["survivor-row", "row-gone"])
-async def test_a_twice_missed_settle_reconciles_the_surviving_row(survivor_present: bool) -> None:
+@pytest.mark.parametrize(
+    ("survivor_present", "survivor_cooldown_seconds"),
+    [(True, 45.0), (True, -45.0), (False, None)],
+    ids=["survivor-future-cooldown", "survivor-elapsed-cooldown", "row-gone"],
+)
+async def test_a_twice_missed_settle_reconciles_the_surviving_row(
+    survivor_present: bool,
+    survivor_cooldown_seconds: float | None,
+) -> None:
     # A settle whose two fenced resets both miss used to restore the stale
     # pre-chase snapshot: the anchor supersession then rewrote against an
     # obsolete epoch and missed, and the next load read the surviving row as
@@ -44685,16 +44732,20 @@ async def test_a_twice_missed_settle_reconciles_the_surviving_row(survivor_prese
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
 
-    def row(epoch: float, count: int) -> Any:
+    def row(epoch: float, count: int, *, cooldown_seconds: float = 45.0) -> Any:
         return SimpleNamespace(
             consecutive_failures=count,
-            cooldown_until_epoch=time.time() + 45.0,
+            cooldown_until_epoch=time.time() + cooldown_seconds,
             last_detail="stream_incomplete",
             updated_at_epoch=epoch,
             admission_generation=7,
         )
 
-    survivor = row(epoch_c, 3) if survivor_present else None
+    survivor = (
+        row(epoch_c, 3, cooldown_seconds=survivor_cooldown_seconds)
+        if survivor_present and survivor_cooldown_seconds is not None
+        else None
+    )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(side_effect=[row(epoch_a, 2), row(epoch_b, 2), survivor]),
         persist_retry_circuit=AsyncMock(return_value=None),
@@ -44712,6 +44763,10 @@ async def test_a_twice_missed_settle_reconciles_the_surviving_row(survivor_prese
         )
         assert restored.consecutive_failures == 3
         assert restored.persisted_admission_generation == 7
+        if survivor_cooldown_seconds is not None and survivor_cooldown_seconds > 0.0:
+            assert restored.cooldown_until > time.monotonic()
+        else:
+            assert restored.cooldown_until == 0.0, "an elapsed durable deadline must retain the zero sentinel"
     else:
         assert settled is True, "a chase that finds the row gone is settled after all"
         assert cast(Any, service)._http_bridge_retry_circuits.get(session.key) is None

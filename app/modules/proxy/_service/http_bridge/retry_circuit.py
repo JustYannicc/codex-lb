@@ -2696,8 +2696,14 @@ class _HTTPBridgeRetryCircuitMixin:
                                     state.poison_anchor_cleared = False
                                     state.owed_poison_detail = None
                                 state.consecutive_failures = max(0, surviving.consecutive_failures)
-                                state.cooldown_until = time.monotonic() + max(
-                                    0.0, surviving.cooldown_until_epoch - time.time()
+                                surviving_cooldown_remaining = max(
+                                    0.0,
+                                    surviving.cooldown_until_epoch - time.time(),
+                                )
+                                state.cooldown_until = (
+                                    time.monotonic() + surviving_cooldown_remaining
+                                    if surviving_cooldown_remaining > 0.0
+                                    else 0.0
                                 )
                                 state.last_detail = surviving.last_detail
                                 if state.cooldown_until > time.monotonic():

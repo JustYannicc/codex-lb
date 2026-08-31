@@ -2904,6 +2904,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session,
                     detail=grouped_terminal_detail,
                     attempt=grouped_request_state.response_create_attempt,
+                    probe_owner=grouped_request_state,
                     terminal_pre_response_frame=True,
                 )
                 # A fan-out carrying two or more eventless requests advances the
