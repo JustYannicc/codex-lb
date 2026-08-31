@@ -4043,7 +4043,7 @@ class _HTTPBridgeStreamingMixin:
         error_code: str,
         error_message: str,
         preserve_durable_lease: bool = False,
-        probe_owner: object | None = None,
+        probe_owner: _WebSocketRequestState | None = None,
         proxy_continuity_loss_detail: str | None = None,
     ) -> None:
         async def cleanup() -> None:

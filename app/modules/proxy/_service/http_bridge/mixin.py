@@ -2335,7 +2335,7 @@ class _HTTPBridgeMixin(
                         continue
                     await abandon_selected_account_retry(account)
                     continue
-                await fail_owner_unavailable_after_probe(release_account_lease=True)
+                await fail_connect_after_probe()
                 raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id)
             except (aiohttp.ClientError, asyncio.TimeoutError) as transport_exc:
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:

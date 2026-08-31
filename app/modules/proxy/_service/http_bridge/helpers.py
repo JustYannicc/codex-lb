@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Literal, Mapping, Protocol, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -234,6 +234,16 @@ class _HTTPBridgeDeniedAnchorFence:
     retain_until_durable_clear: bool = False
 
 
+class _ReleaseHTTPBridgeRetryCircuitProbe(Protocol):
+    def __call__(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        detail: str,
+        probe_owner: "_WebSocketRequestState | None" = None,
+    ) -> Awaitable[bool]: ...
+
+
 async def _fail_http_bridge_owner_unavailable_after_probe(
     session: "_HTTPBridgeSession",
     *,
@@ -241,7 +251,7 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
     request_state: "_WebSocketRequestState",
     release_account_lease: Callable[[], Awaitable[None]] | None,
     complete_failed_handoff: Callable[[], None],
-    release_probe: Callable[..., Awaitable[bool]],
+    release_probe: _ReleaseHTTPBridgeRetryCircuitProbe,
 ) -> None:
     """Finish owner-loss cleanup before surfacing cancellation or failure."""
 

@@ -1060,6 +1060,17 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
 
 
+@pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
+@pytest.mark.parametrize("param", [None, "", "   ", 0, False, {}, []])
+def test_http_bridge_stale_anchor_recovery_rejects_malformed_present_param(code: str, param: object) -> None:
+    error = proxy_service.openai_error(code, "Previous response with id 'resp_missing' not found.")
+    cast(Any, error["error"])["param"] = param
+    exc = ProxyResponseError(400, error)
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
+    assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
+
+
 @pytest.mark.parametrize("param", ["", "   "])
 def test_previous_response_recovery_preserves_present_blank_param(param: str) -> None:
     error = proxy_service.openai_error("invalid_request_error", "Invalid previous_response_id.")
@@ -12011,6 +12022,68 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_re
     assert circuit_state.half_open_until == 0.0
     assert circuit_state.half_open_owner_session is None
     assert circuit_state.cooldown_until > 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_preserves_probe_on_generic_refresh_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-hard-refresh-failure", None),
+        key_value="sid-hard-refresh-failure",
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-refresh-failure",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 1.0,
+    )
+    attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    request_state.response_create_attempt = attempt
+    session.pending_requests.append(request_state)
+    circuit_state = _activate_half_open_probe(service, session)
+    circuit_state.half_open_owner_token = request_state
+
+    async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(account=session.account, error_message=None, error_code=None)
+
+    async def ensure_fresh(*_args: object, **_kwargs: object) -> Any:
+        raise RefreshError("invalid_grant", "refresh failed", True)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=0.001,
+            http_responses_session_bridge_request_budget_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    service._load_balancer = cast(Any, SimpleNamespace(mark_permanent_failure=AsyncMock()))
+
+    with pytest.raises(RefreshError):
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert circuit_state.half_open_until > time.monotonic()
+    assert circuit_state.half_open_owner_session is session
+    assert circuit_state.half_open_owner_token is request_state
+    assert attempt.disarmed is False
 
 
 @pytest.mark.asyncio

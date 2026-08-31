@@ -75,7 +75,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
         session: _HTTPBridgeSession,
         *,
         detail: str,
-        probe_owner: object | None = None,
+        probe_owner: _WebSocketRequestState | None = None,
     ) -> bool: ...
     async def _release_http_bridge_admission_preregistration(
         self,
