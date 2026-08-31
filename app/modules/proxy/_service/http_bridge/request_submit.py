@@ -439,11 +439,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
     def _put(self, item: str | None) -> None:
         current_task = asyncio.current_task()
-        reserved_bytes = (
-            self._blocked_put_reservations.pop(current_task, None)
-            if current_task is not None
-            else None
-        )
+        reserved_bytes = self._blocked_put_reservations.pop(current_task, None) if current_task is not None else None
         item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         if self._revoked.is_set() and item is not None:
             if reserved_bytes is not None:
