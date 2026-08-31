@@ -45303,6 +45303,97 @@ async def test_http_bridge_retry_circuit_load_keeps_recreated_same_generation_cl
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_load_adopts_recreated_row_generation() -> None:
+    # Purging a durable row starts a new lineage whose admission generation
+    # may restart at one. A stale local high-water value must not make every
+    # subsequent claim use an impossible generation from the old row.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-generation-recreated-row")
+    old_epoch = time.time() - 60.0
+    recreated_row = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=0.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+        admission_generation=1,
+        admission_claimed_at_epoch=None,
+        admission_claimed_generation=None,
+        admission_claimed_until_epoch=None,
+    )
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+        persisted_updated_at_epoch=old_epoch,
+        persisted_admission_generation=4,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=recreated_row))
+
+    generation_loaded, generation = await service._http_bridge_retry_circuit_generation(hard_session)
+    assert generation_loaded is True
+    assert generation is not None
+    assert generation.admission_generation == 1
+    assert state.persisted_admission_generation == 1
+
+    assert await service._load_http_bridge_retry_circuit(hard_session) is True
+    assert state.persisted_admission_generation == 1
+    assert state.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_generation_keeps_claim_on_recreated_row() -> None:
+    # A second local request can claim the recreated row while this lookup is
+    # in flight. Its receipt belongs to the new lineage; do not reintroduce
+    # the old row's high-water generation when merging that race.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-generation-recreated-claim")
+    old_epoch = time.time() - 60.0
+    new_epoch = time.time()
+    recreated_row = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=0.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=new_epoch,
+        admission_generation=1,
+        admission_claimed_at_epoch=None,
+        admission_claimed_generation=None,
+        admission_claimed_until_epoch=None,
+    )
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=time.monotonic(),
+        persisted_updated_at_epoch=old_epoch,
+        persisted_admission_generation=4,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def lookup_recreated_row(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await release_lookup.wait()
+        return recreated_row
+
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=lookup_recreated_row)
+    generation_task = asyncio.create_task(service._http_bridge_retry_circuit_generation(hard_session))
+    await lookup_started.wait()
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        state.persisted_admission_claimed_at_epoch = new_epoch + 1.0
+        state.persisted_admission_claimed_generation = 2
+        state.persisted_admission_claimed_until_epoch = new_epoch + 120.0
+    release_lookup.set()
+
+    generation_loaded, generation = await generation_task
+    assert generation_loaded is True
+    assert generation is not None
+    assert generation.admission_generation == 2
+    assert state.persisted_admission_generation == 2
+    assert state.persisted_admission_claimed_generation == 2
+
+
+@pytest.mark.asyncio
 async def test_poison_quarantine_is_the_one_reason_that_proves_the_anchor_dead() -> None:
     # The other half of the contract: the retry circuit opening on repeated
     # eventless poison-class failures must satisfy the same predicate, or the

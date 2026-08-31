@@ -245,6 +245,42 @@ def _http_bridge_retry_circuit_claim_receipt_advanced(
     return current_rank > previous_rank
 
 
+def _http_bridge_retry_circuit_admission_generation_for_load(
+    state: "_HTTPBridgeRetryCircuitState | None",
+    persisted: Any,
+    *,
+    local_claim_receipt: tuple[float | None, int | None, float | None],
+    current_claim_receipt: tuple[float | None, int | None, float | None],
+) -> int:
+    """Adopt a durable generation without carrying it across row recreation.
+
+    ``admission_generation`` is monotonic only within one durable row
+    lineage; purging and recreating a key legitimately restarts it at zero or
+    one. A local claim that advanced while this lookup was in flight still
+    needs its high-water fence, as does a snapshot from the same row lineage
+    (identified by its unchanged observation epoch). Otherwise the durable
+    row is authoritative and its generation must replace stale local state.
+    """
+    if persisted is None:
+        return max(0, state.persisted_admission_generation) if state is not None else 0
+    persisted_generation = max(0, getattr(persisted, "admission_generation", 0))
+    if state is None:
+        return persisted_generation
+    same_lineage = getattr(persisted, "updated_at_epoch", None) == state.persisted_updated_at_epoch
+    claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
+        local_claim_receipt,
+        current_claim_receipt,
+    )
+    if same_lineage:
+        return max(state.persisted_admission_generation, persisted_generation)
+    if claim_advanced:
+        # The row changed while a local claim advanced. That claim may belong
+        # to the recreated lineage, so carry the receipt's generation rather
+        # than the old lineage's high-water value.
+        return max(persisted_generation, max(0, current_claim_receipt[1] or 0))
+    return persisted_generation
+
+
 def _merge_http_bridge_retry_circuit_claim_marker(
     local_claimed_at_epoch: float | None,
     local_claimed_generation: int | None,
@@ -496,14 +532,6 @@ class _HTTPBridgeRetryCircuitMixin:
             state = self._http_bridge_retry_circuits.get(key)
             if state is None and persisted is None:
                 return True, None
-            persisted_updated_at_epoch = max(
-                state.persisted_updated_at_epoch if state is not None else 0.0,
-                persisted.updated_at_epoch if persisted is not None else 0.0,
-            )
-            persisted_admission_generation = max(
-                state.persisted_admission_generation if state is not None else 0,
-                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
-            )
             current_claim_receipt = (
                 (
                     state.persisted_admission_claimed_at_epoch,
@@ -535,6 +563,23 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_admission_claimed_at_epoch = persisted_admission_claimed_at_epoch
                 state.persisted_admission_claimed_generation = persisted_admission_claimed_generation
                 state.persisted_admission_claimed_until_epoch = persisted_admission_claimed_until_epoch
+            persisted_updated_at_epoch = (
+                max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
+                if state is not None and persisted is not None
+                else (
+                    persisted.updated_at_epoch
+                    if persisted is not None
+                    else (state.persisted_updated_at_epoch if state is not None else 0.0)
+                )
+            )
+            persisted_admission_generation = _http_bridge_retry_circuit_admission_generation_for_load(
+                state,
+                persisted,
+                local_claim_receipt=local_claim_receipt,
+                current_claim_receipt=current_claim_receipt,
+            )
+            if state is not None:
+                state.persisted_admission_generation = persisted_admission_generation
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
@@ -1561,14 +1606,6 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.last_detail = state.last_detail or persisted.last_detail
                 else:
                     state.last_detail = persisted.last_detail or state.last_detail
-            # Claim-only durable writes advance the admission generation
-            # without changing the episode columns above. Preserve that
-            # high-water mark on both merge paths so a later settle carries
-            # the generation fence and cannot clear beneath an unseen claim.
-            state.persisted_admission_generation = max(
-                state.persisted_admission_generation,
-                max(0, getattr(persisted, "admission_generation", 0)),
-            )
             current_claim_receipt = (
                 state.persisted_admission_claimed_at_epoch,
                 state.persisted_admission_claimed_generation,
@@ -1588,6 +1625,18 @@ class _HTTPBridgeRetryCircuitMixin:
                 current_claim_receipt,
             ):
                 current_claim_receipt = (None, None, None)
+            # Claim-only durable writes advance the admission generation
+            # without changing the episode columns above. Preserve that
+            # high-water mark for the same row lineage or a claim that
+            # advanced while this lookup was in flight; a purged and
+            # recreated row is authoritative and may restart at generation
+            # zero or one.
+            state.persisted_admission_generation = _http_bridge_retry_circuit_admission_generation_for_load(
+                state,
+                persisted,
+                local_claim_receipt=local_claim_receipt,
+                current_claim_receipt=current_claim_receipt,
+            )
             (
                 state.persisted_admission_claimed_at_epoch,
                 state.persisted_admission_claimed_generation,
