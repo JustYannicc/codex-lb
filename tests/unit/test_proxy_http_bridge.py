@@ -16161,8 +16161,10 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_missing_with_single_candidate(
+@pytest.mark.parametrize("candidate_count", [0, 1, 2])
+async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_candidate_or_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
+    candidate_count: int,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -16219,40 +16221,68 @@ async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
-    load_selection_inputs = AsyncMock(
-        return_value=SimpleNamespace(
-            accounts=[SimpleNamespace(id="acc-only", status=AccountStatus.ACTIVE)],
-        )
+    candidates = tuple(
+        SimpleNamespace(id=f"acc-owner-miss-{index}", status=AccountStatus.ACTIVE) for index in range(candidate_count)
     )
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        load_selection_inputs,
-    )
-    get_or_create = AsyncMock()
+    list_selection_candidates = AsyncMock(return_value=candidates)
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    session = _make_bridge_session(key_value="owner-miss-single")
+    get_or_create = AsyncMock(return_value=session if candidate_count == 1 else None)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
 
-    with pytest.raises(ProxyResponseError) as exc_info:
-        async for _chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-turn-state": "turn_owner_miss"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=1800.0,
-            max_sessions=8,
-            queue_limit=4,
-        ):
-            pass
+    async def fake_stream_http_bridge_session_events(
+        _session: proxy_service._HTTPBridgeSession,
+        **_kwargs: object,
+    ):
+        yield 'data: {"type":"response.completed"}\n\n'
 
-    get_or_create.assert_not_awaited()
-    load_selection_inputs.assert_not_awaited()
-    assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+
+    if candidate_count == 1:
+        chunks = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={"x-codex-turn-state": "turn_owner_miss"},
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
+        assert chunks == ['data: {"type":"response.completed"}\n\n']
+        get_or_create.assert_awaited_once()
+        assert get_or_create.await_args is not None
+        assert get_or_create.await_args.kwargs["preferred_account_id"] == candidates[0].id
+    else:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            async for _chunk in service._stream_via_http_bridge(
+                payload,
+                headers={"x-codex-turn-state": "turn_owner_miss"},
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            ):
+                pass
+
+        get_or_create.assert_not_awaited()
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+
+    list_selection_candidates.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -41735,6 +41735,9 @@ async def test_stream_previous_response_owner_miss_uses_sole_candidate_or_fails_
         assert request_logs.calls[0]["status"] == "success"
         assert request_logs.calls[0]["account_id"] == account_other.id
         select_account.assert_awaited_once()
+        assert select_account.await_args is not None
+        assert select_account.await_args.kwargs["required_account_id"] == account_other.id
+        assert select_account.await_args.kwargs["required_account_is_ownership_constraint"] is True
         assert stream_calls == [account_other.id]
         assert counter.samples == []
     else:

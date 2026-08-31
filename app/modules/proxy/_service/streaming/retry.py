@@ -1219,6 +1219,8 @@ class _StreamingRetryMixin:
                             )
                         yield format_sse_event(event)
                         return
+                    preferred_account_id = selection_candidates[0].id
+                    require_preferred_account = True
             # File and previous-response ownership are peers, not fallback
             # preferences. Resolve both before selection so a conflict cannot
             # be hidden by whichever source happened to run first. A hard turn

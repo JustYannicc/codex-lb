@@ -1978,6 +1978,35 @@ class _HTTPBridgeStreamingMixin:
             and request_state.preferred_account_id == continuity_preferred_account_id
         )
         file_required_preferred_account = rewritten_file_account_id is not None
+        if (
+            required_continuity_owner_missing
+            and request_state.previous_response_id is not None
+            and request_state.preferred_account_id is None
+            and rewritten_file_account_id is None
+            and not durable_owner_missing
+            and not model_transition_owner_missing
+        ):
+            selection_account_ids = (
+                api_key.assigned_account_ids
+                if api_key is not None and api_key.account_assignment_scope_enabled
+                else None
+            )
+            try:
+                selection_candidates = await self._load_balancer.list_selection_candidates(
+                    model=effective_payload.model,
+                    service_tier=request_state.requested_service_tier,
+                    additional_limit_name=None,
+                    account_ids=selection_account_ids,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to list HTTP bridge owner-miss candidates request_id=%s",
+                    request_id,
+                )
+                selection_candidates = ()
+            if len(selection_candidates) == 1:
+                request_state.preferred_account_id = selection_candidates[0].id
+                required_continuity_owner_missing = False
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
