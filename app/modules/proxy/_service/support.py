@@ -1609,6 +1609,14 @@ def _mark_response_create_attempt_observed(
             attempt.non_terminal_response_observed = True
 
 
+def _disarm_response_create_attempt(request_state: _WebSocketRequestState | None) -> None:
+    if request_state is None:
+        return
+    attempt = request_state.response_create_attempt
+    if attempt is not None:
+        attempt.disarmed = True
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return

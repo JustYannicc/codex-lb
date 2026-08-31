@@ -168,15 +168,13 @@ from app.modules.proxy._service.support import (
     _complete_http_bridge_handoff,
     _copy_websocket_route_metadata_to_session,
     _DeferredAccountBackoffLifecycle,
+    _disarm_response_create_attempt,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _sleep_for_account_selection_recovery,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
-)
-from app.modules.proxy._service.support import (
-    _websocket_route_log_kwargs as _websocket_route_log_kwargs,
 )
 from app.modules.proxy._service.warmup import (
     WarmupExecutionData as WarmupExecutionData,
@@ -2024,6 +2022,7 @@ class _HTTPBridgeMixin(
         async def fail_owner_unavailable_after_probe(
             detail: str = "previous_response_owner_unavailable", *, release_account_lease: bool = False
         ) -> None:
+            _disarm_response_create_attempt(request_state)
             try:
                 if release_account_lease:
                     await release_selected_account_lease()
