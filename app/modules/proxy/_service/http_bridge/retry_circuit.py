@@ -942,7 +942,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_owner_token = None
             if not defer_durable_snapshot:
                 state.persisted_updated_at_epoch = persisted.updated_at_epoch
-            state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
+                state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
             state.last_touched_monotonic = now_monotonic
             if not defer_durable_snapshot:
                 state.last_durable_load_monotonic = now_monotonic
@@ -1269,7 +1269,7 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.half_open_owner_token = None
                         if not defer_durable_snapshot:
                             state.persisted_updated_at_epoch = persisted.updated_at_epoch
-                        state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
+                            state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
                         # Post-write time, not this persist's entry time: a
                         # load that started while the durable write was in
                         # flight can carry a start stamp later than the entry
