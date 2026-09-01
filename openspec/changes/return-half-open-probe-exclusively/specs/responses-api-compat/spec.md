@@ -26,7 +26,10 @@ After a real hard-key cooldown expires, the proxy MUST admit exactly one local
   settles. The lease MUST record the owning HTTP bridge session. A probe return
   MUST be accepted only from that owner, MUST leave the durable failure count
   unchanged, and MUST represent the returned probe as an elapsed local cooldown
-  so the next admission acquires a fresh lease.
+  so the next admission acquires a fresh lease. Each lease MUST also carry a
+  process-local generation paired with its owner token and deadline. A release
+  whose session, token, deadline, or generation does not match the active lease
+  MUST be a no-op.
 
 The durable retry row remains the replica-wide source for failure counts and
 future cooldown deadlines. The active half-open owner is intentionally
@@ -48,7 +51,8 @@ only when no local probe is active.
 #### Scenario: Continuity loss returns only the owning probe
 
 - **GIVEN** session A owns the active half-open lease for a hard key
-- **WHEN** session B reports a proxy-side continuity-ownership failure
+- **WHEN** session B reports a proxy-side continuity-ownership failure with
+  explicit proxy continuity provenance
 - **THEN** the active lease remains intact
 - **WHEN** session A reports that same continuity loss
 - **THEN** the lease is returned as an elapsed cooldown
@@ -97,19 +101,31 @@ detached-registry capacity cannot outlive the failed reconnect.
 The proxy MUST NOT increment or persist retry-circuit failures for explicitly
 identified proxy continuity-ownership loss, including
 `continuity_owner_unavailable`, `previous_response_owner_unavailable`,
-`previous_response_not_found`, `bridge_previous_response_not_found`,
-`bridge_owner_unreachable`, and `bridge_instance_mismatch`. It MUST continue to
+`bridge_owner_unreachable`, and `bridge_instance_mismatch`. A
+`previous_response_not_found` or `bridge_previous_response_not_found` detail is
+continuity-neutral only when the request state explicitly proves that the
+rejected anchor was injected by this proxy; a raw or client-supplied detail
+MUST remain genuine upstream failure evidence. The proxy MUST continue to
 increment and persist genuine upstream `stream_incomplete`,
-`stream_idle_timeout`, and `clean_close` failures when their attempt is
-eligible. Anchor replay and error-provenance policy remain governed by their
-existing contracts.
+`stream_idle_timeout`, `clean_close`, and raw previous-response rejection
+failures when their attempt is eligible. Anchor replay and error-provenance
+policy remain governed by their existing contracts.
 
 #### Scenario: Proxy continuity loss is neutral
 
 - **GIVEN** an eligible local half-open probe
-- **WHEN** the proxy loses continuity ownership
+- **WHEN** the proxy loses continuity ownership and the request carries
+  explicit proxy continuity provenance
 - **THEN** the circuit count does not increase
 - **AND** the owner lease is returned when the reporting session owns it
+
+#### Scenario: Raw previous-response rejection remains genuine
+
+- **GIVEN** an eligible local half-open probe
+- **WHEN** the upstream rejects a raw or client-supplied
+  `previous_response_not_found` anchor without proxy continuity provenance
+- **THEN** the circuit records a genuine failure strike
+- **AND** the active half-open lease is not returned as continuity-neutral
 
 #### Scenario: Genuine upstream failure still opens the circuit
 

@@ -3005,6 +3005,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     attempt=grouped_request_state.response_create_attempt,
                     probe_owner=grouped_request_state,
                     terminal_pre_response_frame=True,
+                    proxy_continuity_provenance=bool(grouped_request_state.proxy_injected_previous_response_id),
                 )
                 # A fan-out carrying two or more eventless requests advances the
                 # circuit through its threshold inside this loop, so the anchor
@@ -4300,6 +4301,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     attempt=terminal_request_state.response_create_attempt,
                     probe_owner=terminal_request_state,
                     terminal_pre_response_frame=True,
+                    proxy_continuity_provenance=bool(terminal_request_state.proxy_injected_previous_response_id),
                 )
                 terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)
 
