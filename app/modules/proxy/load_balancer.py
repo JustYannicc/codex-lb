@@ -380,7 +380,13 @@ class LoadBalancer:
             require_security_work_authorized=require_security_work_authorized,
         )
         # Preserve paused/quota-filtered owners for owner-miss cardinality.
-        return tuple(_clone_account(account) for account in selection_inputs.effective_continuity_owner_candidates)
+        excluded_ids = set(exclude_account_ids or ())
+        owner_candidates = (
+            account
+            for account in selection_inputs.effective_continuity_owner_candidates
+            if account.id not in excluded_ids
+        )
+        return tuple(_clone_account(account) for account in owner_candidates)
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:
