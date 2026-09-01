@@ -1091,13 +1091,20 @@ class _HTTPBridgeRetryCircuitMixin:
 
         async def release_claim_after_interruption() -> None:
             nonlocal claim_released
+            # The claim is created before a request state owns it.  Keep a
+            # small service-owned stand-in so a failed or timed-out release
+            # can use the normal generation-fenced retry path instead of
+            # dropping the only durable receipt with this coroutine.
+            release_request_state = SimpleNamespace(
+                request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
+                verified_stale_anchor_retry_circuit_key=key,
+                verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
+                verified_stale_anchor_retry_circuit_claimed_at_epoch=result_claimed_at_epoch,
+                verified_stale_anchor_retry_circuit_claimed_until_epoch=result_claimed_until_epoch,
+                retry_circuit_claim_release_retry_scheduled=False,
+            )
             release_task = asyncio.create_task(
-                self._clear_http_bridge_retry_circuit_admission_claim(
-                    key=key,
-                    claimed_generation=claimed_generation,
-                    claimed_at_epoch=result_claimed_at_epoch,
-                    claimed_until_epoch=result_claimed_until_epoch,
-                ),
+                self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(release_request_state),
                 name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}claim-cancelled-release",
             )
             try:
@@ -1122,8 +1129,17 @@ class _HTTPBridgeRetryCircuitMixin:
                     exc_info=True,
                 )
             finally:
-                if claim_receipt is not None:
-                    claim_receipt.clear()
+                if claim_released:
+                    # Keep the dictionary contract for callers that still own
+                    # it, but only erase it after the fenced durable clear
+                    # confirms this exact claim was released.
+                    if claim_receipt is not None:
+                        claim_receipt.clear()
+                else:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                        self,
+                        release_request_state,
+                    )
 
         try:
             local_state_changed = False

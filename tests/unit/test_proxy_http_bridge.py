@@ -31158,6 +31158,168 @@ async def test_http_bridge_retry_claim_releases_receipt_when_cancelled_after_dur
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("release_outcome", [False, RuntimeError("release failed")], ids=["false", "raises"])
+async def test_http_bridge_retry_claim_cancel_release_retries_and_keeps_receipt_on_failure(
+    release_outcome: bool | RuntimeError,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cancelled-release-failure")
+    post_cas_lock_held = asyncio.Event()
+
+    class _PostCasLock:
+        def __init__(self) -> None:
+            self._entries = 0
+
+        async def __aenter__(self) -> "_PostCasLock":
+            self._entries += 1
+            if self._entries == 2:
+                post_cas_lock_held.set()
+                await asyncio.Event().wait()
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def claim_generation(**_kwargs: Any) -> Any:
+        return claimed
+
+    service._durable_bridge = SimpleNamespace(claim_retry_circuit_generation=claim_generation)
+    cast(Any, service)._http_bridge_retry_circuit_lock = _PostCasLock()
+    release_claim = (
+        AsyncMock(side_effect=release_outcome)
+        if isinstance(release_outcome, RuntimeError)
+        else AsyncMock(return_value=release_outcome)
+    )
+    schedule_retry = Mock()
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request_bounded", release_claim)
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+    receipt: dict[str, Any] = {}
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            claim_receipt=receipt,
+        )
+    )
+    await post_cas_lock_held.wait()
+    claim_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+
+    release_claim.assert_awaited_once()
+    schedule_retry.assert_called_once()
+    assert schedule_retry.call_args.args[0] is service
+    release_request_state = schedule_retry.call_args.args[1]
+    assert release_request_state.verified_stale_anchor_retry_circuit_key == hard_session.key
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_generation == 1
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch == 1_000.0
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch == 1_077.0
+    assert receipt == {
+        "generation": 1,
+        "claimed_at_epoch": 1_000.0,
+        "claimed_until_epoch": 1_077.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_claim_cancel_release_bounds_stalled_clear_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cancelled-release-timeout")
+    post_cas_lock_held = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+
+    class _PostCasLock:
+        def __init__(self) -> None:
+            self._entries = 0
+
+        async def __aenter__(self) -> "_PostCasLock":
+            self._entries += 1
+            if self._entries == 2:
+                post_cas_lock_held.set()
+                await asyncio.Event().wait()
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def claim_generation(**_kwargs: Any) -> Any:
+        return claimed
+
+    async def stalled_release(_request_state: Any) -> bool:
+        release_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await allow_release.wait()
+        return False
+
+    service._durable_bridge = SimpleNamespace(claim_retry_circuit_generation=claim_generation)
+    cast(Any, service)._http_bridge_retry_circuit_lock = _PostCasLock()
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", stalled_release)
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS",
+        0.001,
+    )
+    schedule_retry = Mock()
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+    receipt: dict[str, Any] = {}
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+            claim_receipt=receipt,
+        )
+    )
+    await post_cas_lock_held.wait()
+    claim_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+    await release_started.wait()
+
+    schedule_retry.assert_called_once()
+    assert schedule_retry.call_args.args[0] is service
+    assert receipt == {
+        "generation": 1,
+        "claimed_at_epoch": 1_000.0,
+        "claimed_until_epoch": 1_077.0,
+    }
+
+    abandoned_tasks = tuple(getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", set()))
+    allow_release.set()
+    if abandoned_tasks:
+        await asyncio.gather(*abandoned_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_abandoned_retry_claim_cleanup_drains_during_shutdown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     service._background_cleanup_tasks = set()
