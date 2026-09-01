@@ -13,7 +13,7 @@ from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
-    _http_bridge_quarantine_clear_fence,
+    _http_bridge_poison_quarantine_arm_fence_details,
     _http_bridge_quarantine_clear_fence_details,
     _http_bridge_quarantine_registry,
     _http_bridge_session_key_poison_quarantined,
@@ -124,6 +124,20 @@ def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) ->
     same span the durable retry-circuit row already reserves for itself.
     """
     return max(0.0, cooldown_remaining) + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+
+
+def _revoke_http_bridge_poison_quarantine_at_arm_fence(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+) -> bool:
+    fence = _http_bridge_poison_quarantine_arm_fence_details(service, key)
+    return _revoke_http_bridge_poison_quarantine(
+        service,
+        key,
+        generation=fence.generation,
+        raw_generation=fence.raw_generation,
+        captured_eventless_timeout_count=fence.eventless_timeout_count,
+    )
 
 
 def _http_bridge_retry_circuit_suppression_message(block_reason: str, retry_after_seconds: int) -> str:
@@ -622,11 +636,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         # — settled or purged by another replica — and a
                         # remotely recovered key must not stay suppressed
                         # for the stale deadline.
-                        _revoke_http_bridge_poison_quarantine(
-                            self,
-                            key,
-                            generation=_http_bridge_quarantine_clear_fence(self, key),
-                        )
+                        _revoke_http_bridge_poison_quarantine_at_arm_fence(self, key)
             return True
 
         now_epoch = time.time()
@@ -729,11 +739,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         if _http_bridge_session_key_poison_quarantined(self, key):
                             # The expired row just purged is the episode this
                             # quarantine fenced; it ended long ago.
-                            _revoke_http_bridge_poison_quarantine(
-                                self,
-                                key,
-                                generation=_http_bridge_quarantine_clear_fence(self, key),
-                            )
+                            _revoke_http_bridge_poison_quarantine_at_arm_fence(self, key)
                 return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
@@ -910,11 +916,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(poison_cooldown_remaining),
             )
         elif revoke_stale_poison_quarantine and _http_bridge_session_key_poison_quarantined(self, key):
-            _revoke_http_bridge_poison_quarantine(
-                self,
-                key,
-                generation=_http_bridge_quarantine_clear_fence(self, key),
-            )
+            _revoke_http_bridge_poison_quarantine_at_arm_fence(self, key)
         return True
 
     async def _persist_http_bridge_retry_circuit(

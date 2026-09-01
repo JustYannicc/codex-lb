@@ -58,6 +58,8 @@ class _HTTPBridgeQuarantineEntry:
     # speculative poison window bump ``generation`` without touching this,
     # so a revocation can still recognize its own arm.
     poison_generation: int = 0
+    poison_raw_generation: int = 0
+    poison_eventless_timeout_count: int = 0
     # The poison classification's OWN deadline. The shared
     # ``quarantined_until`` keeps the session fenced under whatever
     # evidence extended it last, but only a poison arm may extend this
@@ -202,11 +204,17 @@ def _revoke_http_bridge_poison_quarantine(
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
+            entry.poison_generation = 0
+            entry.poison_raw_generation = 0
+            entry.poison_eventless_timeout_count = 0
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return True
         if restore_reason is not None and restore_until > now:
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
+            entry.poison_generation = 0
+            entry.poison_raw_generation = 0
+            entry.poison_eventless_timeout_count = 0
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return True
         if (
@@ -221,6 +229,8 @@ def _revoke_http_bridge_poison_quarantine(
             entry.reason = None
             entry.quarantined_until = 0.0
             entry.poison_generation = 0
+            entry.poison_raw_generation = 0
+            entry.poison_eventless_timeout_count = 0
             entry.poison_quarantined_until = 0.0
             return True
         registry.pop(key, None)
@@ -339,6 +349,28 @@ def _http_bridge_quarantine_clear_fence_details(
     )
 
 
+def _http_bridge_poison_quarantine_arm_fence_details(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+) -> _HTTPBridgeQuarantineClearFence:
+    """Return the fence captured when the surviving poison arm was installed."""
+    registry = _http_bridge_quarantine_registry(service)
+    now = time.monotonic()
+    _prune_http_bridge_quarantine_registry(registry, now)
+    entry = registry.get(key)
+    if (
+        entry is None
+        or entry.quarantined_until <= now
+        or entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+    ):
+        return _HTTPBridgeQuarantineClearFence()
+    return _HTTPBridgeQuarantineClearFence(
+        generation=entry.poison_generation,
+        raw_generation=entry.poison_raw_generation,
+        eventless_timeout_count=entry.poison_eventless_timeout_count,
+    )
+
+
 def _quarantine_http_bridge_session(
     service: Any,
     session: _HTTPBridgeSession,
@@ -410,6 +442,8 @@ def _quarantine_http_bridge_session(
         entry.reason = reason
         if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             entry.poison_generation = entry.generation
+            entry.poison_raw_generation = entry.generation
+            entry.poison_eventless_timeout_count = entry.consecutive_eventless_timeouts
             entry.poison_quarantined_until = max(entry.poison_quarantined_until, now + ttl_seconds)
     else:
         # The weaker fence stands on its own evidence; record it, with its
@@ -594,6 +628,8 @@ def _clear_http_bridge_quarantine(
             entry.reason = None
             entry.quarantined_until = 0.0
             entry.poison_generation = 0
+            entry.poison_raw_generation = 0
+            entry.poison_eventless_timeout_count = 0
             entry.poison_quarantined_until = 0.0
             entry.suppressed_weaker_until = 0.0
             return True
@@ -610,6 +646,8 @@ def _clear_http_bridge_quarantine(
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
             entry.poison_generation = 0
+            entry.poison_raw_generation = 0
+            entry.poison_eventless_timeout_count = 0
             entry.poison_quarantined_until = 0.0
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return False

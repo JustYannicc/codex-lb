@@ -40020,6 +40020,66 @@ async def test_the_load_path_adopts_lagging_clock_resets() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revocation_path", ["miss", "purge", "reset"])
+async def test_durable_load_revocation_preserves_post_capture_first_strike(
+    revocation_path: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-load-revoke-first-strike")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.cooldown_until = now + 60.0
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = time.time() - 30.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    captured_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(
+        service,
+        session.key,
+    )
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    if revocation_path == "miss":
+        cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+        service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    elif revocation_path == "purge":
+        stale_row = SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=(
+                time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
+            ),
+            admission_generation=0,
+        )
+        service._durable_bridge = SimpleNamespace(
+            lookup_retry_circuit=AsyncMock(return_value=stale_row),
+            purge_retry_circuit=AsyncMock(return_value=True),
+        )
+    else:
+        reset_row = SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=time.time(),
+            admission_generation=0,
+        )
+        service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=reset_row))
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.consecutive_eventless_timeouts == captured_fence.eventless_timeout_count + 1
+    assert entry.reason is None
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+
+@pytest.mark.asyncio
 async def test_a_survivor_joining_during_finalization_blocks_the_settle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
