@@ -31320,6 +31320,148 @@ async def test_http_bridge_retry_claim_cancel_release_bounds_stalled_clear_and_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "release_outcome",
+    [False, RuntimeError("late claim release failed")],
+    ids=["false-result", "exception"],
+)
+async def test_http_bridge_retry_claim_late_result_retries_failed_release(
+    release_outcome: bool | RuntimeError,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    hard_session = _make_bridge_session(key_value="bridge-circuit-late-claim-release")
+    claim_started = asyncio.Event()
+    allow_claim = asyncio.Event()
+    release_called = asyncio.Event()
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def delayed_claim(**_kwargs: Any) -> Any:
+        claim_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await allow_claim.wait()
+        return claimed
+
+    async def release_claim(request_state: Any) -> bool:
+        release_called.set()
+        assert request_state.verified_stale_anchor_retry_circuit_key == hard_session.key
+        assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 1
+        assert request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch == 1_000.0
+        assert request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch == 1_077.0
+        if isinstance(release_outcome, RuntimeError):
+            raise release_outcome
+        return release_outcome
+
+    service._durable_bridge = SimpleNamespace(claim_retry_circuit_generation=delayed_claim)
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", release_claim)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.001)
+    schedule_retry = Mock()
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+    )
+    await claim_started.wait()
+    assert await claim_task is None
+
+    allow_claim.set()
+    await asyncio.wait_for(release_called.wait(), timeout=0.2)
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+    schedule_retry.assert_called_once()
+    release_request_state = schedule_retry.call_args.args[1]
+    assert release_request_state.verified_stale_anchor_retry_circuit_key == hard_session.key
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_generation == 1
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch == 1_000.0
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch == 1_077.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_claim_late_result_bounds_stalled_release_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    hard_session = _make_bridge_session(key_value="bridge-circuit-late-claim-release-timeout")
+    claim_started = asyncio.Event()
+    allow_claim = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    retry_scheduled = asyncio.Event()
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def delayed_claim(**_kwargs: Any) -> Any:
+        claim_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await allow_claim.wait()
+        return claimed
+
+    async def stalled_release(_request_state: Any) -> bool:
+        release_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await allow_release.wait()
+        return False
+
+    service._durable_bridge = SimpleNamespace(claim_retry_circuit_generation=delayed_claim)
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", stalled_release)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.001)
+    schedule_retry = Mock(side_effect=lambda *_args: retry_scheduled.set())
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+    )
+    await claim_started.wait()
+    assert await claim_task is None
+
+    allow_claim.set()
+    await asyncio.wait_for(release_started.wait(), timeout=0.2)
+    await asyncio.wait_for(retry_scheduled.wait(), timeout=0.2)
+    schedule_retry.assert_called_once()
+
+    allow_release.set()
+    abandoned_tasks = tuple(getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", set()))
+    if abandoned_tasks:
+        await asyncio.gather(*abandoned_tasks, return_exceptions=True)
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_abandoned_retry_claim_cleanup_drains_during_shutdown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     service._background_cleanup_tasks = set()

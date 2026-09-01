@@ -999,12 +999,32 @@ class _HTTPBridgeRetryCircuitMixin:
                 return
             result_claimed_at_epoch = getattr(_result, "admission_claimed_at_epoch", None) or claim_started_epoch
             result_claimed_until_epoch = getattr(_result, "admission_claimed_until_epoch", None) or claim_until_epoch
-            await self._clear_http_bridge_retry_circuit_admission_claim(
-                key=key,
-                claimed_generation=claimed_generation,
-                claimed_at_epoch=result_claimed_at_epoch,
-                claimed_until_epoch=result_claimed_until_epoch,
+            release_request_state = SimpleNamespace(
+                request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
+                verified_stale_anchor_retry_circuit_key=key,
+                verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
+                verified_stale_anchor_retry_circuit_claimed_at_epoch=result_claimed_at_epoch,
+                verified_stale_anchor_retry_circuit_claimed_until_epoch=result_claimed_until_epoch,
+                retry_circuit_claim_release_retry_scheduled=False,
             )
+            try:
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    release_request_state
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to release abandoned HTTP bridge retry-circuit admission claim request_id=%s",
+                    release_request_state.request_id,
+                    exc_info=True,
+                )
+                claim_released = False
+            if not claim_released:
+                _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                    self,
+                    release_request_state,
+                )
 
         claim_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
         if claim_timeout_seconds is None:
