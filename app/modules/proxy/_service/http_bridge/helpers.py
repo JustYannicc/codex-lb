@@ -288,7 +288,13 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                     )
         finally:
             complete_failed_handoff()
-            await release_probe(session, detail=detail, probe_owner=request_state)
+            try:
+                await release_probe(session, detail=detail, probe_owner=request_state)
+            finally:
+                await service._close_http_bridge_session_bounded(
+                    session,
+                    reason="owner_unavailable_after_probe",
+                )
 
     cleanup_task = asyncio.create_task(cleanup())
     _, cancellation = await _await_task_deferring_cancellation(cleanup_task)

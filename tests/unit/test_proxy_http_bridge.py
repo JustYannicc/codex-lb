@@ -12534,7 +12534,7 @@ async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
     assert owner_attempt.disarmed is True
     assert sibling_attempt.disarmed is True
     assert session.key not in service._http_bridge_sessions
-    assert service._http_bridge_detached_sessions[id(session)] is session
+    assert id(session) not in service._http_bridge_detached_sessions
     assert circuit_state.half_open_until == 0.0
     assert circuit_state.half_open_owner_session is None
 
@@ -12599,7 +12599,7 @@ async def test_reconnect_owner_unavailable_defers_cancellation_through_pending_l
         )
 
     async def release_lease(_lease: proxy_service.AccountLease) -> None:
-        events.append("lease")
+        events.append("selected_lease" if _lease is replacement_lease else "session_lease")
 
     original_release_probe = service._release_http_bridge_retry_circuit_half_open
 
@@ -12636,7 +12636,7 @@ async def test_reconnect_owner_unavailable_defers_cancellation_through_pending_l
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(reconnect_task, timeout=1.0)
 
-    assert events == ["disarm", "lease", "probe"]
+    assert events == ["disarm", "selected_lease", "probe", "session_lease"]
     assert owner_attempt.disarmed is True
     assert sibling_attempt.disarmed is True
     assert session.handoff_in_progress is False

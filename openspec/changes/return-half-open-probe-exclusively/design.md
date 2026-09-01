@@ -69,7 +69,8 @@ closes the session after releasing the lifecycle lock. A shielded cleanup task
 owns the critical transition so cancellation is reported to the caller only
 after the registry and lease state are consistent. The required-owner
 unavailable exit from an in-place reconnect uses the same lifecycle-ordered
-detach and disarm transition before it releases the probe.
+detach and disarm transition before it releases the probe, then closes the
+detached session through the same cancellation-deferred cleanup owner.
 
 ### Port only the accepted #1857 recovery exits
 
