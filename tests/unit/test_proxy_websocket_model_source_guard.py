@@ -468,17 +468,31 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("synthesized_turn_state", "preissued", "expected_fail_closed"),
+    (
+        "synthesized_turn_state",
+        "preissued",
+        "codex_session_affinity",
+        "expected_fail_closed",
+    ),
     [
-        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, False),
-        (None, True, False),
-        (None, False, True),
+        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, True, False),
+        (None, True, True, False),
+        (None, True, False, False),
+        (None, False, True, True),
+        (None, False, False, True),
     ],
-    ids=["current-proxy-marker", "echoed-proxy-marker", "client-spoof"],
+    ids=[
+        "current-proxy-marker",
+        "echoed-codex-proxy-marker",
+        "echoed-v1-proxy-marker",
+        "client-spoof-codex",
+        "client-spoof-v1",
+    ],
 )
 async def test_terminal_compaction_generated_turn_state_requires_exact_provenance(
     synthesized_turn_state: str | None,
     preissued: bool,
+    codex_session_affinity: bool,
     expected_fail_closed: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -491,10 +505,16 @@ async def test_terminal_compaction_generated_turn_state_requires_exact_provenanc
 
     service = _service()
     if preissued:
+        # v1/responses keeps a synthesized marker out of forwarded headers on
+        # the first handshake.  Seed that exact shape so the reconnect case
+        # proves the marker was retained without trusting a client-only value.
+        preissued_headers = (
+            {} if not codex_session_affinity else {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        )
         service._websocket_continuity_state_for_request(
-            {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            preissued_headers,
             api_key=None,
-            codex_session_affinity=True,
+            codex_session_affinity=codex_session_affinity,
             synthesized_turn_state="turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
     account = _make_account("acc_ws_compaction_spoofed_turn_state")
@@ -537,7 +557,7 @@ async def test_terminal_compaction_generated_turn_state_requires_exact_provenanc
     await service.proxy_responses_websocket(
         _websocket(downstream),
         {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        codex_session_affinity=True,
+        codex_session_affinity=codex_session_affinity,
         openai_cache_affinity=False,
         api_key=None,
         synthesized_turn_state=synthesized_turn_state,
