@@ -3658,6 +3658,12 @@ source ownership. An unavailable source-catalog lookup is distinct from an owner
 miss: the direct WebSocket path MUST preserve its existing subscription fallback
 instead of applying the successful-catalog precondition or converting the lookup
 failure into `previous_response_owner_unavailable`.
+A real client-supplied `x-codex-turn-state` is hard continuity evidence. When
+that token cannot be resolved to an owner in the requesting API-key scope, the
+proxy MUST fail closed and MUST NOT apply the sole-candidate fallback, even when
+exactly one subscription account is eligible. Proxy-synthesized first-turn
+placeholders (`turn_*` / `http_turn_*`) remain the only exception while they are
+unregistered; a registered placeholder MUST resolve to its recorded owner.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
@@ -3721,6 +3727,19 @@ failure into `previous_response_owner_unavailable`.
 - **THEN** the proxy proceeds through normal subscription account selection
 - **AND** the request is forwarded to that sole eligible subscription account
 - **AND** the `previous_response_id` is preserved in the upstream request
+
+#### Scenario: Unresolved client turn-state blocks the HTTP sole-candidate fallback
+
+- **GIVEN** the requested model is known to subscription routing
+- **AND** the source catalog lookup succeeds without confirming source ownership
+- **AND** no subscription account is recorded as owner of `previous_response_id`
+- **AND** the client supplies an `x-codex-turn-state` with no owner in the
+  requesting API-key scope
+- **AND** exactly one eligible subscription account remains
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the proxy returns HTTP status `502`
+- **AND** the sanitized error code is `previous_response_owner_unavailable`
+- **AND** no subscription account is selected and no upstream request is dispatched
 
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
 
