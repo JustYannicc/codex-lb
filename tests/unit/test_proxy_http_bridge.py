@@ -16162,19 +16162,30 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("candidate_count", "client_turn_state", "allow_fallback"),
+    (
+        "candidate_count",
+        "client_turn_state",
+        "synthesized_turn_state",
+        "forwarded_request",
+        "allow_fallback",
+    ),
     [
-        (0, None, False),
-        (1, None, True),
-        (2, None, False),
-        (1, "client-turn-state", False),
-        (1, "http_turn_00000000000000000000000000000000", True),
+        (0, None, "http_turn_generated", False, False),
+        (1, None, "http_turn_generated", False, True),
+        (2, None, "http_turn_generated", False, False),
+        (1, "client-turn-state", None, False, False),
+        (1, "turn_00000000000000000000000000000000", None, False, False),
+        (1, "http_turn_00000000000000000000000000000000", None, False, False),
+        (1, "client-turn-state", None, True, False),
+        (1, "http_turn_generated", "http_turn_generated", True, True),
     ],
 )
 async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_candidate_or_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     candidate_count: int,
     client_turn_state: str | None,
+    synthesized_turn_state: str | None,
+    forwarded_request: bool,
     allow_fallback: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -16266,6 +16277,8 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
                 codex_idle_ttl_seconds=1800.0,
                 max_sessions=8,
                 queue_limit=4,
+                synthesized_turn_state=synthesized_turn_state,
+                forwarded_request=forwarded_request,
             )
         ]
         assert chunks == ['data: {"type":"response.completed"}\n\n']
@@ -16287,6 +16300,8 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
                 codex_idle_ttl_seconds=1800.0,
                 max_sessions=8,
                 queue_limit=4,
+                synthesized_turn_state=synthesized_turn_state,
+                forwarded_request=forwarded_request,
             ):
                 pass
 
@@ -16537,6 +16552,52 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
     assert context.original_affinity_kind == "session_header"
     assert context.original_affinity_key == "sid-123"
     assert cast(dict[str, str], captured["headers"])["x-codex-session-id"] == "sid-123"
+
+
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_preserves_synthesized_turn_state_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(**kwargs: object):
+        captured.update(kwargs)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            synthesized_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == []
+    context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
+    assert context.downstream_turn_state == "http_turn_generated"
+    assert context.synthesized_turn_state == "http_turn_generated"
 
 
 @pytest.mark.asyncio

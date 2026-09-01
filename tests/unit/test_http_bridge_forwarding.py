@@ -29,6 +29,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_SIGNATURE_HEADER,
     HTTP_BRIDGE_SIGNATURE_V2_HEADER,
     HTTP_BRIDGE_SIGNATURE_VERSION_HEADER,
+    HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
@@ -122,6 +123,74 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert forwarded.context == context
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+def test_parse_forwarded_request_round_trips_authenticated_synthesized_turn_state() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] == "http_turn_generated"
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+@pytest.mark.parametrize("tamper", ["mutate", "strip_signature"])
+def test_parse_forwarded_request_rejects_unbound_synthesized_turn_state_marker(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "mutate":
+        headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] = "http_turn_attacker"
+    else:
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_build_owner_forward_headers_preserves_legacy_signature_when_marker_absent() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER not in headers
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+    )
 
 
 def test_parse_forwarded_request_preserves_signed_file_owner_proof() -> None:

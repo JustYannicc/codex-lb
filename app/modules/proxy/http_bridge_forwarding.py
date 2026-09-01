@@ -56,6 +56,7 @@ HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_FILE_OWNER_HEADER = "x-codex-bridge-file-owner"
+HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER = "x-codex-bridge-synthesized-turn-state"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
 HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
@@ -81,6 +82,10 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    # This is a server-generated turn-state marker, not client continuity
+    # evidence.  It is carried separately so an owner can authorize the
+    # narrow sole-candidate fallback without trusting a client-shaped value.
+    synthesized_turn_state: str | None = None
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
@@ -327,6 +332,8 @@ def build_owner_forward_headers(
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
+    if context.synthesized_turn_state is not None:
+        forwarded[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] = context.synthesized_turn_state
     if context.reservation is not None:
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
@@ -397,6 +404,7 @@ def parse_forwarded_request(
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        synthesized_turn_state=_optional_header(headers.get(HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER)),
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
@@ -424,6 +432,12 @@ def parse_forwarded_request(
             signature_version=signature_version,
         ),
     )
+    # A synthesized-turn marker is meaningful only when it is covered by the
+    # tools-bound signature.  Without this gate, an external caller could
+    # plant the marker on a valid legacy-primary forward and unlock the
+    # single-candidate owner-miss fallback using spoofed client state.
+    if context.synthesized_turn_state is not None and not tools_bound_valid:
+        return None, _invalid_bridge_forward_signature_error()
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
@@ -623,6 +637,7 @@ def _bridge_forward_tools_bound_signature(
         include_client_ip=True,
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
+        bind_synthesized_turn_state=True,
     )
     return _sign_bridge_payload(signing_payload)
 
@@ -639,36 +654,40 @@ def _structured_bridge_signing_payload(
     include_client_ip: bool,
     signature_version: str | None,
     protocol: str,
+    bind_synthesized_turn_state: bool = False,
 ) -> str:
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
     # domain-separates the primary and tamper-proofing signatures.
+    signing_fields: dict[str, object] = {
+        "body_digest": body_digest,
+        "client_ip": context.client_ip if include_client_ip else None,
+        "client_ip_present": context.client_ip is not None,
+        "codex_session_affinity": context.codex_session_affinity,
+        "downstream_turn_state": context.downstream_turn_state,
+        "file_owner_account_id": context.file_owner_account_id,
+        "include_client_ip": include_client_ip,
+        "origin_instance": context.origin_instance,
+        "original_affinity_key": context.original_affinity_key,
+        "original_affinity_kind": context.original_affinity_kind,
+        "original_request_unanchored": context.original_request_unanchored,
+        "protocol": protocol,
+        "reservation": (
+            {
+                "id": context.reservation.reservation_id,
+                "key_id": context.reservation.key_id,
+                "model": context.reservation.model,
+            }
+            if context.reservation is not None
+            else None
+        ),
+        "signature_version": signature_version,
+        "target_instance": context.target_instance,
+    }
+    if bind_synthesized_turn_state:
+        signing_fields["synthesized_turn_state"] = context.synthesized_turn_state
     return json.dumps(
-        {
-            "body_digest": body_digest,
-            "client_ip": context.client_ip if include_client_ip else None,
-            "client_ip_present": context.client_ip is not None,
-            "codex_session_affinity": context.codex_session_affinity,
-            "downstream_turn_state": context.downstream_turn_state,
-            "file_owner_account_id": context.file_owner_account_id,
-            "include_client_ip": include_client_ip,
-            "origin_instance": context.origin_instance,
-            "original_affinity_key": context.original_affinity_key,
-            "original_affinity_kind": context.original_affinity_kind,
-            "original_request_unanchored": context.original_request_unanchored,
-            "protocol": protocol,
-            "reservation": (
-                {
-                    "id": context.reservation.reservation_id,
-                    "key_id": context.reservation.key_id,
-                    "model": context.reservation.model,
-                }
-                if context.reservation is not None
-                else None
-            ),
-            "signature_version": signature_version,
-            "target_instance": context.target_instance,
-        },
+        signing_fields,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
