@@ -579,6 +579,7 @@ async def test_http_bridge_completed_delivery_cleanup_releases_queue_after_racin
         started_at=time.monotonic(),
         event_queue=event_queue,
         event_queue_revoked=revoked,
+        downstream_visible=True,
         transport="http",
     )
     session = _make_bridge_session(
@@ -8502,6 +8503,63 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
     assert '"code":"bridge_eventless_timeout"' in events[0]
     release.assert_awaited_once_with(request_state)
     assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_startup_cooldown_preserves_pending_terminal_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal queued before attachment must not be mistaken for eventless startup."""
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-terminal-pending", None, "hard"),
+    )
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    terminal_event = (
+        'event: response.failed\ndata: {"type":"response.failed",'
+        '"response":{"id":"resp-terminal-pending","status":"failed"}}\n\n'
+    )
+    assert event_queue.enqueue_terminal_event_nowait(terminal_event) is True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-pending",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=event_queue.revoked,
+        transport="http",
+        session_id="turn-terminal-pending",
+        hard_continuity_anchor=True,
+    )
+    submit = AsyncMock()
+    cooldown = AsyncMock(side_effect=[0.0, 30.0])
+    detach = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    events = [
+        event
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    assert events == [terminal_event]
+    submit.assert_awaited_once()
+    assert cooldown.await_count == 2
+    detach.assert_awaited_once_with(session, request_state=request_state)
 
 
 @pytest.mark.asyncio

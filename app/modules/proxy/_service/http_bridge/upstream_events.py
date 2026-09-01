@@ -2543,7 +2543,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     False,
                                 )
                                 consumer_detached = consumer_started and request_state.event_queue_revoked.is_set()
-                                detached_before_consumer = not consumer_started and not request_state.downstream_visible
+                                detached_before_consumer = not consumer_started
                                 terminal_missing_without_consumer = (
                                     not completed_delivery_scope.terminal_enqueued and not consumer_started
                                 )

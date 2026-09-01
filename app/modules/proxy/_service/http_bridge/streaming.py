@@ -4735,6 +4735,7 @@ class _HTTPBridgeStreamingMixin:
             and not request_state.verified_stale_anchor_replay
             and request_state.response_id is None
             and request_state.response_event_count == 0
+            and not getattr(event_queue, "terminal_pending", False)
             and event_queue.empty()
         ):
             if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
