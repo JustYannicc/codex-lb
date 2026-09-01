@@ -30916,6 +30916,86 @@ async def test_http_bridge_verified_stale_anchor_claims_captured_generation_atom
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("release_mode", ["false", "stalled"], ids=["false-result", "stalled-clear"])
+async def test_http_bridge_retry_claim_post_cas_local_advance_bounds_release_and_retries(
+    release_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-post-cas-local-advance")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        persisted_updated_at_epoch=7.0,
+        persisted_admission_generation=0,
+        consecutive_failures=0,
+        last_failure_monotonic=now,
+        cooldown_until=0.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    release_started = asyncio.Event()
+    claimed = SimpleNamespace(
+        admission_claimed_generation=1,
+        admission_claimed_at_epoch=1_000.0,
+        admission_claimed_until_epoch=1_077.0,
+    )
+
+    async def claim_generation(**_kwargs: Any) -> Any:
+        # Make the local post-CAS check win after the durable claim commits.
+        state.last_failure_monotonic = now + 1.0
+        return claimed
+
+    async def release_claim(**_kwargs: Any) -> bool:
+        release_started.set()
+        if release_mode == "stalled":
+            await asyncio.Event().wait()
+        return False
+
+    service._durable_bridge = SimpleNamespace(claim_retry_circuit_generation=claim_generation)
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim", release_claim)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.001)
+    schedule_retry = Mock()
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+    receipt: dict[str, Any] = {}
+    captured_generation = proxy_support_module._HTTPBridgeRetryCircuitGeneration(
+        admission_generation=0,
+        persisted_updated_at_epoch=7.0,
+        persisted_consecutive_failures=0,
+        durable_cooldown_until_epoch=0.0,
+        local_consecutive_failures=0,
+        last_failure_monotonic=now,
+        local_cooldown_until=0.0,
+    )
+
+    outcome = await asyncio.wait_for(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=captured_generation,
+            claim_receipt=receipt,
+        ),
+        timeout=0.2,
+    )
+
+    assert outcome is False
+    await release_started.wait()
+    schedule_retry.assert_called_once_with(service, schedule_retry.call_args.args[1])
+    release_request_state = schedule_retry.call_args.args[1]
+    assert release_request_state.verified_stale_anchor_retry_circuit_key == hard_session.key
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_generation == 1
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch == 1_000.0
+    assert release_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch == 1_077.0
+    assert receipt == {
+        "generation": 1,
+        "claimed_at_epoch": 1_000.0,
+        "claimed_until_epoch": 1_077.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_claim_uses_exact_request_deadline_as_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

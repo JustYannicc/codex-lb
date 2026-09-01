@@ -492,6 +492,25 @@ def _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
         request_state.retry_circuit_claim_release_retry_scheduled = False
 
 
+def _http_bridge_retry_circuit_claim_release_request_state(
+    *,
+    key: _HTTPBridgeSessionKey,
+    claimed_generation: int,
+    claimed_at_epoch: float,
+    claimed_until_epoch: float,
+) -> SimpleNamespace:
+    """Build the minimal mutable state used by claim-release cleanup."""
+    return SimpleNamespace(
+        request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
+        verified_stale_anchor_retry_circuit_key=key,
+        verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
+        verified_stale_anchor_retry_circuit_claimed_at_epoch=claimed_at_epoch,
+        verified_stale_anchor_retry_circuit_claimed_until_epoch=claimed_until_epoch,
+        verified_stale_anchor_retry_circuit_claimed_attempt_count=0,
+        retry_circuit_claim_release_retry_scheduled=False,
+    )
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitKeyProbe:
     """Key-scoped stand-in for the planning-time first-touch load.
@@ -999,13 +1018,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 return
             result_claimed_at_epoch = getattr(_result, "admission_claimed_at_epoch", None) or claim_started_epoch
             result_claimed_until_epoch = getattr(_result, "admission_claimed_until_epoch", None) or claim_until_epoch
-            release_request_state = SimpleNamespace(
-                request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
-                verified_stale_anchor_retry_circuit_key=key,
-                verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
-                verified_stale_anchor_retry_circuit_claimed_at_epoch=result_claimed_at_epoch,
-                verified_stale_anchor_retry_circuit_claimed_until_epoch=result_claimed_until_epoch,
-                retry_circuit_claim_release_retry_scheduled=False,
+            release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
+                key=key,
+                claimed_generation=claimed_generation,
+                claimed_at_epoch=result_claimed_at_epoch,
+                claimed_until_epoch=result_claimed_until_epoch,
             )
             try:
                 claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
@@ -1115,13 +1132,11 @@ class _HTTPBridgeRetryCircuitMixin:
             # small service-owned stand-in so a failed or timed-out release
             # can use the normal generation-fenced retry path instead of
             # dropping the only durable receipt with this coroutine.
-            release_request_state = SimpleNamespace(
-                request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
-                verified_stale_anchor_retry_circuit_key=key,
-                verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
-                verified_stale_anchor_retry_circuit_claimed_at_epoch=result_claimed_at_epoch,
-                verified_stale_anchor_retry_circuit_claimed_until_epoch=result_claimed_until_epoch,
-                retry_circuit_claim_release_retry_scheduled=False,
+            release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
+                key=key,
+                claimed_generation=claimed_generation,
+                claimed_at_epoch=result_claimed_at_epoch,
+                claimed_until_epoch=result_claimed_until_epoch,
             )
             release_task = asyncio.create_task(
                 self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(release_request_state),
@@ -1192,14 +1207,22 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                     state.persisted_admission_claimed_until_epoch = result_claimed_until_epoch
             if local_state_changed:
-                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim(
+                release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
                     key=key,
                     claimed_generation=claimed_generation,
                     claimed_at_epoch=result_claimed_at_epoch,
                     claimed_until_epoch=result_claimed_until_epoch,
                 )
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    release_request_state
+                )
                 if claim_released and claim_receipt is not None:
                     claim_receipt.clear()
+                elif not claim_released:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                        self,
+                        release_request_state,
+                    )
                 return False
             return True
         except BaseException:
