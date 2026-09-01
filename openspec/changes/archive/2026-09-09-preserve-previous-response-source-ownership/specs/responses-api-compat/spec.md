@@ -29,7 +29,11 @@ that token cannot be resolved to an owner in the requesting API-key scope, the
 proxy MUST fail closed and MUST NOT apply the sole-candidate fallback, even when
 exactly one subscription account is eligible. Proxy-synthesized first-turn
 placeholders (`turn_*` / `http_turn_*`) remain the only exception while they are
-unregistered; a registered placeholder MUST resolve to its recorded owner.
+unregistered; a registered placeholder MUST resolve to its recorded owner. For
+the HTTP bridge owner-miss fallback, that exception MUST be authorized by a
+server-generated marker carried in the authenticated internal forward; a
+client-supplied value matching the `turn_*` / `http_turn_*` shape MUST NOT
+qualify.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
