@@ -31352,6 +31352,61 @@ async def test_http_bridge_aborted_terminal_cleanup_schedules_failed_claim_relea
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_aborted_terminal_cleanup_bounds_stalled_claim_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key_value="bridge-aborted-claim-release-timeout",
+        pending_requests=deque(),
+        queued_request_count=0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-aborted-claim-release-timeout",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_claimed_generation=3,
+    )
+    clear_started = asyncio.Event()
+    allow_clear = asyncio.Event()
+
+    async def stalled_clear(**_kwargs: Any) -> bool:
+        clear_started.set()
+        await allow_clear.wait()
+        return False
+
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim", stalled_clear)
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS", 0.001)
+    schedule_retry = Mock()
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    cleanup_task = asyncio.create_task(service._settle_aborted_http_bridge_terminal_states(session, [request_state]))
+    timed_out = False
+    try:
+        await clear_started.wait()
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.1)
+        except TimeoutError:
+            timed_out = True
+    finally:
+        allow_clear.set()
+        await cleanup_task
+
+    assert not timed_out, "aborted terminal cleanup must not wait indefinitely on durable claim release"
+    schedule_retry.assert_called_once_with(service, request_state)
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 3
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_verified_stale_anchor_claim_times_out_and_releases_circuit_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

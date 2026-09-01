@@ -2500,7 +2500,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             exc_info=True,
                         )
                 try:
-                    claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request(
+                    claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
                         request_state
                     )
                 except Exception:
