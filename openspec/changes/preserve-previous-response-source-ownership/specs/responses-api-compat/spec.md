@@ -30,12 +30,15 @@ proxy MUST fail closed and MUST NOT apply the sole-candidate fallback, even when
 exactly one subscription account is eligible. Proxy-synthesized first-turn
 placeholders (`turn_*` / `http_turn_*`) remain the only exception while they are
 unregistered; a registered placeholder MUST resolve to its recorded owner. For
-the HTTP bridge owner-miss fallback, that exception MUST be authorized by a
-server-generated marker carried in the authenticated internal forward; a
-client-supplied value matching the `turn_*` / `http_turn_*` shape MUST NOT
-qualify. On the direct Responses WebSocket path, the exception MUST require an
-exact match with the synthesized marker generated for that handshake or a
-server-side continuity record proving that the proxy previously issued the
+the same fail-closed decision, a physically present but blank
+`x-codex-turn-state` header MUST be treated as client input rather than as an
+omitted header and MUST NOT authorize synthesized provenance or sole-candidate
+fallback. For the HTTP bridge owner-miss fallback, that exception MUST be
+authorized by a server-generated marker carried in the authenticated internal
+forward; a client-supplied value matching the `turn_*` / `http_turn_*` shape
+MUST NOT qualify. On the direct Responses WebSocket path, the exception MUST
+require an exact match with the synthesized marker generated for that handshake
+or a server-side continuity record proving that the proxy previously issued the
 marker; matching the synthesized-token shape alone MUST NOT qualify.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
@@ -108,6 +111,19 @@ marker; matching the synthesized-token shape alone MUST NOT qualify.
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** the client supplies an `x-codex-turn-state` with no owner in the
   requesting API-key scope
+- **AND** exactly one eligible subscription account remains
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the proxy returns HTTP status `502`
+- **AND** the sanitized error code is `previous_response_owner_unavailable`
+- **AND** no subscription account is selected and no upstream request is dispatched
+
+#### Scenario: Blank client turn-state blocks the HTTP sole-candidate fallback
+
+- **GIVEN** the requested model is known to subscription routing
+- **AND** the source catalog lookup succeeds without confirming source ownership
+- **AND** no subscription account is recorded as owner of `previous_response_id`
+- **AND** the client sends a physically present but blank `x-codex-turn-state`
+  header
 - **AND** exactly one eligible subscription account remains
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy returns HTTP status `502`

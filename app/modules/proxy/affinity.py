@@ -400,6 +400,18 @@ def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None
     return stripped or None
 
 
+def _turn_state_header_present(headers: Mapping[str, str]) -> bool:
+    """Return whether the request physically carries a turn-state header.
+
+    Header value normalization intentionally maps blank values to ``None`` for
+    affinity selection.  Continuity security still needs to distinguish a
+    missing header from a present-but-blank client value, so callers can avoid
+    treating an explicit blank as proxy-generated provenance.
+    """
+
+    return any(key.lower() == "x-codex-turn-state" for key in headers)
+
+
 def _bare_codex_session_affinity(
     headers: Mapping[str, str],
     *,
