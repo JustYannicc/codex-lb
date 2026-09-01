@@ -16,6 +16,9 @@
   strikes.
 - [x] Order proxy continuity reset lifecycle ownership, detach, disarm, release,
   settlement, and close through cancellation-safe cleanup.
+- [x] Apply the same detach/disarm-before-release ordering to an in-place
+  reconnect whose required continuity owner is unavailable, and preserve its
+  typed owner error when selected-account lease cleanup fails.
 
 ## Coverage
 

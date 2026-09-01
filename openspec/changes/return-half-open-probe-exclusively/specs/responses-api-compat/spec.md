@@ -72,7 +72,10 @@ bridge routing and marking every pending response-create attempt on that session
 as disarmed. It MUST return the probe only after detachment and disarming, then
 settle pending requests and close the session through a cancellation-shielded
 cleanup path. A late submit MUST NOT append an undisarmed attempt between the
-reset's disarm and detach steps.
+reset's disarm and detach steps. This ordering MUST also apply when an in-place
+reconnect fails because its required continuity owner is unavailable. Failure
+to release a selected account lease during that terminal cleanup MUST NOT
+replace the stable continuity-owner error returned to the client.
 
 #### Scenario: Reset teardown cannot manufacture a circuit strike
 

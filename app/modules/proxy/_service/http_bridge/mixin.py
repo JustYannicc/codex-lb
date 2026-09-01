@@ -2021,6 +2021,7 @@ class _HTTPBridgeMixin(
             detail: str = "previous_response_owner_unavailable", *, release_account_lease: bool = False
         ) -> None:
             await _fail_http_bridge_owner_unavailable_after_probe(
+                self,
                 session,
                 detail=detail,
                 request_state=request_state,

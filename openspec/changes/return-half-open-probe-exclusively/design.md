@@ -67,7 +67,9 @@ under `_http_bridge_lock`, marks all pending response-create attempts disarmed,
 and only then returns the half-open lease. It snapshots the work to settle and
 closes the session after releasing the lifecycle lock. A shielded cleanup task
 owns the critical transition so cancellation is reported to the caller only
-after the registry and lease state are consistent.
+after the registry and lease state are consistent. The required-owner
+unavailable exit from an in-place reconnect uses the same lifecycle-ordered
+detach and disarm transition before it releases the probe.
 
 ### Port only the accepted #1857 recovery exits
 

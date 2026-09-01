@@ -11452,6 +11452,71 @@ async def test_reconnect_cancellation_during_wrong_owner_lease_release_completes
 
 
 @pytest.mark.asyncio
+async def test_reconnect_wrong_owner_lease_release_failure_preserves_typed_owner_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="wrong-owner-lease-release-failure")
+    required_account = cast(Any, SimpleNamespace(id="acc-required", status=AccountStatus.ACTIVE))
+    replacement_account = cast(Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE))
+    replacement_lease = proxy_service.AccountLease(
+        lease_id="lease-wrong-owner-release-failure",
+        account_id=replacement_account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-wrong-owner-release-failure",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=required_account.id,
+    )
+
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=replacement_account,
+            error_message=None,
+            error_code=None,
+            lease=replacement_lease,
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "release_account_lease",
+        AsyncMock(side_effect=RuntimeError("lease store unavailable")),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            require_preferred_account=True,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert session.handoff_in_progress is False
+    assert session.handoff_future is None
+    assert session.key not in service._http_bridge_inflight_sessions
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_preserves_hard_account_after_1011(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -12428,7 +12493,16 @@ async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
     sibling_request.response_create_attempt = sibling_attempt
     session.pending_requests.extend((owner_request, sibling_request))
     session.queued_request_count = 2
+    service._http_bridge_sessions[session.key] = session
     circuit_state = _activate_half_open_probe(service, session)
+    original_release_probe = service._release_http_bridge_retry_circuit_half_open
+
+    async def release_probe(*args: Any, **kwargs: Any) -> bool:
+        assert session.key not in service._http_bridge_sessions
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        assert owner_attempt.disarmed is True
+        assert sibling_attempt.disarmed is True
+        return await original_release_probe(*args, **kwargs)
 
     async def select_no_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
         return proxy_service.AccountSelection(
@@ -12451,6 +12525,7 @@ async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
         ),
     )
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_no_account)
+    monkeypatch.setattr(service, "_release_http_bridge_retry_circuit_half_open", release_probe)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         await service._reconnect_http_bridge_session(session, request_state=owner_request)
@@ -12458,6 +12533,8 @@ async def test_reconnect_owner_unavailable_disarms_all_pending_attempts(
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert owner_attempt.disarmed is True
     assert sibling_attempt.disarmed is True
+    assert session.key not in service._http_bridge_sessions
+    assert service._http_bridge_detached_sessions[id(session)] is session
     assert circuit_state.half_open_until == 0.0
     assert circuit_state.half_open_owner_session is None
 

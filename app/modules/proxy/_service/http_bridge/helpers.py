@@ -14,6 +14,8 @@ from ipaddress import ip_address
 from typing import Any, Literal, Mapping, Protocol, TypeVar, cast
 from urllib.parse import urlparse
 
+import anyio
+
 from app.core import shutdown as shutdown_state
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -245,6 +247,7 @@ class _ReleaseHTTPBridgeRetryCircuitProbe(Protocol):
 
 
 async def _fail_http_bridge_owner_unavailable_after_probe(
+    service: _HTTPBridgeServiceProtocol,
     session: "_HTTPBridgeSession",
     *,
     detail: str,
@@ -254,12 +257,35 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
     release_probe: _ReleaseHTTPBridgeRetryCircuitProbe,
 ) -> None:
     """Finish owner-loss cleanup before surfacing cancellation or failure."""
+    lifecycle_lock_held = session.lifecycle_lock.statistics().owner == anyio.get_current_task()
+
+    async def detach_and_disarm() -> None:
+        session.closed = True
+        async with service._http_bridge_lock:
+            service._detach_http_bridge_session_locked(session.key, expected_session=session)
+        await _disarm_pending_response_create_attempts(session)
 
     async def cleanup() -> None:
-        await _disarm_pending_response_create_attempts(session)
+        # A submitter can append until it observes the same lifecycle state.
+        # Detach and disarm under one ownership interval so the probe cannot
+        # return while a late, still-eligible send remains routable.
+        if lifecycle_lock_held:
+            await detach_and_disarm()
+        else:
+            async with session.lifecycle_lock:
+                await detach_and_disarm()
         try:
             if release_account_lease is not None:
-                await release_account_lease()
+                try:
+                    await release_account_lease()
+                except Exception:
+                    # The lease is already detached from this session. Its
+                    # best-effort release must not replace the stable
+                    # continuity-owner error with an internal cleanup error.
+                    logger.warning(
+                        "Failed to release selected account lease after HTTP bridge owner loss",
+                        exc_info=True,
+                    )
         finally:
             complete_failed_handoff()
             await release_probe(session, detail=detail, probe_owner=request_state)
