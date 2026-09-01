@@ -6168,7 +6168,9 @@ class _WebSocketMixin:
             # A stale-anchor replay may be detached while waiting for its
             # terminal event.  It still owns the durable admission marker;
             # release it only after this terminal cleanup path has run.
-            claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+            claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                request_state
+            )
             if not claim_released:
                 _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
             # The reservation is settled; clear any terminal-bookkeeping
@@ -6448,7 +6450,7 @@ class _WebSocketMixin:
         # Keep the admission marker until terminal settlement has completed;
         # a later cleanup path can retry the fenced release if persistence was
         # unavailable here.
-        claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+        claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state)
         if not claim_released:
             _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
 
@@ -6826,7 +6828,9 @@ class _WebSocketMixin:
                 # Every request popped into terminal cleanup owns its replay
                 # marker until this terminal event/EOS handoff completes,
                 # including requests without an API-key reservation.
-                claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state)
+                claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    request_state
+                )
                 if not claim_released:
                     _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
             except Exception:
