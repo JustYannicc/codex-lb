@@ -33,7 +33,10 @@ unregistered; a registered placeholder MUST resolve to its recorded owner. For
 the HTTP bridge owner-miss fallback, that exception MUST be authorized by a
 server-generated marker carried in the authenticated internal forward; a
 client-supplied value matching the `turn_*` / `http_turn_*` shape MUST NOT
-qualify.
+qualify. On the direct Responses WebSocket path, the exception MUST require an
+exact match with the synthesized marker generated for that handshake or a
+server-side continuity record proving that the proxy previously issued the
+marker; matching the synthesized-token shape alone MUST NOT qualify.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
@@ -110,6 +113,19 @@ qualify.
 - **THEN** the proxy returns HTTP status `502`
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** no subscription account is selected and no upstream request is dispatched
+
+#### Scenario: Generated-looking WebSocket turn state requires exact provenance
+
+- **GIVEN** a direct Responses WebSocket handshake generated a synthesized turn-state marker
+- **AND** the client supplies a different `x-codex-turn-state` that matches the synthesized-token shape
+- **AND** that client token has no owner in the requesting API-key scope
+- **AND** exactly one eligible subscription account remains
+- **WHEN** the client submits a compact continuation with a missing previous-response owner
+- **THEN** the proxy fails closed with `turn_state_owner_unavailable`
+- **AND** no subscription account is selected and no upstream request is dispatched
+- **BUT WHEN** the turn state exactly matches the marker generated for that handshake
+- **OR** server-side continuity state proves that the proxy issued the marker on an earlier handshake
+- **THEN** the unregistered first-turn placeholder may use the sole-candidate compatibility fallback
 
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
 
