@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     PrivateAttr,
     SerializeAsAny,
     SkipValidation,
@@ -671,6 +672,24 @@ class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
+    _codex_lb_raw_input_string_length: int | None = PrivateAttr(default=None)
+    _codex_lb_raw_input_normalized_value: JsonValue | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_raw_input_string_length(
+        cls,
+        data: JsonValue | ResponsesRequest,
+        handler: ModelWrapValidatorHandler[ResponsesRequest],
+    ) -> ResponsesRequest:
+        if isinstance(data, cls):
+            return handler(data)
+        raw_input = data.get("input") if is_json_mapping(data) else None
+        raw_input_string_length = len(raw_input) if isinstance(raw_input, str) else None
+        request = handler(data)
+        request._codex_lb_raw_input_string_length = raw_input_string_length
+        request._codex_lb_raw_input_normalized_value = request.input if raw_input_string_length is not None else None
+        return request
 
     @model_validator(mode="before")
     @classmethod

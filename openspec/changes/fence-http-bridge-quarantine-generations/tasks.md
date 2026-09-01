@@ -28,3 +28,7 @@
 - [x] 1.13 Capture raw generation alongside poison provenance so pre-fence
   first strikes reset correctly, and classify one-item arrays using the
   compact serialization of the entire array.
+- [x] 1.14 Preserve the original raw-string input length through request
+  validation so array normalization cannot change the full-resend boundary.
+- [x] 1.15 Discard expired suppressed-weaker markers before deciding whether
+  a post-capture first eventless strike survives poison cleanup.
