@@ -38,11 +38,18 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
+_HTTP_BRIDGE_RETRY_CIRCUIT_LEASE = tuple[float, object, int]
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
         "clean_close",
         "stream_idle_timeout",
+        # A client-supplied previous-response rejection is upstream evidence,
+        # not proxy continuity loss. The recorder filters these details out
+        # only when the request state explicitly proves that codex-lb injected
+        # the rejected anchor.
+        "previous_response_not_found",
+        "bridge_previous_response_not_found",
         # Pre-response-start bridge silence. Deliberately *not* aliased onto
         # stream_idle_timeout: the whole point is that a circuit opened before
         # any response existed must be distinguishable from one opened by a
@@ -190,6 +197,10 @@ class _HTTPBridgeRetryCircuitState:
     # passes a request state, while tests use plain sentinels to prove that no
     # fields or equality semantics participate in ownership.
     half_open_owner_token: object | None = None
+    # Process-local identity for this lease. This intentionally remains
+    # separate from ``persisted_admission_generation``, which versions a
+    # durable replay claim and may be shared by another replica.
+    half_open_lease_generation: int = 0
 
 
 @dataclass(slots=True)
@@ -220,6 +231,10 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuit_persisted_keys = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
     service._http_bridge_retry_circuit_key_locks = {}
+    # A session/request token may be reused by a later probe after this state
+    # is returned. Keep a service-wide generation so a late completion cannot
+    # release that replacement lease.
+    service._http_bridge_retry_circuit_half_open_generation = 0
     # A settlement pops the state object, taking its stale-load watermark
     # with it; this per-key watermark survives the pop so a lookup that
     # began before the settlement cannot adopt the pre-settlement row into
@@ -478,16 +493,33 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
         selection: _HTTPBridgeRetryCircuitAttemptSelection,
+        proxy_continuity_provenance: bool = False,
     ) -> int | None:
         attempt = selection.attempt
         if attempt is not None:
+            if proxy_continuity_provenance:
+                return await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=detail,
+                    attempt=attempt,
+                    proxy_continuity_provenance=True,
+                )
             return await self._record_http_bridge_retry_circuit_failure(
                 session,
                 detail=detail,
                 attempt=attempt,
             )
         if selection.kind == "absent":
-            return await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
+            if proxy_continuity_provenance:
+                return await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=detail,
+                    proxy_continuity_provenance=True,
+                )
+            return await self._record_http_bridge_retry_circuit_failure(
+                session,
+                detail=detail,
+            )
         if selection.kind == "recorded":
             for recorded_attempt in selection.attempts:
                 settled = recorded_attempt.retry_circuit_failure_settled
@@ -928,6 +960,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_until = 0.0
                 state.half_open_owner_session = None
                 state.half_open_owner_token = None
+                state.half_open_lease_generation = 0
             elif (
                 episode_replaced
                 and not local_failure_is_newer
@@ -941,6 +974,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_until = 0.0
                 state.half_open_owner_session = None
                 state.half_open_owner_token = None
+                state.half_open_lease_generation = 0
             if not defer_durable_snapshot:
                 state.persisted_updated_at_epoch = persisted.updated_at_epoch
                 state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
@@ -1259,12 +1293,14 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.half_open_until = 0.0
                             state.half_open_owner_session = None
                             state.half_open_owner_token = None
+                            state.half_open_lease_generation = 0
                         elif episode_replaced and not local_failure_is_newer and not active_local_probe:
                             # A replacement row with an elapsed cooldown must
                             # not inherit a lease opened by the ended episode.
                             state.half_open_until = 0.0
                             state.half_open_owner_session = None
                             state.half_open_owner_token = None
+                            state.half_open_lease_generation = 0
                         if not defer_durable_snapshot:
                             state.persisted_updated_at_epoch = persisted.updated_at_epoch
                             state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
@@ -1299,7 +1335,7 @@ class _HTTPBridgeRetryCircuitMixin:
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
         allow_operation_fenced_continuity_replay: bool = False,
-        claimed_lease_out: list[tuple[float, object]] | None = None,
+        claimed_lease_out: list[_HTTP_BRIDGE_RETRY_CIRCUIT_LEASE] | None = None,
     ) -> bool:
         """Avoid replaying a repeatedly failing hard-affinity request in a tight loop."""
         if session.key.strength != "hard":
@@ -1338,12 +1374,15 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.half_open_owner_session = session
                     owner_token = probe_owner if probe_owner is not None else session
                     state.half_open_owner_token = owner_token
+                    next_lease_generation = getattr(self, "_http_bridge_retry_circuit_half_open_generation", 0) + 1
+                    self._http_bridge_retry_circuit_half_open_generation = next_lease_generation
+                    state.half_open_lease_generation = next_lease_generation
                     if claimed_lease_out is not None:
                         # The exact lease this admission claimed, handed out
                         # under the same lock that installed it, so a
                         # fail-closed caller can return precisely its own
                         # probe under any interleaving.
-                        claimed_lease_out.append((state.half_open_until, owner_token))
+                        claimed_lease_out.append((state.half_open_until, owner_token, next_lease_generation))
                     logger.info(
                         "http_bridge_retry_circuit event=half_open bridge_kind=%s bridge_key=%s failures=%s",
                         session.key.affinity_kind,
@@ -1678,16 +1717,29 @@ class _HTTPBridgeRetryCircuitMixin:
         detail: str,
         probe_owner: object | None = None,
         expected_half_open_until: float | None = None,
+        expected_half_open_generation: int | None = None,
     ) -> bool:
-        """Return an active local probe only from its owning session.
+        """Return an active local probe only from its exact lease owner.
 
         Continuity ownership loss is a proxy-side recovery outcome, not an
         upstream failure. Returning the probe preserves the durable failure
         count and leaves an elapsed, non-zero local cooldown marker so the
         next local admission installs a new exclusive lease.
+
+        The process-local lease generation is distinct from the durable
+        admission generation. A session and request token may be reused for a
+        later probe, so a completion from an earlier lease must be a no-op.
         """
         if session.key.strength != "hard":
             return False
+        if expected_half_open_until is None and probe_owner is not None:
+            owner_deadline = getattr(probe_owner, "claimed_half_open_until", None)
+            if isinstance(owner_deadline, (int, float)) and owner_deadline > 0.0:
+                expected_half_open_until = float(owner_deadline)
+        if expected_half_open_generation is None and probe_owner is not None:
+            owner_generation = getattr(probe_owner, "claimed_half_open_generation", None)
+            if isinstance(owner_generation, int) and owner_generation > 0:
+                expected_half_open_generation = owner_generation
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -1705,6 +1757,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 expected_owner = probe_owner if probe_owner is not None else session
                 if state.half_open_owner_token is not expected_owner:
                     return False
+            active_generation = getattr(state, "half_open_lease_generation", 0)
+            if active_generation > 0 and expected_half_open_generation != active_generation:
+                return False
+            if active_generation == 0 and expected_half_open_generation not in (None, 0):
+                return False
             # A durable reload may have installed a newer future cooldown
             # while this local probe was in flight. Returning the probe must
             # never erase that protection.
@@ -1712,6 +1769,7 @@ class _HTTPBridgeRetryCircuitMixin:
             state.half_open_until = 0.0
             state.half_open_owner_session = None
             state.half_open_owner_token = None
+            state.half_open_lease_generation = 0
             state.last_half_open_release_monotonic = now
             state.last_touched_monotonic = now
             consecutive_failures = state.consecutive_failures
@@ -1748,6 +1806,7 @@ class _HTTPBridgeRetryCircuitMixin:
         attempt: _HTTPBridgeResponseCreateAttempt | None = None,
         probe_owner: object | None = None,
         terminal_pre_response_frame: bool = False,
+        proxy_continuity_provenance: bool = False,
     ) -> int | None:
         """Count one hard-key failure against the retry circuit.
 
@@ -1760,7 +1819,10 @@ class _HTTPBridgeRetryCircuitMixin:
         never asserts it, so its "upstream answered" guard is unchanged.
         """
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
-        if detail in _HTTP_BRIDGE_RETRY_CIRCUIT_PROXY_CONTINUITY_DETAILS:
+        if detail in _HTTP_BRIDGE_RETRY_CIRCUIT_PROXY_CONTINUITY_DETAILS and (
+            detail not in {"previous_response_not_found", "bridge_previous_response_not_found"}
+            or proxy_continuity_provenance
+        ):
             await self._release_http_bridge_retry_circuit_half_open(
                 session,
                 detail=detail,
@@ -1838,6 +1900,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.half_open_until = 0.0
                     state.half_open_owner_session = None
                     state.half_open_owner_token = None
+                    state.half_open_lease_generation = 0
                     if scoped_attempt is not None:
                         scoped_attempt.retry_circuit_failure_recorded = True
                         scoped_attempt.retry_circuit_failure_settled = anyio.Event()
@@ -2714,6 +2777,7 @@ class _HTTPBridgeRetryCircuitMixin:
                                     state.half_open_until = 0.0
                                     state.half_open_owner_session = None
                                     state.half_open_owner_token = None
+                                    state.half_open_lease_generation = 0
                                 state.persisted_updated_at_epoch = surviving.updated_at_epoch
                                 state.persisted_admission_generation = getattr(surviving, "admission_generation", 0)
                                 state.last_durable_load_monotonic = max(
