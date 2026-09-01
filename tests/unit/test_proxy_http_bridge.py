@@ -35202,6 +35202,7 @@ def test_http_bridge_quarantine_poison_clear_preserves_post_fence_first_strike()
         session,
         key_generation=captured_fence.generation,
         key_raw_generation=captured_fence.raw_generation,
+        key_eventless_timeout_count=captured_fence.eventless_timeout_count,
         key_generation_captured=True,
     )
 
@@ -35239,6 +35240,7 @@ def test_http_bridge_quarantine_poison_revoke_preserves_post_fence_first_strike(
             session.key,
             generation=captured_fence.generation,
             raw_generation=captured_fence.raw_generation,
+            captured_eventless_timeout_count=captured_fence.eventless_timeout_count,
         )
         is True
     )
@@ -35252,8 +35254,45 @@ def test_http_bridge_quarantine_poison_revoke_preserves_post_fence_first_strike(
     assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON
 
 
+def test_http_bridge_quarantine_poison_revoke_resets_pre_fence_strike_after_weaker_expiry() -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-poison-revoke-expired-weaker")
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    captured_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(
+        service,
+        session.key,
+    )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    entry.suppressed_weaker_until = time.monotonic() - 1.0
+
+    assert (
+        http_bridge_quarantine_module._revoke_http_bridge_poison_quarantine(
+            service,
+            session.key,
+            generation=captured_fence.generation,
+            raw_generation=captured_fence.raw_generation,
+            captured_eventless_timeout_count=captured_fence.eventless_timeout_count,
+        )
+        is True
+    )
+    assert session.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+
+
 @pytest.mark.asyncio
-async def test_retry_circuit_merge_revocation_preserves_post_arm_first_strike() -> None:
+async def test_retry_circuit_merge_revocation_preserves_post_arm_first_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="retry-merge-poison-revoke-first-strike")
     state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
@@ -35278,7 +35317,11 @@ async def test_retry_circuit_merge_revocation_preserves_post_arm_first_strike() 
         state.last_detail = None
         state.cooldown_until = 0.0
 
-    service._persist_http_bridge_retry_circuit_serialized = _persist_then_lose_poison_lineage
+    monkeypatch.setattr(
+        service,
+        "_persist_http_bridge_retry_circuit_serialized",
+        _persist_then_lose_poison_lineage,
+    )
 
     await service._record_http_bridge_retry_circuit_failure_locked(
         session,
@@ -35289,6 +35332,7 @@ async def test_retry_circuit_merge_revocation_preserves_post_arm_first_strike() 
         quarantine_cooldown_remaining=60.0,
         armed_quarantine_generation=captured_fence.generation,
         armed_quarantine_raw_generation=captured_fence.raw_generation,
+        armed_quarantine_eventless_timeout_count=captured_fence.eventless_timeout_count,
     )
 
     entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
@@ -35315,12 +35359,19 @@ def test_http_bridge_quarantine_poison_clear_resets_pre_fence_first_strike() -> 
     assert captured_fence.raw_generation is not None
     entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
     assert entry.consecutive_eventless_timeouts == 1
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+    entry.suppressed_weaker_until = time.monotonic() - 1.0
 
     http_bridge_quarantine_module._clear_http_bridge_quarantine(
         service,
         session,
         key_generation=captured_fence.generation,
         key_raw_generation=captured_fence.raw_generation,
+        key_eventless_timeout_count=captured_fence.eventless_timeout_count,
         key_generation_captured=True,
     )
 
@@ -40732,6 +40783,7 @@ def test_a_completion_clear_ignores_expired_weaker_marker_when_preserving_a_new_
         session,
         key_generation=captured.generation,
         key_raw_generation=captured.raw_generation,
+        key_eventless_timeout_count=captured.eventless_timeout_count,
         key_generation_captured=True,
     )
 

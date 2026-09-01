@@ -2582,10 +2582,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         # that completion must not capture and clear evidence it did not see.
         completion_quarantine_clear_fence: int | None = None
         completion_quarantine_clear_raw_generation: int | None = None
+        completion_quarantine_clear_eventless_timeout_count = 0
         if event_type == "response.completed":
             completion_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
             completion_quarantine_clear_fence = completion_fence.generation
             completion_quarantine_clear_raw_generation = completion_fence.raw_generation
+            completion_quarantine_clear_eventless_timeout_count = completion_fence.eventless_timeout_count
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -3784,10 +3786,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session,
                 key_generation=completion_quarantine_clear_fence,
                 key_raw_generation=completion_quarantine_clear_raw_generation,
+                key_eventless_timeout_count=completion_quarantine_clear_eventless_timeout_count,
                 key_generation_captured=True,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
                 additional_key_raw_generation=terminal_request_state.verified_stale_anchor_quarantine_raw_generation,
+                additional_key_eventless_timeout_count=(
+                    terminal_request_state.verified_stale_anchor_quarantine_eventless_timeout_count
+                ),
             )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)

@@ -79,6 +79,7 @@ class _HTTPBridgeQuarantineClearFence:
 
     generation: int | None = None
     raw_generation: int | None = None
+    eventless_timeout_count: int = 0
 
 
 def _http_bridge_quarantine_owner_ref(
@@ -160,6 +161,7 @@ def _revoke_http_bridge_poison_quarantine(
     *,
     generation: int | None,
     raw_generation: int | None = None,
+    captured_eventless_timeout_count: int = 0,
     restore_reason: str | None = None,
     restore_until: float = 0.0,
 ) -> bool:
@@ -190,15 +192,19 @@ def _revoke_http_bridge_poison_quarantine(
         # let disproved poison evidence outlive its revocation.
         and entry.poison_generation == generation
     ):
+        now = time.monotonic()
         entry.poison_quarantined_until = 0.0
-        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > time.monotonic():
+        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until <= now:
+            entry.suppressed_weaker_reason = None
+            entry.suppressed_weaker_until = 0.0
+        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > now:
             entry.reason = entry.suppressed_weaker_reason
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
             return True
-        if restore_reason is not None and restore_until > time.monotonic():
+        if restore_reason is not None and restore_until > now:
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
@@ -206,7 +212,7 @@ def _revoke_http_bridge_poison_quarantine(
         if (
             raw_generation is not None
             and entry.generation != raw_generation
-            and entry.consecutive_eventless_timeouts > 0
+            and entry.consecutive_eventless_timeouts > captured_eventless_timeout_count
         ):
             # A first eventless strike recorded after this speculative arm was
             # captured advances only the raw generation. Revoke the disproved
@@ -324,10 +330,12 @@ def _http_bridge_quarantine_clear_fence_details(
         return _HTTPBridgeQuarantineClearFence(
             generation=entry.poison_generation,
             raw_generation=entry.generation,
+            eventless_timeout_count=entry.consecutive_eventless_timeouts,
         )
     return _HTTPBridgeQuarantineClearFence(
         generation=entry.generation,
         raw_generation=entry.generation,
+        eventless_timeout_count=entry.consecutive_eventless_timeouts,
     )
 
 
@@ -488,10 +496,12 @@ def _clear_http_bridge_quarantine(
     *,
     key_generation: int | None = None,
     key_raw_generation: int | None = None,
+    key_eventless_timeout_count: int = 0,
     key_generation_captured: bool = False,
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
     additional_key_raw_generation: int | None = None,
+    additional_key_eventless_timeout_count: int = 0,
 ) -> None:
     """Clear only quarantine evidence this completion is authorized to clear.
 
@@ -515,17 +525,20 @@ def _clear_http_bridge_quarantine(
         # generation for the entry armed during recovery.
         key_generation = additional_key_generation
         key_raw_generation = additional_key_raw_generation
+        key_eventless_timeout_count = additional_key_eventless_timeout_count
         key_generation_captured = True
     elif not key_generation_captured:
         fence = _http_bridge_quarantine_clear_fence_details(service, session.key)
         key_generation = fence.generation
         key_raw_generation = fence.raw_generation
+        key_eventless_timeout_count = fence.eventless_timeout_count
     now = time.monotonic()
 
     def clear_fenced(
         key: _HTTPBridgeSessionKey,
         captured_generation: int | None,
         captured_raw_generation: int | None,
+        captured_eventless_timeout_count: int,
         *,
         is_primary: bool = False,
     ) -> bool:
@@ -570,7 +583,7 @@ def _clear_http_bridge_quarantine(
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
             and entry.generation != captured_raw
-            and entry.consecutive_eventless_timeouts > 0
+            and entry.consecutive_eventless_timeouts > captured_eventless_timeout_count
             and entry.suppressed_weaker_reason is None
         ):
             # A first eventless strike only advances the raw generation; it
@@ -612,7 +625,18 @@ def _clear_http_bridge_quarantine(
         )
         return True
 
-    if clear_fenced(session.key, key_generation, key_raw_generation, is_primary=True):
+    if clear_fenced(
+        session.key,
+        key_generation,
+        key_raw_generation,
+        key_eventless_timeout_count,
+        is_primary=True,
+    ):
         session.quarantined = False
     if additional_key is not None and additional_key != session.key:
-        clear_fenced(additional_key, additional_key_generation, additional_key_raw_generation)
+        clear_fenced(
+            additional_key,
+            additional_key_generation,
+            additional_key_raw_generation,
+            additional_key_eventless_timeout_count,
+        )
