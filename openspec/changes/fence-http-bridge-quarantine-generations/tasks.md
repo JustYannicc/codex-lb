@@ -39,3 +39,5 @@
   owner forwards delta-only when no exact-body signature proves raw shape.
 - [x] 1.18 Fence poison cleanup by the captured eventless-timeout count so an
   expired weaker arm cannot make a pre-capture strike look new.
+- [x] 1.19 Carry the full poison cleanup fence through durable-load miss,
+  purge, and reset revocation paths so a post-capture first strike survives.

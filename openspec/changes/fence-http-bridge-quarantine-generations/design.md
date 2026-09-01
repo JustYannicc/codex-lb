@@ -56,6 +56,9 @@ when the request itself does not carry a full resend.
 - Durable-merge revocation carries the same poison provenance and raw
   generation pair, so revoking a speculative poison arm cannot erase a first
   strike recorded while persistence was in flight.
+- Durable-load miss, purge, and reset revocation reuse the fence stored when
+  the poison arm was installed, so a first strike recorded after that arm is
+  not recaptured as pre-revocation evidence and discarded.
 - The fence also captures the eventless-timeout count. A weaker quarantine arm
   may advance the raw generation without recording a strike, so cleanup keeps
   a first strike only when the count itself advanced after capture and drops
