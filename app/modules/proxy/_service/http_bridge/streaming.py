@@ -248,6 +248,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
@@ -1993,7 +1994,7 @@ class _HTTPBridgeStreamingMixin:
             and not durable_owner_missing
             and not model_transition_owner_missing
             and (
-                raw_incoming_turn_state_header is None
+                not _turn_state_header_present(headers)
                 or (synthesized_turn_state is not None and raw_incoming_turn_state_header == synthesized_turn_state)
             )
         ):

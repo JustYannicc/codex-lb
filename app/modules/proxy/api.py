@@ -6137,12 +6137,15 @@ async def _stream_responses(
         if bridge_active
         else None
     )
-    incoming_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(effective_headers)
     synthesized_turn_state = (
         forwarded_synthesized_turn_state
         if bridge_active and forwarded_request
         else downstream_turn_state
-        if bridge_active and not forwarded_request and incoming_turn_state is None
+        if (
+            bridge_active
+            and not forwarded_request
+            and not proxy_affinity_module._turn_state_header_present(effective_headers)
+        )
         else None
     )
     turn_state_headers = (
@@ -6600,8 +6603,11 @@ async def _collect_responses(
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
-    incoming_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
-    synthesized_turn_state = downstream_turn_state if bridge_active and incoming_turn_state is None else None
+    synthesized_turn_state = (
+        downstream_turn_state
+        if bridge_active and not proxy_affinity_module._turn_state_header_present(request.headers)
+        else None
+    )
     client_ip = resolve_request_client_host(request)
     turn_state_headers = (
         proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)

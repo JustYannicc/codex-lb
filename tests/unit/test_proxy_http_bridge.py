@@ -16176,6 +16176,8 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
         (1, "client-turn-state", None, False, False),
         (1, "turn_00000000000000000000000000000000", None, False, False),
         (1, "http_turn_00000000000000000000000000000000", None, False, False),
+        (1, "", None, False, False),
+        (1, "   ", None, False, False),
         (1, "client-turn-state", None, True, False),
         (1, "http_turn_generated", "http_turn_generated", True, True),
     ],
