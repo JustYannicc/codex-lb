@@ -788,6 +788,7 @@ class _HTTPBridgeRetryCircuitMixin:
             request_state.verified_stale_anchor_retry_circuit_claimed_generation = None
             request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
             request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
+            request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = 0
         return cleared
 
     async def _clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
@@ -976,8 +977,15 @@ class _HTTPBridgeRetryCircuitMixin:
             )
 
         claimed_generation = expected_admission_generation + 1
+        abandoned_claim_reconciliation_finished = asyncio.Event()
+        release_abandoned_claim_after_reconciliation = True
 
         async def release_abandoned_claim(_result: Any) -> None:
+            nonlocal release_abandoned_claim_after_reconciliation
+
+            await abandoned_claim_reconciliation_finished.wait()
+            if not release_abandoned_claim_after_reconciliation:
+                return
             result_generation = getattr(_result, "admission_claimed_generation", None)
             if result_generation is not None and result_generation != claimed_generation:
                 logger.warning(
@@ -1032,7 +1040,13 @@ class _HTTPBridgeRetryCircuitMixin:
                     key=key,
                     run_durable_claim=run_durable_claim,
                     deadline=deadline,
+                    expected_claimed_generation=claimed_generation,
+                    expected_claimed_at_epoch=claim_started_epoch,
+                    expected_claimed_until_epoch=claim_until_epoch,
                     on_abandoned_result=release_abandoned_claim,
+                )
+                release_abandoned_claim_after_reconciliation = (
+                    claimed is None or claimed is _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
                 )
         except Exception:
             logger.warning(
@@ -1042,6 +1056,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return None
+        finally:
+            abandoned_claim_reconciliation_finished.set()
         if claimed is _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED:
             return None
         if claimed is None:
@@ -1161,9 +1177,19 @@ class _HTTPBridgeRetryCircuitMixin:
         key: _HTTPBridgeSessionKey,
         run_durable_claim: Callable[[], Awaitable[Any]],
         deadline: float | None = None,
+        expected_claimed_generation: int,
+        expected_claimed_at_epoch: float,
+        expected_claimed_until_epoch: float,
         on_abandoned_result: Callable[[Any], Awaitable[None]] | None = None,
     ) -> Any:
-        """Re-run a timed-out compare-and-set within the remaining request budget."""
+        """Re-run and reconcile a timed-out compare-and-set within the budget.
+
+        A first CAS can commit after its result is lost at the timeout
+        boundary.  If the identical reconciliation CAS then refuses, inspect
+        the durable receipt once before treating that refusal as a competing
+        claim.  Only an exact generation/start/expiry match proves that this
+        request owns the marker; an outage or timeout remains undecidable.
+        """
         reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
         if reconcile_timeout_seconds is None:
             return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
@@ -1183,7 +1209,45 @@ class _HTTPBridgeRetryCircuitMixin:
                         _hash_identifier(key.affinity_key),
                     )
                 return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
-            return reconciliation.value
+            reconciled_claim = reconciliation.value
+            if reconciled_claim is not None:
+                return reconciled_claim
+
+            lookup_retry_circuit = getattr(self._durable_bridge, "lookup_retry_circuit", None)
+            if not callable(lookup_retry_circuit):
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+            if lookup_timeout_seconds is None:
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            lookup = await self._await_http_bridge_retry_circuit_call(
+                lookup_retry_circuit(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                ),
+                timeout=lookup_timeout_seconds,
+                label="claim-reconciliation",
+            )
+            if not lookup.completed:
+                if not lookup.cancellation_settled:
+                    logger.warning(
+                        "Timed out looking up HTTP bridge retry circuit claim receipt after reconciliation; "
+                        "durable state remains undecided bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            durable_claim = lookup.value
+            durable_claimed_until_epoch = getattr(durable_claim, "admission_claimed_until_epoch", None)
+            if durable_claim is not None and (
+                durable_claimed_until_epoch is not None
+                and durable_claimed_until_epoch > time.time()
+                and getattr(durable_claim, "admission_claimed_generation", None) == expected_claimed_generation
+                and getattr(durable_claim, "admission_claimed_at_epoch", None) == expected_claimed_at_epoch
+                and durable_claimed_until_epoch == expected_claimed_until_epoch
+            ):
+                return durable_claim
+            return None
         except Exception:
             logger.warning(
                 "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",

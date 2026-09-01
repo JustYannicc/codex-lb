@@ -22,6 +22,10 @@ explicitly generation-fenced.
 - Bound the claim and one timeout reconciliation attempt by the caller's
   remaining request deadline; cancellation-resistant durable calls are
   detached at that bound and remain fail-closed without a concurrent retry.
+- If a settled timeout reconciliation refuses the identical claim, perform one
+  bounded durable receipt lookup and adopt the claim only when generation,
+  start, and expiry all match the request's receipt; a lookup failure remains
+  undecided and a mismatch remains a confirmed competing claim.
 - Recheck local state both before and after the durable CAS so a same-key local
   failure wins over a delayed replay claim.
 - Store a nullable claim receipt (`admission_claimed_at_epoch`,
@@ -40,6 +44,14 @@ explicitly generation-fenced.
 - Clear a circuit only with the captured timestamp and generation, release a
   replay marker only with its claim receipt, retain local admission state on
   lookup/CAS failure, and report whether the durable clear actually matched.
+- Capture the response-create attempt count with a claim and release it during
+  pre-dispatch cleanup only when that count is unchanged, so an ambiguous send
+  without an operation ID cannot discard ownership.
+- When terminal stale-anchor handling resets a session for a same-owner retry,
+  detach the claim receipt before reset and transfer its key, lease, and attempt
+  fence to the retry request state. The transferred attempt fence starts from
+  the retry state's own current response-create attempt count, not the source
+  request's historical count.
 - Fence stale retry-circuit purges on the captured failure timestamp and
   admission generation plus any captured claim receipt, so a delayed
   same-generation failure or active replay cannot be deleted by an older

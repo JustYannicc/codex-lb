@@ -109,6 +109,7 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_retry_circuit_suppression_message,
+    _schedule_http_bridge_retry_circuit_admission_claim_release_retry,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
@@ -2316,6 +2317,9 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = claim_receipt.get(
                                 "claimed_until_epoch"
                             )
+                            request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = (
+                                request_state.response_create_attempt_count
+                            )
                         if not generation_claimed:
                             remote_probe_holds_lease = False
                             if claim_outcome is False and circuit_key is not None:
@@ -2820,6 +2824,8 @@ class _HTTPBridgeRequestSubmitMixin:
             and claim_key is not None
             and not request_state.recovery_attempt_dispatched
             and not request_state.operation_dispatched
+            and request_state.response_create_attempt_count
+            == request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count
         )
         retire_closed_session = False
         async with session.pending_lock:
@@ -2851,14 +2857,19 @@ class _HTTPBridgeRequestSubmitMixin:
         elif gate_acquired:
             await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if release_pre_dispatch_claim:
+            claim_released = False
             try:
-                await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state)
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    request_state
+                )
             except Exception:
                 logger.warning(
                     "Failed to release HTTP bridge retry-circuit admission claim during submit cleanup request_id=%s",
                     request_state.request_id,
                     exc_info=True,
                 )
+            if not claim_released:
+                _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_claimed

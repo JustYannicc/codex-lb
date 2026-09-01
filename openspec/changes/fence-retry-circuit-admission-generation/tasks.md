@@ -50,3 +50,12 @@
   WebSocket terminal cleanup, retain the receipt, and schedule the existing
   service-owned generation-fenced retry; cover normal, draining, and aborted
   cleanup paths.
+- [x] 4.6 After a settled timeout reconciliation refusal, perform one bounded
+  durable receipt lookup and adopt only an exact generation/start/expiry match;
+  keep lookup failures undecided and mismatches fail-closed.
+- [x] 4.7 Fence pre-dispatch claim cleanup on the captured response-create
+  attempt count so an ambiguous no-operation-ID send retains its claim.
+- [x] 4.8 Detach the stale-anchor claim receipt before terminal session reset
+  and transfer its key, lease, and attempt fence to the same-owner retry state;
+  initialize the transferred fence from the retry state's own attempt baseline
+  and schedule release retry after a pre-dispatch refusal or exception.

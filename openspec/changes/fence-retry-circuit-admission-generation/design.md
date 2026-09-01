@@ -45,8 +45,12 @@ remaining request deadline when the first operation has settled cancellation.
 A cancellation-resistant first operation is detached and no concurrent retry
 is issued; its eventual commit is therefore fail-closed for this request. A
 committed first claim rejects a settled reconciliation through the incremented
-generation; an uncommitted one can be recovered. Refusal, store errors, a
-second timeout, or an expired deadline all remain fail-closed.
+generation; an uncommitted one can be recovered. If that settled
+reconciliation refuses, one bounded receipt lookup may adopt the claim only
+when the durable generation, claim start, and claim expiry exactly match the
+receipt captured by this request. A lookup timeout or error remains undecided;
+an absent or mismatched receipt is a confirmed competing claim. Refusal, store
+errors, a second timeout, or an expired deadline otherwise remain fail-closed.
 After a successful receipt, the local state is checked again under the lock;
 any intervening same-key failure or cooldown suppresses the replay.
 
@@ -63,6 +67,16 @@ receipt remains in place; the receipt is cleared only by its owning replay's
 generation-matched release.
 Only after a successful CAS does the local state get removed, and a local
 failure that arrived after the lookup still wins the post-CAS check.
+
+Pre-dispatch submit cleanup captures the response-create attempt count when it
+installs a claim and may release that claim only if the count is unchanged.
+This preserves ownership when a send was ambiguous but produced no operation
+ID. When terminal stale-anchor handling resets a session for a same-owner
+retry, it detaches the receipt before reset and transfers the claim key, lease,
+and attempt fence to the retry request state so reset cleanup cannot release
+the retry's marker. The retry attempt fence is initialized from that fresh
+state's current response-create attempt count; the source count is used only
+while restoring the detached receipt if recovery setup fails.
 
 Expired-row purges compare both the observed timestamp and
 ``admission_generation`` and only delete rows with no active claim lease. The

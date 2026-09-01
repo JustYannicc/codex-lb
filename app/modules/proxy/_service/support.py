@@ -1102,6 +1102,11 @@ class _WebSocketRequestState:
     verified_stale_anchor_retry_circuit_claimed_generation: int | None = None
     verified_stale_anchor_retry_circuit_claimed_at_epoch: float | None = None
     verified_stale_anchor_retry_circuit_claimed_until_epoch: float | None = None
+    # ``response_create_attempt_count`` is the send fence for pre-dispatch
+    # cleanup.  Capture it when the claim is installed so an ambiguous send
+    # cannot be mistaken for a setup failure merely because no operation ID
+    # was available to mark dispatched.
+    verified_stale_anchor_retry_circuit_claimed_attempt_count: int = 0
     retry_circuit_claim_release_retry_scheduled: bool = False
     verified_stale_anchor_quarantine_generation: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when

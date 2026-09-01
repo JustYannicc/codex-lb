@@ -105,6 +105,10 @@ receipt by matching the claimed generation and any captured timestamps; an
 older receipt MUST NOT clear a reclaimed marker. A durable release refusal or
 exception MUST NOT escape terminal cleanup or discard the receipt, and MUST
 schedule the existing service-owned generation-fenced release retry.
+When terminal stale-anchor recovery transfers a receipt to a same-owner retry,
+the retry MUST fence pre-dispatch cleanup against its own current
+`response_create_attempt_count`; the source request's historical attempt count
+MUST NOT be reused after transfer.
 
 #### Scenario: A newer durable failure survives an older success
 
@@ -138,6 +142,18 @@ schedule the existing service-owned generation-fenced release retry.
 - **THEN** terminal cleanup MUST continue without propagating that store failure
 - **AND** the request MUST retain its claim receipt
 - **AND** the service MUST schedule a generation-fenced release retry
+
+#### Scenario: A transferred receipt uses the retry's attempt baseline
+
+- **GIVEN** a stale-anchor source request owns a receipt after one or more
+  response-create attempts
+- **WHEN** recovery transfers the receipt to a freshly prepared same-owner retry
+- **THEN** the source request MUST be detached from the receipt before reset
+- **AND** the retry MUST store its own current `response_create_attempt_count`
+  as the pre-dispatch cleanup fence
+- **AND** a retry setup failure before its first send MUST release the receipt
+- **AND** an ambiguous retry send that increments its attempt count MUST retain
+  the receipt for reconciliation
 
 ### Requirement: Retry-circuit stale purges are generation-fenced
 
