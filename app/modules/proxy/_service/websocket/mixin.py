@@ -1343,10 +1343,34 @@ class _WebSocketMixin:
         synthesized_turn_state: str | None = None,
     ) -> "_WebSocketContinuityState":
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
-        if not codex_session_affinity:
-            return _WebSocketContinuityState()
         api_key_id = api_key.id if api_key is not None else None
+        if not codex_session_affinity:
+            # ``/v1/responses`` deliberately has no Codex session affinity,
+            # but a proxy-issued turn marker still needs exact provenance on
+            # reconnect. Store only that bearer marker here and return a
+            # fresh state so unrelated response/tool continuity cannot leak
+            # into the affinity-free route.
+            # The v1 route deliberately keeps the generated marker out of
+            # ``forwarded_headers`` because its wire profile does not forward
+            # a synthetic client header.  Retain that marker explicitly so a
+            # later reconnect echo can prove it was issued by this proxy.
+            turn_state = _sticky_key_from_turn_state_header(headers) or synthesized_turn_state
+            if turn_state is None:
+                return _WebSocketContinuityState()
+            cache_key = (turn_state, api_key_id)
+            existing_state = proxy._websocket_continuity_index.get(cache_key)
+            proxy_marker_provenance = synthesized_turn_state == turn_state or bool(
+                existing_state is not None and existing_state.proxy_synthesized_turn_state_provenance
+            )
+            if not proxy_marker_provenance:
+                return _WebSocketContinuityState()
+            proxy._websocket_continuity_index.pop(cache_key, None)
+            proxy._websocket_continuity_index[cache_key] = _WebSocketContinuityState(
+                proxy_synthesized_turn_state_provenance=True
+            )
+            while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
+                proxy._websocket_continuity_index.pop(next(iter(proxy._websocket_continuity_index)))
+            return _WebSocketContinuityState(proxy_synthesized_turn_state_provenance=True)
         cache_keys = [
             (continuity_key, api_key_id)
             for continuity_key in _websocket_continuity_aliases_from_headers(
