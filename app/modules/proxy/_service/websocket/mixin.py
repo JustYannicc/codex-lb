@@ -983,6 +983,25 @@ async def _release_websocket_response_create_ownership_for_cleanup(
             response_create_gate.release()
 
 
+async def _release_websocket_retry_circuit_admission_claim(
+    proxy: _WebSocketServiceProtocol,
+    request_state: _WebSocketRequestState,
+) -> None:
+    """Release a terminal claim without letting durable I/O break cleanup."""
+
+    try:
+        claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state)
+    except Exception:
+        _facade().logger.warning(
+            "Failed to release websocket retry-circuit admission claim during terminal cleanup request_id=%s",
+            request_state.request_log_id or request_state.request_id,
+            exc_info=True,
+        )
+        claim_released = False
+    if not claim_released:
+        _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
+
+
 async def _process_and_forward_upstream_websocket_text(
     proxy: _WebSocketServiceProtocol,
     websocket: WebSocket,
@@ -6168,11 +6187,7 @@ class _WebSocketMixin:
             # A stale-anchor replay may be detached while waiting for its
             # terminal event.  It still owns the durable admission marker;
             # release it only after this terminal cleanup path has run.
-            claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
-                request_state
-            )
-            if not claim_released:
-                _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
+            await _release_websocket_retry_circuit_admission_claim(proxy, request_state)
             # The reservation is settled; clear any terminal-bookkeeping
             # settlement claim so abort handling does not settle it again.
             request_state.terminal_settlement_phase = None
@@ -6450,9 +6465,7 @@ class _WebSocketMixin:
         # Keep the admission marker until terminal settlement has completed;
         # a later cleanup path can retry the fenced release if persistence was
         # unavailable here.
-        claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state)
-        if not claim_released:
-            _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
+        await _release_websocket_retry_circuit_admission_claim(proxy, request_state)
 
     async def _write_websocket_connect_failure(
         self,
@@ -6824,21 +6837,10 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
-            try:
-                # Every request popped into terminal cleanup owns its replay
-                # marker until this terminal event/EOS handoff completes,
-                # including requests without an API-key reservation.
-                claim_released = await proxy._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
-                    request_state
-                )
-                if not claim_released:
-                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(proxy, request_state)
-            except Exception:
-                _facade().logger.warning(
-                    "Failed to release websocket retry-circuit admission claim during terminal cleanup request_id=%s",
-                    request_state.request_log_id or request_state.request_id,
-                    exc_info=True,
-                )
+            # Every request popped into terminal cleanup owns its replay
+            # marker until this terminal event/EOS handoff completes,
+            # including requests without an API-key reservation.
+            await _release_websocket_retry_circuit_admission_claim(proxy, request_state)
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)

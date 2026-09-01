@@ -31316,8 +31316,14 @@ async def test_http_bridge_aborted_terminal_cleanup_leaves_pending_retry_claim_o
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "clear_side_effect",
+    [None, RuntimeError("durable claim release failed")],
+    ids=["false-result", "exception"],
+)
 async def test_http_bridge_aborted_terminal_cleanup_schedules_failed_claim_release_retry(
     monkeypatch: pytest.MonkeyPatch,
+    clear_side_effect: Exception | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
@@ -31335,7 +31341,7 @@ async def test_http_bridge_aborted_terminal_cleanup_schedules_failed_claim_relea
         pending_requests=deque(),
         queued_request_count=0,
     )
-    clear_claim = AsyncMock(return_value=False)
+    clear_claim = AsyncMock(return_value=False, side_effect=clear_side_effect)
     schedule_retry = Mock()
     monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request", clear_claim)
     monkeypatch.setattr(

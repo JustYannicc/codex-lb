@@ -46,3 +46,7 @@
 - [x] 4.4 Keep the lease longer than the request budget by the cleanup grace,
   and prove normal finalization releases every popped claim, including
   requests without an API-key reservation.
+- [x] 4.5 Keep durable claim-release refusals and exceptions inside HTTP and
+  WebSocket terminal cleanup, retain the receipt, and schedule the existing
+  service-owned generation-fenced retry; cover normal, draining, and aborted
+  cleanup paths.

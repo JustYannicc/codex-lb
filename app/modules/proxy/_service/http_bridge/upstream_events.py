@@ -2509,6 +2509,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
                 else:
                     if not claim_released:
                         _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)

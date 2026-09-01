@@ -7,7 +7,7 @@ from collections import deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -83,6 +83,7 @@ class _DummyWebSocketService(_WebSocketMixin, _HTTPBridgeRetryCircuitMixin):
 
 class _DummyFacade:
     _TRANSIENT_RETRY_CODES: frozenset[str] = frozenset()
+    logger = Mock()
 
     @staticmethod
     def _service_tier_from_event_payload(_payload: object) -> None:
@@ -331,6 +332,53 @@ async def test_websocket_terminal_cleanup_bounds_stalled_claim_release_and_retai
     assert not timed_out, "websocket terminal cleanup must not wait indefinitely on durable claim release"
     schedule_retry.assert_called_once_with(service, request_state)
     assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 3
+
+
+@pytest.mark.parametrize("draining_until_terminal", [False, True])
+@pytest.mark.asyncio
+async def test_websocket_terminal_cleanup_retries_claim_release_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    draining_until_terminal: bool,
+) -> None:
+    service = _DummyWebSocketService()
+    request_state = _WebSocketRequestState(
+        request_id="ws-terminal-claim-release-exception",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport=_REQUEST_TRANSPORT_HTTP,
+        upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
+        draining_until_terminal=draining_until_terminal,
+        verified_stale_anchor_retry_circuit_claimed_generation=4,
+    )
+    monkeypatch.setattr(
+        service,
+        "_clear_http_bridge_retry_circuit_admission_claim_for_request_bounded",
+        AsyncMock(side_effect=RuntimeError("durable claim release failed")),
+    )
+    schedule_retry = Mock()
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=cast(Any, object()),
+        account_id_value="acc-terminal-claim-release-exception",
+        event=None,
+        event_type=None if draining_until_terminal else "response.completed",
+        payload=None if draining_until_terminal else {},
+        api_key=None,
+        upstream_control=_WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    schedule_retry.assert_called_once_with(service, request_state)
+    assert request_state.verified_stale_anchor_retry_circuit_claimed_generation == 4
 
 
 @pytest.mark.asyncio

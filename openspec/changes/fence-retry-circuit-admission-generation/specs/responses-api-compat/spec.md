@@ -102,7 +102,9 @@ merge using the existing failure observation metadata without rewriting the
 independent `admission_generation` or an active claim receipt. A terminal,
 aborted, cancelled, or proven pre-dispatch-cleaned replay MUST release its
 receipt by matching the claimed generation and any captured timestamps; an
-older receipt MUST NOT clear a reclaimed marker.
+older receipt MUST NOT clear a reclaimed marker. A durable release refusal or
+exception MUST NOT escape terminal cleanup or discard the receipt, and MUST
+schedule the existing service-owned generation-fenced release retry.
 
 #### Scenario: A newer durable failure survives an older success
 
@@ -127,6 +129,15 @@ older receipt MUST NOT clear a reclaimed marker.
 - **AND** the active claim generation and receipt MUST remain unchanged
 - **AND** the replay owner MUST still release that receipt explicitly at
   terminal settlement
+
+#### Scenario: Durable receipt release fails during terminal cleanup
+
+- **GIVEN** an HTTP or WebSocket replay reaches terminal or aborted cleanup
+  while it still owns an active claim receipt
+- **WHEN** the bounded durable release returns no match or raises
+- **THEN** terminal cleanup MUST continue without propagating that store failure
+- **AND** the request MUST retain its claim receipt
+- **AND** the service MUST schedule a generation-fenced release retry
 
 ### Requirement: Retry-circuit stale purges are generation-fenced
 
