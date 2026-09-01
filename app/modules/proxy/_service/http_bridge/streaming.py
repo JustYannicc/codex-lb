@@ -243,6 +243,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
     _extract_model_class,
+    _is_synthesized_turn_state,
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
@@ -1985,6 +1986,7 @@ class _HTTPBridgeStreamingMixin:
             and rewritten_file_account_id is None
             and not durable_owner_missing
             and not model_transition_owner_missing
+            and (incoming_turn_state_header is None or _is_synthesized_turn_state(incoming_turn_state_header))
         ):
             selection_account_ids = (
                 api_key.assigned_account_ids

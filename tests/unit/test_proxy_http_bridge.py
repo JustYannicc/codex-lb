@@ -16161,10 +16161,21 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("candidate_count", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("candidate_count", "client_turn_state", "allow_fallback"),
+    [
+        (0, None, False),
+        (1, None, True),
+        (2, None, False),
+        (1, "client-turn-state", False),
+        (1, "http_turn_00000000000000000000000000000000", True),
+    ],
+)
 async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_candidate_or_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     candidate_count: int,
+    client_turn_state: str | None,
+    allow_fallback: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -16238,12 +16249,13 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
 
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
 
-    if candidate_count == 1:
+    request_headers = {"x-codex-turn-state": client_turn_state} if client_turn_state is not None else {}
+    if allow_fallback:
         chunks = [
             chunk
             async for chunk in service._stream_via_http_bridge(
                 payload,
-                headers={"x-codex-turn-state": "turn_owner_miss"},
+                headers=request_headers,
                 codex_session_affinity=True,
                 propagate_http_errors=False,
                 openai_cache_affinity=False,
@@ -16264,7 +16276,7 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
         with pytest.raises(ProxyResponseError) as exc_info:
             async for _chunk in service._stream_via_http_bridge(
                 payload,
-                headers={"x-codex-turn-state": "turn_owner_miss"},
+                headers=request_headers,
                 codex_session_affinity=True,
                 propagate_http_errors=False,
                 openai_cache_affinity=False,
@@ -16282,7 +16294,10 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
         assert exc_info.value.status_code == 502
         assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
 
-    list_selection_candidates.assert_awaited_once()
+    if client_turn_state is None or allow_fallback:
+        list_selection_candidates.assert_awaited_once()
+    else:
+        list_selection_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio
