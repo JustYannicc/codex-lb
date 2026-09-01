@@ -4966,7 +4966,9 @@ not by itself establish durable full-resend proof, prefix identity, or
 account-neutral replay safety. Request validation MUST preserve a client-supplied
 string's original shape and character length for this decision; normalizing that
 string into a one-item array MUST NOT add the array envelope to its boundary
-calculation.
+calculation. An internal HTTP bridge owner-forward hop MUST preserve that
+original string shape so the owner's request validation reaches the same
+classification as the origin.
 
 A fresh reattach whose incoming payload is classified as full-resend-shaped MUST
 NOT receive a proxy-injected durable anchor through any injection point — the

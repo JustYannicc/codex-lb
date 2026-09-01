@@ -1186,7 +1186,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
 
     client = HTTPBridgeOwnerClient()
-    payload = _payload()
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "x" * 4035})
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
         target_instance="instance-b",
@@ -1214,6 +1214,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     headers = cast(dict[str, str], captured["headers"])
     forwarded_json = cast(dict[str, object], captured["json"])
     assert "tools" not in forwarded_json
+    assert forwarded_json["input"] == "x" * 4035
     forwarded_payload = ResponsesRequest.model_validate(forwarded_json)
     assert "tools" not in forwarded_payload.model_fields_set
     assert "tools" not in forwarded_payload.to_payload()
@@ -1225,6 +1226,11 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     assert error is None
     assert forwarded is not None
     assert forwarded.context == context
+    normalized_body = ResponsesRequest.model_validate(payload.model_dump_for_forwarding())
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] != _bridge_forward_tools_bound_signature(
+        payload=normalized_body,
+        context=context,
+    )
     assert isinstance(headers, dict)
     assert "Content-Type" not in headers
     assert "content-type" not in headers

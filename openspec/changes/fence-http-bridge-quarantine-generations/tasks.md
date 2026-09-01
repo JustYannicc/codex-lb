@@ -32,3 +32,5 @@
   validation so array normalization cannot change the full-resend boundary.
 - [x] 1.15 Discard expired suppressed-weaker markers before deciding whether
   a post-capture first eventless strike survives poison cleanup.
+- [x] 1.16 Preserve raw-string input provenance across the internal owner
+  forwarding wire and bind its signature to the exact posted body.

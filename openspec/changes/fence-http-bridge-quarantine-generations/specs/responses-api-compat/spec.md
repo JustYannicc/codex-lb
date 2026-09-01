@@ -113,7 +113,9 @@ only a payload-shape signal and does not establish durable full-resend proof,
 prefix identity, or account-neutral replay safety. Request validation MUST
 preserve a client-supplied string's original shape and character length for
 this decision; normalizing that string into a one-item array MUST NOT add the
-array envelope to its boundary calculation.
+array envelope to its boundary calculation. An internal HTTP bridge
+owner-forward hop MUST preserve that original string shape so the owner's
+request validation reaches the same classification as the origin.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
