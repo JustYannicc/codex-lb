@@ -37,14 +37,16 @@ expired, pruned, or replaced generation MUST NOT clear an entry armed while the
 recovery is in flight. This fence MUST apply when the origin key is distinct
 from the completing session's key and when both keys are the same.
 
-For a poison quarantine, the cleanup fence MUST capture both the poison
-provenance generation and the entry's raw generation at the same observation.
+For a poison quarantine, the cleanup fence MUST capture the poison provenance
+generation, the entry's raw generation, and its eventless-timeout count at the
+same observation.
 Clearing matched poison provenance MUST retain an inactive first-strike counter
-only when the raw generation advanced after that capture; a strike already
-present at capture MUST be reset with the poison arm. An expired suppressed
-weaker fence MUST be discarded before cleanup decides whether a post-capture
-first strike survives. The same raw-generation rule MUST apply when a durable
-retry-circuit merge revokes a speculative poison arm.
+only when both the raw generation and eventless-timeout count advanced after
+that capture; a strike already present at capture MUST be reset with the poison
+arm. An expired suppressed weaker fence MUST be discarded before cleanup
+decides whether a post-capture first strike survives. The same captured-count
+rule MUST apply when a durable retry-circuit merge revokes a speculative poison
+arm.
 
 Quarantine cleanup MUST remain independent from retry-circuit state, account
 health, routing score, account eligibility, and durable bridge ownership. A

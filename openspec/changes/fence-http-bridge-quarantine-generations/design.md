@@ -56,6 +56,10 @@ when the request itself does not carry a full resend.
 - Durable-merge revocation carries the same poison provenance and raw
   generation pair, so revoking a speculative poison arm cannot erase a first
   strike recorded while persistence was in flight.
+- The fence also captures the eventless-timeout count. A weaker quarantine arm
+  may advance the raw generation without recording a strike, so cleanup keeps
+  a first strike only when the count itself advanced after capture and drops
+  expired suppressed-weaker evidence before making that decision.
 - A new owner marks legacy-signature fallback requests as input-shape
   ambiguous; a one-item array on that path remains delta-only, while a
   body-bound current-origin forward retains exact raw-string classification.

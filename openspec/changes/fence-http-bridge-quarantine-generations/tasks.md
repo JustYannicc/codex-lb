@@ -37,3 +37,5 @@
 - [x] 1.17 Preserve post-capture first-strike evidence when durable merge
   revokes speculative poison, and keep legacy-origin normalized one-item
   owner forwards delta-only when no exact-body signature proves raw shape.
+- [x] 1.18 Fence poison cleanup by the captured eventless-timeout count so an
+  expired weaker arm cannot make a pre-capture strike look new.

@@ -1662,6 +1662,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 assert state is not None
                 armed_quarantine_generation: int | None = None
                 armed_quarantine_raw_generation: int | None = None
+                armed_quarantine_eventless_timeout_count = 0
                 pre_arm_quarantine_reason: str | None = None
                 pre_arm_quarantine_until = 0.0
                 if quarantine_poisoned_anchor:
@@ -1687,6 +1688,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     armed_quarantine_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
                     armed_quarantine_generation = armed_quarantine_fence.generation
                     armed_quarantine_raw_generation = armed_quarantine_fence.raw_generation
+                    armed_quarantine_eventless_timeout_count = armed_quarantine_fence.eventless_timeout_count
                 recorded_failures = await self._record_http_bridge_retry_circuit_failure_locked(
                     session,
                     state,
@@ -1696,6 +1698,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     quarantine_cooldown_remaining=quarantine_cooldown_remaining,
                     armed_quarantine_generation=armed_quarantine_generation,
                     armed_quarantine_raw_generation=armed_quarantine_raw_generation,
+                    armed_quarantine_eventless_timeout_count=armed_quarantine_eventless_timeout_count,
                     pre_arm_quarantine_reason=pre_arm_quarantine_reason,
                     pre_arm_quarantine_until=pre_arm_quarantine_until,
                 )
@@ -1720,6 +1723,7 @@ class _HTTPBridgeRetryCircuitMixin:
         quarantine_cooldown_remaining: float,
         armed_quarantine_generation: int | None = None,
         armed_quarantine_raw_generation: int | None = None,
+        armed_quarantine_eventless_timeout_count: int = 0,
         pre_arm_quarantine_reason: str | None = None,
         pre_arm_quarantine_until: float = 0.0,
     ) -> int | None:
@@ -1820,6 +1824,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     session.key,
                     generation=armed_quarantine_generation,
                     raw_generation=armed_quarantine_raw_generation,
+                    captured_eventless_timeout_count=armed_quarantine_eventless_timeout_count,
                     restore_reason=pre_arm_quarantine_reason,
                     restore_until=pre_arm_quarantine_until,
                 )
