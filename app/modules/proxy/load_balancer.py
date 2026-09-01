@@ -298,14 +298,9 @@ def _apply_selection_account_filters(
         authorized_mutation_account_ids = (
             selection_inputs.effective_sticky_mutation_authority_account_ids & security_authorized_account_ids
         )
-        authorized_owner_candidates = [
-            account
-            for account in selection_inputs.effective_continuity_owner_candidates
-            if bool(account.security_work_authorized)
-        ]
-        authorized_accounts = [
-            account for account in selection_inputs.accounts if bool(account.security_work_authorized)
-        ]
+        owner_candidates = selection_inputs.effective_continuity_owner_candidates
+        authorized_owner_candidates = [account for account in owner_candidates if account.security_work_authorized]
+        authorized_accounts = [account for account in selection_inputs.accounts if account.security_work_authorized]
         if selection_inputs.accounts and not authorized_accounts:
             return replace(
                 selection_inputs,
