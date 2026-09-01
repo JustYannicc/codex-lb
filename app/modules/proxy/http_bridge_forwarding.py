@@ -471,6 +471,15 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
+    # A pre-change origin posts the normalized one-item array for a client
+    # string and has no body-bound signature that can prove the original wire
+    # shape. Keep that array out of the size-based full-resend heuristic on
+    # the new owner: treating its JSON overhead as client content can cross
+    # the 4096-byte boundary and drop otherwise-valid prior context during a
+    # rolling upgrade. Current origins send the body-bound signature and
+    # preserve raw strings on the owner wire, so their classification remains
+    # exact.
+    payload._codex_lb_legacy_owner_forwarding_input_shape = True
     return HTTPBridgeForwardedRequest(context=context), None
 
 

@@ -159,6 +159,7 @@ def _revoke_http_bridge_poison_quarantine(
     key: _HTTPBridgeSessionKey,
     *,
     generation: int | None,
+    raw_generation: int | None = None,
     restore_reason: str | None = None,
     restore_until: float = 0.0,
 ) -> bool:
@@ -201,6 +202,20 @@ def _revoke_http_bridge_poison_quarantine(
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
             entry.generation = _next_http_bridge_quarantine_generation(service, registry)
+            return True
+        if (
+            raw_generation is not None
+            and entry.generation != raw_generation
+            and entry.consecutive_eventless_timeouts > 0
+        ):
+            # A first eventless strike recorded after this speculative arm was
+            # captured advances only the raw generation. Revoke the disproved
+            # poison evidence without erasing that later strike, so the next
+            # timeout is still the second consecutive failure.
+            entry.reason = None
+            entry.quarantined_until = 0.0
+            entry.poison_generation = 0
+            entry.poison_quarantined_until = 0.0
             return True
         registry.pop(key, None)
         return True

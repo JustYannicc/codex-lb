@@ -43,7 +43,8 @@ Clearing matched poison provenance MUST retain an inactive first-strike counter
 only when the raw generation advanced after that capture; a strike already
 present at capture MUST be reset with the poison arm. An expired suppressed
 weaker fence MUST be discarded before cleanup decides whether a post-capture
-first strike survives.
+first strike survives. The same raw-generation rule MUST apply when a durable
+retry-circuit merge revokes a speculative poison arm.
 
 Quarantine cleanup MUST remain independent from retry-circuit state, account
 health, routing score, account eligibility, and durable bridge ownership. A
@@ -115,7 +116,11 @@ preserve a client-supplied string's original shape and character length for
 this decision; normalizing that string into a one-item array MUST NOT add the
 array envelope to its boundary calculation. An internal HTTP bridge
 owner-forward hop MUST preserve that original string shape so the owner's
-request validation reaches the same classification as the origin.
+request validation reaches the same classification as the origin. During a
+rolling upgrade, when an older origin forwards only a normalized one-item
+array and the owner cannot validate the additive exact-body signature, the
+owner MUST classify that ambiguous one-item array as delta-only instead of
+counting normalization-envelope bytes toward the full-resend boundary.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
@@ -126,3 +131,13 @@ request validation reaches the same classification as the origin.
   full-resend anchor injection
 - **AND** the request still resolves and receives its durable anchor
 - **AND** no account health, routing, or durable ownership state changes
+
+#### Scenario: Legacy owner forwarding does not inflate a raw string
+
+- **GIVEN** an older origin normalized a below-boundary client string into a
+  one-item array before forwarding it to a newer owner
+- **AND** the forward validates only through the rolling-upgrade legacy
+  signature fallback
+- **WHEN** the newer owner classifies the request shape
+- **THEN** it MUST treat the ambiguous one-item array as delta-only
+- **AND** it MUST retain the durable previous-response anchor

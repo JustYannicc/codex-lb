@@ -34,3 +34,6 @@
   a post-capture first eventless strike survives poison cleanup.
 - [x] 1.16 Preserve raw-string input provenance across the internal owner
   forwarding wire and bind its signature to the exact posted body.
+- [x] 1.17 Preserve post-capture first-strike evidence when durable merge
+  revokes speculative poison, and keep legacy-origin normalized one-item
+  owner forwards delta-only when no exact-body signature proves raw shape.

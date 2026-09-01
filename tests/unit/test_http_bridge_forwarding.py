@@ -13,6 +13,7 @@ from aiohttp.client_reqrep import ConnectionKey
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_AFFINITY_KEY_HEADER,
     HTTP_BRIDGE_AFFINITY_KIND_HEADER,
@@ -414,6 +415,75 @@ def test_parse_forwarded_request_falls_back_to_legacy_signature_without_v2() -> 
     assert error is None
     assert forwarded is not None
     assert forwarded.context == context
+
+
+def test_legacy_owner_forward_preserves_ambiguous_raw_string_boundary() -> None:
+    """An old origin's normalized string must stay delta-only on a new owner."""
+    normalized_input = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "x" * 4035}],
+        }
+    ]
+    old_origin_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": normalized_input,
+            "tools": [],
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
+    _use_legacy_forward_signature(headers, payload=old_origin_payload, context=context)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=old_origin_payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert len(old_origin_payload.model_dump_json()) >= 4096
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(old_origin_payload) is False
+
+
+def test_body_bound_owner_forward_keeps_one_item_array_classification() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "x" * 4035}],
+                }
+            ],
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is True
 
 
 def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -> None:

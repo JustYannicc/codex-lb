@@ -2055,6 +2055,8 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
     if isinstance(input_value, str):
         return len(input_value) >= 4096
     if isinstance(input_value, Sequence) and not isinstance(input_value, (str, bytes, bytearray)):
+        if payload._codex_lb_legacy_owner_forwarding_input_shape and len(input_value) == 1:
+            return False
         if len(input_value) > 1:
             return True
         if len(input_value) == 1:
