@@ -2048,6 +2048,9 @@ def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSes
 
 
 def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bool:
+    raw_input_string_length = payload._codex_lb_raw_input_string_length
+    if raw_input_string_length is not None and payload.input is payload._codex_lb_raw_input_normalized_value:
+        return raw_input_string_length >= 4096
     input_value = payload.input
     if isinstance(input_value, str):
         return len(input_value) >= 4096

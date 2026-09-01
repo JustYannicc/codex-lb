@@ -4963,7 +4963,10 @@ other input shape MUST be classified as delta-only. Exactly 4096 characters is
 included; 4095 is not. A serialization failure MUST classify the one-item array
 as delta-only. This shape classification is only a payload-shape signal and does
 not by itself establish durable full-resend proof, prefix identity, or
-account-neutral replay safety.
+account-neutral replay safety. Request validation MUST preserve a client-supplied
+string's original shape and character length for this decision; normalizing that
+string into a one-item array MUST NOT add the array envelope to its boundary
+calculation.
 
 A fresh reattach whose incoming payload is classified as full-resend-shaped MUST
 NOT receive a proxy-injected durable anchor through any injection point — the
@@ -4982,7 +4985,9 @@ For a poison quarantine, the cleanup fence MUST capture both the poison
 provenance generation and the entry's raw generation at the same observation.
 Clearing matched poison provenance MUST retain an inactive first-strike counter
 only when the raw generation advanced after that capture; a strike already
-present at capture MUST be reset with the poison arm.
+present at capture MUST be reset with the poison arm. An expired suppressed
+weaker fence MUST be discarded before cleanup decides whether a post-capture
+first strike survives.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 

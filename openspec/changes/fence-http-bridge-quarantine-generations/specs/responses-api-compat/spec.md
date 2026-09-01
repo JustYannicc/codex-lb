@@ -41,7 +41,9 @@ For a poison quarantine, the cleanup fence MUST capture both the poison
 provenance generation and the entry's raw generation at the same observation.
 Clearing matched poison provenance MUST retain an inactive first-strike counter
 only when the raw generation advanced after that capture; a strike already
-present at capture MUST be reset with the poison arm.
+present at capture MUST be reset with the poison arm. An expired suppressed
+weaker fence MUST be discarded before cleanup decides whether a post-capture
+first strike survives.
 
 Quarantine cleanup MUST remain independent from retry-circuit state, account
 health, routing score, account eligibility, and durable bridge ownership. A
@@ -108,7 +110,10 @@ characters. Shorter strings and arrays, empty or null input, and any other
 shape MUST remain delta-only; exactly 4096 is included and 4095 is not. A
 serialization failure MUST classify the one-item array as delta-only. This is
 only a payload-shape signal and does not establish durable full-resend proof,
-prefix identity, or account-neutral replay safety.
+prefix identity, or account-neutral replay safety. Request validation MUST
+preserve a client-supplied string's original shape and character length for
+this decision; normalizing that string into a one-item array MUST NOT add the
+array envelope to its boundary calculation.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 

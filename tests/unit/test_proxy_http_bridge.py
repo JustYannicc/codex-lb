@@ -320,6 +320,44 @@ def test_http_bridge_full_resend_shape_classifier_has_normative_boundaries(
     assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is expected
 
 
+@pytest.mark.parametrize(
+    ("input_length", "expected"),
+    [
+        pytest.param(4035, False, id="normalized-array-overhead-does-not-count"),
+        pytest.param(4095, False, id="raw-string-below-boundary"),
+        pytest.param(4096, True, id="raw-string-at-boundary"),
+    ],
+)
+def test_http_bridge_full_resend_shape_preserves_validated_raw_string_boundary(
+    input_length: int,
+    expected: bool,
+) -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": "x" * input_length,
+        }
+    )
+
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is expected
+    revalidated = ResponsesRequest.model_validate(payload)
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(revalidated) is expected
+
+
+def test_http_bridge_full_resend_shape_does_not_reuse_raw_string_length_after_input_replacement() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": "x" * 4096,
+        }
+    )
+    replaced = payload.model_copy(update={"input": ["delta"]})
+
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(replaced) is False
+
+
 def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:
     request = (
         '{"type":"response.create","previous_response_id":"resp_parent",'
@@ -40561,6 +40599,38 @@ def test_a_completion_clear_spares_a_strike_armed_during_settlement() -> None:
         "a poison quarantine armed during the completion's durable awaits is fresh evidence the clear must spare"
     )
     assert session.quarantined is True, "the session flag must agree with the registry the fence preserved"
+
+
+def test_a_completion_clear_ignores_expired_weaker_marker_when_preserving_a_new_strike() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-expired-weaker-marker-strike")
+    service._http_bridge_sessions[session.key] = session
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    captured = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(service, session.key)
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    entry.suppressed_weaker_reason = http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON
+    entry.suppressed_weaker_until = time.monotonic() - 1.0
+
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
+    http_bridge_quarantine_module._clear_http_bridge_quarantine(
+        service,
+        session,
+        key_generation=captured.generation,
+        key_raw_generation=captured.raw_generation,
+        key_generation_captured=True,
+    )
+
+    surviving = http_bridge_quarantine_module._http_bridge_quarantine_registry(service).get(session.key)
+    assert surviving is not None, "an expired weaker marker must not hide a post-capture strike"
+    assert surviving.reason is None
+    assert surviving.consecutive_eventless_timeouts == 1
+    assert surviving.suppressed_weaker_reason is None
+    assert surviving.suppressed_weaker_until == 0.0
 
 
 @pytest.mark.asyncio

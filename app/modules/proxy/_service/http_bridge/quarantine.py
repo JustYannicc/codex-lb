@@ -548,6 +548,9 @@ def _clear_http_bridge_quarantine(
             # generation still matches.
             registry.pop(key, None)
             return True
+        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until <= now:
+            entry.suppressed_weaker_reason = None
+            entry.suppressed_weaker_until = 0.0
         captured_raw = captured_raw_generation if captured_raw_generation is not None else captured_generation
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
