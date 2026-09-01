@@ -679,6 +679,7 @@ class ResponsesRequest(BaseModel):
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
     _codex_lb_raw_input_provenance: _ResponsesRawInputProvenance | None = PrivateAttr(default=None)
+    _codex_lb_legacy_owner_forwarding_input_shape: bool = PrivateAttr(default=False)
 
     @model_validator(mode="wrap")
     @classmethod

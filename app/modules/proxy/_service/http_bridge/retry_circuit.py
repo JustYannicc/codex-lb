@@ -14,7 +14,7 @@ from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _http_bridge_quarantine_clear_fence,
-    _http_bridge_quarantine_generation,
+    _http_bridge_quarantine_clear_fence_details,
     _http_bridge_quarantine_registry,
     _http_bridge_session_key_poison_quarantined,
     _quarantine_http_bridge_session,
@@ -1661,6 +1661,7 @@ class _HTTPBridgeRetryCircuitMixin:
             if duplicate_attempt is None:
                 assert state is not None
                 armed_quarantine_generation: int | None = None
+                armed_quarantine_raw_generation: int | None = None
                 pre_arm_quarantine_reason: str | None = None
                 pre_arm_quarantine_until = 0.0
                 if quarantine_poisoned_anchor:
@@ -1683,7 +1684,9 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                     # Captured so a lost cross-replica race can revoke exactly
                     # this speculative arm and nothing re-armed after it.
-                    armed_quarantine_generation = _http_bridge_quarantine_generation(self, session.key)
+                    armed_quarantine_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
+                    armed_quarantine_generation = armed_quarantine_fence.generation
+                    armed_quarantine_raw_generation = armed_quarantine_fence.raw_generation
                 recorded_failures = await self._record_http_bridge_retry_circuit_failure_locked(
                     session,
                     state,
@@ -1692,6 +1695,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     quarantine_poisoned_anchor=quarantine_poisoned_anchor,
                     quarantine_cooldown_remaining=quarantine_cooldown_remaining,
                     armed_quarantine_generation=armed_quarantine_generation,
+                    armed_quarantine_raw_generation=armed_quarantine_raw_generation,
                     pre_arm_quarantine_reason=pre_arm_quarantine_reason,
                     pre_arm_quarantine_until=pre_arm_quarantine_until,
                 )
@@ -1715,6 +1719,7 @@ class _HTTPBridgeRetryCircuitMixin:
         quarantine_poisoned_anchor: bool,
         quarantine_cooldown_remaining: float,
         armed_quarantine_generation: int | None = None,
+        armed_quarantine_raw_generation: int | None = None,
         pre_arm_quarantine_reason: str | None = None,
         pre_arm_quarantine_until: float = 0.0,
     ) -> int | None:
@@ -1814,6 +1819,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     self,
                     session.key,
                     generation=armed_quarantine_generation,
+                    raw_generation=armed_quarantine_raw_generation,
                     restore_reason=pre_arm_quarantine_reason,
                     restore_until=pre_arm_quarantine_until,
                 )
