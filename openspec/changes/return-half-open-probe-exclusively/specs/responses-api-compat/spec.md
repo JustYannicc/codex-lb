@@ -75,7 +75,10 @@ cleanup path. A late submit MUST NOT append an undisarmed attempt between the
 reset's disarm and detach steps. This ordering MUST also apply when an in-place
 reconnect fails because its required continuity owner is unavailable. Failure
 to release a selected account lease during that terminal cleanup MUST NOT
-replace the stable continuity-owner error returned to the client.
+replace the stable continuity-owner error returned to the client. The detached
+session MUST be closed through cancellation-deferred cleanup before that error
+returns, so its upstream socket, account and durable leases, reader, and
+detached-registry capacity cannot outlive the failed reconnect.
 
 #### Scenario: Reset teardown cannot manufacture a circuit strike
 
