@@ -356,6 +356,35 @@ def test_http_bridge_full_resend_shape_does_not_reuse_raw_string_length_after_in
     replaced = payload.model_copy(update={"input": ["delta"]})
 
     assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(replaced) is False
+    assert replaced.model_dump_for_http_bridge_owner_forwarding()["input"] == ["delta"]
+
+
+@pytest.mark.parametrize(
+    ("input_length", "expected"),
+    [
+        pytest.param(4035, False, id="normalized-array-overhead-does-not-count"),
+        pytest.param(4095, False, id="raw-string-below-boundary"),
+        pytest.param(4096, True, id="raw-string-at-boundary"),
+    ],
+)
+def test_http_bridge_owner_forwarding_preserves_raw_string_boundary(
+    input_length: int,
+    expected: bool,
+) -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": "x" * input_length,
+        }
+    )
+
+    forwarded = payload.model_dump_for_http_bridge_owner_forwarding()
+    assert isinstance(forwarded["input"], str)
+    assert isinstance(payload.model_dump_for_forwarding()["input"], list)
+    owner_payload = ResponsesRequest.model_validate(forwarded)
+
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(owner_payload) is expected
 
 
 def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:

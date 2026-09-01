@@ -5142,7 +5142,7 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 
         priority_response = await async_client.post(
             "/internal/bridge/responses",
-            json=priority_payload.model_dump_for_forwarding(),
+            json=priority_payload.model_dump_for_http_bridge_owner_forwarding(),
             headers=forward_headers,
         )
 
@@ -5302,7 +5302,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     response = await asyncio.wait_for(
         async_client.post(
             "/internal/bridge/responses",
-            json=payload.model_dump_for_forwarding(),
+            json=payload.model_dump_for_http_bridge_owner_forwarding(),
             headers=forward_headers,
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,

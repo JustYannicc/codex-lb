@@ -668,16 +668,21 @@ class ResponsesTextControls(BaseModel):
     format: ResponsesTextFormat | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ResponsesRawInputProvenance:
+    raw_string: str
+    normalized_value: JsonValue
+
+
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
-    _codex_lb_raw_input_string_length: int | None = PrivateAttr(default=None)
-    _codex_lb_raw_input_normalized_value: JsonValue | None = PrivateAttr(default=None)
+    _codex_lb_raw_input_provenance: _ResponsesRawInputProvenance | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
-    def _capture_raw_input_string_length(
+    def _capture_raw_input_string_provenance(
         cls,
         data: JsonValue | ResponsesRequest,
         handler: ModelWrapValidatorHandler[ResponsesRequest],
@@ -685,10 +690,12 @@ class ResponsesRequest(BaseModel):
         if isinstance(data, cls):
             return handler(data)
         raw_input = data.get("input") if is_json_mapping(data) else None
-        raw_input_string_length = len(raw_input) if isinstance(raw_input, str) else None
         request = handler(data)
-        request._codex_lb_raw_input_string_length = raw_input_string_length
-        request._codex_lb_raw_input_normalized_value = request.input if raw_input_string_length is not None else None
+        request._codex_lb_raw_input_provenance = (
+            _ResponsesRawInputProvenance(raw_string=raw_input, normalized_value=request.input)
+            if isinstance(raw_input, str)
+            else None
+        )
         return request
 
     @model_validator(mode="before")
@@ -790,10 +797,10 @@ class ResponsesRequest(BaseModel):
 
         Like ``model_dump(mode="json", exclude_none=True)`` but without
         synthesizing fields the client never sent. Used by every path that
-        forwards this request as a JSON body — the multi-instance owner
-        forward (``HTTPBridgeOwnerClient``) and model-source Responses
-        egress — so that field omission survives the hop and the receiving
-        side does not re-mark ``tools`` as explicitly set.
+        forwards this request to a model source so that field omission
+        survives the hop and the receiver does not re-mark ``tools`` as
+        explicitly set. The multi-instance owner wire has a dedicated dump
+        because it must also preserve pre-validation input shape.
         """
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
         if "tools" not in self.model_fields_set:
@@ -808,6 +815,21 @@ class ResponsesRequest(BaseModel):
             # forward the field when the client actually sent it — including
             # an explicit client-sent ``[]``. See issue #1184.
             payload.pop("tools", None)
+        return payload
+
+    def model_dump_for_http_bridge_owner_forwarding(self) -> MutableJsonObject:
+        """Dump the exact request body posted to an internal bridge owner.
+
+        Request validation normalizes a client string into one input item.
+        Preserve the original string on this internal hop so the owner can
+        revalidate it without changing the full-resend boundary. Keep model
+        source forwarding normalized; only the internal owner needs to repeat
+        local request-shape classification.
+        """
+        payload = self.model_dump_for_forwarding()
+        provenance = self._codex_lb_raw_input_provenance
+        if provenance is not None and self.input is provenance.normalized_value:
+            payload["input"] = provenance.raw_string
         return payload
 
     def to_payload(self) -> JsonObject:

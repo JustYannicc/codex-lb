@@ -62,7 +62,7 @@ HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # Additive tamper-proofing header (#1203): a second signature bound to the
-# exact forwarding body (``model_dump_for_forwarding``) that is posted, so an
+# exact forwarding body (``model_dump_for_http_bridge_owner_forwarding``) that is posted, so an
 # in-transit rewrite injecting ``"tools": []`` is detected even though the
 # primary signature hashes a plain ``model_dump`` that synthesizes the same
 # empty list. Orthogonal to ``x-codex-bridge-signature-version`` below (which
@@ -185,7 +185,7 @@ class HTTPBridgeOwnerClient:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
-            request_payload = payload.model_dump_for_forwarding()
+            request_payload = payload.model_dump_for_http_bridge_owner_forwarding()
             request_headers = build_owner_forward_headers(headers=headers, payload=payload, context=context)
             request_context = session.post(
                 request_url,
@@ -605,7 +605,8 @@ def _bridge_forward_tools_bound_signature(
     """Tamper-proofing signature bound to the exact posted forwarding body.
 
     Signs the same forwarding dump that is actually posted
-    (``model_dump_for_forwarding``), not a plain ``model_dump`` that
+    (``model_dump_for_http_bridge_owner_forwarding``), not a plain
+    ``model_dump`` that
     synthesizes ``"tools": []`` for clients that omitted the field. A plain
     dump would make the omitted-tools and explicit-``tools: []`` bodies sign
     identically, so a body rewritten in transit to inject ``"tools": []``
@@ -616,7 +617,7 @@ def _bridge_forward_tools_bound_signature(
     including the unanchored / signature-version domain) so the binding also
     carries #1169's isolation guarantees. Always authenticates ``client_ip``.
     """
-    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_http_bridge_owner_forwarding())
     signing_payload = _structured_bridge_signing_payload(
         body_digest=body_digest,
         context=context,
