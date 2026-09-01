@@ -467,6 +467,93 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("synthesized_turn_state", "preissued", "expected_fail_closed"),
+    [
+        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, False),
+        (None, True, False),
+        (None, False, True),
+    ],
+    ids=["current-proxy-marker", "echoed-proxy-marker", "client-spoof"],
+)
+async def test_terminal_compaction_generated_turn_state_requires_exact_provenance(
+    synthesized_turn_state: str | None,
+    preissued: bool,
+    expected_fail_closed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the exact proxy marker can bypass unresolved turn ownership."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    if preissued:
+        service._websocket_continuity_state_for_request(
+            {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            api_key=None,
+            codex_session_affinity=True,
+            synthesized_turn_state="turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+    account = _make_account("acc_ws_compaction_spoofed_turn_state")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_ws_compaction_spoofed_turn_state"))
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    async def resolve_turn_state_owner(
+        *,
+        turn_state: str,
+        api_key: ApiKeyData | None,
+        fail_on_missing: bool,
+    ) -> str | None:
+        del api_key
+        assert turn_state == "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        if fail_on_missing:
+            raise proxy_service.ProxyResponseError(
+                502,
+                proxy_service.openai_error(
+                    "turn_state_owner_unavailable",
+                    "Turn-state owner account is unavailable; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            )
+        return None
+
+    async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
+        del self, args, kwargs
+        return account, upstream
+
+    payload = json.loads(_compaction_trigger_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = "resp_ws_compaction_spoofed_owner_miss"
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", resolve_turn_state_owner)
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        synthesized_turn_state=synthesized_turn_state,
+    )
+
+    if expected_fail_closed:
+        list_selection_candidates.assert_not_awaited()
+        assert upstream.sent_text == []
+        assert any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
+    else:
+        list_selection_candidates.assert_awaited_once()
+        assert len(upstream.sent_text) == 1
+        assert not any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
 async def test_owner_miss_rebinds_existing_socket_to_refreshed_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

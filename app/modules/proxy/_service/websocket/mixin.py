@@ -455,7 +455,6 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
-    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _request_allows_unavailable_legacy_owner_abandonment,
@@ -1376,6 +1375,8 @@ class _WebSocketMixin:
         exact_alias_resolved = continuity_state is not None
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
+        if synthesized_turn_state is not None:
+            continuity_state.proxy_synthesized_turn_state_provenance = True
         publish_keys = cache_keys if not exact_client_turn or exact_alias_resolved else lookup_keys
         for key in publish_keys:
             proxy._websocket_continuity_index.pop(key, None)
@@ -2048,7 +2049,10 @@ class _WebSocketMixin:
                             await proxy._resolve_compact_turn_state_owner(
                                 turn_state=turn_state,
                                 api_key=request_state.api_key or api_key,
-                                fail_on_missing=not _is_synthesized_turn_state(turn_state),
+                                fail_on_missing=not (
+                                    turn_state == synthesized_turn_state
+                                    or continuity_state.proxy_synthesized_turn_state_provenance
+                                ),
                             )
                             if turn_state is not None
                             else None
