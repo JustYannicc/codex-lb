@@ -12,8 +12,9 @@
 - [x] Normalize elapsed durable cooldowns to the zero sentinel without clearing
   equal/newer active local half-open leases.
 - [x] Record the owning session, return only that probe as an elapsed cooldown,
-  classify proxy continuity loss as neutral, and preserve genuine upstream
-  strikes.
+  fence each release by session/token/deadline/process-local generation,
+  classify explicitly proven proxy continuity loss as neutral, and preserve
+  genuine upstream strikes.
 - [x] Order proxy continuity reset lifecycle ownership, detach, disarm, release,
   settlement, and close through cancellation-safe cleanup.
 - [x] Apply the same detach/disarm-before-release/close ordering to an in-place
@@ -25,7 +26,9 @@
 - [x] Cover elapsed/absent rows, real expiry single-flight, owner fencing,
   equal-version and lookup-failure lease retention, and replica-boundary state.
 - [x] Cover proxy continuity teardown ordering, cancellation, continuity
-  neutrality, and genuine upstream failure through unit and real bridge paths.
+  neutrality (including injected-anchor provenance), stale-generation no-op
+  releases, raw previous-response failures, and genuine upstream failure
+  through unit and real bridge paths.
 
 ## Verification
 

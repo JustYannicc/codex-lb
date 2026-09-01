@@ -42,23 +42,28 @@ durable reset or lower failure count also preserves an active local lease and
 its failure fence; only an inactive local state is cleared by a durable reset.
 A lookup failure leaves the existing local state untouched.
 
-### Fence a process-local lease by session identity
+### Fence a process-local lease by session, token, deadline, and generation
 
-When admission crosses a real cooldown boundary, store the session identity
-alongside `half_open_until`. Release requires the same identity and an active
-lease. Release clears the lease and records an elapsed local cooldown marker;
-it does not change durable failure fields. A local release timestamp keeps that
-marker when a subsequent durable lookup misses, so the next admission can still
-install exactly one fresh lease without making a durable claim.
+When admission crosses a real cooldown boundary, store the session identity,
+owner token, deadline, and a monotonically increasing process-local lease
+generation. Release requires an active lease and an exact match for every
+available fence. A stale completion, including one reusing the same session and
+token for a replacement lease, is a no-op. Release clears the lease and records
+an elapsed local cooldown marker; it does not change durable failure fields. A
+local release timestamp keeps that marker when a subsequent durable lookup
+misses, so the next admission can still install exactly one fresh lease without
+making a durable claim.
 
 ### Reuse the existing failure funnel for classification
 
 Classify the established proxy continuity-loss details before the genuine
 failure set. Continuity loss invokes the owner-fenced release and returns
-without a durable write. Genuine `stream_incomplete`, `stream_idle_timeout`,
-and `clean_close` continue through the existing attempt-scoped accounting
-path. Anchor replay and error provenance remain owned by their existing
-vehicles.
+without a durable write. A previous-response rejection is continuity-neutral
+only when request state proves that the rejected anchor was proxy-injected;
+raw/client-supplied rejection remains a genuine strike. Genuine
+`stream_incomplete`, `stream_idle_timeout`, and `clean_close` continue through
+the existing attempt-scoped accounting path. Anchor replay and error
+provenance remain owned by their existing vehicles.
 
 ### Serialize reset's critical section
 
@@ -84,8 +89,8 @@ anchor-recovery changes are copied from the overlapping vehicles.
 - [Local leases are not replica-wide] → Keep durable failure/cooldown state as
   the shared authority and document that each process may admit its own probe
   after a real elapsed deadline.
-- [A stale owner could attempt a late release] → Require active lease and exact
-  session identity; ignore non-owner releases.
+- [A stale owner could attempt a late release] → Require an active lease and
+  exact session, token, deadline, and generation; ignore non-owner releases.
 - [Reset cancellation could strand resources] → Shield the detach/disarm/
   release transition and await the cleanup task before propagating cancellation.
 - [Holding lifecycle ownership across network-like awaits could deadlock] →

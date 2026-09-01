@@ -4071,6 +4071,14 @@ class _HTTPBridgeStreamingMixin:
                         session,
                         detail=proxy_continuity_loss_detail,
                         probe_owner=probe_owner,
+                        expected_half_open_until=(
+                            getattr(probe_owner, "claimed_half_open_until", None) if probe_owner is not None else None
+                        ),
+                        expected_half_open_generation=(
+                            getattr(probe_owner, "claimed_half_open_generation", None)
+                            if probe_owner is not None
+                            else None
+                        ),
                     )
 
             # Settlement and socket close can await user-facing queues and

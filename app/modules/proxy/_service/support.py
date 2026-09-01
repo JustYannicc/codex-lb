@@ -1085,6 +1085,9 @@ class _WebSocketRequestState:
     # it claimed none); released by the submit finalizer whenever the probe
     # was never dispatched, so no pre-dispatch exit can strand the lease.
     claimed_half_open_until: float = 0.0
+    # Process-local lease generation paired with ``claimed_half_open_until``;
+    # a reused request/session token must not return a later probe.
+    claimed_half_open_generation: int = 0
     # True while the submit owns an admission-waiter registration taken at
     # submit entry, before the retry-circuit gate, that the dispatch path has
     # not yet taken over. It keeps the turn visible to a concurrent

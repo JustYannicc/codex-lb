@@ -31219,6 +31219,8 @@ async def test_http_bridge_retry_circuit_returned_probe_is_owner_fenced_and_sing
 
     assert await service._http_bridge_precreated_retry_allowed(owner) is True
     assert state.half_open_owner_session is owner
+    claimed_half_open_until = state.half_open_until
+    claimed_half_open_generation = state.half_open_lease_generation
     assert (
         await service._release_http_bridge_retry_circuit_half_open(
             sibling,
@@ -31231,6 +31233,9 @@ async def test_http_bridge_retry_circuit_returned_probe_is_owner_fenced_and_sing
         await service._release_http_bridge_retry_circuit_half_open(
             owner,
             detail="previous_response_not_found",
+            probe_owner=owner,
+            expected_half_open_until=claimed_half_open_until,
+            expected_half_open_generation=claimed_half_open_generation,
         )
         is True
     )
@@ -31239,6 +31244,173 @@ async def test_http_bridge_retry_circuit_returned_probe_is_owner_fenced_and_sing
     assert state.cooldown_until > 0.0
     assert await service._http_bridge_precreated_retry_allowed(owner) is True
     assert await service._http_bridge_precreated_retry_allowed(sibling) is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_stale_generation_cannot_release_reused_probe_token() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-reused-probe-token")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now - 1.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    probe_token = object()
+
+    first_claim: list[tuple[float, object, int]] = []
+    assert (
+        await service._http_bridge_precreated_retry_allowed(
+            session,
+            probe_owner=probe_token,
+            claimed_lease_out=first_claim,
+        )
+        is True
+    )
+    first_until, first_owner, first_generation = first_claim[-1]
+    assert first_owner is probe_token
+    assert (
+        await service._release_http_bridge_retry_circuit_half_open(
+            session,
+            detail="previous_response_not_found",
+            probe_owner=probe_token,
+            expected_half_open_until=first_until,
+            expected_half_open_generation=first_generation,
+        )
+        is True
+    )
+
+    second_claim: list[tuple[float, object, int]] = []
+    assert (
+        await service._http_bridge_precreated_retry_allowed(
+            session,
+            probe_owner=probe_token,
+            claimed_lease_out=second_claim,
+        )
+        is True
+    )
+    second_until, second_owner, second_generation = second_claim[-1]
+    assert second_owner is probe_token
+    assert second_generation != first_generation
+
+    assert (
+        await service._release_http_bridge_retry_circuit_half_open(
+            session,
+            detail="previous_response_not_found",
+            probe_owner=probe_token,
+            expected_half_open_until=second_until,
+            expected_half_open_generation=first_generation,
+        )
+        is False
+    )
+    assert state.half_open_until == second_until
+    assert state.half_open_owner_session is session
+    assert state.half_open_owner_token is probe_token
+    assert state.half_open_lease_generation == second_generation
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_raw_previous_response_not_found_counts_as_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-raw-previous-response-not-found")
+    now = time.monotonic()
+    probe_token = object()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=now,
+        half_open_until=now + 60.0,
+        half_open_owner_session=session,
+        half_open_owner_token=probe_token,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    persist_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_retry_circuit,
+    )
+
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="previous_response_not_found",
+        probe_owner=probe_token,
+    )
+
+    assert consecutive_failures == 3
+    assert state.consecutive_failures == 3
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    persist_retry_circuit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_proxy_previous_response_not_found_returns_probe() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-proxy-previous-response-not-found")
+    request_state = _make_eventless_http_bridge_owner(request_id="req-proxy-previous-response-not-found")
+    lease_until = time.monotonic() + 60.0
+    lease_generation = 41
+    request_state.claimed_half_open_until = lease_until
+    request_state.claimed_half_open_generation = lease_generation
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+        half_open_until=lease_until,
+        half_open_owner_session=session,
+        half_open_owner_token=request_state,
+        half_open_lease_generation=lease_generation,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="previous_response_not_found",
+        probe_owner=request_state,
+        proxy_continuity_provenance=True,
+    )
+
+    assert consecutive_failures is None
+    assert state.consecutive_failures == 2
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert state.half_open_lease_generation == 0
+    assert state.cooldown_until > 0.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_stream_incomplete_remains_genuine_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stream-incomplete-genuine")
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=1,
+        cooldown_until=0.0,
+        last_detail="clean_close",
+        last_touched_monotonic=time.monotonic(),
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    persist_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_retry_circuit,
+    )
+
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="stream_incomplete",
+    )
+
+    assert consecutive_failures == 2
+    assert state.consecutive_failures == 2
+    persist_retry_circuit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -31382,6 +31554,8 @@ async def test_http_bridge_retry_circuit_bypassed_request_cannot_return_another_
     assert await service._http_bridge_precreated_retry_allowed(session, probe_owner=owner_request) is True
     assert state.half_open_owner_session is session
     assert state.half_open_owner_token is owner_request
+    claimed_half_open_until = state.half_open_until
+    claimed_half_open_generation = state.half_open_lease_generation
     assert (
         await service._http_bridge_precreated_retry_allowed(
             session,
@@ -31405,6 +31579,8 @@ async def test_http_bridge_retry_circuit_bypassed_request_cannot_return_another_
             session,
             detail="previous_response_not_found",
             probe_owner=owner_request,
+            expected_half_open_until=claimed_half_open_until,
+            expected_half_open_generation=claimed_half_open_generation,
         )
         is True
     )
@@ -31445,11 +31621,14 @@ async def test_http_bridge_precreated_retry_without_request_state_fences_unique_
         probe_owner = kwargs["probe_owner"]
         observed_probe_owners.append(probe_owner)
         assert await original_retry_allowed(admitted_session, **kwargs) is True
+        claimed_probe = kwargs["claimed_lease_out"][-1]
         assert (
             await service._release_http_bridge_retry_circuit_half_open(
                 admitted_session,
                 detail="previous_response_not_found",
                 probe_owner=probe_owner,
+                expected_half_open_until=claimed_probe[0],
+                expected_half_open_generation=claimed_probe[2],
             )
             is True
         )
@@ -31566,6 +31745,8 @@ async def test_http_bridge_proxy_continuity_reset_disarms_before_release_and_doe
         half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    request_state.claimed_half_open_until = state.half_open_until
+    request_state.claimed_half_open_generation = state.half_open_lease_generation
     service._http_bridge_sessions[session.key] = session
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
@@ -31646,6 +31827,8 @@ async def test_http_bridge_reset_cleanup_defers_cancellation_until_detach_and_cl
         half_open_owner_session=session,
     )
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    request_state.claimed_half_open_until = state.half_open_until
+    request_state.claimed_half_open_generation = state.half_open_lease_generation
     settle_started = asyncio.Event()
     allow_settle = asyncio.Event()
 
@@ -39087,6 +39270,7 @@ async def test_grouped_continuity_failure_returns_the_owning_half_open_probe(
     from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
 
     owner.expose_stale_previous_response_classifier = True
+    owner.proxy_injected_previous_response_id = True
     sibling = proxy_service._WebSocketRequestState(
         request_id="req-grouped-probe-sibling",
         model="gpt-5.4",
@@ -39098,6 +39282,7 @@ async def test_grouped_continuity_failure_returns_the_owning_half_open_probe(
         event_queue=asyncio.Queue(),
         transport="http",
         expose_stale_previous_response_classifier=True,
+        proxy_injected_previous_response_id=True,
     )
     sibling.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
     session.pending_requests.append(sibling)
@@ -44854,9 +45039,18 @@ async def test_the_gate_returns_a_probe_reclaimed_over_a_stale_lease(
         gate_state.half_open_until = time.monotonic() + 600.0
         gate_state.half_open_owner_session = session
         gate_state.half_open_owner_token = kwargs.get("probe_owner", session)
+        next_generation = getattr(service, "_http_bridge_retry_circuit_half_open_generation", 0) + 1
+        service._http_bridge_retry_circuit_half_open_generation = next_generation
+        gate_state.half_open_lease_generation = next_generation
         claimed_out = kwargs.get("claimed_lease_out")
         if claimed_out is not None:
-            claimed_out.append((gate_state.half_open_until, gate_state.half_open_owner_token))
+            claimed_out.append(
+                (
+                    gate_state.half_open_until,
+                    gate_state.half_open_owner_token,
+                    next_generation,
+                )
+            )
         return True
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", reclaiming_admission)
