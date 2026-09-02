@@ -140,8 +140,23 @@ def _http_bridge_quarantine_evictable_keys(
     return [
         key
         for key, entry in registry.items()
-        if not (entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON and entry.quarantined_until > now)
+        if not (entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON and entry.poison_quarantined_until > now)
     ]
+
+
+def _http_bridge_quarantine_eviction_order(
+    key: _HTTPBridgeSessionKey,
+    entry: _HTTPBridgeQuarantineEntry,
+) -> tuple[float, int, str, str, str, str]:
+    """Return the stable weakest-first order for non-poison entries."""
+    return (
+        entry.last_touched_monotonic,
+        entry.generation,
+        key.affinity_kind,
+        key.affinity_key,
+        key.api_key_id or "",
+        key.strength or "",
+    )
 
 
 def _http_bridge_quarantine_poison_overflow_until(service: Any, now: float) -> float:
@@ -201,7 +216,10 @@ def _admit_http_bridge_quarantine_key(
         # Refuse this arm rather than evicting one or growing past the hard
         # registry bound. The caller can still retire/fail the session.
         return False
-    for stale_key in sorted(evictable, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
+    for stale_key in sorted(
+        evictable,
+        key=lambda candidate: _http_bridge_quarantine_eviction_order(candidate, registry[candidate]),
+    )[:overflow]:
         registry.pop(stale_key, None)
     return True
 
@@ -223,7 +241,10 @@ def _prune_http_bridge_quarantine_registry(
         # make room, so a normally-mutated registry never reaches this state
         # with an all-poison burst.
         evictable = _http_bridge_quarantine_evictable_keys(registry, now)
-        for stale_key in sorted(evictable, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
+        for stale_key in sorted(
+            evictable,
+            key=lambda candidate: _http_bridge_quarantine_eviction_order(candidate, registry[candidate]),
+        )[:overflow]:
             registry.pop(stale_key, None)
 
 

@@ -53,7 +53,13 @@ health, routing score, account eligibility, and durable bridge ownership. A
 successful replay MAY clear quarantine without clearing or settling a retry
 circuit. TTL and size-cap pruning MUST remain bounded and self-recovering. When
 admitting a new key, the registry MUST prune expired entries and evict only the
-oldest weaker-fence entries needed to stay within its hard size cap. If every
+oldest weaker-fence entries needed to stay within its hard size cap. An active
+poison fence whose poison-specific deadline has not expired MUST never be
+evictable. Inactive first-strike entries and active
+non-poison quarantine entries MUST share one eviction tier ordered by ascending
+last-touch time, then ascending generation, then the key tuple (affinity kind,
+affinity key, API-key id with null ordered as the empty string, and strength).
+If every
 slot holds an active poison fence, the new arm MUST be rejected instead of
 evicting poison evidence or growing the registry past the cap; the rejected
 session MUST remain unquarantined and the rejection MUST NOT allocate or
@@ -130,10 +136,13 @@ not mutate account health, routing, or durable ownership.
 For this requirement, the canonical full-resend-shape predicate MUST inspect
 the decoded Responses request's `input` before durable lookup or replay
 projection. It is true for a string with at least 4096 characters, an array
-with more than one item, or a one-item array whose compact serialization of the
+with more than one item unless every item is a `function_call_output`,
+`custom_tool_call_output`, or `apply_patch_call_output`, or a one-item array whose compact serialization of the
 entire array (`ensure_ascii=true` and no separator whitespace) is at least 4096
 characters. Shorter strings and arrays, empty or null input, and any other
-shape MUST remain delta-only; exactly 4096 is included and 4095 is not. A
+shape MUST remain delta-only. A multi-item array containing only those tool
+output items is delta-only because their corresponding calls exist only behind
+the continuation anchor. Exactly 4096 is included and 4095 is not. A
 serialization failure MUST classify the one-item array as delta-only. This is
 only a payload-shape signal and does not establish durable full-resend proof,
 prefix identity, or account-neutral replay safety. Request validation MUST

@@ -308,6 +308,14 @@ def test_http_bridge_prepares_full_resend_shape_for_late_hard_anchor_injection()
         pytest.param(["x" * 4091], False, id="short-one-item-array"),
         pytest.param(["x" * 4092], True, id="boundary-one-item-array"),
         pytest.param(["x", "y"], True, id="multiple-items"),
+        pytest.param(
+            [
+                {"type": "function_call_output", "call_id": "call-1", "output": "first"},
+                {"type": "function_call_output", "call_id": "call-2", "output": "second"},
+            ],
+            False,
+            id="parallel-tool-output-delta",
+        ),
         pytest.param([], False, id="empty-array"),
     ],
 )
@@ -13791,19 +13799,45 @@ async def test_stream_via_http_bridge_skips_session_anchor_after_cross_account_f
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_full_resend_payload(
+@pytest.mark.parametrize(
+    ("input_value", "quarantine_key", "expected_anchor", "expected_prepare_lengths"),
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+                {"role": "user", "content": "follow up"},
+            ],
+            False,
+            None,
+            [3],
+            id="full-resend-stays-unanchored",
+        ),
+        pytest.param(
+            [
+                {"type": "function_call_output", "call_id": "call-1", "output": "first"},
+                {"type": "function_call_output", "call_id": "call-2", "output": "second"},
+            ],
+            True,
+            "resp_latest",
+            [2, 2],
+            id="quarantined-parallel-tool-output-delta-keeps-anchor",
+        ),
+    ],
+)
+async def test_stream_via_http_bridge_classifies_anchorless_full_resend_and_quarantined_multi_output_delta(
     monkeypatch: pytest.MonkeyPatch,
+    input_value: list[proxy_service.JsonValue],
+    quarantine_key: bool,
+    expected_anchor: str | None,
+    expected_prepare_lengths: list[int],
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
             "instructions": "hi",
-            "input": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "world"},
-                {"role": "user", "content": "follow up"},
-            ],
+            "input": input_value,
         },
     )
     request_state = proxy_service._WebSocketRequestState(
@@ -13855,6 +13889,12 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
     )
+    if quarantine_key:
+        http_bridge_quarantine_module._quarantine_http_bridge_session(
+            service,
+            _make_bridge_session(key_value="sid-123"),
+            reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+        )
 
     monkeypatch.setattr(
         proxy_service,
@@ -13917,12 +13957,8 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
     ]
 
     assert chunks == []
-    assert captured["previous_response_id"] is None
-    # Full-resend payloads are explicitly excluded from durable anchor
-    # injection, so the bridge prepares the original request exactly once.
-    assert prepared_input_lengths == [3]
-    # This path never reaches the trim branch, so the fake request_state
-    # returned by fake_prepare keeps its default metadata.
+    assert captured["previous_response_id"] == expected_anchor
+    assert prepared_input_lengths == expected_prepare_lengths
     assert request_state.input_full_fingerprint is None
 
 
@@ -34725,6 +34761,76 @@ def test_http_bridge_quarantine_registry_is_size_bounded() -> None:
     assert len(http_bridge_quarantine_module._http_bridge_quarantine_registry(service)) <= max_entries
 
 
+def test_http_bridge_quarantine_eviction_order_is_deterministic_for_equal_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 3)
+    now = time.monotonic()
+    poison_key = proxy_service._HTTPBridgeSessionKey("session_header", "poison", None)
+    lower_generation_key = proxy_service._HTTPBridgeSessionKey("session_header", "lower-generation", None)
+    higher_generation_key = proxy_service._HTTPBridgeSessionKey("session_header", "higher-generation", None)
+    registry = {
+        poison_key: http_bridge_quarantine_module._HTTPBridgeQuarantineEntry(
+            generation=1,
+            quarantined_until=now + 60.0,
+            last_touched_monotonic=now - 100.0,
+            reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+            poison_quarantined_until=now + 60.0,
+        ),
+        higher_generation_key: http_bridge_quarantine_module._HTTPBridgeQuarantineEntry(
+            generation=3,
+            last_touched_monotonic=now - 10.0,
+        ),
+        lower_generation_key: http_bridge_quarantine_module._HTTPBridgeQuarantineEntry(
+            generation=2,
+            quarantined_until=now + 60.0,
+            last_touched_monotonic=now - 10.0,
+            reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+        ),
+    }
+    new_key = proxy_service._HTTPBridgeSessionKey("session_header", "new", None)
+
+    assert http_bridge_quarantine_module._admit_http_bridge_quarantine_key(registry, new_key, now) is True
+
+    assert poison_key in registry
+    assert higher_generation_key in registry
+    assert lower_generation_key not in registry
+
+
+def test_http_bridge_quarantine_cap_can_evict_a_weaker_fence_after_its_poison_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
+    service = SimpleNamespace()
+    retained = _make_bridge_session(key_value="expired-poison-retained-weaker")
+    replacement = _make_bridge_session(key_value="replacement-weaker")
+
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+        minimum_seconds=900.0,
+    )
+    clock[0] = 1700.0
+
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        replacement,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+
+    registry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+    assert retained.key not in registry
+    assert replacement.key in registry
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_poison_overflow_fails_closed_for_unstored_keys(
     monkeypatch: pytest.MonkeyPatch,
@@ -39535,6 +39641,7 @@ def test_the_cap_does_not_evict_an_active_poison_quarantine() -> None:
     poison_entry = http_bridge_quarantine_module._HTTPBridgeQuarantineEntry()
     poison_entry.reason = http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
     poison_entry.quarantined_until = now + 600.0
+    poison_entry.poison_quarantined_until = now + 600.0
     poison_entry.last_touched_monotonic = now - 10_000.0
     registry[poison_key] = poison_entry
     for index in range(http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES):

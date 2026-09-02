@@ -129,6 +129,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES,
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
@@ -2058,7 +2059,13 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
         if payload._codex_lb_legacy_owner_forwarding_input_shape and len(input_value) == 1:
             return False
         if len(input_value) > 1:
-            return True
+            # Multiple outputs can be one delta-only continuation for
+            # parallel calls completed by the anchored response. Without the
+            # corresponding call items this payload is not self-contained and
+            # must keep its durable anchor.
+            return not all(
+                _http_bridge_input_item_type(item) in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES for item in input_value
+            )
         if len(input_value) == 1:
             try:
                 return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
