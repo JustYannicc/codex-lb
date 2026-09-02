@@ -1067,6 +1067,7 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
+                synthesized_turn_state=synthesized_turn_state,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
@@ -1224,6 +1225,7 @@ class _HTTPBridgeStreamingMixin:
             rewritten_file_account_id=rewritten_file_account_id,
             file_account_resolution_complete=True,
             upstream_stream_transport_override="http",
+            synthesized_turn_state=synthesized_turn_state,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
