@@ -375,18 +375,18 @@ def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSe
     now = time.monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
-    if entry is not None:
-        return (
-            entry.quarantined_until > now
-            and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-            # The classification expires on the poison arm's OWN deadline even
-            # while weaker evidence keeps the shared session fence alive.
-            and entry.poison_quarantined_until > now
-        )
+    if entry is not None and (
+        entry.quarantined_until > now
+        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        # The classification expires on the poison arm's OWN deadline even
+        # while weaker evidence keeps the shared session fence alive.
+        and entry.poison_quarantined_until > now
+    ):
+        return True
     # When every registry slot is an active poison fence, a new poison arm is
-    # rejected to preserve the hard cap. The rejected key has no entry, but it
-    # must not immediately re-inject the anchor that the failed arm proved
-    # unsafe. Treat unknown keys as poisoned for the bounded overflow window.
+    # rejected to preserve the hard cap. A later weaker arm can admit that key
+    # after a slot opens, but it must not hide the still-live overflow proof.
+    # Fall back whenever the retained entry does not itself prove active poison.
     return _http_bridge_quarantine_poison_overflow_until(service, now) > now
 
 

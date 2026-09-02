@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyUsageReservationData
@@ -1221,6 +1222,58 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        pytest.param("x" * 4095, id="raw-string-boundary"),
+        pytest.param(
+            [
+                {"type": "function_call_output", "call_id": "call-1", "output": "first"},
+                {"type": "function_call_output", "call_id": "call-2", "output": "second"},
+            ],
+            id="parallel-tool-output-delta",
+        ),
+    ],
+)
+async def test_owner_forward_blocks_delta_shapes_that_legacy_owners_reclassify(
+    monkeypatch: pytest.MonkeyPatch,
+    input_value: object,
+) -> None:
+    dispatched = False
+
+    class UnexpectedSession:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal dispatched
+            dispatched = True
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", UnexpectedSession)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": input_value})
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _event in HTTPBridgeOwnerClient().stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=payload,
+            headers={},
+            context=context,
+            request_started_at=10.0,
+        ):
+            pass
+
+    assert dispatched is False
+    assert exc_info.value.status_code == 503
+    error = exc_info.value.payload.get("error")
+    assert isinstance(error, dict)
+    assert error.get("code") == "bridge_owner_forward_failed"
+    assert exc_info.value.failure_detail == "owner_input_shape_upgrade_required"
+
+
+@pytest.mark.asyncio
 async def test_owner_forward_allows_json_content_type_for_internal_post(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1267,7 +1320,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
 
     client = HTTPBridgeOwnerClient()
-    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "x" * 4035})
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
         target_instance="instance-b",
@@ -1294,7 +1347,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     headers = cast(dict[str, str], captured["headers"])
     forwarded_json = cast(dict[str, object], captured["json"])
     assert "tools" not in forwarded_json
-    assert forwarded_json["input"] == "x" * 4035
+    assert forwarded_json["input"] == "hi"
     forwarded_payload = ResponsesRequest.model_validate(forwarded_json)
     assert "tools" not in forwarded_payload.model_fields_set
     assert "tools" not in forwarded_payload.to_payload()

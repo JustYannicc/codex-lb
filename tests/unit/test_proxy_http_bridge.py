@@ -34877,6 +34877,24 @@ async def test_http_bridge_retry_circuit_poison_overflow_fails_closed_for_unstor
         > time.monotonic()
     )
 
+    # A slot later opens and the rejected key records its first eventless
+    # timeout. The new inactive entry must not mask the service-level overflow
+    # proof left by the rejected poison arm.
+    registry.pop(sessions[0].key)
+    admitted_after_rejection = sessions[max_entries]
+    http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(
+        service,
+        admitted_after_rejection,
+    )
+    admitted_entry = registry[admitted_after_rejection.key]
+    assert admitted_entry.consecutive_eventless_timeouts == 1
+    assert admitted_entry.reason is None
+    assert admitted_entry.quarantined_until == 0.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(
+        service,
+        admitted_after_rejection.key,
+    )
+
 
 def test_http_bridge_poison_overflow_ignores_a_longer_weaker_fence(
     monkeypatch: pytest.MonkeyPatch,

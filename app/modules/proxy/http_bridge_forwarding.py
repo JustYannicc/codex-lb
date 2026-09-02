@@ -21,7 +21,10 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
-from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_payload_looks_like_full_resend,
+    _http_bridge_request_budget_seconds,
+)
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -176,6 +179,22 @@ class HTTPBridgeOwnerClient:
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
+        if _http_bridge_owner_forward_requires_shape_upgrade(payload):
+            # A pre-change owner normalizes a raw string into an array and uses
+            # its older array heuristic. It can therefore turn these delta-only
+            # inputs into full resends and suppress the durable anchor. There is
+            # no owner-capability proof on the deployed ring wire, so fail before
+            # dispatch and let the caller's existing local-recovery gates decide.
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    "bridge_owner_forward_failed",
+                    "HTTP bridge owner cannot safely classify this continuation during a rolling upgrade",
+                    error_type="server_error",
+                ),
+                failure_phase="owner_forward",
+                failure_detail="owner_input_shape_upgrade_required",
+            )
         settings = get_settings()
         timeout = _owner_forward_timeout(
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -257,6 +276,29 @@ class HTTPBridgeOwnerClient:
                     # the owner; origin must not release or replay.
                     on_request_dispatched()
                 raise
+
+
+def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest) -> bool:
+    """Keep delta-only input away from owners that may run the old classifier."""
+    if _http_bridge_payload_looks_like_full_resend(payload):
+        return False
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    if len(input_value) > 1:
+        # The current classifier reaches this delta-only result only when every
+        # item is a tool output. The legacy owner classified every multi-item
+        # array as a full resend.
+        return True
+    if len(input_value) != 1:
+        return False
+    try:
+        # Request validation normalizes a raw string into this one-item array.
+        # If its compact form crosses the legacy boundary while the preserved
+        # raw shape remains below it, the two owner versions disagree.
+        return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def build_owner_forward_headers(

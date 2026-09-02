@@ -81,3 +81,9 @@ self-contained because its matching calls live behind that anchor.
 - A new owner marks legacy-signature fallback requests as input-shape
   ambiguous; a one-item array on that path remains delta-only, while a
   body-bound current-origin forward retains exact raw-string classification.
+- A current origin refuses owner dispatch before I/O when legacy normalization
+  could reverse its delta-only classification: a below-boundary raw string
+  whose normalized one-item array reaches the boundary, or a multi-item array
+  containing only tool outputs. Without a ring-level owner capability proof,
+  the origin treats the remote owner as potentially pre-change and leaves only
+  the existing fail-closed or locally fenced recovery paths available.
