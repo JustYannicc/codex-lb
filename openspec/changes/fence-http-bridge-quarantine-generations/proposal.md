@@ -21,9 +21,13 @@ recovery observed an absent entry.
   a non-clearing fence.
 - Treat an observed quarantine generation, including an observed absence, as an
   exact cleanup fence for recovery-origin keys.
-- Keep quarantine bounded by its existing TTL and size cap, and keep successful
-  replay cleanup independent from retry-circuit state, account health, routing,
-  and durable ownership.
+- Keep quarantine bounded by its existing TTL and size cap: prune expired
+  entries and evict the oldest weaker fences first; when every slot holds an
+  active poison fence, reject a new key instead of dropping poison proof or
+  growing the registry, and cover rejected poison keys with one bounded
+  service-level fail-closed deadline. Keep successful replay cleanup
+  independent from retry-circuit state, account health, routing, and durable
+  ownership.
 - Clarify the selection contract: quarantine makes a live session unavailable
   for local reuse and anchor-presence checks, while a delta-only request may
   still use its durable anchor because it has no other context source.

@@ -41,3 +41,7 @@
   expired weaker arm cannot make a pre-capture strike look new.
 - [x] 1.19 Carry the full poison cleanup fence through durable-load miss,
   purge, and reset revocation paths so a post-capture first strike survives.
+- [x] 1.20 Keep quarantine admission hard-capped: evict only expired or
+  weaker-fence entries, reject a new key when every slot holds active poison
+  evidence, and cover rejected keys with a bounded fail-closed overflow
+  deadline without mutating retained poison generations.

@@ -33,6 +33,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS = 600.0
 _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD = 2
 _HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES = 1024
+_HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR = "_http_bridge_quarantine_poison_overflow_until"
 
 _HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON = "reattach_missing_response_created"
 _HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON = "repeated_eventless_timeout"
@@ -131,6 +132,80 @@ def _next_http_bridge_quarantine_generation(
     return next_generation
 
 
+def _http_bridge_quarantine_evictable_keys(
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+    now: float,
+) -> list[_HTTPBridgeSessionKey]:
+    """Return entries that can leave without dropping active poison proof."""
+    return [
+        key
+        for key, entry in registry.items()
+        if not (entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON and entry.quarantined_until > now)
+    ]
+
+
+def _http_bridge_quarantine_poison_overflow_until(service: Any, now: float) -> float:
+    """Return the bounded fail-closed window for rejected poison arms."""
+    deadline = float(getattr(service, _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR, 0.0) or 0.0)
+    if deadline <= now:
+        if deadline:
+            setattr(service, _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR, 0.0)
+        return 0.0
+    return deadline
+
+
+def _remember_http_bridge_quarantine_poison_overflow(
+    service: Any,
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+    now: float,
+    minimum_seconds: float | None,
+) -> None:
+    """Keep rejected poison keys fail-closed without growing the registry.
+
+    A registry full of active poison fences has no safe eviction candidate. A
+    rejected key is therefore covered by one bounded service-level deadline;
+    callers treat unknown keys as poison evidence until that window expires.
+    The deadline includes the required window of the rejected arm and every
+    active poison fence currently retained by the registry.
+    """
+    ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
+    if minimum_seconds is not None:
+        ttl_seconds = max(ttl_seconds, minimum_seconds)
+    deadline = now + ttl_seconds
+    for entry in registry.values():
+        if entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+            continue
+        if entry.quarantined_until > now:
+            deadline = max(deadline, entry.quarantined_until, entry.poison_quarantined_until)
+    deadline = max(
+        deadline,
+        float(getattr(service, _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR, 0.0) or 0.0),
+    )
+    setattr(service, _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR, deadline)
+
+
+def _admit_http_bridge_quarantine_key(
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+    key: _HTTPBridgeSessionKey,
+    now: float,
+) -> bool:
+    """Make room for one new key, or reject it when every fence is poison."""
+    if key in registry:
+        return True
+    overflow = len(registry) + 1 - _HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES
+    if overflow <= 0:
+        return True
+    evictable = _http_bridge_quarantine_evictable_keys(registry, now)
+    if len(evictable) < overflow:
+        # Active poison entries are correctness fences for durable anchors.
+        # Refuse this arm rather than evicting one or growing past the hard
+        # registry bound. The caller can still retire/fail the session.
+        return False
+    for stale_key in sorted(evictable, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
+        registry.pop(stale_key, None)
+    return True
+
+
 def _prune_http_bridge_quarantine_registry(
     registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
     now: float,
@@ -144,15 +219,10 @@ def _prune_http_bridge_quarantine_registry(
         # An active poison quarantine is the only record that a key's anchor
         # was proven dead, and its deadline is a required minimum: evicting
         # it early hands the poisoned anchor back to the very probe it
-        # exists to protect. The cap therefore evicts only expired or
-        # weaker-fence entries and holds as a correctness bound, not an
-        # unconditional one, when an incident quarantines more keys than the
-        # cap at once.
-        evictable = [
-            key
-            for key, entry in registry.items()
-            if not (entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON and entry.quarantined_until > now)
-        ]
+        # exists to protect. New keys are rejected when no weaker entry can
+        # make room, so a normally-mutated registry never reaches this state
+        # with an all-poison burst.
+        evictable = _http_bridge_quarantine_evictable_keys(registry, now)
         for stale_key in sorted(evictable, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
             registry.pop(stale_key, None)
 
@@ -284,14 +354,19 @@ def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSe
     now = time.monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
-    return (
-        entry is not None
-        and entry.quarantined_until > now
-        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-        # The classification expires on the poison arm's OWN deadline even
-        # while weaker evidence keeps the shared session fence alive.
-        and entry.poison_quarantined_until > now
-    )
+    if entry is not None:
+        return (
+            entry.quarantined_until > now
+            and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            # The classification expires on the poison arm's OWN deadline even
+            # while weaker evidence keeps the shared session fence alive.
+            and entry.poison_quarantined_until > now
+        )
+    # When every registry slot is an active poison fence, a new poison arm is
+    # rejected to preserve the hard cap. The rejected key has no entry, but it
+    # must not immediately re-inject the anchor that the failed arm proved
+    # unsafe. Treat unknown keys as poisoned for the bounded overflow window.
+    return _http_bridge_quarantine_poison_overflow_until(service, now) > now
 
 
 def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
@@ -377,7 +452,7 @@ def _quarantine_http_bridge_session(
     *,
     reason: str,
     minimum_seconds: float | None = None,
-) -> None:
+) -> bool:
     """Quarantine a bridge session that has proven silent/wedged.
 
     Session-scoped only: no account-health writes happen here, and the entry
@@ -388,9 +463,18 @@ def _quarantine_http_bridge_session(
     maximum cooldown, so a poison quarantine armed at that cooldown would
     otherwise expire in the same instant the cooldown does, handing the
     poisoned anchor straight back to the request that cooldown was holding.
+
+    Returns ``False`` when the hard registry cap is full of active poison
+    fences and this new key cannot be admitted without dropping one of them.
     """
     now = time.monotonic()
     registry = _http_bridge_quarantine_registry(service)
+    _prune_http_bridge_quarantine_registry(registry, now)
+    if not _admit_http_bridge_quarantine_key(registry, session.key, now):
+        if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+            _remember_http_bridge_quarantine_poison_overflow(service, registry, now, minimum_seconds)
+        session.quarantined = False
+        return False
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
     # Captured before the deadline extension below: a poison arm upgrading
@@ -455,7 +539,7 @@ def _quarantine_http_bridge_session(
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:
-        return
+        return True
     _log_http_bridge_event(
         "session_quarantined",
         session.key,
@@ -465,6 +549,7 @@ def _quarantine_http_bridge_session(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+    return True
 
 
 def _record_http_bridge_quarantine_wedged_pending(
@@ -498,6 +583,9 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(session.key)
     if entry is None:
+        if not _admit_http_bridge_quarantine_key(registry, session.key, now):
+            session.quarantined = False
+            return
         entry = _HTTPBridgeQuarantineEntry(
             generation=_next_http_bridge_quarantine_generation(service, registry),
         )

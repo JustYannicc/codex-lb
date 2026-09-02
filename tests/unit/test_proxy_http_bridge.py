@@ -34725,6 +34725,53 @@ def test_http_bridge_quarantine_registry_is_size_bounded() -> None:
     assert len(http_bridge_quarantine_module._http_bridge_quarantine_registry(service)) <= max_entries
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_poison_overflow_fails_closed_for_unstored_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exercise the production retry-circuit path rather than only the registry
+    # helper: once every slot carries poison evidence, later distinct keys are
+    # rejected without growing the map but remain fail-closed as anchors.
+    monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 8)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    max_entries = http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES
+    sessions = [_make_bridge_session(key_value=f"quarantine-poison-bound-{index}") for index in range(max_entries + 8)]
+
+    for session in sessions[:max_entries]:
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    registry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+    retained_generations = {key: entry.generation for key, entry in registry.items()}
+    assert len(registry) == max_entries
+    assert len(retained_generations) == max_entries
+    assert all(
+        entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        and entry.quarantined_until > time.monotonic()
+        for entry in registry.values()
+    )
+
+    for session in sessions[max_entries:]:
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    assert all(
+        http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key)
+        for session in sessions
+    )
+    assert all(session.quarantined for session in sessions[:max_entries])
+    assert all(not session.quarantined for session in sessions[max_entries:])
+    assert {key: entry.generation for key, entry in registry.items()} == retained_generations
+    assert (
+        getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR)
+        > time.monotonic()
+    )
+
+
 def test_http_bridge_quarantine_eventless_strikes_require_threshold(caplog: pytest.LogCaptureFixture) -> None:
     service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-strikes")
