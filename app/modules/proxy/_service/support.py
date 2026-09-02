@@ -1357,6 +1357,11 @@ class _HTTPBridgeSession:
     handoff_in_progress: bool = False
     handoff_future: asyncio.Future["_HTTPBridgeSession"] | None = None
     account_lease: AccountLease | None = None
+    # A replacement lease can be acquired before the new websocket is
+    # installed. If its first release attempt is interrupted, retain the
+    # handle on the detached session so the single close owner can drain it
+    # instead of losing capacity accounting.
+    pending_account_lease_releases: list[AccountLease] = field(default_factory=list)
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     upstream_proxy_route_mode: str | None = None

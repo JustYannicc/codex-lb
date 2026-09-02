@@ -422,6 +422,29 @@ async def _rollback_http_bridge_recovery_turn_state_registration(
     return await _await_task_deferring_cancellation(rollback_task)
 
 
+async def _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    detail: str,
+    probe_owner: object | None,
+    expected_half_open_until: float | None,
+    expected_half_open_generation: int | None,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Return an undispatched probe even when the caller is cancelled."""
+    release_task = asyncio.create_task(
+        service._release_http_bridge_retry_circuit_half_open(
+            session,
+            detail=detail,
+            probe_owner=probe_owner,
+            expected_half_open_until=expected_half_open_until,
+            expected_half_open_generation=expected_half_open_generation,
+        ),
+        name="http-bridge-undispatched-probe-release",
+    )
+    return await _await_task_deferring_cancellation(release_task)
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
@@ -1010,6 +1033,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_scope_id = ensure_request_scope_id()
         owned_unanchored_handoff = session.unanchored_reservation_id == request_scope_id
         admission_claims: list[tuple[float, object, int]] = []
+        body_exception: BaseException | None = None
         try:
             await self._submit_http_bridge_request_with_handoff(
                 session,
@@ -1021,6 +1045,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 recovery_turn_state=recovery_turn_state,
                 admission_claims=admission_claims,
             )
+        except BaseException as exc:
+            # A deferred cancellation belongs to the cleanup wait, not to the
+            # body that already selected a terminal result. Preserve that
+            # result when a typed proxy failure races the probe handback.
+            body_exception = exc
+            raise
         finally:
             _release_http_bridge_unanchored_handoff(
                 session,
@@ -1046,7 +1076,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 # marker (an expired but positive cooldown) so the next
                 # request re-claims the lease instead of the whole window
                 # suppressing traffic behind a probe that never flew.
-                await self._release_http_bridge_retry_circuit_half_open(
+                _, release_cancellation = await _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
+                    self,
                     session,
                     detail="probe_not_dispatched",
                     probe_owner=claimed_probe[1],
@@ -1055,6 +1086,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 request_state.claimed_half_open_until = 0.0
                 request_state.claimed_half_open_generation = 0
+                if release_cancellation is not None and body_exception is None:
+                    raise release_cancellation
             # Inner pre-submit cleanup may clear the reservation before control
             # returns here, so ownership must be captured before awaiting it.
             # Only that request, or one whose pre-dispatch exit just released
@@ -3822,6 +3855,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # flight — the same handback contract the submit finalizer applies.
         admission_claims: list[tuple[float, object, int]] = []
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] = []
+        body_exception: BaseException | None = None
         try:
             return await self._retry_http_bridge_precreated_request_admitted(
                 session,
@@ -3830,6 +3864,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 admission_claims=admission_claims,
                 retry_send_baselines=retry_send_baselines,
             )
+        except BaseException as exc:
+            # Keep the retry body's typed terminal error when cancellation is
+            # deferred while returning its undispatched probe lease.
+            body_exception = exc
+            raise
         finally:
             claimed_probe = admission_claims[-1] if admission_claims else None
             if claimed_probe is not None:
@@ -3837,7 +3876,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_send_baselines[-1][0].response_create_attempt_count > retry_send_baselines[-1][1]
                 )
                 if not send_attempt_advanced:
-                    released = await self._release_http_bridge_retry_circuit_half_open(
+                    (
+                        released,
+                        release_cancellation,
+                    ) = await _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
+                        self,
                         session,
                         detail="probe_not_dispatched",
                         probe_owner=claimed_probe[1],
@@ -3847,6 +3890,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     if released and isinstance(claimed_probe[1], _WebSocketRequestState):
                         claimed_probe[1].claimed_half_open_until = 0.0
                         claimed_probe[1].claimed_half_open_generation = 0
+                    if release_cancellation is not None and body_exception is None:
+                        raise release_cancellation
 
     async def _retry_http_bridge_precreated_request_admitted(
         self: Any,

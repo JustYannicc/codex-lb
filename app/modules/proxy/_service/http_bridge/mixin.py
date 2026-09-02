@@ -124,6 +124,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_first_turn_timeout,
     _refresh_reused_http_bridge_session_with_handoff,
     _register_http_bridge_turn_state_aliases_locked,
+    _release_http_bridge_account_lease_deferring_cancellation,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
     _settle_failed_http_bridge_creation,
@@ -2126,14 +2127,14 @@ class _HTTPBridgeMixin(
             lease, selected_account_lease = selected_account_lease, None
             if lease is None:
                 return
-            async with session.pending_lock:
-                if session.account_lease is not None and lease.lease_id == session.account_lease.lease_id:
-                    session.account_lease = None
             try:
-                await self._load_balancer.release_account_lease(lease)
+                cancellation = await _release_http_bridge_account_lease_deferring_cancellation(self, session, lease)
             except BaseException:
                 complete_failed_handoff()
                 raise
+            if cancellation is not None:
+                complete_failed_handoff()
+                raise cancellation
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id

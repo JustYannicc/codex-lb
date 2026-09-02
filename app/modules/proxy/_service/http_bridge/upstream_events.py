@@ -1662,6 +1662,24 @@ async def _retire_denied_http_bridge_anchor(
         logger.warning("Failed to retire a denied proxy-injected HTTP bridge anchor", exc_info=True)
 
 
+def _http_bridge_terminal_failure_holds_protected_replay(
+    request_state: _WebSocketRequestState,
+    *,
+    is_previous_response_not_found_event: bool,
+) -> bool:
+    """Whether a terminal failure still owns a replay worth protecting.
+
+    A verified anchor-free replay suppresses ordinary eventless strikes while
+    it is still available.  A raw/client-supplied ``previous_response_not_found``
+    is different: the upstream rejection is genuine evidence even when the
+    client body also happens to qualify as a safe full resend.  Only a
+    proxy-injected anchor may make that rejection continuity-neutral.
+    """
+    return _http_bridge_request_state_holds_safe_replay(request_state) and not (
+        is_previous_response_not_found_event and not bool(request_state.proxy_injected_previous_response_id)
+    )
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -2878,8 +2896,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # dispatch, so charging it here would let two safely
                 # replayable requests open the circuit between them and clear
                 # the anchor both of them could still have used.
-                if grouped_request_state.response_event_count != 0 or _http_bridge_request_state_holds_safe_replay(
-                    grouped_request_state
+                if (
+                    grouped_request_state.response_event_count != 0
+                    or _http_bridge_terminal_failure_holds_protected_replay(
+                        grouped_request_state,
+                        is_previous_response_not_found_event=is_previous_response_not_found_event,
+                    )
                 ):
                     continue
                 if grouped_request_state.request_kind == "prewarm" or grouped_request_state.skip_request_log:
@@ -4138,7 +4160,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # request with no replay is stranded like any other, and the
                 # delta spec's no-response/no-safe-replay rule applies to it
                 # the same way the retirement funnels apply it.
-                and not _http_bridge_request_state_holds_safe_replay(terminal_request_state)
+                and not _http_bridge_terminal_failure_holds_protected_replay(
+                    terminal_request_state,
+                    is_previous_response_not_found_event=is_previous_response_not_found_event,
+                )
             ):
                 # An upstream terminal frame that fails the request before any
                 # response event is the same pre-response failure the circuit
