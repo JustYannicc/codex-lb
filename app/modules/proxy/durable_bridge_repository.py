@@ -4354,7 +4354,7 @@ def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBri
         last_detail=row.last_detail,
         updated_at_epoch=row.updated_at_epoch,
         admission_generation=row.admission_generation,
-        admission_claimed_at_epoch=getattr(row, "admission_claimed_at_epoch", None),
-        admission_claimed_generation=getattr(row, "admission_claimed_generation", None),
-        admission_claimed_until_epoch=getattr(row, "admission_claimed_until_epoch", None),
+        admission_claimed_at_epoch=row.admission_claimed_at_epoch,
+        admission_claimed_generation=row.admission_claimed_generation,
+        admission_claimed_until_epoch=row.admission_claimed_until_epoch,
     )
