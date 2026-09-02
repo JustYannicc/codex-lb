@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
@@ -168,6 +169,7 @@ def _http_bridge_retry_circuit_suppression_message(block_reason: str, retry_afte
 class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
+    elapsed_durable_cooldown_pending: bool = False
     last_detail: str | None = None
     last_touched_monotonic: float = 0.0
     persisted_updated_at_epoch: float = 0.0
@@ -269,6 +271,8 @@ def _record_http_bridge_retry_circuit_duplicate_suppressed(
 
 
 class _HTTPBridgeRetryCircuitMixin:
+    _http_bridge_retry_circuit_half_open_generation: int = 0
+
     @staticmethod
     def _http_bridge_retry_circuit_has_active_half_open_lease(
         state: _HTTPBridgeRetryCircuitState | None,
@@ -373,6 +377,7 @@ class _HTTPBridgeRetryCircuitMixin:
         claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
         if not callable(claim_generation):
             return None
+        claim_generation_call = cast(Callable[..., Awaitable[Any]], claim_generation)
 
         # Local failure recording for this key serializes on the key lock,
         # so holding it across the durable CAS keeps the claim linearized
@@ -391,7 +396,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     return False
             try:
                 claimed = await asyncio.wait_for(
-                    claim_generation(
+                    claim_generation_call(
                         session_key_kind=key.affinity_kind,
                         session_key_value=key.affinity_key,
                         api_key_id=key.api_key_id,
@@ -817,6 +822,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
+        positive_durable_cooldown_elapsed = persisted.cooldown_until_epoch > 0.0 and cooldown_remaining == 0.0
         # ``cooldown_until`` is a monotonic deadline whose zero value means
         # that this key is not cooling down. A durable row with an absent or
         # elapsed wall-clock deadline must stay at that sentinel; adding zero
@@ -857,6 +863,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 or persisted.consecutive_failures != state.consecutive_failures
                 or persisted.last_detail != state.last_detail
             )
+            durable_snapshot_is_new = key not in self._http_bridge_retry_circuit_loaded_keys or episode_replaced
             active_local_probe = self._http_bridge_retry_circuit_has_active_half_open_lease(
                 state,
                 now=now_monotonic,
@@ -976,6 +983,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_owner_token = None
                 state.half_open_lease_generation = 0
             if not defer_durable_snapshot:
+                if durable_snapshot_is_new:
+                    state.elapsed_durable_cooldown_pending = bool(
+                        positive_durable_cooldown_elapsed
+                        and state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                    )
                 state.persisted_updated_at_epoch = persisted.updated_at_epoch
                 state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
             state.last_touched_monotonic = now_monotonic
@@ -1368,8 +1380,11 @@ class _HTTPBridgeRetryCircuitMixin:
                     and state.half_open_until > 0.0
                     and state.half_open_until <= now
                 )
-                if state is not None and (state.cooldown_until > 0 or abandoned_half_open_lease):
+                if state is not None and (
+                    state.cooldown_until > 0 or state.elapsed_durable_cooldown_pending or abandoned_half_open_lease
+                ):
                     state.cooldown_until = 0.0
+                    state.elapsed_durable_cooldown_pending = False
                     state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
                     state.half_open_owner_session = session
                     owner_token = probe_owner if probe_owner is not None else session
@@ -1891,9 +1906,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 ):
                     return None
                 else:
-                    state = self._http_bridge_retry_circuits.setdefault(
-                        session.key,
-                        _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
+                    state = cast(
+                        _HTTPBridgeRetryCircuitState,
+                        self._http_bridge_retry_circuits.setdefault(
+                            session.key,
+                            _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
+                        ),
                     )
                     state.last_touched_monotonic = now
                     state.last_failure_monotonic = now

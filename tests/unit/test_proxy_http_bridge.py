@@ -31144,6 +31144,27 @@ async def test_http_bridge_retry_circuit_elapsed_durable_cooldown_uses_zero_sent
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_positive_elapsed_durable_cooldown_is_single_flight() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_bridge_session(key_value="bridge-positive-elapsed-row")
+    sibling = _make_bridge_session(key_value="bridge-positive-elapsed-row")
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() - 1.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=persisted))
+
+    assert await service._http_bridge_precreated_retry_allowed(owner) is True
+    state = cast(Any, service)._http_bridge_retry_circuits[owner.key]
+    assert state.cooldown_until == 0.0
+    assert state.half_open_until > time.monotonic()
+    assert state.half_open_owner_session is owner
+    assert await service._http_bridge_precreated_retry_allowed(sibling) is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_durable_miss_preserves_active_local_lease() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-miss-preserves-lease")
