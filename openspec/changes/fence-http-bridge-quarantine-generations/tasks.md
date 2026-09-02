@@ -47,3 +47,6 @@
   deadline without mutating retained poison generations.
 - [x] 1.21 Keep parallel tool-output deltas anchored and make equal-age
   non-poison eviction deterministic by generation and complete session key.
+- [x] 1.22 Preserve overflow poison across a later inactive entry, and block
+  inverse rolling-upgrade owner dispatch when legacy normalization can reverse
+  a delta-only classification.

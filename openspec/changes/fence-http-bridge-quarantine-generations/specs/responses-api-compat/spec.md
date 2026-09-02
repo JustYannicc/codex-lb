@@ -67,8 +67,11 @@ mutate a quarantine generation. The service MUST maintain one bounded
 poison-overflow deadline for rejected poison arms, extending it through the
 required window of the rejected arm and every active retained poison fence;
 while that deadline is active, anchor checks for an unknown rejected key MUST
-fail closed as poison evidence. Re-arming an existing key MAY refresh its
-entry in place without consuming another slot.
+fail closed as poison evidence. The same overflow verdict MUST govern a later
+retained entry for that key whenever the entry does not itself carry active
+poison evidence, including an inactive first-strike entry admitted after a slot
+opens. Re-arming an existing key MAY refresh its entry in place without
+consuming another slot.
 
 #### Scenario: Detached predecessor cannot clear a replacement
 
@@ -122,6 +125,16 @@ entry in place without consuming another slot.
 - **AND** an anchor check for the rejected key fails closed while the bounded
   poison-overflow deadline is active
 
+#### Scenario: Overflow poison survives later inactive admission
+
+- **GIVEN** a full registry rejected a poison arm for a key and recorded an
+  active service-level overflow deadline
+- **WHEN** a slot opens and the key records a first eventless timeout as an
+  inactive entry
+- **THEN** an anchor check for the key still fails closed under the overflow
+  deadline
+- **AND** the inactive entry does not report the poisoned anchor safe
+
 ### Requirement: Quarantine selection distinguishes local reuse from durable context
 
 An active quarantine MUST make every live session under its key unavailable for
@@ -154,7 +167,14 @@ request validation reaches the same classification as the origin. During a
 rolling upgrade, when an older origin forwards only a normalized one-item
 array and the owner cannot validate the additive exact-body signature, the
 owner MUST classify that ambiguous one-item array as delta-only instead of
-counting normalization-envelope bytes toward the full-resend boundary.
+counting normalization-envelope bytes toward the full-resend boundary. In the
+inverse rolling-upgrade direction, an upgraded origin without positive proof
+that the selected owner implements this classifier MUST NOT dispatch a
+delta-only shape that the legacy owner would classify as a full resend. This
+guard MUST cover a client string below 4096 characters whose normalized
+one-item array reaches 4096 compact-serialization characters, and a multi-item
+array containing only the allowed tool-output item types. The origin MUST fail
+closed or enter an already-authorized local recovery path before owner I/O.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
@@ -175,3 +195,14 @@ counting normalization-envelope bytes toward the full-resend boundary.
 - **WHEN** the newer owner classifies the request shape
 - **THEN** it MUST treat the ambiguous one-item array as delta-only
 - **AND** it MUST retain the durable previous-response anchor
+
+#### Scenario: Current origin does not expose a delta to a legacy owner
+
+- **GIVEN** an upgraded origin selects a remote owner whose current classifier
+  capability is not positively known
+- **AND** the request is delta-only under the current classifier but full-resend
+  shaped after legacy normalization
+- **WHEN** the origin reaches the owner-forward boundary
+- **THEN** it MUST NOT dispatch the request to that owner
+- **AND** it MUST fail closed or use an already-authorized local recovery path
+  before the legacy owner can suppress the durable anchor
