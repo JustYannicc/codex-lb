@@ -31154,14 +31154,71 @@ async def test_http_bridge_retry_circuit_positive_elapsed_durable_cooldown_is_si
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
     )
-    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=persisted))
+    both_lookups_started = asyncio.Event()
+    lookup_count = 0
 
-    assert await service._http_bridge_precreated_retry_allowed(owner) is True
+    async def lookup_retry_circuit(**_kwargs: object) -> object:
+        nonlocal lookup_count
+        lookup_count += 1
+        if lookup_count == 2:
+            both_lookups_started.set()
+        await both_lookups_started.wait()
+        return persisted
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=lookup_retry_circuit),
+    )
+
+    admissions = await asyncio.gather(
+        service._http_bridge_precreated_retry_allowed(owner),
+        service._http_bridge_precreated_retry_allowed(sibling),
+    )
+
+    assert sorted(admissions) == [False, True]
     state = cast(Any, service)._http_bridge_retry_circuits[owner.key]
     assert state.cooldown_until == 0.0
     assert state.half_open_until > time.monotonic()
-    assert state.half_open_owner_session is owner
-    assert await service._http_bridge_precreated_retry_allowed(sibling) is False
+    assert state.half_open_owner_session in (owner, sibling)
+
+
+@pytest.mark.asyncio
+async def test_elapsed_durable_transition_survives_local_prune_until_claimed_row_expires() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-positive-elapsed-prune")
+    now_monotonic = time.monotonic()
+    updated_at_epoch = time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        elapsed_durable_cooldown_pending=False,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=(
+            now_monotonic - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1
+        ),
+        persisted_updated_at_epoch=updated_at_epoch,
+        persisted_admission_generation=1,
+        last_durable_load_monotonic=now_monotonic,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(session.key)
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 1.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=updated_at_epoch,
+                admission_generation=1,
+            )
+        )
+    )
+
+    service._prune_http_bridge_retry_circuit_state(now_monotonic)
+    assert cast(Any, service)._http_bridge_retry_circuits[session.key] is state
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+    assert state.elapsed_durable_cooldown_pending is False
 
 
 @pytest.mark.asyncio

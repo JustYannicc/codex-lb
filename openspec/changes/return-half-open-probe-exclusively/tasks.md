@@ -24,8 +24,10 @@
 ## Coverage
 
 - [x] Preserve a positive elapsed durable cooldown as a one-shot local
-  half-open transition while keeping absent, zero, and negative deadlines at
-  the unrestricted zero-sentinel behavior.
+  half-open transition, prove concurrent admission is single-flight, and keep
+  the consumed marker for the lifetime of an ever-claimed durable row while
+  absent, zero, and negative deadlines retain unrestricted zero-sentinel
+  behavior.
 - [x] Cover elapsed/absent rows, real expiry single-flight, owner fencing,
   equal-version and lookup-failure lease retention, and replica-boundary state.
 - [x] Cover proxy continuity teardown ordering, cancellation, continuity

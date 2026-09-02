@@ -556,8 +556,18 @@ class _HTTPBridgeRetryCircuitMixin:
     def _prune_http_bridge_retry_circuit_state(self: Any, now: float) -> None:
         expiry = now - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
         for key, state in list(self._http_bridge_retry_circuits.items()):
-            if state.last_touched_monotonic > expiry or self._http_bridge_retry_circuit_has_active_half_open_lease(
-                state, now=now
+            state_expiry = expiry
+            if state.persisted_admission_generation > 0:
+                # Ever-claimed durable rows survive for two circuit TTLs so
+                # their generation fence cannot be purged beside an active or
+                # recently released replay. Retain the matching local snapshot
+                # for the same interval: otherwise the first-TTL prune forgets
+                # that an elapsed positive cooldown transition was consumed,
+                # and loading the unchanged durable row re-arms it.
+                state_expiry = now - 2 * DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+            if (
+                state.last_touched_monotonic > state_expiry
+                or self._http_bridge_retry_circuit_has_active_half_open_lease(state, now=now)
             ):
                 continue
             self._http_bridge_retry_circuits.pop(key, None)
