@@ -175,8 +175,8 @@ def _remember_http_bridge_quarantine_poison_overflow(
     for entry in registry.values():
         if entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             continue
-        if entry.quarantined_until > now:
-            deadline = max(deadline, entry.quarantined_until, entry.poison_quarantined_until)
+        if entry.poison_quarantined_until > now:
+            deadline = max(deadline, entry.poison_quarantined_until)
     deadline = max(
         deadline,
         float(getattr(service, _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR, 0.0) or 0.0),

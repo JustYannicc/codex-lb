@@ -34772,6 +34772,44 @@ async def test_http_bridge_retry_circuit_poison_overflow_fails_closed_for_unstor
     )
 
 
+def test_http_bridge_poison_overflow_ignores_a_longer_weaker_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1000.0
+    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: now)
+    monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
+    service = SimpleNamespace()
+    retained = _make_bridge_session(key_value="quarantine-poison-retained")
+    rejected = _make_bridge_session(key_value="quarantine-poison-rejected")
+
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+        minimum_seconds=900.0,
+    )
+
+    retained_entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[retained.key]
+    assert retained_entry.poison_quarantined_until == now + 700.0
+    assert retained_entry.quarantined_until == now + 900.0
+    assert not http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        rejected,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=650.0,
+    )
+    assert (
+        getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR)
+        == now + 700.0
+    )
+
+
 def test_http_bridge_quarantine_eventless_strikes_require_threshold(caplog: pytest.LogCaptureFixture) -> None:
     service = SimpleNamespace()
     session = _make_bridge_session(key_value="quarantine-strikes")
