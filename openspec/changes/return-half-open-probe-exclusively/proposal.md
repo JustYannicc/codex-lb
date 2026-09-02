@@ -8,18 +8,22 @@ vehicles.
 
 ## Why
 
-An elapsed durable cooldown must not be reconstructed as a non-zero monotonic
-deadline: that synthetic transition consumes a half-open probe even though no
-cooldown is active. When a real half-open probe is consumed by this proxy's own
-continuity-ownership loss, the probe must be returned without charging the
-upstream circuit. Returning it must still preserve single-flight admission for
-the next local reconnect, and proxy-owned teardown must not manufacture an
-upstream failure while the reset is in progress.
+An absent, zero, or negative durable cooldown must not be reconstructed as a
+non-zero monotonic deadline. A positive deadline that elapsed before loading is
+different: it records a real cooldown transition, so exactly one local request
+must consume it as a half-open probe. When a real half-open probe is consumed by
+this proxy's own continuity-ownership loss, the probe must be returned without
+charging the upstream circuit. Returning it must still preserve single-flight
+admission for the next local reconnect, and proxy-owned teardown must not
+manufacture an upstream failure while the reset is in progress.
 
 ## What changes
 
-- Normalize absent or elapsed durable cooldowns to the zero sentinel while
-  retaining real future cooldowns and durable failure counts.
+- Normalize absent, zero, negative, and elapsed durable cooldown deadlines to
+  the zero sentinel while retaining real future cooldowns and durable failure
+  counts. A newly loaded positive elapsed deadline carries a one-shot local
+  transition, retained as long as its ever-claimed durable row can survive, so
+  concurrent or repeated loads cannot manufacture additional probes.
 - Track the process-local session that acquired a half-open probe. Only that
   owner may return it, and a returned probe becomes an elapsed cooldown so the
   next local admission acquires a fresh lease.
