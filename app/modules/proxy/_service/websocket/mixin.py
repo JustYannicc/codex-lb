@@ -291,6 +291,7 @@ from app.modules.proxy._service.http_bridge.request_submit import (
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _enqueue_http_bridge_event,
+    _enqueue_http_bridge_terminal_event,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -6815,15 +6816,15 @@ class _WebSocketMixin:
                             discard()
 
             # Attached queues retain their buffered events for the active
-            # consumer.  Their terminal publication may wait for capacity, so
-            # it must happen outside ``pending_lock``.
+            # consumer. Publish terminal failure out of band so a full queue
+            # cannot hold lifecycle ownership until that consumer reads. The
+            # live queue drains before its terminal sequence, preserving order.
             if event_queue is not None and event_queue_consumer_started:
                 try:
-                    await _enqueue_http_bridge_event(
+                    _enqueue_http_bridge_terminal_event(
                         request_state,
                         event_queue,
                         terminal_event,
-                        terminal=True,
                     )
                 except Exception:
                     _facade().logger.warning(

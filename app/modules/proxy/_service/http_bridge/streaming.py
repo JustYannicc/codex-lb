@@ -364,6 +364,8 @@ async def _next_http_bridge_event_block(
                     timeout=_HTTP_BRIDGE_EVENT_TIMEOUT_RECONCILE_SECONDS,
                 )
             except asyncio.TimeoutError:
+                if get_task.done() and not get_task.cancelled():
+                    return get_task.result()
                 raise
             if event_block is None and budget_task.done():
                 raise _HTTPBridgeLiveEventQueueBudgetExceeded
@@ -1433,28 +1435,6 @@ class _HTTPBridgeStreamingMixin:
             request_state.deferred_account_backoff_lifecycle = lifecycle
             request_state.durable_owner_dead = dead_owner_anchor
             return request_state, text_data
-
-        def capture_denied_anchor_generation(
-            request_state: _WebSocketRequestState,
-            session: _HTTPBridgeSession | None,
-        ) -> None:
-            """Fence a proxy anchor from the generation it was prepared on."""
-            del session
-            if (
-                request_state.proxy_injected_previous_response_id
-                and request_state.previous_response_id is not None
-                and request_state.denied_proxy_injected_anchor_fence_generation_at_prepare is None
-            ):
-                (
-                    request_state.denied_proxy_injected_anchor_fence_generation_at_prepare,
-                    request_state.denied_proxy_injected_anchor_fence_was_already_denied,
-                ) = _capture_http_bridge_denied_anchor_fence(
-                    self,
-                    request_state.previous_response_id,
-                    request_id,
-                )
-                request_state.denied_proxy_injected_anchor_fence_response_id = request_state.previous_response_id
-                request_state.denied_proxy_injected_anchor_fence_request_id = request_id
 
         async def release_unowned_bridge_lifecycle(
             lifecycle: _DeferredAccountBackoffLifecycle | None,

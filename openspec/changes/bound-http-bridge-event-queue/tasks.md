@@ -29,3 +29,14 @@
 - [x] 3.4 Review the committed diff for disconnect/cancellation, task ownership, terminal settlement, durable spool/replay, and async task leaks
 
 - [x] 3.5 Test cross-session budget pressure, byte release after dequeue, and fail-closed queue revocation without a new operator setting
+
+
+## 4. Maintainer review follow-up
+
+- [x] 4.1 Reproduce the timeout-grace event loss, make queue-read cancellation non-consuming, and return a finished reconciled read
+
+- [x] 4.2 Publish attached failure terminals without waiting for live capacity and prove a later session lifecycle waiter is not blocked by a stalled consumer
+
+- [x] 4.3 Remove the unused denied-anchor generation capture helper
+
+- [x] 4.4 Run focused and broader bridge tests, Ruff, formatting, type checks, proxy architecture validation, diff checks, strict targeted OpenSpec validation, and final exact-candidate review

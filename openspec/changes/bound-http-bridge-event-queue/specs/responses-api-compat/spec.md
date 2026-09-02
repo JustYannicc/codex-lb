@@ -2,11 +2,13 @@
 
 ### Requirement: HTTP bridge live event buffering is bounded
 
-Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. In this finite-queue backpressure path, the relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure. This no-drop guarantee does not apply after the process-wide byte budget rejects a payload and revokes the queue.
+Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. In this finite-queue backpressure path, the relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure. Cancelling a pending queue read MUST NOT strand an event that another task removed from the queue, and timeout reconciliation MUST return a completed read before reporting the timeout. This no-drop guarantee does not apply after the process-wide byte budget rejects a payload and revokes the queue.
 
 Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; an attached stream MUST surface one `response.failed` terminal result with `upstream_unavailable` (or the equivalent HTTP 503 error when the route propagates HTTP errors), while a later upstream `response.failed` publication MAY be ignored by the revoked queue. A pre-consumer queue that is already revoked or abandoned MAY be discarded and therefore expose only EOS to a delayed reader. The service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
 
 Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
+
+Failure finalization for an attached stream MUST publish its ordered terminal result without waiting for live queue capacity. A full queue and stalled attached consumer MUST NOT keep session lifecycle ownership from a later request, and the consumer MUST still receive every buffered event before the terminal result and end marker.
 
 Completed durable transcript replay MUST remain byte-bounded by the durable spool contract and MUST use finite startup buffering that can hold the selected replay plus its end marker without waiting for a consumer that has not started yet.
 
@@ -30,6 +32,21 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 - **WHEN** the downstream stream disconnects or is cancelled
 - **THEN** the waiting enqueue and every enqueue-owned task terminate without requiring another consumer read
 - **AND** terminal persistence, durable spool state, request logging, reservation settlement, and bridge cleanup remain able to complete
+
+#### Scenario: Timeout cancellation retains a raced event
+
+- **GIVEN** a live event becomes available while the stream reconciles a keepalive timeout
+- **WHEN** timeout cleanup cancels the pending queue read
+- **THEN** the event is either returned by that completed read or remains queued for the next read
+- **AND** the event payload byte reservation is released exactly once when the consumer receives it
+
+#### Scenario: Failure finalization does not wait for an attached consumer
+
+- **GIVEN** an attached downstream consumer has stopped reading and its live queue is full
+- **WHEN** websocket failure finalization publishes the request's terminal failure
+- **THEN** finalization releases session lifecycle ownership without waiting for the consumer to drain a slot
+- **AND** a later request can enter the session lifecycle section
+- **AND** the stalled consumer later receives every buffered event before the terminal failure and end marker
 
 #### Scenario: Durable replay starts without a live consumer
 

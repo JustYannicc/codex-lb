@@ -457,6 +457,90 @@ async def test_http_bridge_event_wait_preserves_event_after_timeout_wins_race(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_queue_cancellation_retains_ready_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a waiting reader cannot remove the event that woke it."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    original_wait = asyncio.wait
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
+    observed_ready_task: asyncio.Task[Any] | None = None
+
+    async def hold_queue_wait(
+        awaitables: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal observed_ready_task
+        tasks = tuple(awaitables)
+        observed_ready_task = tasks[0]
+        wait_started.set()
+        await release_wait.wait()
+        return await original_wait(tasks, *args, **kwargs)
+
+    monkeypatch.setattr(http_bridge_request_submit_module.asyncio, "wait", hold_queue_wait)
+
+    reader = asyncio.create_task(event_queue.get())
+    await asyncio.wait_for(wait_started.wait(), timeout=1.0)
+    assert observed_ready_task is not None
+
+    event_queue.put_nowait("response.completed")
+    await asyncio.wait_for(observed_ready_task, timeout=1.0)
+
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    assert event_queue.get_nowait() == "response.completed"
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_wait_returns_finished_get_after_reconcile_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished consumer result wins even if reconcile reports a timeout."""
+
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("response.completed")
+    original_wait = asyncio.wait
+
+    async def select_timeout_after_get_finishes(
+        awaitables: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        tasks = tuple(awaitables)
+        task_by_name = {task.get_name(): task for task in tasks if isinstance(task, asyncio.Task)}
+        if "http-bridge-event-consumer" not in task_by_name:
+            return await original_wait(tasks, *args, **kwargs)
+        get_task = task_by_name["http-bridge-event-consumer"]
+        timeout_task = task_by_name["http-bridge-event-timeout"]
+        while not get_task.done():
+            await asyncio.sleep(0)
+        return {timeout_task}, set(tasks) - {timeout_task}
+
+    async def report_reconcile_timeout(*_args: Any, **_kwargs: Any) -> Any:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", select_timeout_after_get_finishes)
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait_for", report_reconcile_timeout)
+
+    assert (
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.001)
+        == "response.completed"
+    )
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_wait_delivers_terminal_before_budget_failure() -> None:
     """A queued terminal event remains ahead of a concurrent budget signal."""
 
@@ -1628,8 +1712,8 @@ async def test_http_bridge_finalizer_discards_revoked_preconsumer_queue_when_ter
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling_queue() -> None:
-    """Attached sibling and failed queues keep buffered events ahead of terminal EOS."""
+async def test_http_bridge_liveness_settlement_does_not_block_session_on_attached_paused_queue() -> None:
+    """A full attached queue cannot hold lifecycle ownership until its consumer reads."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -1711,15 +1795,19 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
             error_message="heartbeat expired",
         )
     )
+    later_submit_entered = asyncio.Event()
+
+    async def later_submit_lifecycle_section() -> None:
+        async with session.lifecycle_lock:
+            later_submit_entered.set()
+
+    later_submit: asyncio.Task[None] | None = None
     try:
         await asyncio.wait_for(fail_reader_started.wait(), timeout=1.0)
-
-        async def wait_for_pending_claim() -> None:
-            while session.pending_requests:
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(wait_for_pending_claim(), timeout=1.0)
-        assert not settlement_task.done()
+        later_submit = asyncio.create_task(later_submit_lifecycle_section())
+        await asyncio.wait_for(later_submit_entered.wait(), timeout=0.2)
+        await asyncio.wait_for(settlement_task, timeout=0.2)
+        await asyncio.wait_for(later_submit, timeout=0.2)
 
         async def consume_events(
             queue: http_bridge_request_submit_module._HTTPBridgeLiveEventQueue,
@@ -1737,22 +1825,27 @@ async def test_http_bridge_liveness_settlement_preserves_attached_paused_sibling
             asyncio.gather(sibling_consumer_task, failed_consumer_task),
             timeout=1.0,
         )
-        await asyncio.wait_for(settlement_task, timeout=1.0)
     finally:
         if not settlement_task.done():
             settlement_task.cancel()
-        await asyncio.gather(settlement_task, return_exceptions=True)
+        if later_submit is not None and not later_submit.done():
+            later_submit.cancel()
+        await asyncio.gather(
+            settlement_task,
+            *((later_submit,) if later_submit is not None else ()),
+            return_exceptions=True,
+        )
 
     assert events[:2] == ["buffered-1", "buffered-2"]
     assert events[2] is not None
     assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in events[2]
     assert events[3] is None
-    assert sibling_state.event_queue_revoked.is_set() is False
+    assert sibling_state.event_queue_revoked.is_set() is True
     assert failed_events[:2] == ["failed-buffered-1", "failed-buffered-2"]
     assert failed_events[2] is not None
     assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in failed_events[2]
     assert failed_events[3] is None
-    assert failed_state.event_queue_revoked.is_set() is False
+    assert failed_state.event_queue_revoked.is_set() is True
     assert session.pending_requests == deque()
 
 
@@ -30202,7 +30295,7 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
     assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
     assert await asyncio.wait_for(sibling_queue.get(), timeout=0.1) is None
     assert request_state.replay_count == 0
-    assert sibling_state.event_queue_revoked.is_set() is False
+    assert sibling_state.event_queue_revoked.is_set() is True
     assert request_state.event_queue_revoked.is_set() is True
     assert request_queue.empty()
     assert session.pending_requests == deque()

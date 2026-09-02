@@ -326,6 +326,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         # this second signal so a delayed consumer cannot observe bare EOS
         # while terminal bookkeeping is still in flight.
         self._terminal_ready = asyncio.Event()
+        self._item_ready = asyncio.Event()
         self._terminal_budget_exceeded = False
         self._discarded = False
         # ``asyncio.Queue.put`` invokes ``self._put`` after a blocked putter
@@ -457,6 +458,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._byte_budget.release(item_bytes)
             raise
         self._queued_bytes += item_bytes
+        self._item_ready.set()
 
     def put_nowait(self, item: str | None) -> None:
         if self._terminal_pending:
@@ -536,7 +538,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 self._byte_budget.release(item_bytes)
                 return item
             if not self.empty():
-                return await super().get()
+                return self.get_nowait()
             # The stream-level reader owns budget-failure classification.  A
             # queue get must return its ordinary EOS sentinel here so the
             # reader can turn the already-set budget signal into its terminal
@@ -568,23 +570,26 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                             task.cancel()
                     await asyncio.gather(terminal_ready_task, budget_task, return_exceptions=True)
                 continue
-            get_task = asyncio.create_task(super().get(), name="http-bridge-event-get")
+            item_ready_task = asyncio.create_task(
+                self._item_ready.wait(),
+                name="http-bridge-event-item-ready",
+            )
             revoke_task = asyncio.create_task(self._revoked.wait(), name="http-bridge-event-revoke")
             try:
-                done, _pending = await asyncio.wait(
-                    (get_task, revoke_task),
+                await asyncio.wait(
+                    (item_ready_task, revoke_task),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if get_task in done:
-                    return get_task.result()
             finally:
-                for task in (get_task, revoke_task):
+                for task in (item_ready_task, revoke_task):
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(get_task, revoke_task, return_exceptions=True)
+                await asyncio.gather(item_ready_task, revoke_task, return_exceptions=True)
 
     def _get(self) -> str | None:
         item = super()._get()
+        if super().empty():
+            self._item_ready.clear()
         item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         self._queued_bytes = max(0, self._queued_bytes - item_bytes)
         self._byte_budget.release(item_bytes)
