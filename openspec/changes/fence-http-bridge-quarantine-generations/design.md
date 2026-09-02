@@ -26,7 +26,9 @@ also the completing session's primary key.
 
 TTL and size pruning remain the only automatic expiry mechanisms. Admission of
 a new key first prunes expired entries and then evicts the oldest non-poison
-fence when the size cap needs a slot. If every slot contains an active poison
+fence when the size cap needs a slot. Active non-poison and inactive
+first-strike entries share one stable order: last-touch time, generation, then
+the complete session-key tuple. If every slot contains an active poison
 fence, the new arm is rejected: the service neither evicts poison evidence nor
 grows the registry past its hard cap, and the rejected session remains
 unquarantined. Because the rejected key has no entry to consult, the service
@@ -41,7 +43,8 @@ account-health, routing, or durable-owner state.
 Delta-only anchor selection is kept explicit in the main Responses contract: a
 quarantined live session is absent as a local session candidate, but the
 durable anchor remains available when the request itself does not carry a full
-resend.
+resend. In particular, a multi-item array containing only tool outputs is not
+self-contained because its matching calls live behind that anchor.
 
 ## Proof seams
 

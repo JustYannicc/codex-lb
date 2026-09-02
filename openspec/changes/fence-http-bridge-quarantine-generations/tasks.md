@@ -45,3 +45,5 @@
   weaker-fence entries, reject a new key when every slot holds active poison
   evidence, and cover rejected keys with a bounded fail-closed overflow
   deadline without mutating retained poison generations.
+- [x] 1.21 Keep parallel tool-output deltas anchored and make equal-age
+  non-poison eviction deterministic by generation and complete session key.
