@@ -9,15 +9,24 @@ durable `cooldown_until_epoch` as the in-memory `0.0` sentinel. A real future
 durable deadline MUST remain an active monotonic cooldown, and durable failure
 counts MUST remain available for admission and later recovery decisions.
 
-#### Scenario: Elapsed durable row does not manufacture a probe transition
+#### Scenario: Missing durable deadline does not manufacture a probe transition
 
-- **GIVEN** a durable hard-key row whose cooldown is absent or at/before the
-  current wall-clock time
+- **GIVEN** a durable hard-key row whose cooldown deadline is absent, zero, or
+  negative
 - **WHEN** the row is loaded for retry admission
 - **THEN** the local cooldown is `0.0`
 - **AND** no half-open lease is created solely because the row was reloaded
 - **AND** repeated admissions remain allowed until a real cooldown transition
   occurs
+
+#### Scenario: Elapsed positive durable deadline admits one local probe
+
+- **GIVEN** a durable hard-key row at or above the failure threshold whose
+  positive cooldown deadline has elapsed
+- **WHEN** concurrent local requests ask for retry admission
+- **THEN** the local cooldown remains the `0.0` sentinel
+- **AND** exactly one request acquires a process-local half-open lease
+- **AND** the other requests are suppressed until that probe settles
 
 ### Requirement: Half-open retry probes are exclusive within their owning process
 
