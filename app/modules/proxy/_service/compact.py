@@ -58,6 +58,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
+    _turn_state_header_present,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
@@ -997,6 +998,7 @@ class _CompactMixin:
         )
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
+        turn_state_header_present = _turn_state_header_present(headers)
         turn_state = _sticky_key_from_turn_state_header(headers)
         synthesized_turn_state = turn_state is not None and _is_synthesized_turn_state(turn_state)
         try:
@@ -1043,9 +1045,10 @@ class _CompactMixin:
                         ),
                     )
                 if previous_response_preferred_account_id is None and turn_state_owner_account_id is None:
-                    # A file pin is structural ownership evidence, so it stays
-                    # strict even when the subscription pool has one candidate.
-                    if rewritten_file_account_id is not None:
+                    # File pins and unresolved client turn-state are hard
+                    # continuity boundaries. Header normalization maps blanks
+                    # to None, so preserve physical presence for this decision.
+                    if rewritten_file_account_id is not None or turn_state_header_present:
                         selection_candidates: tuple[Account, ...] = ()
                     else:
                         # Preserve the compatibility fallback for an owner miss

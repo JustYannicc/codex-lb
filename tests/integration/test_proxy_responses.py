@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -1596,6 +1597,79 @@ async def test_v1_responses_streaming_missing_previous_response_owner_returns_ht
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
     assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "turn_state",
+    [
+        "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "http_turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "",
+    ],
+    ids=["client-turn-shape", "client-http-turn-shape", "blank-header"],
+)
+async def test_v1_responses_unresolved_client_turn_state_blocks_sole_candidate_fallback(
+    async_client,
+    monkeypatch,
+    turn_state: str,
+):
+    raw_account_id = "acc_prev_http_unresolved_turn"
+    email = "prev-http-unresolved-turn@example.com"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        upstream_calls.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_crossed_turn_boundary"}}\n\n'
+
+    previous_owner_lookup = AsyncMock(return_value=None)
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        previous_owner_lookup,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_prev_http_unresolved_turn",
+        },
+        headers={"x-codex-turn-state": turn_state},
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert upstream_calls == []
+    previous_owner_lookup.assert_awaited()
+    if turn_state:
+        turn_state_owner_lookup.assert_awaited_once()
+        assert turn_state_owner_lookup.await_args is not None
+        assert turn_state_owner_lookup.await_args.kwargs["fail_on_missing"] is True
+    else:
+        turn_state_owner_lookup.assert_not_awaited()
 
 
 @pytest.mark.asyncio

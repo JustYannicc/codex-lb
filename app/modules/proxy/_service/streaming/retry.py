@@ -69,12 +69,12 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
-    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
     _websocket_continuity_key_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -297,6 +297,7 @@ class _StreamingRetryMixin:
         rewritten_file_account_id: str | None = None,
         file_account_resolution_complete: bool = False,
         upstream_stream_transport_override: str | None = None,
+        synthesized_turn_state: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -398,7 +399,9 @@ class _StreamingRetryMixin:
             api_key=api_key,
         )
         turn_state_owner_account_id: str | None = None
+        turn_state_header_present = _turn_state_header_present(headers)
         turn_state = _sticky_key_from_turn_state_header(headers)
+        synthesized_turn_state_provenance = turn_state is not None and turn_state == synthesized_turn_state
         if turn_state is not None:
             # HTTP and WebSocket transports share the bridge turn-state index;
             # treating this as ordinary sticky input would cross replicas or
@@ -406,7 +409,9 @@ class _StreamingRetryMixin:
             turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                 turn_state=turn_state,
                 api_key=api_key,
-                fail_on_missing=not _is_synthesized_turn_state(turn_state),
+                # Token shape is not provenance. Only the exact marker carried
+                # by the authenticated bridge path may remain unresolved here.
+                fail_on_missing=not synthesized_turn_state_provenance,
             )
         sticky_key_source = "none"
         if affinity.codex_session_source == "thread_header":
@@ -1151,9 +1156,13 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None and turn_state_owner_account_id is None:
-                    # A file pin is structural ownership evidence, so it stays
-                    # strict even when the subscription pool has one candidate.
-                    if rewritten_file_account_id is not None:
+                    # File pins and unresolved client turn-state are hard
+                    # continuity boundaries. A physically blank header still
+                    # counts as client input, while an authenticated exact
+                    # synthesized marker may use the compatibility fallback.
+                    if rewritten_file_account_id is not None or (
+                        turn_state_header_present and not synthesized_turn_state_provenance
+                    ):
                         selection_candidates: tuple[Account, ...] = ()
                     else:
                         # Preserve the compatibility fallback for an owner miss

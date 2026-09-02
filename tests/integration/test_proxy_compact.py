@@ -247,6 +247,61 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
         assert limits[0].current_value == 0
 
 
+@pytest.mark.asyncio
+async def test_proxy_compact_blank_turn_state_blocks_sole_candidate_fallback(async_client, monkeypatch):
+    raw_account_id = "acc_compact_blank_turn_state"
+    email = "compact-blank-turn-state@example.com"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+            }
+        )
+
+    previous_owner_lookup = AsyncMock(return_value=None)
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        previous_owner_lookup,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"x-codex-turn-state": ""},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_compact_blank_turn_state",
+        },
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert compact_calls == []
+    previous_owner_lookup.assert_awaited_once()
+    turn_state_owner_lookup.assert_not_awaited()
+
+
 class _JsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
