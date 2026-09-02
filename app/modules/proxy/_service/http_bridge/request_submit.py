@@ -627,13 +627,25 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
                 self.revoke()
             finally:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                reserved_bytes = self._blocked_put_reservations.pop(put_task, None)
-                if reserved_bytes is not None:
-                    self._byte_budget.release(reserved_bytes)
+
+                async def reap_tasks_and_release_reservation() -> None:
+                    try:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    finally:
+                        reserved_bytes = self._blocked_put_reservations.pop(put_task, None)
+                        if reserved_bytes is not None:
+                            self._byte_budget.release(reserved_bytes)
+
+                cleanup_task = asyncio.create_task(
+                    reap_tasks_and_release_reservation(),
+                    name="http-bridge-event-put-cleanup",
+                )
+                _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
         except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
             self.revoke()
 

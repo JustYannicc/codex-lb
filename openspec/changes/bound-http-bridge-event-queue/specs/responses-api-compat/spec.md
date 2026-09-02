@@ -6,7 +6,9 @@ Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory
 
 Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; an attached stream MUST surface one `response.failed` terminal result with `upstream_unavailable` (or the equivalent HTTP 503 error when the route propagates HTTP errors), while a later upstream `response.failed` publication MAY be ignored by the revoked queue. A pre-consumer queue that is already revoked or abandoned MAY be discarded and therefore expose only EOS to a delayed reader. The service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
 
-Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
+The HTTP route MAY translate budget exhaustion into an HTTP 503 only before it has emitted its first stream event. Once any SSE event has been emitted, later budget exhaustion MUST remain inside the committed stream and emit the `response.failed` terminal result instead of raising a route-level HTTP error.
+
+Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Repeated cancellation while a blocked enqueue is cleaning up MUST NOT interrupt task reaping or release of the payload's process-wide byte reservation; cancellation MUST propagate only after that cleanup finishes. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
 
 Failure finalization for an attached stream MUST publish its ordered terminal result without waiting for live queue capacity. A full queue and stalled attached consumer MUST NOT keep session lifecycle ownership from a later request, and the consumer MUST still receive every buffered event before the terminal result and end marker.
 
@@ -70,3 +72,18 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 - **THEN** the stream emits one `response.failed` event with `upstream_unavailable` (or returns HTTP 503 when HTTP errors are propagated)
 - **AND** a later upstream `response.failed` event is not required to be delivered through the revoked queue
 - **AND** the rejected payload and any unread queue bytes are released during cleanup
+
+#### Scenario: Budget failure after stream commitment stays in SSE
+
+- **GIVEN** an HTTP bridge route that propagates pre-stream failures as HTTP errors
+- **AND** the route has already emitted at least one SSE event
+- **WHEN** the process-wide live-event byte budget rejects a later event
+- **THEN** the committed stream emits one `response.failed` event with `upstream_unavailable`
+- **AND** the stream ends without raising a route-level HTTP 503
+
+#### Scenario: Repeated cancellation releases a blocked reservation
+
+- **GIVEN** a live-event producer whose payload reservation is waiting on a full queue
+- **WHEN** cancellation is requested again while the producer is reaping its enqueue-owned tasks
+- **THEN** the producer finishes reaping those tasks and releases the blocked payload reservation
+- **AND** cancellation propagates only after the process-wide byte budget reflects that release

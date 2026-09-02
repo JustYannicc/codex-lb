@@ -15741,6 +15741,131 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_budget_exhaustion_after_first_event_stays_sse(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CreatedThenOversizedEventUpstream(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_budget_after_commit",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+
+        async def emit_oversized_event(self) -> None:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.output_text.delta",
+                            "response_id": "resp_budget_after_commit",
+                            "delta": "x" * 2048,
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_budget_after_commit",
+        "http-bridge-budget-after-commit@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    upstream = CreatedThenOversizedEventUpstream()
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=1024)
+    normalize_raised_proxy_error = Mock(wraps=http_bridge_streaming_module._partial_output_proxy_error_event_block)
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET",
+        budget,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_partial_output_proxy_error_event_block",
+        normalize_raised_proxy_error,
+    )
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.4",
+        instructions="Return exactly OK.",
+        input="exhaust the live-event budget after response.created",
+        prompt_cache_key="budget-after-commit",
+    )
+    stream = cast(
+        AsyncGenerator[str, None],
+        service.stream_http_responses(
+            payload,
+            {},
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+        ),
+    )
+
+    try:
+        first_event = proxy_module.parse_sse_data_json(await asyncio.wait_for(anext(stream), timeout=1.0))
+        assert first_event is not None
+        assert first_event["type"] == "response.created"
+
+        await upstream.emit_oversized_event()
+
+        terminal_event = cast(
+            dict[str, Any],
+            proxy_module.parse_sse_data_json(await asyncio.wait_for(anext(stream), timeout=1.0)),
+        )
+        assert terminal_event is not None
+        assert terminal_event["type"] == "response.failed"
+        assert terminal_event["response"]["error"]["code"] == "upstream_unavailable"
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(stream), timeout=1.0)
+    finally:
+        await stream.aclose()
+
+    assert budget.used_bytes == 0
+    normalize_raised_proxy_error.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_live_event_queue_applies_backpressure(
     async_client,
     app_instance,

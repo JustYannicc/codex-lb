@@ -4882,7 +4882,7 @@ class _HTTPBridgeStreamingMixin:
 
                 response_id = _websocket_downstream_response_id(request_state)
                 message = "HTTP bridge live event queue byte budget exhausted"
-                if propagate_http_errors:
+                if propagate_http_errors and not yielded_any:
                     raise ProxyResponseError(
                         503,
                         openai_error("upstream_unavailable", message, error_type="server_error"),

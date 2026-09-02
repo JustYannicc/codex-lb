@@ -40,3 +40,12 @@
 - [x] 4.3 Remove the unused denied-anchor generation capture helper
 
 - [x] 4.4 Run focused and broader bridge tests, Ruff, formatting, type checks, proxy architecture validation, diff checks, strict targeted OpenSpec validation, and final exact-candidate review
+
+
+## 5. Current-head review follow-up
+
+- [x] 5.1 Add product-path regressions for budget exhaustion after the first SSE event and repeated cancellation during blocked-put cleanup
+
+- [x] 5.2 Keep post-commit budget failure inside SSE and defer blocked-put cancellation until task reaping and reservation release finish
+
+- [x] 5.3 Run focused and bridge integration tests, Ruff, formatting, type checks, architecture validation, diff checks, strict targeted OpenSpec validation, and exact-candidate review

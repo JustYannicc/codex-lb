@@ -239,6 +239,47 @@ async def test_http_bridge_event_put_releases_blocked_budget_on_cancellation() -
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_put_releases_blocked_budget_after_repeated_cancellation() -> None:
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    class SlowCancellationEvent(asyncio.Event):
+        async def wait(self):
+            try:
+                return await super().wait()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                raise
+
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=SlowCancellationEvent(),
+        byte_budget=budget,
+    )
+    event_queue.put_nowait("first")
+
+    producer = asyncio.create_task(event_queue.put("blocked-payload"))
+    await asyncio.sleep(0)
+    assert budget.used_bytes == len("first") + len("blocked-payload")
+
+    producer.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+    producer.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await producer
+
+    assert event_queue.qsize() == 1
+    assert event_queue.queued_bytes == len("first")
+    assert budget.used_bytes == len("first")
+    assert event_queue.get_nowait() == "first"
+    assert budget.used_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_blocked_budget_failure_dominates_late_terminal() -> None:
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=5)
     event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
