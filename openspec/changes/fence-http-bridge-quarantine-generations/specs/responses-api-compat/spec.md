@@ -51,7 +51,18 @@ arm.
 Quarantine cleanup MUST remain independent from retry-circuit state, account
 health, routing score, account eligibility, and durable bridge ownership. A
 successful replay MAY clear quarantine without clearing or settling a retry
-circuit. TTL and size-cap pruning MUST remain bounded and self-recovering.
+circuit. TTL and size-cap pruning MUST remain bounded and self-recovering. When
+admitting a new key, the registry MUST prune expired entries and evict only the
+oldest weaker-fence entries needed to stay within its hard size cap. If every
+slot holds an active poison fence, the new arm MUST be rejected instead of
+evicting poison evidence or growing the registry past the cap; the rejected
+session MUST remain unquarantined and the rejection MUST NOT allocate or
+mutate a quarantine generation. The service MUST maintain one bounded
+poison-overflow deadline for rejected poison arms, extending it through the
+required window of the rejected arm and every active retained poison fence;
+while that deadline is active, anchor checks for an unknown rejected key MUST
+fail closed as poison evidence. Re-arming an existing key MAY refresh its
+entry in place without consuming another slot.
 
 #### Scenario: Detached predecessor cannot clear a replacement
 
@@ -92,6 +103,18 @@ circuit. TTL and size-cap pruning MUST remain bounded and self-recovering.
 - **WHEN** the predecessor completes after the replacement is canonical
 - **THEN** cleanup compares weak object identity and leaves the replacement
   quarantine active even if an integer object id would collide
+
+#### Scenario: The hard cap rejects a new key when poison fences fill it
+
+- **GIVEN** the quarantine registry already holds its maximum number of
+  active poison fences
+- **WHEN** a different session key attempts to arm a quarantine
+- **THEN** the new arm is rejected without evicting any poison fence
+- **AND** the registry remains at its maximum size with the existing
+  generations unchanged
+- **AND** the rejected session is not marked quarantined
+- **AND** an anchor check for the rejected key fails closed while the bounded
+  poison-overflow deadline is active
 
 ### Requirement: Quarantine selection distinguishes local reuse from durable context
 

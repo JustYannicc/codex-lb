@@ -24,12 +24,24 @@ the exact surviving generation may be cleared; a pruned-and-reused key or any
 new arm is left intact. The same rule applies when the recovery-origin key is
 also the completing session's primary key.
 
-TTL and size pruning remain the only automatic expiry mechanisms. Successful
+TTL and size pruning remain the only automatic expiry mechanisms. Admission of
+a new key first prunes expired entries and then evicts the oldest non-poison
+fence when the size cap needs a slot. If every slot contains an active poison
+fence, the new arm is rejected: the service neither evicts poison evidence nor
+grows the registry past its hard cap, and the rejected session remains
+unquarantined. Because the rejected key has no entry to consult, the service
+extends one bounded poison-overflow deadline to cover the rejected arm and all
+currently active poison deadlines; anchor checks treat unknown keys as poison
+until that deadline expires. This conservative service-level fallback may
+temporarily fail closed for keys that have no retained entry, but it keeps the
+anchor-proven-dead path safe without growing per-key memory. Re-arming an
+existing key remains in-place and does not require another slot. Successful
 completion clears only quarantine state; it does not touch retry-circuit,
-account-health, routing, or durable-owner state. Delta-only anchor selection is
-kept explicit in the main Responses contract: a quarantined live session is
-absent as a local session candidate, but the durable anchor remains available
-when the request itself does not carry a full resend.
+account-health, routing, or durable-owner state.
+Delta-only anchor selection is kept explicit in the main Responses contract: a
+quarantined live session is absent as a local session candidate, but the
+durable anchor remains available when the request itself does not carry a full
+resend.
 
 ## Proof seams
 
