@@ -2795,17 +2795,25 @@ class _HTTPBridgeRetryCircuitMixin:
                                     0.0,
                                     surviving.cooldown_until_epoch - time.time(),
                                 )
+                                positive_surviving_cooldown_elapsed = (
+                                    surviving.cooldown_until_epoch > 0.0 and surviving_cooldown_remaining == 0.0
+                                )
+                                now_monotonic = time.monotonic()
                                 state.cooldown_until = (
-                                    time.monotonic() + surviving_cooldown_remaining
+                                    now_monotonic + surviving_cooldown_remaining
                                     if surviving_cooldown_remaining > 0.0
                                     else 0.0
                                 )
                                 state.last_detail = surviving.last_detail
-                                if state.cooldown_until > time.monotonic():
+                                if state.cooldown_until > now_monotonic or positive_surviving_cooldown_elapsed:
                                     state.half_open_until = 0.0
                                     state.half_open_owner_session = None
                                     state.half_open_owner_token = None
                                     state.half_open_lease_generation = 0
+                                if positive_surviving_cooldown_elapsed:
+                                    state.elapsed_durable_cooldown_pending = bool(
+                                        state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                                    )
                                 state.persisted_updated_at_epoch = surviving.updated_at_epoch
                                 state.persisted_admission_generation = getattr(surviving, "admission_generation", 0)
                                 state.last_durable_load_monotonic = max(

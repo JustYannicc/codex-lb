@@ -45790,6 +45790,11 @@ async def test_a_twice_missed_settle_reconciles_the_surviving_row(
     state.consecutive_failures = 2
     state.last_detail = "stream_incomplete"
     state.persisted_updated_at_epoch = epoch_a
+    retired_owner_token = object()
+    state.half_open_until = now + 600.0
+    state.half_open_owner_session = session
+    state.half_open_owner_token = retired_owner_token
+    state.half_open_lease_generation = 11
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
 
@@ -45828,6 +45833,22 @@ async def test_a_twice_missed_settle_reconciles_the_surviving_row(
             assert restored.cooldown_until > time.monotonic()
         else:
             assert restored.cooldown_until == 0.0, "an elapsed durable deadline must retain the zero sentinel"
+            assert restored.elapsed_durable_cooldown_pending is True, (
+                "an elapsed positive durable deadline must arm the one-shot half-open transition"
+            )
+            assert restored.half_open_until == 0.0, "rehydration must clear the retired half-open lease deadline"
+            assert restored.half_open_owner_session is None, "rehydration must clear the retired lease owner"
+            assert restored.half_open_owner_token is None, "rehydration must clear the retired lease token"
+            assert restored.half_open_lease_generation == 0, "rehydration must clear the retired lease generation"
+
+            service._durable_bridge.lookup_retry_circuit = AsyncMock(return_value=survivor)
+            assert await service._http_bridge_precreated_retry_allowed(session) is True
+            assert restored.elapsed_durable_cooldown_pending is False
+            assert restored.half_open_owner_session is session
+            sibling = _make_bridge_session(key_value="bridge-twice-missed-settle")
+            assert await service._http_bridge_precreated_retry_allowed(sibling) is False, (
+                "the rehydrated elapsed transition must admit exactly one half-open probe"
+            )
     else:
         assert settled is True, "a chase that finds the row gone is settled after all"
         assert cast(Any, service)._http_bridge_retry_circuits.get(session.key) is None
