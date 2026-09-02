@@ -35,12 +35,17 @@ for the normative behavior.
 
 Convert a durable wall-clock deadline to a monotonic deadline only when the
 remaining duration is positive. Otherwise merge `0.0`. This avoids creating a
-synthetic expired transition from a row that is already open for admission.
-Equal-version reloads reconcile durable fields but do not clear a live local
-half-open lease: the reload cannot prove which local session owns it. A newer
-durable reset or lower failure count also preserves an active local lease and
-its failure fence; only an inactive local state is cleared by a durable reset.
-A lookup failure leaves the existing local state untouched.
+synthetic monotonic deadline from a row that is already open for admission.
+An absent, zero, or negative durable deadline is the unrestricted sentinel. A
+newly adopted positive deadline that elapsed before the load instead records a
+one-shot local transition: the first admission consumes it into the existing
+owner-fenced half-open lease, and concurrent admissions remain suppressed until
+that probe settles. Reloading the same durable snapshot does not re-arm the
+transition. Equal-version reloads reconcile durable fields but do not clear a
+live local half-open lease: the reload cannot prove which local session owns
+it. A newer durable reset or lower failure count also preserves an active local
+lease and its failure fence; only an inactive local state is cleared by a
+durable reset. A lookup failure leaves the existing local state untouched.
 
 ### Fence a process-local lease by session, token, deadline, and generation
 
