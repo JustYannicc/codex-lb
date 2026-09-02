@@ -28,9 +28,12 @@ A real client-supplied `x-codex-turn-state` is hard continuity evidence. When
 that token cannot be resolved to an owner in the requesting API-key scope, the
 proxy MUST fail closed and MUST NOT apply the sole-candidate fallback, even when
 exactly one subscription account is eligible. Proxy-synthesized first-turn
-placeholders (`turn_*` / `http_turn_*`) remain the only exception while they are
-unregistered; a registered placeholder MUST resolve to its recorded owner. For
-the same fail-closed decision, a physically present but blank
+placeholders (`turn_*` / `http_turn_*`) are exempt only when exact server-side
+issuance provenance is established in the requesting API-key scope, or when an
+independent hard owner (such as a recorded previous response or file pin)
+already constrains the request; an unregistered placeholder MUST NOT authorize
+generic owner-miss fallback. A registered placeholder MUST resolve to its
+recorded owner. For the same fail-closed decision, a physically present but blank
 `x-codex-turn-state` header MUST be treated as client input rather than as an
 omitted header and MUST NOT authorize synthesized provenance or sole-candidate
 fallback. For the HTTP bridge owner-miss fallback, that exception MUST be
@@ -47,6 +50,14 @@ marker; matching the synthesized-token shape alone MUST NOT qualify.
 - **AND** request logs record a subscription account as the owner of `previous_response_id`
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the request is not forwarded to the model source
+- **AND** subscription routing preserves the recorded account owner
+
+#### Scenario: Recorded subscription owner overrides a disabled HTTP model source
+
+- **GIVEN** a Responses-compatible source is configured but disabled for the requested model
+- **AND** request logs record a subscription account as the owner of `previous_response_id`
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the request is not rejected as `model_source_disabled`
 - **AND** subscription routing preserves the recorded account owner
 
 #### Scenario: Canonical source response ID remains source-routed over HTTP
@@ -130,13 +141,13 @@ marker; matching the synthesized-token shape alone MUST NOT qualify.
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** no subscription account is selected and no upstream request is dispatched
 
-#### Scenario: Generated-looking WebSocket turn state requires exact provenance
+#### Scenario: Generated-looking turn state requires exact provenance
 
 - **GIVEN** a direct Responses WebSocket handshake generated a synthesized turn-state marker
 - **AND** the client supplies a different `x-codex-turn-state` that matches the synthesized-token shape
 - **AND** that client token has no owner in the requesting API-key scope
 - **AND** exactly one eligible subscription account remains
-- **WHEN** the client submits a compact continuation with a missing previous-response owner
+- **WHEN** the client submits a direct Responses WebSocket continuation with a missing previous-response owner
 - **THEN** the proxy fails closed with `turn_state_owner_unavailable`
 - **AND** no subscription account is selected and no upstream request is dispatched
 - **BUT WHEN** the turn state exactly matches the marker generated for that handshake
