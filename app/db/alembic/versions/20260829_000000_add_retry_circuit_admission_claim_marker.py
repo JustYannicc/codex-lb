@@ -7,8 +7,6 @@ Create Date: 2026-08-29
 
 from __future__ import annotations
 
-import time
-
 import sqlalchemy as sa
 from alembic import op
 
@@ -23,6 +21,16 @@ _COLUMNS = {
     "admission_claimed_generation": sa.Integer(),
     "admission_claimed_until_epoch": sa.Float(),
 }
+
+
+def _active_claim_statement(dialect_name: str) -> sa.TextClause:
+    if dialect_name == "postgresql":
+        database_now_epoch = "EXTRACT(EPOCH FROM clock_timestamp())"
+    elif dialect_name == "sqlite":
+        database_now_epoch = "((julianday('now') - 2440587.5) * 86400.0)"
+    else:
+        raise RuntimeError(f"retry-circuit admission claim migration unsupported for dialect={dialect_name!r}")
+    return sa.text(f"SELECT 1 FROM {_TABLE} WHERE admission_claimed_until_epoch > {database_now_epoch} LIMIT 1")
 
 
 def _columns(bind) -> set[str]:
@@ -72,10 +80,7 @@ def downgrade() -> None:
     # stamping, then allow a complete downgrade once every lease has expired.
     active_claim = None
     if "admission_claimed_until_epoch" in existing:
-        active_claim = bind.execute(
-            sa.text(f"SELECT 1 FROM {_TABLE} WHERE admission_claimed_until_epoch > :now_epoch LIMIT 1"),
-            {"now_epoch": time.time()},
-        ).first()
+        active_claim = bind.execute(_active_claim_statement(bind.dialect.name)).first()
     if active_claim is not None:
         raise RuntimeError(
             "cannot downgrade retry-circuit admission claim marker migration while active receipts exist"

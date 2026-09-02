@@ -23,17 +23,20 @@ explicitly generation-fenced.
   remaining request deadline; cancellation-resistant durable calls are
   detached at that bound and remain fail-closed without a concurrent retry.
 - If a settled timeout reconciliation refuses the identical claim, perform one
-  bounded durable receipt lookup and adopt the claim only when generation,
-  start, and expiry all match the request's receipt; a lookup failure remains
-  undecided and a mismatch remains a confirmed competing claim.
+  bounded durable receipt lookup and adopt the claim only when generation and
+  start match the request's receipt and the database clock confirms the stored
+  expiry is still live; a lookup failure remains undecided and a mismatch
+  remains a confirmed competing claim.
 - Recheck local state both before and after the durable CAS so a same-key local
   failure wins over a delayed replay claim.
 - Store a nullable claim receipt (`admission_claimed_at_epoch`,
   `admission_claimed_generation`, and `admission_claimed_until_epoch`) with a
-  bounded lease. The request path carries its remaining budget plus cleanup
-  grace; direct repository callers use the two-hour budget plus the same
-  grace, so a crashed owner is reclaimable without allowing an active replay
-  to be purged. The migration's downgrade is guarded: an unexpired receipt
+  bounded lease. The request path carries only its relative remaining budget
+  plus cleanup grace; the repository derives expiry and every live/expired
+  comparison from the database clock. Direct repository callers use the
+  two-hour budget plus the same grace, so a crashed owner is reclaimable
+  without allowing an active replay to be purged. The migration's downgrade
+  uses that database clock too and is guarded: an unexpired receipt
   refuses rollback before DDL or version stamping, while a database with no
   live receipt may drop the marker columns and remain compatible with the
   parent revision. The receipt inspection and marker drop are serialized as
@@ -57,7 +60,8 @@ explicitly generation-fenced.
   same-generation failure or active replay cannot be deleted by an older
   cleanup read.
 - Treat a stale purge that loses its conditional fence or fails before
-  confirming deletion as unknown durable state: pre-created admission and its
+  confirming deletion as unknown durable state immediately, even when a
+  reload finds a fresh below-threshold row: pre-created admission and its
   cooldown hint fail closed for that call, while an ordinary lookup failure
   keeps the existing local fallback behavior.
 

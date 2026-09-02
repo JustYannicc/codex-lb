@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import time
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -11,7 +10,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.clients.proxy import ProxyResponseError
@@ -3418,14 +3418,203 @@ async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
     assert after_delayed_failure.admission_claimed_generation == 1
 
 
+def test_retry_circuit_lease_clock_uses_each_database_server_clock() -> None:
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    postgres_clock = str(
+        repository_module._retry_circuit_database_now_epoch("postgresql").compile(
+            dialect=postgresql.dialect(),
+        )
+    )
+    sqlite_clock = str(
+        repository_module._retry_circuit_database_now_epoch("sqlite").compile(
+            dialect=sqlite.dialect(),
+        )
+    )
+
+    assert "clock_timestamp()" in postgres_clock
+    assert "julianday('now')" in sqlite_clock
+    claim_parameters = inspect.signature(DurableBridgeSessionCoordinator.claim_retry_circuit_generation).parameters
+    assert "claim_lease_seconds" in claim_parameters
+    assert "now_epoch" not in claim_parameters
+    assert "claimed_until_epoch" not in claim_parameters
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_live_claim_ignores_replica_clock_skew(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    async with async_session_factory() as clock_session:
+        database_now = float(
+            await clock_session.scalar(
+                text("SELECT (julianday('now') - 2440587.5) * 86400.0"),
+            )
+        )
+
+    monkeypatch.setattr(
+        repository_module,
+        "time",
+        SimpleNamespace(time=lambda: database_now - 3600.0),
+        raising=False,
+    )
+    claimed = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-database-clock",
+        api_key_id="key-database-clock",
+        expected_updated_at_epoch=None,
+        expected_admission_generation=0,
+        expected_consecutive_failures=0,
+        expected_cooldown_until_epoch=0.0,
+        claim_lease_seconds=60.0,
+    )
+
+    assert claimed is not None
+    assert claimed.admission_claimed_at_epoch is not None
+    assert claimed.admission_claimed_until_epoch is not None
+    assert claimed.admission_claimed_at_epoch == pytest.approx(database_now, abs=1.0)
+    assert claimed.admission_claimed_until_epoch - claimed.admission_claimed_at_epoch == pytest.approx(
+        60.0,
+        abs=0.05,
+    )
+
+    monkeypatch.setattr(
+        repository_module,
+        "time",
+        SimpleNamespace(time=lambda: database_now + 3600.0),
+    )
+    live_claim = await coordinator.lookup_live_retry_circuit_admission_claim(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-database-clock",
+        api_key_id="key-database-clock",
+        claimed_generation=1,
+        claimed_at_epoch=claimed.admission_claimed_at_epoch,
+    )
+    assert live_claim is not None
+    assert live_claim.admission_claimed_until_epoch == claimed.admission_claimed_until_epoch
+    competing_claim = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-database-clock",
+        api_key_id="key-database-clock",
+        expected_updated_at_epoch=claimed.updated_at_epoch,
+        expected_admission_generation=1,
+        expected_consecutive_failures=0,
+        expected_cooldown_until_epoch=0.0,
+        claim_lease_seconds=60.0,
+    )
+
+    assert competing_claim is None
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_reset_and_purges_preserve_live_claim_under_replica_clock_skew(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    async with async_session_factory() as clock_session:
+        database_now = float(
+            await clock_session.scalar(
+                text("SELECT (julianday('now') - 2440587.5) * 86400.0"),
+            )
+        )
+    stale_updated_at = database_now - 3 * repository_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+    cases = (
+        ("reset", "sid-retry-circuit-skewed-reset"),
+        ("purge", "sid-retry-circuit-skewed-purge"),
+        ("batch", "sid-retry-circuit-skewed-batch"),
+    )
+    for case, session_key_value in cases:
+        await coordinator.persist_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value=session_key_value,
+            api_key_id=f"key-skewed-{case}",
+            consecutive_failures=2,
+            cooldown_until_epoch=database_now - 1.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=stale_updated_at,
+        )
+
+    monkeypatch.setattr(
+        repository_module,
+        "time",
+        SimpleNamespace(time=lambda: database_now - 30.0),
+        raising=False,
+    )
+    claims = {}
+    for case, session_key_value in cases:
+        claim = await coordinator.claim_retry_circuit_generation(
+            session_key_kind="session_header",
+            session_key_value=session_key_value,
+            api_key_id=f"key-skewed-{case}",
+            expected_updated_at_epoch=stale_updated_at,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            expected_cooldown_until_epoch=database_now - 1.0,
+            claim_lease_seconds=60.0,
+        )
+        assert claim is not None
+        claims[case] = claim
+
+    monkeypatch.setattr(
+        repository_module,
+        "time",
+        SimpleNamespace(time=lambda: database_now + 3600.0),
+    )
+    reset_claim = claims["reset"]
+    assert (
+        await coordinator.clear_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-skewed-reset",
+            api_key_id="key-skewed-reset",
+            expected_updated_at_epoch=stale_updated_at,
+            expected_admission_generation=1,
+        )
+        is True
+    )
+    reset_row = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-skewed-reset",
+        api_key_id="key-skewed-reset",
+    )
+    assert reset_row is not None
+    assert reset_row.admission_claimed_generation == reset_claim.admission_claimed_generation
+    assert reset_row.admission_claimed_until_epoch == reset_claim.admission_claimed_until_epoch
+
+    assert (
+        await coordinator.purge_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-skewed-purge",
+            api_key_id="key-skewed-purge",
+            expected_updated_at_epoch=stale_updated_at,
+            expected_admission_generation=1,
+        )
+        is False
+    )
+    async with async_session_factory() as purge_session:
+        assert await DurableBridgeRepository(purge_session).purge_retry_circuits_before(database_now + 1.0) == 0
+    assert (
+        await coordinator.lookup_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-skewed-batch",
+            api_key_id="key-skewed-batch",
+        )
+        is not None
+    )
+
+
 @pytest.mark.asyncio
 async def test_durable_bridge_retry_circuit_claim_lease_blocks_purge_and_allows_expired_reclaim(
     async_session_factory: Callable[[], AsyncSession],
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
-    # The first claim is active at the real wall-clock used by purge.  A stale
+    # The first claim is active on the database clock used by purge. A stale
     # loader must not delete it just because the failure observation is old.
-    now_epoch = time.time()
     claimed = await coordinator.claim_retry_circuit_generation(
         session_key_kind="session_header",
         session_key_value="sid-retry-circuit-claim-lease",
@@ -3434,12 +3623,15 @@ async def test_durable_bridge_retry_circuit_claim_lease_blocks_purge_and_allows_
         expected_admission_generation=0,
         expected_consecutive_failures=0,
         expected_cooldown_until_epoch=0.0,
-        now_epoch=now_epoch,
         claim_lease_seconds=60.0,
     )
     assert claimed is not None
-    assert claimed.admission_claimed_at_epoch == now_epoch
-    assert claimed.admission_claimed_until_epoch == now_epoch + 60.0
+    assert claimed.admission_claimed_at_epoch is not None
+    assert claimed.admission_claimed_until_epoch is not None
+    assert claimed.admission_claimed_until_epoch - claimed.admission_claimed_at_epoch == pytest.approx(
+        60.0,
+        abs=0.05,
+    )
     assert (
         await coordinator.purge_retry_circuit(
             session_key_kind="session_header",
@@ -3450,11 +3642,25 @@ async def test_durable_bridge_retry_circuit_claim_lease_blocks_purge_and_allows_
         is False
     )
     async with async_session_factory() as purge_session:
-        assert await DurableBridgeRepository(purge_session).purge_retry_circuits_before(now_epoch + 1.0) == 0
+        assert (
+            await DurableBridgeRepository(purge_session).purge_retry_circuits_before(claimed.updated_at_epoch + 1.0)
+            == 0
+        )
 
     # A crashed owner is recoverable after the lease deadline.  Reclaiming
     # advances the generation, so a stale cleanup or release receipt from the
     # first owner cannot clear the replacement claim.
+    async with async_session_factory() as expire_session:
+        await expire_session.execute(
+            update(HttpBridgeRetryCircuit)
+            .where(
+                HttpBridgeRetryCircuit.session_key_kind == "session_header",
+                HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash("sid-retry-circuit-claim-lease"),
+                HttpBridgeRetryCircuit.api_key_scope == "key-claim-lease",
+            )
+            .values(admission_claimed_until_epoch=claimed.admission_claimed_at_epoch - 1.0)
+        )
+        await expire_session.commit()
     reclaimed = await coordinator.claim_retry_circuit_generation(
         session_key_kind="session_header",
         session_key_value="sid-retry-circuit-claim-lease",
@@ -3463,13 +3669,13 @@ async def test_durable_bridge_retry_circuit_claim_lease_blocks_purge_and_allows_
         expected_admission_generation=1,
         expected_consecutive_failures=0,
         expected_cooldown_until_epoch=0.0,
-        now_epoch=now_epoch + 61.0,
         claim_lease_seconds=60.0,
     )
     assert reclaimed is not None
     assert reclaimed.admission_generation == 2
     assert reclaimed.admission_claimed_generation == 2
-    assert reclaimed.admission_claimed_until_epoch == now_epoch + 121.0
+    assert reclaimed.admission_claimed_until_epoch is not None
+    assert reclaimed.admission_claimed_until_epoch > claimed.admission_claimed_until_epoch
     assert (
         await coordinator.clear_retry_circuit_admission_claim(
             session_key_kind="session_header",

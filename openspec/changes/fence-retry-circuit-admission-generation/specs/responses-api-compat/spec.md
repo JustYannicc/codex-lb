@@ -13,7 +13,10 @@ durable operation. The claim MUST use a dialect-guarded SQLite/PostgreSQL
 `RETURNING` statement so a successful claim receipt is part of the same write.
 The claim lease MUST cover the request's remaining budget plus 60 seconds of
 cleanup grace (or two hours plus that grace when no request deadline is
-provided), and an active lease MUST block a second claim.
+provided), and an active lease MUST block a second claim. The caller MUST pass
+the lease as a relative duration. The durable repository MUST derive the stored
+claim-until epoch and every active/expired receipt comparison from the database
+clock; caller wall-clock values MUST NOT decide lease liveness.
 
 #### Scenario: A newer same-key local failure suppresses a delayed claim
 
@@ -28,6 +31,13 @@ provided), and an active lease MUST block a second claim.
 - **WHEN** one replica advances `admission_generation`
 - **THEN** the other replica's conditional claim MUST return no receipt
 - **AND** it MUST fail closed without dispatching a second replay
+
+#### Scenario: Replica clock skew cannot steal a live claim
+
+- **GIVEN** one replica owns a claim that remains live on the database clock
+- **WHEN** another replica's wall clock is ahead of the claim expiry
+- **THEN** the second replica MUST NOT advance the admission generation
+- **AND** reset, purge, and guarded migration downgrade MUST preserve the live receipt
 
 #### Scenario: A timed-out claim is reconciled within the request budget
 
@@ -51,7 +61,8 @@ provided), and an active lease MUST block a second claim.
 The migration that adds `admission_claimed_at_epoch`,
 `admission_claimed_generation`, and `admission_claimed_until_epoch` MUST keep
 the columns nullable. Its downgrade MUST inspect the durable claim-until
-epochs before changing the schema or Alembic version: any unexpired receipt
+epochs against the database clock before changing the schema or Alembic
+version: any unexpired receipt
 MUST make the downgrade fail before DDL or version stamping. When no live
 receipt remains (all receipt epochs are null or expired), the downgrade MUST
 remove the marker columns so the parent revision remains compatible with its
@@ -162,8 +173,9 @@ Expired retry-circuit purges MUST compare the captured `updated_at_epoch` and
 unexpired claim receipt. A purge that loses a generation or claim-receipt race
 MUST leave the newer row intact. An expired claim MAY be reclaimed only by a
 new generation-fenced claim. If a stale-row purge returns no match or raises
-before confirming deletion, the loader MUST report the durable state as
-uncertain for that call.
+before confirming deletion, the loader MUST immediately report the durable
+state as uncertain for that call. A later reload MUST NOT clear that
+uncertainty, including when it finds a fresh below-threshold row.
 
 #### Scenario: A claim survives a stale purge
 

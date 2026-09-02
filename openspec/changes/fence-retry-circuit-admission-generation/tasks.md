@@ -59,3 +59,10 @@
   and transfer its key, lease, and attempt fence to the same-owner retry state;
   initialize the transferred fence from the retry state's own attempt baseline
   and schedule release retry after a pre-dispatch refusal or exception.
+- [x] 4.9 Derive claim expiry and active/expired receipt decisions from the
+  database clock using only a relative caller lease; cover claim, live-receipt
+  reconciliation, reset, purge, and guarded migration downgrade under replica
+  clock skew.
+- [x] 4.10 Mark every conditional stale-purge miss uncertain before reload and
+  keep pre-created admission fail-closed even when the refreshed row is fresh
+  and below threshold.

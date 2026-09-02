@@ -12,10 +12,14 @@ skewed and delayed failure writes must still merge.
 Each successful claim also records its generation, start epoch, and expiry in
 nullable columns. The default lease is the two-hour HTTP bridge request budget
 plus 60 seconds of cleanup grace. A request with a shorter configured budget
-uses that exact remaining budget plus the same grace. The marker is active only
-until its expiry; legacy rows with a null expiry are reclaimable by the normal
-generation CAS. The migration leaves all three columns nullable so existing
-rows remain valid. Its downgrade first checks for an unexpired receipt and
+passes that relative remaining budget plus the same grace. The repository
+derives the stored expiry and all active/expired comparisons from the database
+statement clock; replica wall-clock values never decide lease ownership. The
+claim-start epoch remains an identity fence for timeout reconciliation, not a
+liveness clock. The marker is active only until its expiry; legacy rows with a
+null expiry are reclaimable by the normal generation CAS. The migration leaves
+all three columns nullable so existing rows remain valid. Its downgrade checks
+for an unexpired receipt against the same database clock and
 refuses before DDL or Alembic version stamping when one exists; once no live
 receipt remains, it drops the marker columns so the parent revision's ORM
 schema does not trip startup drift checks. The check and drop run under one
@@ -47,10 +51,11 @@ is issued; its eventual commit is therefore fail-closed for this request. A
 committed first claim rejects a settled reconciliation through the incremented
 generation; an uncommitted one can be recovered. If that settled
 reconciliation refuses, one bounded receipt lookup may adopt the claim only
-when the durable generation, claim start, and claim expiry exactly match the
-receipt captured by this request. A lookup timeout or error remains undecided;
-an absent or mismatched receipt is a confirmed competing claim. Refusal, store
-errors, a second timeout, or an expired deadline otherwise remain fail-closed.
+when the durable generation and claim start exactly match the receipt captured
+by this request and the database clock confirms its stored expiry is live. A
+lookup timeout or error remains undecided; an absent, expired, or mismatched
+receipt is a confirmed competing claim. Refusal, store errors, a second
+timeout, or an expired deadline otherwise remain fail-closed.
 After a successful receipt, the local state is checked again under the lock;
 any intervening same-key failure or cooldown suppresses the replay.
 
@@ -86,10 +91,11 @@ advances the generation cannot be deleted by a stale purge and later recreated
 from generation zero. A terminal request releases its marker by matching the
 claimed generation and optional timestamps; a release from an older owner
 cannot clear a reclaimed marker. If that conditional delete returns no match
-or cannot complete, the loader reports an uncertain stale purge to its caller;
-pre-created admission remains fail-closed for that call rather than using an
-untrusted local fallback. The result is carried per call so concurrent loads
-cannot clear each other's uncertainty.
+or cannot complete, the loader reports an uncertain stale purge to its caller
+before any reload; a refreshed below-threshold row may update the cache but
+cannot authorize this call. Pre-created admission remains fail-closed rather
+than using an untrusted local fallback. The result is carried per call so
+concurrent loads cannot clear each other's uncertainty.
 
 ## Delayed failure merge
 

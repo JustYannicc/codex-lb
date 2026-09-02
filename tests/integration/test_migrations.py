@@ -2206,6 +2206,20 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         await engine.dispose()
 
 
+def test_retry_circuit_admission_claim_marker_migration_uses_database_clock() -> None:
+    migration_module = importlib.import_module(
+        "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+    )
+
+    postgres_sql = str(migration_module._active_claim_statement("postgresql"))
+    sqlite_sql = str(migration_module._active_claim_statement("sqlite"))
+
+    assert "admission_claimed_until_epoch > EXTRACT(EPOCH FROM clock_timestamp())" in postgres_sql
+    assert "admission_claimed_until_epoch > ((julianday('now') - 2440587.5) * 86400.0)" in sqlite_sql
+    assert ":now_epoch" not in postgres_sql
+    assert ":now_epoch" not in sqlite_sql
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_event_chunks_migration_preserves_legacy_and_guards_downgrade(tmp_path):
     from alembic import command

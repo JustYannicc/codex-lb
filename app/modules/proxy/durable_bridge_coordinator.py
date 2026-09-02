@@ -259,6 +259,24 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
             )
 
+    async def lookup_live_retry_circuit_admission_claim(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        claimed_generation: int,
+        claimed_at_epoch: float,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_live_retry_circuit_admission_claim(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                claimed_generation=claimed_generation,
+                claimed_at_epoch=claimed_at_epoch,
+            )
+
     async def persist_retry_circuit(
         self,
         *,
@@ -375,9 +393,8 @@ class DurableBridgeSessionCoordinator:
         expected_admission_generation: int,
         expected_consecutive_failures: int,
         expected_cooldown_until_epoch: float,
-        now_epoch: float | None = None,
         claim_lease_seconds: float | None = None,
-        claimed_until_epoch: float | None = None,
+        claimed_at_epoch: float | None = None,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).claim_retry_circuit_generation(
@@ -388,9 +405,8 @@ class DurableBridgeSessionCoordinator:
                 expected_admission_generation=expected_admission_generation,
                 expected_consecutive_failures=expected_consecutive_failures,
                 expected_cooldown_until_epoch=expected_cooldown_until_epoch,
-                now_epoch=now_epoch,
                 claim_lease_seconds=claim_lease_seconds,
-                claimed_until_epoch=claimed_until_epoch,
+                claimed_at_epoch=claimed_at_epoch,
             )
 
     async def purge_retry_circuit(
