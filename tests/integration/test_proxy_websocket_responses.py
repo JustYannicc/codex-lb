@@ -5010,6 +5010,100 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 
 
+def test_v1_responses_websocket_reconnect_trusts_exact_proxy_turn_state_for_owner_miss(
+    app_instance,
+    monkeypatch,
+):
+    account = SimpleNamespace(id="acct_v1_turn_state_reconnect")
+    upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_v1_turn_state_reconnect"))
+    candidate_lookups: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        del request
+        return None
+
+    async def no_previous_response_owner(self, **kwargs):
+        del self, kwargs
+        return None
+
+    async def no_turn_state_owner(self, *, turn_state, api_key, fail_on_missing):
+        del self, api_key
+        assert turn_state.startswith("turn_")
+        assert fail_on_missing is False
+        return None
+
+    async def one_candidate(self, *, model, **kwargs):
+        del self, kwargs
+        candidate_lookups.append(model)
+        return (account,)
+
+    async def connect_subscription_upstream(self, *args, request_state, **kwargs):
+        del self, args, kwargs
+        assert request_state.preferred_account_id == account.id
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        no_previous_response_owner,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        no_turn_state_owner,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_connect_proxy_websocket",
+        connect_subscription_upstream,
+    )
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"type": "compaction_trigger"}],
+        "previous_response_id": "resp_v1_unresolved_owner",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            accepted_headers = {
+                key.decode(): value.decode() for key, value in cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            }
+            turn_state = accepted_headers["x-codex-turn-state"]
+
+        with client.websocket_connect(
+            "/v1/responses",
+            headers={"x-codex-turn-state": turn_state},
+        ) as reconnect_websocket:
+            accepted_headers = {
+                key.decode(): value.decode()
+                for key, value in cast(list[tuple[bytes, bytes]], reconnect_websocket.extra_headers)
+            }
+            assert accepted_headers["x-codex-turn-state"] == turn_state
+            reconnect_websocket.send_text(json.dumps(request_payload))
+            created = json.loads(reconnect_websocket.receive_text())
+            completed = json.loads(reconnect_websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert candidate_lookups == ["gpt-5.4"]
+    assert json.loads(upstream.sent_text[0])["previous_response_id"] == "resp_v1_unresolved_owner"
+
+
 def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

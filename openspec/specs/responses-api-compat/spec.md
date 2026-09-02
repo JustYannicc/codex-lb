@@ -3776,6 +3776,8 @@ marker; matching the synthesized-token shape alone MUST NOT qualify.
 - **BUT WHEN** the turn state exactly matches the marker generated for that handshake
 - **OR** server-side continuity state proves that the proxy issued the marker on an earlier handshake
 - **THEN** the unregistered first-turn placeholder may use the sole-candidate compatibility fallback
+- **AND** this provenance MUST survive an exact-marker reconnect on `/v1/responses`
+  without enabling Codex session affinity or restoring unrelated response or tool state
 
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
 
