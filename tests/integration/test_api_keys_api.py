@@ -2095,6 +2095,12 @@ async def test_responses_recorded_owner_overrides_disabled_model_source(async_cl
         f"acct-disabled-owner-{route.rsplit('/', 1)[-1]}",
         f"disabled-owner-{route.rsplit('/', 1)[-1]}@example.com",
     )
+    competing_account_id = await _import_account(
+        async_client,
+        f"acct-disabled-owner-competing-{route.rsplit('/', 1)[-1]}",
+        f"disabled-owner-competing-{route.rsplit('/', 1)[-1]}@example.com",
+    )
+    assert competing_account_id != account_id
     async with SessionLocal() as session:
         await RequestLogsRepository(session).add_log(
             account_id=account_id,
@@ -2112,14 +2118,18 @@ async def test_responses_recorded_owner_overrides_disabled_model_source(async_cl
         del args, kwargs
         pytest.fail("a recorded subscription owner must bypass a disabled model source")
 
-    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
-        del request, context, api_key, kwargs
+    async def fake_stream_responses(payload, _headers, _access_token, _account_id, **kwargs):
         observed["model"] = payload.model
         observed["previous_response_id"] = payload.previous_response_id
-        return JSONResponse({"ok": True})
+        observed["account_id"] = kwargs["codex_lb_account_id"]
+        event = {
+            "type": "response.completed",
+            "response": {"id": "resp_owner", "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}},
+        }
+        yield f"data: {json.dumps(event)}\n\n"
 
     monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
-    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream_responses)
 
     payload = {
         "model": model,
@@ -2129,11 +2139,16 @@ async def test_responses_recorded_owner_overrides_disabled_model_source(async_cl
     }
     if route.startswith("/backend-api"):
         payload["instructions"] = "continue"
-    response = await async_client.post(route, json=payload)
+    async with async_client.stream("POST", route, json=payload) as response:
+        body = [line async for line in response.aiter_lines() if line]
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert observed == {"model": model, "previous_response_id": previous_response_id}
+    assert any("response.completed" in line for line in body)
+    assert observed == {
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "account_id": account_id,
+    }
 
 
 @pytest.mark.asyncio
