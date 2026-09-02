@@ -7,7 +7,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import NotRequired, TypedDict, cast
 
 import aiohttp
 
@@ -112,6 +112,31 @@ class _OwnerForwardStreamTimeoutError(Exception):
         super().__init__(error_message)
         self.error_code = error_code
         self.error_message = error_message
+
+
+class _BridgeSigningReservation(TypedDict):
+    id: str
+    key_id: str
+    model: str
+
+
+class _BridgeSigningFields(TypedDict):
+    body_digest: str
+    client_ip: str | None
+    client_ip_present: bool
+    codex_session_affinity: bool
+    downstream_turn_state: str | None
+    file_owner_account_id: str | None
+    include_client_ip: bool
+    origin_instance: str
+    original_affinity_key: str | None
+    original_affinity_kind: str | None
+    original_request_unanchored: bool
+    protocol: str
+    reservation: _BridgeSigningReservation | None
+    signature_version: str | None
+    target_instance: str
+    synthesized_turn_state: NotRequired[str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,7 +684,7 @@ def _structured_bridge_signing_payload(
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
     # domain-separates the primary and tamper-proofing signatures.
-    signing_fields: dict[str, object] = {
+    signing_fields: _BridgeSigningFields = {
         "body_digest": body_digest,
         "client_ip": context.client_ip if include_client_ip else None,
         "client_ip_present": context.client_ip is not None,

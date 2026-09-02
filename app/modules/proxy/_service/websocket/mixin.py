@@ -461,6 +461,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,  # noqa: F401
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
     _websocket_continuity_aliases_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -1449,6 +1450,7 @@ class _WebSocketMixin:
         account_lease: AccountLease | None = None
         upstream_requires_security_work_authorized: bool | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
+        client_turn_state_header_present = _turn_state_header_present(headers)
         # Synthesized downstream state arrives through its explicit provenance
         # parameter rather than through ``headers``. Only a genuine client
         # header can therefore become initial upstream state.
@@ -2118,7 +2120,11 @@ class _WebSocketMixin:
                         # fail-closed. Keep this distinction explicit instead
                         # of treating every HTTP source-route exclusion as a
                         # hard account pin.
-                        owner_miss_requires_fail_closed = request_state.file_required_preferred_account
+                        owner_miss_requires_fail_closed = request_state.file_required_preferred_account or (
+                            client_turn_state_header_present
+                            and synthesized_turn_state is None
+                            and not continuity_state.proxy_synthesized_turn_state_provenance
+                        )
                         if (
                             request_state.previous_response_id is not None
                             and previous_response_owner_account_id is None

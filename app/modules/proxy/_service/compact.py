@@ -998,12 +998,19 @@ class _CompactMixin:
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
+        synthesized_turn_state = turn_state is not None and _is_synthesized_turn_state(turn_state)
         try:
             if turn_state is not None:
                 turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                     turn_state=turn_state,
                     api_key=api_key,
-                    fail_on_missing=not _is_synthesized_turn_state(turn_state),
+                    # An unregistered proxy-shaped marker may be a first-turn
+                    # placeholder, but it cannot authorize generic owner-miss
+                    # fallback. The guard below permits it only when another
+                    # independently verified owner (previous response or file)
+                    # pins the request; registered markers resolve strictly in
+                    # the API-key scope above.
+                    fail_on_missing=not synthesized_turn_state,
                 )
             previous_response_id = getattr(payload, "previous_response_id", None)
             previous_response_preferred_account_id: str | None = None
@@ -1018,6 +1025,23 @@ class _CompactMixin:
                     session_id=previous_response_lookup_session_id,
                     surface="compact",
                 )
+                if (
+                    synthesized_turn_state
+                    and turn_state_owner_account_id is None
+                    and previous_response_preferred_account_id is None
+                    and rewritten_file_account_id is None
+                ):
+                    await settle_compact_usage_before_owner_exit(
+                        "Failed to settle compact API key reservation after unproven synthesized turn-state"
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "turn_state_owner_unavailable",
+                            "Turn-state owner account is unavailable; retry the logical turn.",
+                            error_type="server_error",
+                        ),
+                    )
                 if previous_response_preferred_account_id is None and turn_state_owner_account_id is None:
                     # A file pin is structural ownership evidence, so it stays
                     # strict even when the subscription pool has one candidate.

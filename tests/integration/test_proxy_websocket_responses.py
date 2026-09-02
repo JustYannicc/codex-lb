@@ -5104,6 +5104,77 @@ def test_v1_responses_websocket_reconnect_trusts_exact_proxy_turn_state_for_owne
     assert json.loads(upstream.sent_text[0])["previous_response_id"] == "resp_v1_unresolved_owner"
 
 
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("blank_turn_state", ["", "   "])
+def test_responses_websocket_blank_turn_state_is_client_input(
+    app_instance,
+    monkeypatch,
+    route,
+    blank_turn_state,
+):
+    account = SimpleNamespace(id="acct_blank_turn_state_fallback")
+    upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_blank_turn_state_unexpected"))
+    candidate_lookups: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        del request
+        return None
+
+    async def no_previous_response_owner(self, **kwargs):
+        del self, kwargs
+        return None
+
+    async def no_source_owner(model, api_key, *, raw_model=None):
+        del model, api_key, raw_model
+        return ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+
+    async def one_candidate(*, model, **kwargs):
+        del kwargs
+        candidate_lookups.append(model)
+        return (account,)
+
+    async def connect_subscription_upstream(self, *args, request_state, **kwargs):
+        del self, args, request_state, kwargs
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        no_previous_response_owner,
+    )
+    monkeypatch.setattr(websocket_mixin_module, "resolve_responses_model_source_ownership", no_source_owner)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "continue",
+        "input": [{"type": "input_text", "text": "next"}],
+        "previous_response_id": "resp_blank_turn_state_owner_miss",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(route, headers={"x-codex-turn-state": blank_turn_state}) as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            error = json.loads(websocket.receive_text())
+
+    assert error["type"] == "response.failed"
+    assert error["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert candidate_lookups == []
+
+
 def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

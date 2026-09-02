@@ -1275,11 +1275,11 @@ async def responses_websocket(
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
             return
-    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
+    turn_state_header_present = proxy_affinity_module._turn_state_header_present(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
+    if not turn_state_header_present and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
         forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
@@ -1288,7 +1288,7 @@ async def responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
-        synthesized_turn_state=turn_state if client_turn_state is None else None,
+        synthesized_turn_state=turn_state if not turn_state_header_present else None,
         capability_header_values=capability_header_values,
     )
 
@@ -1646,11 +1646,11 @@ async def v1_responses_websocket(
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
             return
-    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
+    turn_state_header_present = proxy_affinity_module._turn_state_header_present(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
+    if not turn_state_header_present and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
         forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
@@ -1659,7 +1659,7 @@ async def v1_responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
-        synthesized_turn_state=turn_state if client_turn_state is None else None,
+        synthesized_turn_state=turn_state if not turn_state_header_present else None,
         capability_header_values=capability_header_values,
     )
 
@@ -4581,7 +4581,7 @@ async def _select_responses_model_source_with_continuity(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
-    if source_selection is None or payload.previous_response_id is None:
+    if payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
         previous_response_id=payload.previous_response_id,

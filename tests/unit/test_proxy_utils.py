@@ -5003,6 +5003,48 @@ async def test_compact_synthesized_turn_state_allows_file_pin_routing(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_compact_unregistered_synthesized_turn_state_blocks_owner_miss_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_compact_unregistered_synth")
+    turn_state = "http_turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    owner_lookup = AsyncMock(return_value=None)
+    previous_owner_lookup = AsyncMock(return_value=None)
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", owner_lookup)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", previous_owner_lookup)
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock())
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+            "previous_response_id": "resp_missing_owner_synthesized",
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
+
+    assert _proxy_error_code(exc_info.value) == "turn_state_owner_unavailable"
+    owner_lookup.assert_awaited_once_with(
+        turn_state=turn_state,
+        api_key=None,
+        fail_on_missing=False,
+    )
+    previous_owner_lookup.assert_awaited_once()
+    list_selection_candidates.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_compact_file_pin_overrides_session_and_prompt_cache_locality(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
