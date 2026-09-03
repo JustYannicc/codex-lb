@@ -1269,6 +1269,7 @@ class _HTTPBridgeOwnerForward:
     owner_instance: str
     owner_endpoint: str
     key: _HTTPBridgeSessionKey
+    owner_process_epoch: str | None = None
 
 
 @dataclass(slots=True, weakref_slot=True)

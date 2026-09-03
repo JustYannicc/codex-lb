@@ -174,17 +174,19 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        owner_supports_input_shape_classifier: bool = False,
         on_request_dispatched: Callable[[], None] | None = None,
         on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
-        if _http_bridge_owner_forward_requires_shape_upgrade(payload):
+        if _http_bridge_owner_forward_requires_shape_upgrade(payload) and not owner_supports_input_shape_classifier:
             # A pre-change owner normalizes a raw string into an array and uses
             # its older array heuristic. It can therefore turn these delta-only
-            # inputs into full resends and suppress the durable anchor. There is
-            # no owner-capability proof on the deployed ring wire, so fail before
-            # dispatch and let the caller's existing local-recovery gates decide.
+            # inputs into full resends and suppress the durable anchor. Without
+            # a current-process capability proof from the ring, fail
+            # before dispatch and let the caller's existing local-recovery
+            # gates decide.
             raise ProxyResponseError(
                 503,
                 openai_error(

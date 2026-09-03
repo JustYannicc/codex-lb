@@ -50,6 +50,7 @@ from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
+from app.modules.proxy import ring_membership as ring_membership_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
@@ -16815,6 +16816,62 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
 
 
 @pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+        owner_process_epoch="owner-process-b",
+    )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "x" * 4095},
+    )
+    capability_check = AsyncMock(return_value=True)
+    service._ring_membership = cast(
+        Any,
+        SimpleNamespace(owner_supports_capability=capability_check),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(**kwargs: object):
+        captured.update(kwargs)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        SimpleNamespace(stream_responses=fake_stream_responses),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == []
+    capability_check.assert_awaited_once_with(
+        "instance-b",
+        owner_process_epoch="owner-process-b",
+        capability=ring_membership_module.HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
+    )
+    assert captured["owner_supports_input_shape_classifier"] is True
+
+
+@pytest.mark.asyncio
 async def test_recovery_forward_replaces_incoming_affinity_with_recovered_turn_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -27854,11 +27911,26 @@ async def test_get_or_create_http_bridge_session_sticky_thread_mismatch_forwards
         max_sessions=8,
         allow_forward_to_owner=True,
         gateway_safe_mode=True,
+        durable_lookup=proxy_service.DurableBridgeLookup(
+            session_id="durable-sticky-thread",
+            canonical_kind="sticky_thread",
+            canonical_key="thread-key",
+            api_key_scope="__anonymous__",
+            account_id="acc-owner",
+            owner_instance_id="instance-b",
+            owner_process_epoch="owner-process-b",
+            owner_epoch=2,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state=None,
+            latest_response_id=None,
+        ),
     )
 
     assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
     assert resolved.owner_instance == "instance-b"
     assert resolved.owner_endpoint == "http://instance-b"
+    assert resolved.owner_process_epoch == "owner-process-b"
 
 
 @pytest.mark.asyncio

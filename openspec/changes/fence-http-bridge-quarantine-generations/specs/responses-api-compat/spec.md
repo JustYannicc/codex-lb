@@ -175,6 +175,13 @@ guard MUST cover a client string below 4096 characters whose normalized
 one-item array reaches 4096 compact-serialization characters, and a multi-item
 array containing only the allowed tool-output item types. The origin MUST fail
 closed or enter an already-authorized local recovery path before owner I/O.
+Positive proof MUST come from a live bridge-ring advertisement containing the
+exact input-shape-classifier capability and a process epoch equal to the
+durable owner's recorded `owner_process_epoch`. When that proof matches, the
+origin MAY dispatch the ambiguous delta-only shape to the upgraded owner.
+Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
+authorize dispatch, including an advertisement left by an earlier process
+that reused the same instance id.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
@@ -206,3 +213,24 @@ closed or enter an already-authorized local recovery path before owner I/O.
 - **THEN** it MUST NOT dispatch the request to that owner
 - **AND** it MUST fail closed or use an already-authorized local recovery path
   before the legacy owner can suppress the durable anchor
+
+#### Scenario: Proven upgraded owner receives an ambiguous delta
+
+- **GIVEN** an upgraded origin selects a live remote owner
+- **AND** the ring advertises the exact input-shape-classifier capability with
+  a process epoch equal to the durable owner's recorded process epoch
+- **AND** the request is delta-only under the current classifier but
+  full-resend shaped after legacy normalization
+- **WHEN** the origin reaches the owner-forward boundary
+- **THEN** it MAY dispatch the request to that owner
+- **AND** the owner MUST retain the durable previous-response anchor
+
+#### Scenario: Replaced owner process cannot inherit capability proof
+
+- **GIVEN** an instance id has a classifier-capable ring advertisement from an
+  earlier owner process
+- **AND** the durable owner record names a different current process epoch
+- **WHEN** an upgraded origin evaluates an ambiguous delta-only owner forward
+- **THEN** the stale advertisement MUST NOT authorize dispatch
+- **AND** the origin MUST fail closed or use an already-authorized local
+  recovery path before owner I/O

@@ -50,3 +50,6 @@
 - [x] 1.22 Preserve overflow poison across a later inactive entry, and block
   inverse rolling-upgrade owner dispatch when legacy normalization can reverse
   a delta-only classification.
+- [x] 1.23 Advertise the current input-shape classifier through bridge-ring
+  metadata and authorize ambiguous delta forwarding only when that capability
+  is bound to the durable owner's exact current process epoch.

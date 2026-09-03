@@ -1274,6 +1274,75 @@ async def test_owner_forward_blocks_delta_shapes_that_legacy_owners_reclassify(
 
 
 @pytest.mark.asyncio
+async def test_owner_forward_dispatches_ambiguous_delta_after_owner_capability_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        @property
+        def content(self) -> SimpleNamespace:
+            async def _iter_chunked(_: int) -> AsyncIterator[bytes]:
+                if False:
+                    yield b""
+                return
+
+            return SimpleNamespace(iter_chunked=_iter_chunked)
+
+    class FakeSession:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            captured["url"] = url
+            captured["json"] = kwargs["json"]
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "x" * 4095},
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    events = [
+        event
+        async for event in HTTPBridgeOwnerClient().stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=payload,
+            headers={},
+            context=context,
+            request_started_at=10.0,
+            owner_supports_input_shape_classifier=True,
+        )
+    ]
+
+    assert captured["url"] == "http://instance-b:2455/internal/bridge/responses"
+    assert captured["json"] == payload.model_dump_for_http_bridge_owner_forwarding()
+    assert len(events) == 1
+    assert '"code":"stream_incomplete"' in events[0]
+
+
+@pytest.mark.asyncio
 async def test_owner_forward_allows_json_content_type_for_internal_post(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

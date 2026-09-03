@@ -2504,6 +2504,15 @@ def _durable_bridge_lookup_active_owner(lookup: DurableBridgeLookup | None) -> s
     return lookup.owner_instance_id
 
 
+def _owner_process_epoch(
+    lookup: DurableBridgeLookup | None,
+    owner_instance: str,
+) -> str | None:
+    if lookup is None or lookup.owner_instance_id != owner_instance:
+        return None
+    return lookup.owner_process_epoch
+
+
 def _durable_bridge_lookup_allows_local_reuse(
     lookup: DurableBridgeLookup | None,
     *,
