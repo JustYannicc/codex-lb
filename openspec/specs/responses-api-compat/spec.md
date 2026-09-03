@@ -4983,6 +4983,13 @@ characters whose normalized one-item array reaches 4096 compact-serialization
 characters, and a multi-item array containing only the allowed tool-output item
 types. The origin MUST fail closed or enter an already-authorized local recovery
 path before owner I/O.
+Positive proof MUST come from a live bridge-ring advertisement containing the
+exact input-shape-classifier capability and a process epoch equal to the
+durable owner's recorded `owner_process_epoch`. When that proof matches, the
+origin MAY dispatch the ambiguous delta-only shape to the upgraded owner.
+Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
+authorize dispatch, including an advertisement left by an earlier process
+that reused the same instance id.
 
 A fresh reattach whose incoming payload is classified as full-resend-shaped MUST
 NOT receive a proxy-injected durable anchor through any injection point — the
@@ -5015,6 +5022,27 @@ durable context.
 - **THEN** it MUST NOT dispatch the request to that owner
 - **AND** it MUST fail closed or use an already-authorized local recovery path
   before the legacy owner can suppress the durable anchor
+
+#### Scenario: Proven upgraded owner receives an ambiguous delta
+
+- **GIVEN** an upgraded origin selects a live remote owner
+- **AND** the ring advertises the exact input-shape-classifier capability with
+  a process epoch equal to the durable owner's recorded process epoch
+- **AND** the request is delta-only under the current classifier but
+  full-resend shaped after legacy normalization
+- **WHEN** the origin reaches the owner-forward boundary
+- **THEN** it MAY dispatch the request to that owner
+- **AND** the owner MUST retain the durable previous-response anchor
+
+#### Scenario: Replaced owner process cannot inherit capability proof
+
+- **GIVEN** an instance id has a classifier-capable ring advertisement from an
+  earlier owner process
+- **AND** the durable owner record names a different current process epoch
+- **WHEN** an upgraded origin evaluates an ambiguous delta-only owner forward
+- **THEN** the stale advertisement MUST NOT authorize dispatch
+- **AND** the origin MUST fail closed or use an already-authorized local
+  recovery path before owner I/O
 
 Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), and is cleared when a response completes with the applicable session-identity or exact recovery-generation fence. Each HTTP bridge session lifetime has an immutable, unique session-identity token represented by that session object's object identity and held by quarantine entries only through a weak owner reference; the token MUST be distinct from reusable bridge keys, account IDs, and session headers. Every quarantine generation MUST come from a service-lifetime monotonic allocator and MUST never be reused, including after per-key removal, TTL/size-cap pruning, registry reinitialization, or an allocator reset; any allocator reset MUST resume above every generation already observed in that service lifetime. Quarantine cleanup MUST NOT write account health, alter routing or account selection, or mutate durable bridge ownership. For a registered primary key, only the current canonical session MAY clear its quarantine; the canonical registry wins over a detached session's weak owner token. The weak owner MAY authorize a clear only when no canonical primary is registered, and an ownerless entry MUST remain uncleared through that fallback. A primary completion MUST capture its immutable session-identity token and the key's quarantine generation, including an observed absence, before taking its first await that can arm a replacement; cleanup and equality checks MUST use only those captured identity and generation/absence values, so a completion cannot remove a newer entry or first-strike evidence armed while settlement is in flight. A stale-anchor recovery-origin key MUST be fenced by the exact quarantine generation observed when recovery was authorized; an observed absence or generation mismatch MUST leave a raced quarantine active. The registry MUST prune expired entries before size eviction. An active poison fence whose poison-specific deadline has not expired MUST never be evictable. Inactive first-strike entries and active non-poison quarantine entries MUST share one eviction tier ordered by ascending last-touch time, then ascending generation, then the key tuple (affinity kind, affinity key, API-key id with null ordered as the empty string, and strength). If every slot holds an active poison fence, a new arm MUST be rejected rather than evicting poison evidence or growing beyond the hard size cap; the rejected session MUST remain unquarantined and no new quarantine generation MUST be allocated. Re-arming an existing key MAY refresh its entry in place. When a poison arm is rejected because every slot is an active poison fence, the service MUST maintain one bounded poison-overflow deadline covering the rejected arm's required window and every active retained poison deadline; while that deadline is active, anchor checks for an unknown rejected key MUST fail closed as poison evidence.
 

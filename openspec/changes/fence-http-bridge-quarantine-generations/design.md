@@ -84,6 +84,10 @@ self-contained because its matching calls live behind that anchor.
 - A current origin refuses owner dispatch before I/O when legacy normalization
   could reverse its delta-only classification: a below-boundary raw string
   whose normalized one-item array reaches the boundary, or a multi-item array
-  containing only tool outputs. Without a ring-level owner capability proof,
-  the origin treats the remote owner as potentially pre-change and leaves only
-  the existing fail-closed or locally fenced recovery paths available.
+  containing only tool outputs. The origin accepts ring-level classifier proof
+  only from a live advertisement whose process epoch equals the durable owner's
+  recorded process epoch. An exact match permits forwarding to an upgraded
+  owner; missing, malformed, stale, or epoch-mismatched proof leaves only the
+  existing fail-closed or locally fenced recovery paths available. Binding the
+  capability to the durable epoch prevents a replacement process from
+  inheriting an earlier process's advertisement under the same instance id.
