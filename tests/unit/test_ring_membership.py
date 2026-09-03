@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
@@ -212,7 +213,14 @@ async def test_legacy_owner_advertisement_does_not_prove_current_classifier(
         await session.execute(
             update(BridgeRingMember)
             .where(BridgeRingMember.instance_id == "pod-legacy")
-            .values(metadata_json='{"endpoint_base_url":"http://10.0.0.14:8080"}')
+            .values(
+                metadata_json=json.dumps(
+                    {
+                        "endpoint_base_url": "http://10.0.0.14:8080",
+                        "owner_process_epoch": http_bridge_owner_process_epoch(),
+                    }
+                )
+            )
         )
         await session.commit()
 
