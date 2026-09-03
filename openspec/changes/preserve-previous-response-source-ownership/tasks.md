@@ -11,6 +11,7 @@
 - [x] 2.5 Treat physically present blank direct-WebSocket turn-state headers as client input and fail closed on owner miss.
 - [x] 2.6 Use TypedDicts for the authenticated forwarding-signature payload shape.
 - [x] 2.7 Require API-key-scoped synthesized-marker provenance or an independent hard owner before compact owner-miss fallback.
+- [x] 2.8 Apply the synthesized-marker provenance guard to compact requests without `previous_response_id`.
 
 ## 3. Regression Coverage
 
@@ -18,8 +19,10 @@
 - [x] 3.2 Cover subscription-owned and canonical source-owned prior responses on both HTTP Responses routes.
 - [x] 3.3 Add direct WebSocket regressions for subscription-owner routing and canonical source-owner HTTP fallback.
 - [x] 3.4 Cover unregistered synthetic-shaped compact turn state with a missing previous-response owner.
+- [x] 3.5 Cover unregistered synthetic-shaped compact turn state without `previous_response_id`.
 
 ## 4. Verification
 
 - [x] 4.1 Run focused tests, Ruff, ty, and scoped/strict OpenSpec validation; inspect the final diff and worktree status.
 - [x] 4.2 Preserve turn-state ownership before owner-miss fallback and fail closed when WebSocket candidate lookup is unavailable.
+- [x] 4.3 Validate the no-previous-response compact provenance boundary and strict OpenSpec contract.

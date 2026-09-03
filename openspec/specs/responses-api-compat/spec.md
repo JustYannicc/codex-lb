@@ -3677,6 +3677,11 @@ MUST NOT qualify. On the direct Responses WebSocket path, the exception MUST
 require an exact match with the synthesized marker generated for that handshake
 or a server-side continuity record proving that the proxy previously issued the
 marker; matching the synthesized-token shape alone MUST NOT qualify.
+For compact requests, this fail-closed synthesized-marker rule MUST also apply
+when `previous_response_id` is absent: an unregistered `turn_*` or
+`http_turn_*` marker MUST fail with `turn_state_owner_unavailable` before generic
+account selection, unless a resolved turn-state owner or an independent hard
+owner such as a file pin constrains the request.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
@@ -3797,6 +3802,18 @@ marker; matching the synthesized-token shape alone MUST NOT qualify.
 - **WHEN** the client submits an HTTP Responses or compact continuation
 - **THEN** the proxy reconciles the turn-state owner through normal owner resolution
 - **AND** the proxy does not apply the zero-or-multiple-candidate owner-miss failure
+
+#### Scenario: Unregistered synthetic compact marker without previous response fails closed
+
+- **GIVEN** a compact request has no `previous_response_id`
+- **AND** the client supplies an unregistered `turn_*` or `http_turn_*`
+  `x-codex-turn-state` in the requesting API-key scope
+- **AND** exactly one eligible subscription account remains
+- **WHEN** the client calls `/backend-api/codex/responses/compact` or
+  `/v1/responses/compact`
+- **THEN** the proxy returns HTTP status `502`
+- **AND** the sanitized error code is `turn_state_owner_unavailable`
+- **AND** no generic subscription account is selected and no upstream request is dispatched
 
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 

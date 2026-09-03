@@ -1027,74 +1027,79 @@ class _CompactMixin:
                     session_id=previous_response_lookup_session_id,
                     surface="compact",
                 )
-                if (
-                    synthesized_turn_state
-                    and turn_state_owner_account_id is None
-                    and previous_response_preferred_account_id is None
-                    and rewritten_file_account_id is None
-                ):
+            if (
+                synthesized_turn_state
+                and turn_state_owner_account_id is None
+                and previous_response_preferred_account_id is None
+                and rewritten_file_account_id is None
+            ):
+                await settle_compact_usage_before_owner_exit(
+                    "Failed to settle compact API key reservation after unproven synthesized turn-state"
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "turn_state_owner_unavailable",
+                        "Turn-state owner account is unavailable; retry the logical turn.",
+                        error_type="server_error",
+                    ),
+                )
+            if (
+                isinstance(previous_response_id, str)
+                and previous_response_id.strip()
+                and previous_response_preferred_account_id is None
+                and turn_state_owner_account_id is None
+            ):
+                # File pins and unresolved client turn-state are hard
+                # continuity boundaries. Header normalization maps blanks
+                # to None, so preserve physical presence for this decision.
+                if rewritten_file_account_id is not None or turn_state_header_present:
+                    selection_candidates: tuple[Account, ...] = ()
+                else:
+                    # Preserve the compatibility fallback for an owner miss
+                    # when exactly one eligible subscription account remains.
+                    # An account-scoped API key narrows the candidate set before
+                    # the count; an unscoped key uses the normal model pool. A
+                    # missing owner with multiple or zero candidates still fails
+                    # closed because selection would otherwise guess an account.
+                    try:
+                        selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                            model=payload.model,
+                            service_tier=_service_tier_from_compact_payload(payload),
+                            additional_limit_name=None,
+                            account_ids=(
+                                api_key.assigned_account_ids
+                                if api_key is not None and api_key.account_assignment_scope_enabled
+                                else None
+                            ),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to list compact owner-miss candidates request_id=%s",
+                            request_id,
+                        )
+                        selection_candidates = ()
+                if len(selection_candidates) != 1:
                     await settle_compact_usage_before_owner_exit(
-                        "Failed to settle compact API key reservation after unproven synthesized turn-state"
+                        "Failed to settle compact API key reservation after previous-response owner fail-closed"
+                    )
+                    message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
+                    _record_continuity_fail_closed(
+                        surface="compact",
+                        reason="owner_account_unavailable",
+                        previous_response_id=previous_response_id,
+                        session_id=previous_response_lookup_session_id,
+                        upstream_error_code="owner_lookup_miss",
                     )
                     raise ProxyResponseError(
                         502,
                         openai_error(
-                            "turn_state_owner_unavailable",
-                            "Turn-state owner account is unavailable; retry the logical turn.",
+                            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+                            message,
                             error_type="server_error",
                         ),
                     )
-                if previous_response_preferred_account_id is None and turn_state_owner_account_id is None:
-                    # File pins and unresolved client turn-state are hard
-                    # continuity boundaries. Header normalization maps blanks
-                    # to None, so preserve physical presence for this decision.
-                    if rewritten_file_account_id is not None or turn_state_header_present:
-                        selection_candidates: tuple[Account, ...] = ()
-                    else:
-                        # Preserve the compatibility fallback for an owner miss
-                        # when exactly one eligible subscription account remains.
-                        # An account-scoped API key narrows the candidate set before
-                        # the count; an unscoped key uses the normal model pool. A
-                        # missing owner with multiple or zero candidates still fails
-                        # closed because selection would otherwise guess an account.
-                        try:
-                            selection_candidates = await proxy._load_balancer.list_selection_candidates(
-                                model=payload.model,
-                                service_tier=_service_tier_from_compact_payload(payload),
-                                additional_limit_name=None,
-                                account_ids=(
-                                    api_key.assigned_account_ids
-                                    if api_key is not None and api_key.account_assignment_scope_enabled
-                                    else None
-                                ),
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Failed to list compact owner-miss candidates request_id=%s",
-                                request_id,
-                            )
-                            selection_candidates = ()
-                    if len(selection_candidates) != 1:
-                        await settle_compact_usage_before_owner_exit(
-                            "Failed to settle compact API key reservation after previous-response owner fail-closed"
-                        )
-                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
-                        _record_continuity_fail_closed(
-                            surface="compact",
-                            reason="owner_account_unavailable",
-                            previous_response_id=previous_response_id,
-                            session_id=previous_response_lookup_session_id,
-                            upstream_error_code="owner_lookup_miss",
-                        )
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
-                                message,
-                                error_type="server_error",
-                            ),
-                        )
-                    owner_miss_fallback_account_id = selection_candidates[0].id
+                owner_miss_fallback_account_id = selection_candidates[0].id
         except asyncio.CancelledError:
             await settle_compact_usage_before_owner_exit(
                 "Failed to settle compact API key reservation after cancelled owner lookup"
