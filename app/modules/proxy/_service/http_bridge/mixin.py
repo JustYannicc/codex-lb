@@ -1757,8 +1757,7 @@ class _HTTPBridgeMixin(
                     selected_account_id=None,
                 )
                 if proxy_connect_failover.last_error is not None:
-                    # Preserve a confirmed pre-dispatch route failure instead
-                    # of generating ``no_accounts``.
+                    # Preserve a confirmed pre-dispatch route failure instead of generating ``no_accounts``.
                     raise proxy_connect_failover.last_error
                 if (
                     require_preferred_account
