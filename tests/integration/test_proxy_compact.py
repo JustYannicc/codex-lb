@@ -302,6 +302,67 @@ async def test_proxy_compact_blank_turn_state_blocks_sole_candidate_fallback(asy
     turn_state_owner_lookup.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "turn_state",
+    [
+        "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "http_turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ],
+    ids=["client-turn-shape", "client-http-turn-shape"],
+)
+async def test_proxy_compact_unregistered_synthetic_turn_state_without_previous_response_fails_closed(
+    async_client,
+    monkeypatch,
+    turn_state: str,
+):
+    raw_account_id = "acc_compact_unregistered_turn_without_previous"
+    email = "compact-unregistered-turn-without-previous@example.com"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+            }
+        )
+
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"x-codex-turn-state": turn_state},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+        },
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert compact_calls == []
+    turn_state_owner_lookup.assert_awaited_once()
+    assert turn_state_owner_lookup.await_args is not None
+    assert turn_state_owner_lookup.await_args.kwargs["fail_on_missing"] is False
+
+
 class _JsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
