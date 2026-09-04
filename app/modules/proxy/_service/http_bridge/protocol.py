@@ -8,7 +8,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import Clock, Scheduler
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account
-from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
+from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey, _WebSocketRequestState
 from app.modules.proxy.durable_bridge_repository import DurableBridgeAliasRegistrationReceipt
 from app.modules.proxy.load_balancer import AccountSelection
 
