@@ -12804,6 +12804,82 @@ async def test_reconnect_owner_unavailable_defers_cancellation_through_pending_l
 
 
 @pytest.mark.asyncio
+async def test_reconnect_owner_unavailable_waits_for_session_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-owner-unavailable-close")
+    session.last_upstream_close_code = 1011
+    owner_request = proxy_service._WebSocketRequestState(
+        request_id="req-owner-unavailable-close",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=session.account.id,
+        file_required_preferred_account=True,
+    )
+    owner_request.response_create_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    session.pending_requests.append(owner_request)
+    session.queued_request_count = 1
+    service._http_bridge_sessions[session.key] = session
+    _activate_half_open_probe(service, session)
+
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    async def close_session(target: proxy_service._HTTPBridgeSession) -> None:
+        assert target is session
+        close_started.set()
+        await allow_close.wait()
+        close_finished.set()
+
+    close = AsyncMock(side_effect=close_session)
+    bounded_close = AsyncMock()
+    release_probe = AsyncMock(return_value=True)
+
+    async def select_no_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Preferred account is unavailable",
+            error_code="usage_limit_reached",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_no_account)
+    monkeypatch.setattr(service, "_release_http_bridge_retry_circuit_half_open", release_probe)
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", bounded_close)
+
+    reconnect_task = asyncio.create_task(service._reconnect_http_bridge_session(session, request_state=owner_request))
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+    assert reconnect_task.done() is False
+    bounded_close.assert_not_awaited()
+
+    allow_close.set()
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await asyncio.wait_for(reconnect_task, timeout=1.0)
+
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert close_finished.is_set()
+    close.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_ignores_stale_preferred_account_after_1011(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -268,7 +268,7 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
             service._detach_http_bridge_session_locked(session.key, expected_session=session)
 
     async def run_step(label: str, operation: Awaitable[Any]) -> None:
-        """Keep teardown moving when one best-effort step is interrupted."""
+        """Keep best-effort cleanup moving when one step is interrupted."""
         try:
             await operation
         except (asyncio.CancelledError, Exception):
@@ -283,27 +283,19 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
         # A submitter can append until it observes the same lifecycle state.
         # Detach and disarm under one ownership interval so the probe cannot
         # return while a late, still-eligible send remains routable.
+        transition_completed = False
         try:
             if lifecycle_lock_held:
-                await run_step("detach", detach_session())
-                await run_step("disarm", _disarm_pending_response_create_attempts(session))
+                await detach_session()
+                await _disarm_pending_response_create_attempts(session)
             else:
-                try:
-                    async with session.lifecycle_lock:
-                        await run_step("detach", detach_session())
-                        await run_step("disarm", _disarm_pending_response_create_attempts(session))
-                except (asyncio.CancelledError, Exception):
-                    # A lock acquisition/teardown failure must not strand the
-                    # owner handoff or skip the remaining resource cleanup.
-                    logger.warning(
-                        "HTTP bridge owner-loss lifecycle transition failed bridge_key=%s",
-                        _hash_identifier(session.key.affinity_key),
-                        exc_info=True,
-                    )
-
+                async with session.lifecycle_lock:
+                    await detach_session()
+                    await _disarm_pending_response_create_attempts(session)
+            transition_completed = True
+        finally:
             if release_account_lease is not None:
                 await run_step("selected_account_lease", release_account_lease())
-        finally:
             try:
                 complete_failed_handoff()
             except (asyncio.CancelledError, Exception):
@@ -312,19 +304,25 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                     _hash_identifier(session.key.affinity_key),
                     exc_info=True,
                 )
-            try:
-                await run_step(
-                    "probe_release",
-                    release_probe(session, detail=detail, probe_owner=request_state),
-                )
-            finally:
-                await run_step(
-                    "session_close",
-                    service._close_http_bridge_session_bounded(
-                        session,
-                        reason="owner_unavailable_after_probe",
-                    ),
-                )
+            if transition_completed:
+                try:
+                    await run_step(
+                        "probe_release",
+                        release_probe(session, detail=detail, probe_owner=request_state),
+                    )
+                finally:
+                    # This terminal path must finish the cancellation-
+                    # deferred resource owner before the caller receives its
+                    # stable typed continuity error.  The bounded wrapper
+                    # may return while the detached session is still tracked
+                    # in the background.
+                    await service._close_http_bridge_session(session)
+            else:
+                # Do not return a probe whose session was not safely detached
+                # and disarmed.  The close still runs so its resources remain
+                # owned and discoverable while the transition error bubbles
+                # to the caller.
+                await service._close_http_bridge_session(session)
 
     cleanup_task = asyncio.create_task(cleanup())
     _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
