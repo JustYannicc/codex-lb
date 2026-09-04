@@ -49,7 +49,7 @@ from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -2360,8 +2360,11 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        # One JSON document per websocket text frame: parse it directly instead
+        # of framing it as SSE and running the line parser over it. The
+        # data-only block is what unmatched events relay.
         event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
+        payload = parse_sse_data_json_text(text)
         event_type = classify_event_type(payload)
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
@@ -2605,8 +2608,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.suppress_next_created_downstream = False
                     suppress_downstream_event = True
                 if payload is not None:
-                    payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
-                    event_block = format_sse_event(payload)
+                    rewritten_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
+                    # ``text`` is the serialization ``payload`` was parsed from (or the
+                    # tool-call rewrite's compact re-dump). Relaying it verbatim is
+                    # only valid while nothing above mutated ``payload`` in place:
+                    # ``mark_duplicate_tool_call_downstream_event`` trims partially
+                    # duplicated ``multi_tool_use.parallel`` arguments on
+                    # ``response.output_item.done`` items without returning a new
+                    # object, so those (rare, per-item) events are always
+                    # re-serialized. Every other pre-framing step is read-only.
+                    if rewritten_payload is not payload or event_type == "response.output_item.done":
+                        payload = rewritten_payload
+                        event_block = format_sse_event(payload)
+                    else:
+                        # Identity fast path: nothing changed, so frame the
+                        # upstream JSON text instead of serializing the dict again.
+                        event_block = format_sse_event_from_text(payload, text)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
                     matched_request_state.last_upstream_activity_at = now
