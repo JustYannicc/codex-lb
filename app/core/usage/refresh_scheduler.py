@@ -42,7 +42,7 @@ _BLOCK_RESET_MATCH_TOLERANCE_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
-class _MonthlyResetEvidence:
+class _UsageResetEvidence:
     baseline: UsageHistory
     before: UsageHistory
     after: UsageHistory
@@ -232,24 +232,32 @@ class UsageRefreshScheduler:
                         refreshed_selected_accounts = [
                             account for account in refreshed_accounts if account.id == selected_account.id
                         ]
-                        monthly_reset_evidence = await _resolve_monthly_reset_evidence(
+                        long_window_reset_evidence = await _resolve_long_window_reset_evidence(
                             accounts=refreshed_selected_accounts,
                             usage_repo=usage_repo,
+                            before_secondary=before_secondary,
+                            after_secondary=after_secondary,
                             before_monthly=before_monthly,
                             after_monthly=after_monthly,
                         )
                         detach_session_objects(session)
                     warmup_before_monthly = dict(before_monthly)
                     warmup_after_monthly = dict(after_monthly)
-                    for account_id, reset_evidence in monthly_reset_evidence.items():
-                        warmup_before_monthly[account_id] = reset_evidence.before
-                        warmup_after_monthly[account_id] = reset_evidence.after
+                    warmup_before_secondary = dict(before_secondary)
+                    warmup_after_secondary = dict(after_secondary)
+                    for account_id, reset_evidence in long_window_reset_evidence.items():
+                        if reset_evidence.after.window == "monthly":
+                            warmup_before_monthly[account_id] = reset_evidence.before
+                            warmup_after_monthly[account_id] = reset_evidence.after
+                        else:
+                            warmup_before_secondary[account_id] = reset_evidence.before
+                            warmup_after_secondary[account_id] = reset_evidence.after
                     async with get_background_session() as session:
                         await reconcile_recoverable_account_statuses(
                             accounts_repo=AccountsRepository(session),
                             usage_repo=UsageRepository(session),
                             accounts=refreshed_selected_accounts,
-                            monthly_reset_evidence=monthly_reset_evidence,
+                            long_window_reset_evidence=long_window_reset_evidence,
                             dashboard_settings=dashboard_settings,
                         )
                     warmup_service = LimitWarmupService(
@@ -268,13 +276,13 @@ class UsageRefreshScheduler:
                         before_secondary=_select_long_window_entries(
                             accounts=refreshed_selected_accounts,
                             monthly_entries=warmup_before_monthly,
-                            secondary_entries=before_secondary,
+                            secondary_entries=warmup_before_secondary,
                         ),
                         after_primary=after_primary,
                         after_secondary=_select_long_window_entries(
                             accounts=refreshed_selected_accounts,
                             monthly_entries=warmup_after_monthly,
-                            secondary_entries=after_secondary,
+                            secondary_entries=warmup_after_secondary,
                         ),
                         previous_plan_types=previous_plan_types,
                         refresh_started_at=refresh_started_at,
@@ -337,7 +345,7 @@ async def reconcile_recoverable_account_statuses(
     accounts_repo: _RecoverableAccountsRepository,
     usage_repo: _LatestUsageRepository,
     accounts: list[Account],
-    monthly_reset_evidence: dict[str, _MonthlyResetEvidence] | None = None,
+    long_window_reset_evidence: dict[str, _UsageResetEvidence] | None = None,
     dashboard_settings: object | None = None,
 ) -> int:
     """Repair recoverable account statuses from the latest usage evidence.
@@ -362,10 +370,15 @@ async def reconcile_recoverable_account_statuses(
     recovered = 0
     for account in candidates:
         monthly_entry = latest_monthly.get(account.id)
-        if _confirmed_free_monthly_reset_recovery(
+        if _confirmed_early_long_window_reset_recovery(
             account=account,
-            reset_evidence=(monthly_reset_evidence or {}).get(account.id),
-            latest=monthly_entry,
+            reset_evidence=(long_window_reset_evidence or {}).get(account.id),
+            latest_primary=latest_primary.get(account.id),
+            latest=_select_long_window_entry(
+                account=account,
+                monthly_entry=monthly_entry,
+                secondary_entry=latest_secondary.get(account.id),
+            ),
         ):
             status = AccountStatus.ACTIVE
             reset_at = None
@@ -416,15 +429,14 @@ async def reconcile_recoverable_account_statuses(
     return recovered
 
 
-def _confirmed_free_monthly_reset_recovery(
+def _confirmed_early_long_window_reset_recovery(
     *,
     account: Account,
-    reset_evidence: _MonthlyResetEvidence | None,
+    reset_evidence: _UsageResetEvidence | None,
+    latest_primary: UsageHistory | None,
     latest: UsageHistory | None,
 ) -> bool:
     if account.status != AccountStatus.RATE_LIMITED:
-        return False
-    if normalize_account_plan_type(account.plan_type) != "free":
         return False
     if account.reset_at is None or account.blocked_at is None:
         return False
@@ -438,12 +450,10 @@ def _confirmed_free_monthly_reset_recovery(
     baseline = reset_evidence.baseline
     before = reset_evidence.before
     after = reset_evidence.after
-    if (
-        baseline.window != "monthly"
-        or before.window != "monthly"
-        or after.window != "monthly"
-        or latest.window != "monthly"
-    ):
+    expected_window = _recovery_long_window(account)
+    if expected_window is None:
+        return False
+    if any((entry.window or "primary") != expected_window for entry in (baseline, before, after, latest)):
         return False
     if baseline.reset_at is None:
         return False
@@ -455,39 +465,55 @@ def _confirmed_free_monthly_reset_recovery(
         return False
     if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
         return False
+    primary_capacity = capacity_for_plan(account.plan_type, "primary")
+    if primary_capacity is not None and primary_capacity > 0:
+        if latest_primary is None:
+            return False
+        if naive_utc_to_epoch(latest_primary.recorded_at) <= account.blocked_at:
+            return False
+        if latest_primary.used_percent >= 100.0:
+            return False
     return (
         naive_utc_to_epoch(after.recorded_at) > account.blocked_at
         and naive_utc_to_epoch(latest.recorded_at) > account.blocked_at
     )
 
 
-async def _resolve_monthly_reset_evidence(
+async def _resolve_long_window_reset_evidence(
     *,
     accounts: list[Account],
     usage_repo: UsageRepository,
+    before_secondary: dict[str, UsageHistory],
+    after_secondary: dict[str, UsageHistory],
     before_monthly: dict[str, UsageHistory],
     after_monthly: dict[str, UsageHistory],
-) -> dict[str, _MonthlyResetEvidence]:
-    evidence: dict[str, _MonthlyResetEvidence] = {}
+) -> dict[str, _UsageResetEvidence]:
+    evidence: dict[str, _UsageResetEvidence] = {}
     for account in accounts:
-        before = before_monthly.get(account.id)
-        after = after_monthly.get(account.id)
+        before = _select_long_window_entry(
+            account=account,
+            monthly_entry=before_monthly.get(account.id),
+            secondary_entry=before_secondary.get(account.id),
+        )
+        after = _select_long_window_entry(
+            account=account,
+            monthly_entry=after_monthly.get(account.id),
+            secondary_entry=after_secondary.get(account.id),
+        )
         if usage_reset_confirmed(before=before, after=after):
             assert before is not None and after is not None
-            evidence[account.id] = _MonthlyResetEvidence(
+            evidence[account.id] = _UsageResetEvidence(
                 baseline=before,
                 before=before,
                 after=after,
             )
-        if (
-            account.status != AccountStatus.RATE_LIMITED
-            or normalize_account_plan_type(account.plan_type) != "free"
-            or account.reset_at is None
-            or account.blocked_at is None
-        ):
+        if account.status != AccountStatus.RATE_LIMITED or account.reset_at is None or account.blocked_at is None:
             continue
         since = datetime.fromtimestamp(account.blocked_at, timezone.utc).replace(tzinfo=None)
-        history = await usage_repo.history_since(account.id, "monthly", since)
+        window = _recovery_long_window(account)
+        if window is None:
+            continue
+        history = await usage_repo.history_since(account.id, window, since)
         persisted = _latest_confirmed_reset_transition_after_baseline(
             [entry for entry in history if entry.recorded_at > since],
             expected_reset_at=account.reset_at,
@@ -503,7 +529,7 @@ def _latest_confirmed_reset_transition_after_baseline(
     *,
     expected_reset_at: int,
     reset_at_tolerance_seconds: int,
-) -> _MonthlyResetEvidence | None:
+) -> _UsageResetEvidence | None:
     baseline = next(
         (
             (index, entry)
@@ -516,12 +542,12 @@ def _latest_confirmed_reset_transition_after_baseline(
         return None
     baseline_index, baseline_entry = baseline
 
-    latest_transition: _MonthlyResetEvidence | None = None
+    latest_transition: _UsageResetEvidence | None = None
     for index in range(baseline_index, len(history) - 1):
         before = history[index]
         after = history[index + 1]
         if usage_reset_confirmed(before=before, after=after):
-            latest_transition = _MonthlyResetEvidence(
+            latest_transition = _UsageResetEvidence(
                 baseline=baseline_entry,
                 before=before,
                 after=after,
@@ -538,6 +564,14 @@ def _select_long_window_entry(
     if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
         return monthly_entry
     return secondary_entry
+
+
+def _recovery_long_window(account: Account) -> str | None:
+    if capacity_for_plan(account.plan_type, "monthly") is not None:
+        return "monthly"
+    if capacity_for_plan(account.plan_type, "secondary") is not None:
+        return "secondary"
+    return None
 
 
 def _select_long_window_entries(
