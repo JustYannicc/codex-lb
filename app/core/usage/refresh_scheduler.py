@@ -23,6 +23,7 @@ from app.modules.accounts.background_repository import BackgroundAccountsReposit
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.limit_warmup.service import (
+    RESET_CONFIRMED_MIN_JUMP_SECONDS,
     LimitWarmupService,
     StreamingLimitWarmupSender,
     usage_reset_confirmed,
@@ -523,6 +524,7 @@ async def _resolve_long_window_reset_evidence(
             since,
             expected_reset_at=account.reset_at,
             reset_at_tolerance_seconds=_BLOCK_RESET_MATCH_TOLERANCE_SECONDS,
+            min_reset_jump_seconds=RESET_CONFIRMED_MIN_JUMP_SECONDS,
         )
         current = evidence.get(account.id)
         if current is not None and history:

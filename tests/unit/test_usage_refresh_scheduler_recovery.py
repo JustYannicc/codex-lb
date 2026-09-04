@@ -263,6 +263,7 @@ class StubUsageRepository:
         *,
         expected_reset_at: int,
         reset_at_tolerance_seconds: int,
+        min_reset_jump_seconds: int,
     ) -> list[UsageHistory]:
         self.history_queries.append((account_id, window, since, expected_reset_at, reset_at_tolerance_seconds))
         history = sorted(
@@ -281,8 +282,16 @@ class StubUsageRepository:
         if not matching_indexes:
             return []
         baseline_index = matching_indexes[-1]
+        baseline_reset_at = history[baseline_index].reset_at
+        assert baseline_reset_at is not None
         after_index = next(
-            (index for index in range(baseline_index + 1, len(history)) if history[index].used_percent < 100.0),
+            (
+                index
+                for index in range(baseline_index + 1, len(history))
+                if history[index].used_percent < 100.0
+                and (entry_reset_at := history[index].reset_at) is not None
+                and entry_reset_at >= baseline_reset_at + min_reset_jump_seconds
+            ),
             None,
         )
         if after_index is None:

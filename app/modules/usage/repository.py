@@ -934,8 +934,15 @@ class UsageRepository:
         *,
         expected_reset_at: int,
         reset_at_tolerance_seconds: int,
+        min_reset_jump_seconds: int,
     ) -> list[UsageHistory]:
-        """Return a reset marker and the first recovery candidate pair after it."""
+        """Return a reset marker and the adjacent pair that first proves a reset after it.
+
+        The ``after`` row must both show available quota and carry a reset
+        deadline at least ``min_reset_jump_seconds`` past the marker's, so an
+        interim sub-100 sample that still reports the old deadline cannot
+        truncate the scan before the real old-to-new transition.
+        """
         baseline_stmt = (
             select(UsageHistory)
             .where(
@@ -952,8 +959,9 @@ class UsageRepository:
             .limit(1)
         )
         baseline = (await self._session.execute(baseline_stmt)).scalar_one_or_none()
-        if baseline is None:
+        if baseline is None or baseline.reset_at is None:
             return []
+        baseline_reset_at = baseline.reset_at
 
         after_stmt = (
             select(UsageHistory)
@@ -961,6 +969,8 @@ class UsageRepository:
                 UsageHistory.account_id == account_id,
                 _window_clause(window),
                 UsageHistory.used_percent < 100.0,
+                UsageHistory.reset_at.is_not(None),
+                UsageHistory.reset_at >= baseline_reset_at + min_reset_jump_seconds,
                 or_(
                     UsageHistory.recorded_at > baseline.recorded_at,
                     and_(

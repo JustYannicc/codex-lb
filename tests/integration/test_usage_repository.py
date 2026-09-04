@@ -9,7 +9,8 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
-from app.core.utils.time import utcnow
+from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
@@ -45,19 +46,22 @@ def _dialect_name(session: AsyncSession) -> str:
 
 
 @pytest.mark.asyncio
-async def test_reset_transition_candidate_returns_only_marker_and_first_recovery_pair(db_setup) -> None:
+async def test_reset_transition_candidate_scans_past_interim_old_deadline_dip(db_setup) -> None:
+    """An interim sub-100 sample with the old deadline must not truncate the scan."""
     del db_setup
     account = _make_account("acc_bounded_reset_candidate")
     now = utcnow()
-    expected_reset_at = int(now.timestamp()) + 7 * 24 * 60 * 60
+    since = now - timedelta(seconds=120)
+    old_reset_at = naive_utc_to_epoch(now) - 30
+    new_reset_at = old_reset_at + 7 * 24 * 60 * 60
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
         repo = UsageRepository(session)
         for offset, used_percent, reset_at in (
-            (1, 100.0, expected_reset_at),
-            (2, 100.0, expected_reset_at),
-            (3, 100.0, expected_reset_at + 7 * 24 * 60 * 60),
-            (4, 0.0, expected_reset_at + 7 * 24 * 60 * 60),
+            (-100, 100.0, old_reset_at),
+            (-80, 99.0, old_reset_at),
+            (-50, 100.0, old_reset_at),
+            (10, 0.0, new_reset_at),
         ):
             await repo.add_entry(
                 account.id,
@@ -71,17 +75,23 @@ async def test_reset_transition_candidate_returns_only_marker_and_first_recovery
         rows = await repo.reset_transition_candidate(
             account.id,
             "secondary",
-            now,
-            expected_reset_at=expected_reset_at,
+            since,
+            expected_reset_at=old_reset_at,
             reset_at_tolerance_seconds=5,
+            min_reset_jump_seconds=60,
         )
 
-    assert len(rows) == 3
     assert [(row.used_percent, row.reset_at) for row in rows] == [
-        (100.0, expected_reset_at),
-        (100.0, expected_reset_at + 7 * 24 * 60 * 60),
-        (0.0, expected_reset_at + 7 * 24 * 60 * 60),
+        (100.0, old_reset_at),
+        (0.0, new_reset_at),
     ]
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        rows,
+        expected_reset_at=old_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+    assert evidence is not None
+    assert (evidence.before.used_percent, evidence.after.used_percent) == (100.0, 0.0)
 
 
 class _TrackedSqliteConnection:

@@ -73,6 +73,7 @@ class _DummyRepo:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool:
         latest = self.accounts_by_id.get(account_id)
         if latest is not None and (
@@ -2553,6 +2554,7 @@ class _StatusCasAlwaysMissRepo(_DummyRepo):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool:
         # The conditional CAS is always conditioned on the freshly observed
         # ciphertext; record it and miss to model the storm.
