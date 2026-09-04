@@ -411,6 +411,14 @@ async def reconcile_recoverable_account_statuses(
             and blocked_at == account.blocked_at
         ):
             continue
+        if not await _recovery_usage_watermark_is_current(
+            account=account,
+            usage_repo=usage_repo,
+            expected_primary=latest_primary.get(account.id),
+            expected_secondary=latest_secondary.get(account.id),
+            expected_monthly=monthly_entry,
+        ):
+            continue
         updated = await accounts_repo.update_status_if_current(
             account.id,
             status,
@@ -431,6 +439,39 @@ async def reconcile_recoverable_account_statuses(
         account.blocked_at = blocked_at
         recovered += 1
     return recovered
+
+
+def _usage_history_identity(entry: UsageHistory | None) -> tuple[int | None, datetime | None] | None:
+    if entry is None:
+        return None
+    return (entry.id, entry.recorded_at)
+
+
+async def _recovery_usage_watermark_is_current(
+    *,
+    account: Account,
+    usage_repo: _LatestUsageRepository,
+    expected_primary: UsageHistory | None,
+    expected_secondary: UsageHistory | None,
+    expected_monthly: UsageHistory | None,
+) -> bool:
+    account_ids = [account.id]
+    current_primary = await usage_repo.latest_by_account(window="primary", account_ids=account_ids)
+    current_secondary = await usage_repo.latest_by_account(window="secondary", account_ids=account_ids)
+    current_monthly = await usage_repo.latest_by_account(window="monthly", account_ids=account_ids)
+    if _usage_history_identity(current_primary.get(account.id)) != _usage_history_identity(expected_primary):
+        return False
+    expected_long = _select_long_window_entry(
+        account=account,
+        monthly_entry=expected_monthly,
+        secondary_entry=expected_secondary,
+    )
+    current_long = _select_long_window_entry(
+        account=account,
+        monthly_entry=current_monthly.get(account.id),
+        secondary_entry=current_secondary.get(account.id),
+    )
+    return _usage_history_identity(current_long) == _usage_history_identity(expected_long)
 
 
 def _confirmed_early_long_window_reset_recovery(

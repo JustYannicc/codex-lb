@@ -27,6 +27,8 @@ from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManage
 
 pytestmark = pytest.mark.unit
 
+_UNSET = object()
+
 
 @pytest.fixture(autouse=True)
 def _clear_refresh_state() -> None:
@@ -73,7 +75,7 @@ class _DummyRepo:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
-        expected_plan_type: str | None | object = None,
+        expected_plan_type: str | None | object = _UNSET,
     ) -> bool:
         latest = self.accounts_by_id.get(account_id)
         if latest is not None and (
@@ -84,6 +86,7 @@ class _DummyRepo:
                 expected_refresh_token_encrypted is not None
                 and latest.refresh_token_encrypted != expected_refresh_token_encrypted
             )
+            or (expected_plan_type is not _UNSET and latest.plan_type != expected_plan_type)
         ):
             return False
         self.status_payload = {
