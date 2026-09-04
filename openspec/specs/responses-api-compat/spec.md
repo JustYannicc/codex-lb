@@ -3682,6 +3682,28 @@ when `previous_response_id` is absent: an unregistered `turn_*` or
 `http_turn_*` marker MUST fail with `turn_state_owner_unavailable` before generic
 account selection, unless a resolved turn-state owner or an independent hard
 owner such as a file pin constrains the request.
+When an authenticated internal owner forward carries a synthesized marker, the
+`x-codex-bridge-synthesized-turn-state-signature` MUST bind that marker to the
+posted body and context. The existing `x-codex-bridge-signature-v2`
+tools-bound signature MUST retain its pre-marker field shape so an older owner
+can verify marker-bearing forwards, including forwards carrying file-owner
+proof. When no synthesized marker is present, the marker field MUST be omitted
+from every signing shape and the marker-proof header MUST NOT be emitted, preserving
+pre-marker v2 owner verification.
+
+#### Scenario: Marker provenance stays compatible during owner forwarding
+
+- **GIVEN** an updated origin forwards a request with a synthesized marker and a file-owner proof
+- **WHEN** a pre-marker owner verifies the `x-codex-bridge-signature-v2` header
+- **THEN** that header matches the pre-marker signing shape and the owner accepts the forward
+- **WHEN** an updated owner verifies the same forward
+- **THEN** the additive `x-codex-bridge-synthesized-turn-state-signature` proves the marker and the owner accepts it
+
+#### Scenario: Marker-free owner forwarding keeps the pre-marker signing shape
+
+- **GIVEN** an owner forward carries no synthesized marker
+- **WHEN** the origin emits the tools-bound v2 signature
+- **THEN** the signing shape omits the marker field and the marker-proof header is absent
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
