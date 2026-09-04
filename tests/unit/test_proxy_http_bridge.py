@@ -13964,6 +13964,78 @@ async def test_stream_via_http_bridge_classifies_anchorless_full_resend_and_quar
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_classifies_full_resend_before_continuity_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The payload-shape guard runs before legacy or durable continuity I/O."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [
+                {"role": "user", "content": "first"},
+                {"role": "user", "content": "second"},
+            ],
+        }
+    )
+    events: list[str] = []
+
+    def classify(_payload: proxy_service.ResponsesRequest) -> bool:
+        events.append("classify")
+        return True
+
+    async def legacy_lookup(**_kwargs: Any) -> None:
+        events.append("legacy")
+        return None
+
+    async def durable_lookup(**_kwargs: Any) -> None:
+        events.append("durable")
+        raise ProxyResponseError(502, openai_error("lookup_failed", "stop after ordering assertion"))
+
+    async def settings_get() -> SimpleNamespace:
+        events.append("settings")
+        return SimpleNamespace(
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=1800,
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+            http_responses_session_bridge_gateway_safe_mode=False,
+        )
+
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_payload_looks_like_full_resend", classify)
+    monkeypatch.setattr(http_bridge_streaming_module, "_legacy_forward_anchor_lookup", legacy_lookup)
+    service._durable_bridge = cast(Any, SimpleNamespace(lookup_request_targets=durable_lookup))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(get=settings_get),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    with pytest.raises(ProxyResponseError, match="Proxy response error"):
+        async for _chunk in service._stream_via_http_bridge_impl(
+            payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert events == ["classify", "settings", "legacy", "durable"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("suffix_items", "pending_tool_calls", "preserves_full_resend", "forwardable_owner"),
     [
@@ -34941,6 +35013,8 @@ async def test_http_bridge_retry_circuit_poison_overflow_fails_closed_for_unstor
         http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key)
         for session in sessions
     )
+    unrelated_key = _make_bridge_session(key_value="quarantine-poison-unrelated")
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, unrelated_key.key)
     assert all(session.quarantined for session in sessions[:max_entries])
     assert all(not session.quarantined for session in sessions[max_entries:])
     assert {key: entry.generation for key, entry in registry.items()} == retained_generations
