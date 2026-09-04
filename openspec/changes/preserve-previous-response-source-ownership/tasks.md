@@ -12,6 +12,7 @@
 - [x] 2.6 Use TypedDicts for the authenticated forwarding-signature payload shape.
 - [x] 2.7 Require API-key-scoped synthesized-marker provenance or an independent hard owner before compact owner-miss fallback.
 - [x] 2.8 Apply the synthesized-marker provenance guard to compact requests without `previous_response_id`.
+- [x] 2.9 Preserve the pre-marker v2 signing shape for marker-bearing owner forwards and add an additive marker-proof signature.
 
 ## 3. Regression Coverage
 
@@ -20,6 +21,7 @@
 - [x] 3.3 Add direct WebSocket regressions for subscription-owner routing and canonical source-owner HTTP fallback.
 - [x] 3.4 Cover unregistered synthetic-shaped compact turn state with a missing previous-response owner.
 - [x] 3.5 Cover unregistered synthetic-shaped compact turn state without `previous_response_id`.
+- [x] 3.6 Cover marker-bearing file-owner forwards, marker-proof tampering, and marker-free pre-marker signing shapes.
 
 ## 4. Verification
 

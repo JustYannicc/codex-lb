@@ -37,6 +37,18 @@ The reuse guard will run after the existing prior-response owner resolution. The
 
 Alternative considered: persist a separate source-response-ID index. Rejected for this change because the configured model source already identifies the only available source route; the missing decision is whether recorded subscription ownership must veto it.
 
+### Keep marker provenance additive to the v2 owner-forward signature
+
+The existing `x-codex-bridge-signature-v2` field set is already a rolling-upgrade
+wire contract. Adding the synthesized marker to that digest would make updated
+origins incompatible with pre-marker owners whenever a forward also carries a
+file-owner proof, because those owners reject an invalid tools-bound signature
+before their legacy fallback. The marker is therefore authenticated by the
+additive `x-codex-bridge-synthesized-turn-state-signature` header while the
+existing v2 shape remains unchanged. Updated owners require both signatures
+when a marker is present; pre-marker owners ignore the additive header and
+continue to verify the original v2 digest.
+
 ### Preserve fail-closed lookup behavior
 
 An owner miss and source-catalog unavailability are distinct states. Known subscription-model misses fail closed unless the sole-candidate compatibility fallback applies; source-owned HTTP requests remain source-routed. Source-catalog unavailability preserves the existing direct WebSocket subscription fallback. Owner errors use the sanitized `previous_response_owner_unavailable` contract. Compact settles any API-key reservation before emitting diagnostics or leaving the owner-miss path; a confirmed fail-safe release preserves the original owner error, while an unconfirmed settlement failure propagates.
