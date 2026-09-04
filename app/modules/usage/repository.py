@@ -926,6 +926,77 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def reset_transition_candidate(
+        self,
+        account_id: str,
+        window: str,
+        since: datetime,
+        *,
+        expected_reset_at: int,
+        reset_at_tolerance_seconds: int,
+    ) -> list[UsageHistory]:
+        """Return a reset marker and the first recovery candidate pair after it."""
+        baseline_stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.recorded_at > since,
+                UsageHistory.reset_at.is_not(None),
+                UsageHistory.reset_at.between(
+                    expected_reset_at - reset_at_tolerance_seconds,
+                    expected_reset_at + reset_at_tolerance_seconds,
+                ),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        baseline = (await self._session.execute(baseline_stmt)).scalar_one_or_none()
+        if baseline is None:
+            return []
+
+        after_stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.used_percent < 100.0,
+                or_(
+                    UsageHistory.recorded_at > baseline.recorded_at,
+                    and_(
+                        UsageHistory.recorded_at == baseline.recorded_at,
+                        UsageHistory.id > baseline.id,
+                    ),
+                ),
+            )
+            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
+            .limit(1)
+        )
+        after = (await self._session.execute(after_stmt)).scalar_one_or_none()
+        if after is None:
+            return [baseline]
+
+        before_stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                or_(
+                    UsageHistory.recorded_at < after.recorded_at,
+                    and_(
+                        UsageHistory.recorded_at == after.recorded_at,
+                        UsageHistory.id < after.id,
+                    ),
+                ),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        before = (await self._session.execute(before_stmt)).scalar_one_or_none()
+        if before is None or before.id == baseline.id:
+            return [baseline, after]
+        return [baseline, before, after]
+
     async def bulk_history_since(
         self,
         account_ids: list[str],

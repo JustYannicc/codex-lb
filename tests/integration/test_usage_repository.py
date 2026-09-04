@@ -44,6 +44,46 @@ def _dialect_name(session: AsyncSession) -> str:
     return bind.dialect.name if bind is not None else "sqlite"
 
 
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_returns_only_marker_and_first_recovery_pair(db_setup) -> None:
+    del db_setup
+    account = _make_account("acc_bounded_reset_candidate")
+    now = utcnow()
+    expected_reset_at = int(now.timestamp()) + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for offset, used_percent, reset_at in (
+            (1, 100.0, expected_reset_at),
+            (2, 100.0, expected_reset_at),
+            (3, 100.0, expected_reset_at + 7 * 24 * 60 * 60),
+            (4, 0.0, expected_reset_at + 7 * 24 * 60 * 60),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="secondary",
+                recorded_at=now + timedelta(seconds=offset),
+                reset_at=reset_at,
+                window_minutes=10_080,
+            )
+
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            now,
+            expected_reset_at=expected_reset_at,
+            reset_at_tolerance_seconds=5,
+        )
+
+    assert len(rows) == 3
+    assert [(row.used_percent, row.reset_at) for row in rows] == [
+        (100.0, expected_reset_at),
+        (100.0, expected_reset_at + 7 * 24 * 60 * 60),
+        (0.0, expected_reset_at + 7 * 24 * 60 * 60),
+    ]
+
+
 class _TrackedSqliteConnection:
     def __init__(self, conn: sqlite3.Connection, closed: list[bool]) -> None:
         self._conn = conn

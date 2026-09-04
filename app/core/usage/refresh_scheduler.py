@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
-from app.core.plan_types import normalize_account_plan_type
+from app.core.config.settings import get_settings
+from app.core.plan_types import normalize_account_plan_type, normalize_capacity_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan
@@ -61,6 +62,7 @@ class _RecoverableAccountsRepository(Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool: ...
 
 
@@ -418,6 +420,7 @@ async def reconcile_recoverable_account_statuses(
             expected_deactivation_reason=account.deactivation_reason,
             expected_reset_at=account.reset_at,
             expected_blocked_at=account.blocked_at,
+            expected_plan_type=account.plan_type,
         )
         if not updated:
             continue
@@ -465,7 +468,8 @@ def _confirmed_early_long_window_reset_recovery(
         return False
     if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
         return False
-    primary_capacity = capacity_for_plan(account.plan_type, "primary")
+    plan_type = normalize_capacity_plan_type(account.plan_type)
+    primary_capacity = capacity_for_plan(plan_type, "primary")
     if primary_capacity is not None and primary_capacity > 0:
         if latest_primary is None:
             return False
@@ -513,7 +517,21 @@ async def _resolve_long_window_reset_evidence(
         window = _recovery_long_window(account)
         if window is None:
             continue
-        history = await usage_repo.history_since(account.id, window, since)
+        history = await usage_repo.reset_transition_candidate(
+            account.id,
+            window,
+            since,
+            expected_reset_at=account.reset_at,
+            reset_at_tolerance_seconds=_BLOCK_RESET_MATCH_TOLERANCE_SECONDS,
+        )
+        current = evidence.get(account.id)
+        if current is not None and history:
+            evidence[account.id] = _UsageResetEvidence(
+                baseline=history[0],
+                before=current.before,
+                after=current.after,
+            )
+            continue
         persisted = _latest_confirmed_reset_transition_after_baseline(
             [entry for entry in history if entry.recorded_at > since],
             expected_reset_at=account.reset_at,
@@ -561,15 +579,17 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> UsageHistory | None:
-    if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
+    plan_type = normalize_capacity_plan_type(account.plan_type)
+    if monthly_entry is not None and capacity_for_plan(plan_type, "monthly") is not None:
         return monthly_entry
     return secondary_entry
 
 
 def _recovery_long_window(account: Account) -> str | None:
-    if capacity_for_plan(account.plan_type, "monthly") is not None:
+    plan_type = normalize_capacity_plan_type(account.plan_type)
+    if capacity_for_plan(plan_type, "monthly") is not None:
         return "monthly"
-    if capacity_for_plan(account.plan_type, "secondary") is not None:
+    if capacity_for_plan(plan_type, "secondary") is not None:
         return "secondary"
     return None
 
