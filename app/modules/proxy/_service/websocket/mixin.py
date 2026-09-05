@@ -4081,6 +4081,12 @@ class _WebSocketMixin:
         if account:
             request_state.websocket_stream_lease = selection.lease
             return account
+        security_retry_pool_exhausted = bool(
+            require_security_work_authorized
+            and not require_preferred_account
+            and request_state.error_code_override == _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
+            and selection.error_code == SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
+        )
         durable_capability_pool_missing = bool(
             require_security_work_authorized
             and request_state.durable_capability_lineage_required
@@ -4090,6 +4096,7 @@ class _WebSocketMixin:
         )
         if (
             defer_no_account_error
+            and not security_retry_pool_exhausted
             and not durable_capability_pool_missing
             and not _facade()._is_local_account_cap_code(selection.error_code)
         ):
@@ -4107,7 +4114,7 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if error_code != SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED and (
+        if security_retry_pool_exhausted or (
             durable_capability_pool_missing
             or (require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE)
         ):
@@ -4118,7 +4125,9 @@ class _WebSocketMixin:
                 api_key=api_key,
                 request_state=request_state,
             )
-            return None
+            # Selection already sent the terminal error. Do not also emit the
+            # last connection failure from the caller's failover loop.
+            raise _WebSocketConnectFailureEmitted
         if require_preferred_account and preferred_account_id is not None:
             if _facade()._is_local_account_cap_code(error_code):
                 status_code, error_payload = selection_failure_response(selection)

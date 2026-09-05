@@ -13,6 +13,7 @@
 - [x] 2.7 Use shape-based synthesized-marker compatibility for owner-miss fallback while retaining API-key scoping and independent hard-owner checks.
 - [x] 2.8 Apply shape-based marker compatibility to compact requests without `previous_response_id`; retain fail-closed handling for blank and non-synthetic client markers.
 - [x] 2.9 Preserve the pre-marker v2 signing shape for marker-bearing owner forwards and add an additive marker-proof signature.
+- [x] 2.10 Restore the WebSocket missing-authorized-pool warning and original security-error handling after authorized retry exhaustion, preserving account-model rejection and hard-owner contracts.
 
 ## 3. Regression Coverage
 
@@ -22,6 +23,7 @@
 - [x] 3.4 Cover unregistered synthetic-shaped compact turn state with a missing previous-response owner through the sole-candidate compatibility path.
 - [x] 3.5 Cover unregistered synthetic-shaped compact turn state without `previous_response_id` through normal compact selection.
 - [x] 3.6 Cover marker-bearing file-owner forwards, marker-proof tampering, and marker-free pre-marker signing shapes.
+- [x] 3.7 Exercise authorized-pool exhaustion through downstream WebSocket requests, including pre-created failures and strict replay boundaries.
 
 ## 4. Verification
 

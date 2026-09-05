@@ -2000,6 +2000,15 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
 - **AND** codex-lb either continues normal account failover when safe or returns the original security-work authorization error when normal failover is exhausted or unsafe
 
+#### Scenario: WebSocket authorized retry pool is exhausted after an account failure
+
+- **GIVEN** a safely replayable downstream WebSocket request received a security-work authorization error and retried in the authorized account pool
+- **WHEN** authorized accounts fail before response creation, including authentication events or connection failures, and selection exhausts that pool
+- **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"` and returns the original security-work authorization error exactly once
+- **AND** the client MUST NOT receive the internal `security_work_authorized_accounts_exhausted` selection error
+- **AND** a later independent request on the same WebSocket can acquire the response-create gate and complete
+- **AND** this handling MUST NOT replace an account-model rejection fallback or relax owner-pinning and output-exposure replay guards
+
 #### Scenario: Pinned requests are not moved to another account
 
 - **WHEN** a security-work authorization error occurs for a request pinned by file ownership or previous-response ownership
