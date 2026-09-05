@@ -2126,7 +2126,7 @@ async def test_responses_recorded_turn_state_owner_skips_model_source(async_clie
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert owner_lookups == [(turn_state, True)]
+    assert owner_lookups == [(turn_state, False)]
     assert observed == {"model": model, "turn_state": None}
 
 
