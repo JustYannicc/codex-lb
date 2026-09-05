@@ -47,9 +47,7 @@ from app.core.metrics.prometheus import (
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.core.utils.shared_future import wait_on_shared_future
-from app.db.models import (
-    StickySessionKind,
-)
+from app.db.models import StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,

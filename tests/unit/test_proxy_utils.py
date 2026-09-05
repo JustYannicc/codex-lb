@@ -51027,6 +51027,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
     }
     original_text = json.dumps(original_payload, separators=(",", ":"))
     fresh_text = json.dumps(fresh_payload, separators=(",", ":"))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_file_owner_required",
         model="gpt-5.1",
@@ -51044,6 +51045,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
         fresh_upstream_request_is_retry_safe=True,
         input_item_count=1,
         input_full_fingerprint=proxy_service._fingerprint_input_items(original_input),
+        event_queue=event_queue,
     )
     owner_lease = proxy_service.AccountLease(
         lease_id="lease_existing_file_owner_stream",
@@ -51071,6 +51073,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
     )
     selection_calls: list[dict[str, object]] = []
     release_account_lease = AsyncMock()
+    handle_stream_error = AsyncMock()
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         selection_calls.append(dict(kwargs))
@@ -51090,6 +51093,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement_account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(
         service,
@@ -51122,6 +51126,17 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
     assert request_state.preferred_account_id == owner_account.id
     assert request_state.excluded_account_ids == set()
     assert request_state.error_code_override == "previous_response_owner_unavailable"
+    event_block = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert event_block is not None
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+    payload = parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "previous_response_owner_unavailable"
+    handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio

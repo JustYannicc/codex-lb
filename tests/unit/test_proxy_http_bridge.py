@@ -31625,7 +31625,7 @@ async def test_http_bridge_retry_circuit_stale_generation_cannot_release_reused_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retry_circuit_raw_previous_response_not_found_counts_as_failure() -> None:
+async def test_http_bridge_retry_circuit_ignores_client_previous_response_not_found() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-raw-previous-response-not-found")
     now = time.monotonic()
@@ -31652,12 +31652,12 @@ async def test_http_bridge_retry_circuit_raw_previous_response_not_found_counts_
         probe_owner=probe_token,
     )
 
-    assert consecutive_failures == 3
-    assert state.consecutive_failures == 3
-    assert state.half_open_until == 0.0
-    assert state.half_open_owner_session is None
-    assert state.half_open_owner_token is None
-    persist_retry_circuit.assert_awaited_once()
+    assert consecutive_failures is None
+    assert state.consecutive_failures == 2
+    assert state.half_open_until > time.monotonic()
+    assert state.half_open_owner_session is session
+    assert state.half_open_owner_token is probe_token
+    persist_retry_circuit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -39368,17 +39368,16 @@ async def test_eventless_terminal_error_records_attempt_scoped_circuit_strike(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("proxy_injected", [False, True])
-async def test_terminal_previous_response_rejection_only_protects_proxy_injected_safe_replay(
+async def test_terminal_previous_response_rejection_with_safe_replay_skips_circuit_strike(
     monkeypatch: pytest.MonkeyPatch,
     proxy_injected: bool,
 ) -> None:
-    """A safe client full resend must not hide a raw anchor rejection.
+    """A verified full resend suppresses retry-circuit accounting.
 
-    The terminal path rewrites the public event to ``stream_incomplete``. Its
-    strike decision still has to use the original rejection provenance: a
-    proxy-injected anchor may return the probe, while a client-supplied anchor
-    remains genuine upstream evidence even when an anchor-free replay is
-    available.
+    The terminal path rewrites the public event to ``stream_incomplete``. A
+    stale-anchor rejection with a verified anchor-free replay follows the
+    existing safe-replay path regardless of whether the anchor came from the
+    proxy or the client.
     """
     service, session, request_state = _make_terminal_error_bridge_fixture(
         request_id=f"req-terminal-provenance-{proxy_injected}",
@@ -39399,13 +39398,7 @@ async def test_terminal_previous_response_rejection_only_protects_proxy_injected
 
     await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
 
-    if proxy_injected:
-        record_failure.assert_not_awaited()
-    else:
-        record_failure.assert_awaited_once()
-        assert record_failure.await_args is not None
-        assert record_failure.await_args.kwargs["detail"] == "stream_incomplete"
-        assert record_failure.await_args.kwargs["proxy_continuity_provenance"] is False
+    record_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio

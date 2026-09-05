@@ -14548,18 +14548,21 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert "previous_response_id" not in replay_payload
         assert replay_payload["input"] == expected_replay_input
         retained_circuit = cast(Any, service)._http_bridge_retry_circuits[session.key]
-        # This fixture sends a client-supplied previous_response_id. Its
-        # explicit previous_response_not_found remains genuine upstream
-        # evidence, even when a verified full resend is available, so it adds
-        # a strike to the seeded circuit. (A proxy-injected anchor is the only
-        # continuity-neutral stale rejection.)
-        assert retained_circuit.consecutive_failures >= 3
+        if circuit_advances_during_admission:
+            assert retained_circuit.consecutive_failures >= 3
+        else:
+            # A verified full resend suppresses retry-circuit accounting for
+            # the stale-anchor recovery, including a client-supplied anchor.
+            assert retained_circuit.consecutive_failures == 2
         if not half_open_probe_return:
             assert retained_circuit.cooldown_until > time.monotonic()
         else:
-            assert retained_circuit.cooldown_until > time.monotonic()
-            assert retained_circuit.half_open_until == 0.0
-            assert retained_circuit.half_open_owner_session is None
+            # The client-supplied stale anchor is not proxy continuity loss:
+            # its safe full resend does not strike or return the active probe.
+            assert retained_circuit.cooldown_until == 0.0
+            assert retained_circuit.half_open_until > time.monotonic()
+            assert retained_circuit.half_open_owner_session is session
+            assert retained_circuit.half_open_owner_token is not None
         durable_clear_retry_circuit.assert_not_awaited()
         clear_http_bridge_quarantine.assert_called_once()
     else:

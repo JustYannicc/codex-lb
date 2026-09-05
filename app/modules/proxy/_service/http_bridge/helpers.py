@@ -279,6 +279,28 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                 exc_info=True,
             )
 
+    async def settle_pending_owner_unavailable() -> None:
+        # The reconnect failure is a proxy-owned continuity loss, not an
+        # upstream stream failure. Settle the detached requests with the
+        # stable owner-unavailable contract before the generic close path
+        # runs; otherwise close would pop them first and publish
+        # ``stream_incomplete`` (and potentially penalize the owner account),
+        # leaving the typed override assigned by the caller too late.
+        await run_step(
+            "owner_unavailable_pending_requests",
+            service._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=session.pending_requests,
+                pending_lock=session.pending_lock,
+                error_code="previous_response_owner_unavailable",
+                error_message="Previous response owner account is unavailable; retry later.",
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+                penalize_account=False,
+            ),
+        )
+
     async def cleanup() -> None:
         # A submitter can append until it observes the same lifecycle state.
         # Detach and disarm under one ownership interval so the probe cannot
@@ -311,6 +333,7 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                         release_probe(session, detail=detail, probe_owner=request_state),
                     )
                 finally:
+                    await settle_pending_owner_unavailable()
                     # This terminal path must finish the cancellation-
                     # deferred resource owner before the caller receives its
                     # stable typed continuity error.  The bounded wrapper
@@ -322,6 +345,7 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                 # and disarmed.  The close still runs so its resources remain
                 # owned and discoverable while the transition error bubbles
                 # to the caller.
+                await settle_pending_owner_unavailable()
                 await service._close_http_bridge_session(session)
 
     cleanup_task = asyncio.create_task(cleanup())

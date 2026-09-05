@@ -3627,9 +3627,9 @@ class _HTTPBridgeStreamingMixin:
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                     probe_owner=request_state,
                     preserve_error=exc,
-                    # A denied anchor is continuity-neutral only when this
-                    # bridge injected it. A client-supplied id is genuine
-                    # upstream evidence and must retain its circuit strike.
+                    # Only a proxy-injected anchor is proxy continuity
+                    # evidence. A client-supplied stale anchor must not
+                    # release the active probe lease or alter circuit state.
                     proxy_continuity_loss_detail=(
                         "previous_response_not_found" if request_state.proxy_injected_previous_response_id else None
                     ),

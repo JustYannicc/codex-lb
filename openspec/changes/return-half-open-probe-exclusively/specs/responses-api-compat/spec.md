@@ -111,14 +111,15 @@ The proxy MUST NOT increment or persist retry-circuit failures for explicitly
 identified proxy continuity-ownership loss, including
 `continuity_owner_unavailable`, `previous_response_owner_unavailable`,
 `bridge_owner_unreachable`, and `bridge_instance_mismatch`. A
-`previous_response_not_found` or `bridge_previous_response_not_found` detail is
-continuity-neutral only when the request state explicitly proves that the
-rejected anchor was injected by this proxy; a raw or client-supplied detail
-MUST remain genuine upstream failure evidence. The proxy MUST continue to
+`previous_response_not_found` or `bridge_previous_response_not_found` detail
+MUST remain outside retry-circuit failure accounting when it is raw or
+client-supplied. When the request state explicitly proves that the rejected
+anchor was injected by this proxy, the detail MAY be treated as continuity-
+neutral and return the active local probe. The proxy MUST continue to
 increment and persist genuine upstream `stream_incomplete`,
-`stream_idle_timeout`, `clean_close`, and raw previous-response rejection
-failures when their attempt is eligible. Anchor replay and error-provenance
-policy remain governed by their existing contracts.
+`stream_idle_timeout`, and `clean_close` failures when their attempt is
+eligible. Anchor replay and error-provenance policy remain governed by their
+existing contracts.
 
 #### Scenario: Proxy continuity loss is neutral
 
@@ -128,13 +129,14 @@ policy remain governed by their existing contracts.
 - **THEN** the circuit count does not increase
 - **AND** the owner lease is returned when the reporting session owns it
 
-#### Scenario: Raw previous-response rejection remains genuine
+#### Scenario: Client previous-response rejection does not strike the circuit
 
 - **GIVEN** an eligible local half-open probe
 - **WHEN** the upstream rejects a raw or client-supplied
   `previous_response_not_found` anchor without proxy continuity provenance
-- **THEN** the circuit records a genuine failure strike
-- **AND** the active half-open lease is not returned as continuity-neutral
+- **THEN** the retry-circuit failure count is unchanged
+- **AND** no retry-circuit failure row is persisted
+- **AND** the active half-open lease remains owned by its original probe
 
 #### Scenario: Genuine upstream failure still opens the circuit
 
