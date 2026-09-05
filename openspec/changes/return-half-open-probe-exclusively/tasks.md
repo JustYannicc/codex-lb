@@ -13,13 +13,17 @@
   equal/newer active local half-open leases.
 - [x] Record the owning session, return only that probe as an elapsed cooldown,
   fence each release by session/token/deadline/process-local generation,
-  classify explicitly proven proxy continuity loss as neutral, and preserve
-  genuine upstream strikes.
+  retain live owners past the default lease through `bridge_request_deadline`,
+  fence late completion by durable episode plus local generation, classify
+  explicitly proven proxy continuity loss as neutral, and preserve genuine
+  upstream strikes.
 - [x] Order proxy continuity reset lifecycle ownership, detach, disarm, release,
-  settlement, and close through cancellation-safe cleanup.
+  settlement, and close through cancellation-safe cleanup; retain failed
+  account-lease handles for explicit retry after transport close.
 - [x] Apply the same detach/disarm-before-release/close ordering to an in-place
-  reconnect whose required continuity owner is unavailable, and preserve its
-  typed owner error when selected-account lease cleanup fails.
+  reconnect whose required continuity owner is unavailable, preserve its typed
+  owner error when selected-account lease cleanup fails, and keep retained
+  account-release retries single-flight.
 
 ## Coverage
 
