@@ -1176,6 +1176,8 @@ async def responses(
             route="responses",
             raw_model=raw_source_model,
             require_streaming=not backend_non_streaming_requested,
+            context=context,
+            previous_response_id=responses_payload.previous_response_id,
         )
         if disabled_denial is not None:
             return disabled_denial
@@ -1384,6 +1386,8 @@ async def v1_responses(
             route="responses",
             raw_model=raw_source_model,
             require_streaming=responses_payload.stream is True,
+            context=context,
+            previous_response_id=responses_payload.previous_response_id,
         )
         if disabled_denial is not None:
             return disabled_denial
@@ -4581,7 +4585,7 @@ async def _select_responses_model_source_with_continuity(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
-    if payload.previous_response_id is None:
+    if source_selection is None or payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
         previous_response_id=payload.previous_response_id,
@@ -4603,6 +4607,8 @@ async def _disabled_model_source_denial(
     raw_model: str | None = None,
     require_streaming: bool = False,
     headers: Mapping[str, str] | None = None,
+    context: ProxyContext | None = None,
+    previous_response_id: str | None = None,
 ) -> JSONResponse | None:
     """Refuse a request whose model source exists but is switched off.
 
@@ -4648,6 +4654,15 @@ async def _disabled_model_source_denial(
     )
     if selection is None:
         return None
+    if route == "responses" and context is not None and previous_response_id is not None:
+        owner_account_id = await context.service._resolve_websocket_previous_response_owner(
+            previous_response_id=previous_response_id,
+            api_key=api_key,
+            session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
+            surface="http_source_route",
+        )
+        if owner_account_id is not None:
+            return None
     source, matched_model = selection
     # The source name is operator-facing configuration, not a client-visible
     # identifier, so the envelope names the model and the condition only.

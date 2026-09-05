@@ -311,7 +311,7 @@ async def test_proxy_compact_blank_turn_state_blocks_sole_candidate_fallback(asy
     ],
     ids=["client-turn-shape", "client-http-turn-shape"],
 )
-async def test_proxy_compact_unregistered_synthetic_turn_state_without_previous_response_fails_closed(
+async def test_proxy_compact_unregistered_synthetic_turn_state_without_previous_response_uses_sole_candidate(
     async_client,
     monkeypatch,
     turn_state: str,
@@ -355,9 +355,9 @@ async def test_proxy_compact_unregistered_synthetic_turn_state_without_previous_
         },
     )
 
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "turn_state_owner_unavailable"
-    assert compact_calls == []
+    assert response.status_code == 200, response.text
+    assert response.json()["object"] == "response.compaction"
+    assert compact_calls == [raw_account_id]
     turn_state_owner_lookup.assert_awaited_once()
     assert turn_state_owner_lookup.await_args is not None
     assert turn_state_owner_lookup.await_args.kwargs["fail_on_missing"] is False

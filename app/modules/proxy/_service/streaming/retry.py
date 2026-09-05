@@ -69,6 +69,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
+    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
@@ -397,11 +398,12 @@ class _StreamingRetryMixin:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
         turn_state_owner_account_id: str | None = None
         turn_state_header_present = _turn_state_header_present(headers)
         turn_state = _sticky_key_from_turn_state_header(headers)
-        synthesized_turn_state_provenance = turn_state is not None and turn_state == synthesized_turn_state
+        turn_state_is_synthesized = turn_state is not None and _is_synthesized_turn_state(turn_state)
         if turn_state is not None:
             # HTTP and WebSocket transports share the bridge turn-state index;
             # treating this as ordinary sticky input would cross replicas or
@@ -409,9 +411,10 @@ class _StreamingRetryMixin:
             turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                 turn_state=turn_state,
                 api_key=api_key,
-                # Token shape is not provenance. Only the exact marker carried
-                # by the authenticated bridge path may remain unresolved here.
-                fail_on_missing=not synthesized_turn_state_provenance,
+                # Synthetic markers are compatibility placeholders when their
+                # bridge alias is unavailable; non-synthetic and blank client
+                # values remain hard continuity constraints.
+                fail_on_missing=not turn_state_is_synthesized,
             )
         sticky_key_source = "none"
         if affinity.codex_session_source == "thread_header":
@@ -1158,10 +1161,10 @@ class _StreamingRetryMixin:
                 if preferred_account_id is None and turn_state_owner_account_id is None:
                     # File pins and unresolved client turn-state are hard
                     # continuity boundaries. A physically blank header still
-                    # counts as client input, while an authenticated exact
-                    # synthesized marker may use the compatibility fallback.
+                    # counts as client input, while a synthetic-shaped marker
+                    # may use the compatibility fallback.
                     if rewritten_file_account_id is not None or (
-                        turn_state_header_present and not synthesized_turn_state_provenance
+                        turn_state_header_present and not turn_state_is_synthesized
                     ):
                         selection_candidates: tuple[Account, ...] = ()
                     else:

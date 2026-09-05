@@ -472,31 +472,35 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
         "synthesized_turn_state",
         "preissued",
         "codex_session_affinity",
-        "expected_fail_closed",
     ),
     [
-        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, True, False),
-        (None, True, True, False),
-        (None, True, False, False),
-        (None, False, True, True),
-        (None, False, False, True),
+        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, True),
+        (None, True, True),
+        (None, True, False),
+        (None, False, True),
+        (None, False, False),
     ],
     ids=[
         "current-proxy-marker",
         "echoed-codex-proxy-marker",
         "echoed-v1-proxy-marker",
-        "client-spoof-codex",
-        "client-spoof-v1",
+        "unregistered-shaped-codex",
+        "unregistered-shaped-v1",
     ],
 )
-async def test_terminal_compaction_generated_turn_state_requires_exact_provenance(
+async def test_terminal_compaction_generated_turn_state_uses_shape_compatibility(
     synthesized_turn_state: str | None,
     preissued: bool,
     codex_session_affinity: bool,
-    expected_fail_closed: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the exact proxy marker can bypass unresolved turn ownership."""
+    """Synthetic-shaped markers keep the sole-candidate compatibility fallback.
+
+    The marker can arrive from a different process or replica without a local
+    provenance record. Its shape is still enough to identify a generated
+    placeholder; blank and non-synthetic client markers remain covered by the
+    fail-closed tests below and in the integration WebSocket lane.
+    """
     settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
@@ -506,8 +510,8 @@ async def test_terminal_compaction_generated_turn_state_requires_exact_provenanc
     service = _service()
     if preissued:
         # v1/responses keeps a synthesized marker out of forwarded headers on
-        # the first handshake.  Seed that exact shape so the reconnect case
-        # proves the marker was retained without trusting a client-only value.
+        # the first handshake. Seed the compatibility shape for the reconnect
+        # cases; the resolver below must not require a process-local record.
         preissued_headers = (
             {} if not codex_session_affinity else {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
         )
@@ -563,14 +567,9 @@ async def test_terminal_compaction_generated_turn_state_requires_exact_provenanc
         synthesized_turn_state=synthesized_turn_state,
     )
 
-    if expected_fail_closed:
-        list_selection_candidates.assert_not_awaited()
-        assert upstream.sent_text == []
-        assert any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
-    else:
-        list_selection_candidates.assert_awaited_once()
-        assert len(upstream.sent_text) == 1
-        assert not any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
+    list_selection_candidates.assert_awaited_once()
+    assert len(upstream.sent_text) == 1
+    assert not any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
 
 
 @pytest.mark.asyncio

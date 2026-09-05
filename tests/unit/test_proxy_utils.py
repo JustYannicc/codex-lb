@@ -5003,7 +5003,7 @@ async def test_compact_synthesized_turn_state_allows_file_pin_routing(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_compact_unregistered_synthesized_turn_state_blocks_owner_miss_fallback(
+async def test_compact_unregistered_synthesized_turn_state_uses_sole_owner_miss_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _make_proxy_settings()
@@ -5013,14 +5013,21 @@ async def test_compact_unregistered_synthesized_turn_state_blocks_owner_miss_fal
     owner_lookup = AsyncMock(return_value=None)
     previous_owner_lookup = AsyncMock(return_value=None)
     list_selection_candidates = AsyncMock(return_value=(account,))
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", owner_lookup)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", previous_owner_lookup)
     monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
-    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})),
+    )
 
     payload = ResponsesCompactRequest.model_validate(
         {
@@ -5031,17 +5038,20 @@ async def test_compact_unregistered_synthesized_turn_state_blocks_owner_miss_fal
         }
     )
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
+    result = await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
 
-    assert _proxy_error_code(exc_info.value) == "turn_state_owner_unavailable"
+    assert result.model_extra == {"output": []}
     owner_lookup.assert_awaited_once_with(
         turn_state=turn_state,
         api_key=None,
         fail_on_missing=False,
     )
     previous_owner_lookup.assert_awaited_once()
-    list_selection_candidates.assert_not_awaited()
+    list_selection_candidates.assert_awaited_once()
+    select_account.assert_awaited_once()
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["required_account_id"] == account.id
+    assert select_account.await_args.kwargs["required_account_is_ownership_constraint"] is True
 
 
 @pytest.mark.asyncio

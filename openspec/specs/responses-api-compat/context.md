@@ -219,6 +219,33 @@ HTTP bridge tracing archive IDs do not pin neutral requests. A real durable
 replaces that identity. Existing file pins and API-key settlement-before-health
 ordering remain independent invariants.
 
+## Continuity marker compatibility
+
+The proxy returns `turn_*` or `http_turn_*` values as first-turn continuity
+markers. They are useful client echoes, but they are not account-ownership
+proof: an alias can be absent after bridge eviction, a process restart, or a
+replica handoff. The normative routing rule is in the
+`Previous-response source routing follows proven ownership` requirement in
+`spec.md`.
+
+When a missing previous-response owner reaches the compatibility path and no
+independent hard owner is available, a marker-shaped value can continue only
+under the existing sole-eligible-account bound. This deliberately avoids
+requiring process-local issuance provenance, which would make valid HTTP bridge
+and direct WebSocket reconnects fail at topology or lifecycle boundaries. A
+registered marker still resolves to its recorded owner; a resolved
+previous-response owner or file pin remains authoritative. A physically present
+blank header and any non-synthetic marker stay hard client input and fail closed
+in the owner-miss path.
+
+For example, a client can echo `http_turn_<marker>` from an earlier HTTP
+response into a later compact request after the bridge alias has disappeared.
+With one eligible account, the request can use normal compact selection. In an
+owner-miss continuation, an opaque client marker, a blank header, a file pin,
+or an unavailable/ambiguous candidate set keeps the hard-owner or fail-closed
+rule in force. The same shape-based compatibility is used when a direct
+WebSocket continuation crosses an eviction, restart, or replica boundary.
+
 Streaming selection authorizes owner compatibility before opening upstream, but
 persists a new owner only after dispatch is observed. A transport failure that
 is positively classified as pre-dispatch therefore leaves the body unowned and

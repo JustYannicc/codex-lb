@@ -3658,30 +3658,26 @@ source ownership. An unavailable source-catalog lookup is distinct from an owner
 miss: the direct WebSocket path MUST preserve its existing subscription fallback
 instead of applying the successful-catalog precondition or converting the lookup
 failure into `previous_response_owner_unavailable`.
-A real client-supplied `x-codex-turn-state` is hard continuity evidence. When
-that token cannot be resolved to an owner in the requesting API-key scope, the
-proxy MUST fail closed and MUST NOT apply the sole-candidate fallback, even when
-exactly one subscription account is eligible. Proxy-synthesized first-turn
-placeholders (`turn_*` / `http_turn_*`) are exempt only when exact server-side
-issuance provenance is established in the requesting API-key scope, or when an
-independent hard owner (such as a recorded previous response or file pin)
-already constrains the request; an unregistered placeholder MUST NOT authorize
-generic owner-miss fallback. A registered placeholder MUST resolve to its
-recorded owner. For the same fail-closed decision, a physically present but blank
-`x-codex-turn-state` header MUST be treated as client input rather than as an
-omitted header and MUST NOT authorize synthesized provenance or sole-candidate
-fallback. For the HTTP bridge owner-miss fallback, that exception MUST be
-authorized by a server-generated marker carried in the authenticated internal
-forward; a client-supplied value matching the `turn_*` / `http_turn_*` shape
-MUST NOT qualify. On the direct Responses WebSocket path, the exception MUST
-require an exact match with the synthesized marker generated for that handshake
-or a server-side continuity record proving that the proxy previously issued the
-marker; matching the synthesized-token shape alone MUST NOT qualify.
-For compact requests, this fail-closed synthesized-marker rule MUST also apply
-when `previous_response_id` is absent: an unregistered `turn_*` or
-`http_turn_*` marker MUST fail with `turn_state_owner_unavailable` before generic
-account selection, unless a resolved turn-state owner or an independent hard
-owner such as a file pin constrains the request.
+A client-supplied nonblank `x-codex-turn-state` that does not match the
+proxy-synthesized marker shapes is hard continuity evidence. When that token
+cannot be resolved to an owner in the requesting API-key scope, the proxy MUST
+fail closed and MUST NOT apply the sole-candidate fallback, even when exactly
+one subscription account is eligible. Proxy-synthesized first-turn
+placeholders (`turn_*` / `http_turn_*`) are compatibility markers rather than
+hard account ownership. In an owner-miss continuation, when a marker alias is
+unavailable, a value matching either shape MUST use the same sole-candidate
+compatibility rule without requiring exact server-side issuance provenance; a
+registered marker MUST still resolve to its recorded owner. A resolved
+previous-response owner and an account-pinned file owner remain independent
+hard constraints, and marker shape
+MUST NOT override either owner or relax strict file routing. For the same
+fail-closed decision, a physically present but blank `x-codex-turn-state`
+header MUST be treated as client input rather than as an omitted header and
+MUST NOT authorize synthesized-marker compatibility or sole-candidate
+fallback. Shape-based marker compatibility applies across HTTP bridge forwards,
+direct Responses WebSocket reconnects, and compact request echoes when local
+marker aliases are unavailable; exact process-local issuance provenance is not
+required.
 When an authenticated internal owner forward carries a synthesized marker, the
 `x-codex-bridge-synthesized-turn-state-signature` MUST bind that marker to the
 posted body and context. The existing `x-codex-bridge-signature-v2`
@@ -3802,20 +3798,24 @@ pre-marker v2 owner verification.
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** no subscription account is selected and no upstream request is dispatched
 
-#### Scenario: Generated-looking turn state requires exact provenance
+#### Scenario: Synthetic-shaped turn state keeps the compatibility fallback
 
-- **GIVEN** a direct Responses WebSocket handshake generated a synthesized turn-state marker
-- **AND** the client supplies a different `x-codex-turn-state` that matches the synthesized-token shape
-- **AND** that client token has no owner in the requesting API-key scope
-- **AND** exactly one eligible subscription account remains
-- **WHEN** the client submits a direct Responses WebSocket continuation with a missing previous-response owner
-- **THEN** the proxy fails closed with `turn_state_owner_unavailable`
-- **AND** no subscription account is selected and no upstream request is dispatched
-- **BUT WHEN** the turn state exactly matches the marker generated for that handshake
-- **OR** server-side continuity state proves that the proxy issued the marker on an earlier handshake
-- **THEN** the unregistered first-turn placeholder may use the sole-candidate compatibility fallback
-- **AND** this provenance MUST survive an exact-marker reconnect on `/v1/responses`
-  without enabling Codex session affinity or restoring unrelated response or tool state
+- **GIVEN** a direct Responses WebSocket continuation has a missing previous-response owner
+- **AND** the client supplies an unregistered `turn_*` or `http_turn_*` marker
+- **AND** no independently resolved previous-response or file owner constrains the request
+- **AND** exactly one eligible subscription account remains after API-key account-assignment scoping
+- **WHEN** the client submits the continuation
+- **THEN** the proxy proceeds through normal subscription selection for that sole account
+- **AND** no exact server-side issuance provenance is required
+- **AND** the marker shape alone does not select an account when zero or multiple eligible accounts remain
+
+#### Scenario: Independent hard ownership remains authoritative over marker shape
+
+- **GIVEN** a request carries an unregistered `turn_*` or `http_turn_*` marker
+- **AND** a recorded previous-response owner or live input-file pin resolves to an account
+- **WHEN** the client submits the Responses or compact continuation
+- **THEN** routing remains constrained to that independently resolved owner
+- **AND** marker-shape compatibility does not override the owner or relax file routing
 
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
 
@@ -3825,7 +3825,7 @@ pre-marker v2 owner verification.
 - **THEN** the proxy reconciles the turn-state owner through normal owner resolution
 - **AND** the proxy does not apply the zero-or-multiple-candidate owner-miss failure
 
-#### Scenario: Unregistered synthetic compact marker without previous response fails closed
+#### Scenario: Unregistered synthetic compact marker without previous response uses sole candidate
 
 - **GIVEN** a compact request has no `previous_response_id`
 - **AND** the client supplies an unregistered `turn_*` or `http_turn_*`
@@ -3833,9 +3833,10 @@ pre-marker v2 owner verification.
 - **AND** exactly one eligible subscription account remains
 - **WHEN** the client calls `/backend-api/codex/responses/compact` or
   `/v1/responses/compact`
-- **THEN** the proxy returns HTTP status `502`
-- **AND** the sanitized error code is `turn_state_owner_unavailable`
-- **AND** no generic subscription account is selected and no upstream request is dispatched
+- **THEN** the proxy proceeds through normal compact subscription selection
+- **AND** the request is forwarded to that sole eligible subscription account
+- **AND** the unregistered marker does not by itself produce
+  `turn_state_owner_unavailable`
 
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 

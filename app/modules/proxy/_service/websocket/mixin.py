@@ -455,6 +455,7 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _request_allows_unavailable_legacy_owner_abandonment,
@@ -493,7 +494,6 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import (
-    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
     AccountLease,
     effective_account_concurrency_caps,
 )
@@ -1344,34 +1344,9 @@ class _WebSocketMixin:
         synthesized_turn_state: str | None = None,
     ) -> "_WebSocketContinuityState":
         proxy = cast(_WebSocketServiceProtocol, self)
-        api_key_id = api_key.id if api_key is not None else None
         if not codex_session_affinity:
-            # ``/v1/responses`` deliberately has no Codex session affinity,
-            # but a proxy-issued turn marker still needs exact provenance on
-            # reconnect. Store only that bearer marker here and return a
-            # fresh state so unrelated response/tool continuity cannot leak
-            # into the affinity-free route.
-            # The v1 route deliberately keeps the generated marker out of
-            # ``forwarded_headers`` because its wire profile does not forward
-            # a synthetic client header.  Retain that marker explicitly so a
-            # later reconnect echo can prove it was issued by this proxy.
-            turn_state = _sticky_key_from_turn_state_header(headers) or synthesized_turn_state
-            if turn_state is None:
-                return _WebSocketContinuityState()
-            cache_key = (turn_state, api_key_id)
-            existing_state = proxy._websocket_continuity_index.get(cache_key)
-            proxy_marker_provenance = synthesized_turn_state == turn_state or bool(
-                existing_state is not None and existing_state.proxy_synthesized_turn_state_provenance
-            )
-            if not proxy_marker_provenance:
-                return _WebSocketContinuityState()
-            proxy._websocket_continuity_index.pop(cache_key, None)
-            proxy._websocket_continuity_index[cache_key] = _WebSocketContinuityState(
-                proxy_synthesized_turn_state_provenance=True
-            )
-            while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
-                proxy._websocket_continuity_index.pop(next(iter(proxy._websocket_continuity_index)))
-            return _WebSocketContinuityState(proxy_synthesized_turn_state_provenance=True)
+            return _WebSocketContinuityState()
+        api_key_id = api_key.id if api_key is not None else None
         cache_keys = [
             (continuity_key, api_key_id)
             for continuity_key in _websocket_continuity_aliases_from_headers(
@@ -1400,8 +1375,6 @@ class _WebSocketMixin:
         exact_alias_resolved = continuity_state is not None
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
-        if synthesized_turn_state is not None:
-            continuity_state.proxy_synthesized_turn_state_provenance = True
         publish_keys = cache_keys if not exact_client_turn or exact_alias_resolved else lookup_keys
         for key in publish_keys:
             proxy._websocket_continuity_index.pop(key, None)
@@ -2075,10 +2048,7 @@ class _WebSocketMixin:
                             await proxy._resolve_compact_turn_state_owner(
                                 turn_state=turn_state,
                                 api_key=request_state.api_key or api_key,
-                                fail_on_missing=not (
-                                    turn_state == synthesized_turn_state
-                                    or continuity_state.proxy_synthesized_turn_state_provenance
-                                ),
+                                fail_on_missing=not _is_synthesized_turn_state(turn_state),
                             )
                             if turn_state is not None
                             else None
@@ -2122,8 +2092,7 @@ class _WebSocketMixin:
                         # hard account pin.
                         owner_miss_requires_fail_closed = request_state.file_required_preferred_account or (
                             client_turn_state_header_present
-                            and synthesized_turn_state is None
-                            and not continuity_state.proxy_synthesized_turn_state_provenance
+                            and (turn_state is None or not _is_synthesized_turn_state(turn_state))
                         )
                         if (
                             request_state.previous_response_id is not None
@@ -4116,7 +4085,6 @@ class _WebSocketMixin:
             and request_state.durable_capability_lineage_required
             and not require_preferred_account
             and not _facade()._is_local_account_cap_code(selection.error_code)
-            and selection.error_code != SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
         )
         if (
             defer_no_account_error
@@ -4137,7 +4105,7 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if error_code != SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED and (
+        if (
             durable_capability_pool_missing
             or (require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE)
         ):
