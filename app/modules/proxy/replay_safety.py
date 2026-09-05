@@ -32,6 +32,7 @@ _ACCOUNT_NEUTRAL_TOOL_CHOICE_STRINGS = frozenset({"auto", "none", "required"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES = frozenset({"high", "low", "medium"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_FILTER_FIELDS = frozenset({"allowed_domains"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_LOCATION_FIELDS = frozenset({"city", "country", "region", "timezone", "type"})
+_ACCOUNT_NEUTRAL_TOOL_SEARCH_OUTPUT_TOOL_FIELDS = frozenset({"name"})
 _ACCOUNT_NEUTRAL_MESSAGE_ROLES = frozenset({"assistant", "developer", "system", "user"})
 _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
     {
@@ -700,7 +701,7 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if item_type == "tool_search_output":
         if item.get("status") == "failed":
             return False
-        has_tools = _tools_are_account_neutral(item.get("tools"))
+        has_tools = _tool_search_output_tools_are_account_neutral(item.get("tools"))
         has_output = isinstance(item.get("output"), str)
         return item.get("execution") in (None, "client") and has_tools != has_output
     output = item.get("output")
@@ -831,6 +832,16 @@ def _client_metadata_is_account_neutral(client_metadata: JsonValue | None) -> bo
 def _tools_are_account_neutral(tools: JsonValue) -> bool:
     return isinstance(tools, list) and all(
         isinstance(tool, dict) and _tool_declaration_is_account_neutral(tool) for tool in tools
+    )
+
+
+def _tool_search_output_tools_are_account_neutral(tools: JsonValue) -> bool:
+    return isinstance(tools, list) and all(
+        isinstance(tool, dict)
+        and set(tool) <= _ACCOUNT_NEUTRAL_TOOL_SEARCH_OUTPUT_TOOL_FIELDS
+        and _is_nonblank_string(tool.get("name"))
+        and not _contains_account_scoped_input_state(tool)
+        for tool in tools
     )
 
 
