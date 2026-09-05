@@ -1086,6 +1086,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 request_state.claimed_half_open_until = 0.0
                 request_state.claimed_half_open_generation = 0
+                request_state.claimed_half_open_episode = None
                 if release_cancellation is not None and body_exception is None:
                     raise release_cancellation
             # Inner pre-submit cleanup may clear the reservation before control
@@ -3890,6 +3891,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     if released and isinstance(claimed_probe[1], _WebSocketRequestState):
                         claimed_probe[1].claimed_half_open_until = 0.0
                         claimed_probe[1].claimed_half_open_generation = 0
+                        claimed_probe[1].claimed_half_open_episode = None
                     if release_cancellation is not None and body_exception is None:
                         raise release_cancellation
 

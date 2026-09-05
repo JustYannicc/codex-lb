@@ -274,7 +274,61 @@ class _HTTPBridgeRetryCircuitMixin:
         now: float,
     ) -> bool:
         """Keep a live local probe while durable state is being reconciled."""
-        return state is not None and state.half_open_until > now
+        if state is None or state.half_open_until <= 0.0:
+            return False
+        if state.half_open_until > now:
+            return True
+        # The local lease deadline is a reclaim bound, not proof that the
+        # owning request stopped. A pending response.create owner keeps the
+        # lease active even after that bound so durable reconciliation cannot
+        # clear it before the admission path renews it through the request
+        # deadline.
+        return _HTTPBridgeRetryCircuitMixin._http_bridge_retry_circuit_half_open_owner_is_live(state)
+
+    @staticmethod
+    def _http_bridge_retry_circuit_half_open_owner_is_live(
+        state: _HTTPBridgeRetryCircuitState,
+    ) -> bool:
+        """Return whether an expired local lease still has a live request owner.
+
+        The lease deadline is only a recovery bound; it is not proof that the
+        websocket or request stopped. A request state that is still pending,
+        has attempted its response.create, and has not entered terminal
+        settlement is a live owner and must keep its exclusive probe. Opaque
+        test/legacy tokens do not carry that proof and remain reclaimable.
+        """
+        owner_session = state.half_open_owner_session
+        owner_token = state.half_open_owner_token
+        if owner_session is None or owner_token is None or getattr(owner_session, "closed", False):
+            return False
+        if owner_token is owner_session:
+            pending_requests = getattr(owner_session, "pending_requests", None)
+            return pending_requests is not None and bool(pending_requests)
+        if not hasattr(owner_token, "response_create_attempt_count"):
+            return False
+        if getattr(owner_token, "response_create_attempt_count", 0) <= 0:
+            return False
+        if getattr(owner_token, "draining_until_terminal", False):
+            return False
+        if getattr(owner_token, "terminal_settlement_phase", None) is not None:
+            return False
+        pending_requests = getattr(owner_session, "pending_requests", None)
+        if pending_requests is None:
+            return False
+        return any(pending_request is owner_token for pending_request in pending_requests)
+
+    @staticmethod
+    def _http_bridge_retry_circuit_half_open_lease_until(
+        owner_token: object,
+        *,
+        now: float,
+    ) -> float:
+        """Extend a probe through its owning request budget when available."""
+        lease_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+        request_deadline = getattr(owner_token, "bridge_request_deadline", None)
+        if isinstance(request_deadline, (int, float)) and request_deadline > lease_until:
+            lease_until = float(request_deadline)
+        return lease_until
 
     async def _http_bridge_retry_circuit_generation(
         self: Any,
@@ -1384,18 +1438,49 @@ class _HTTPBridgeRetryCircuitMixin:
                     and state.half_open_until > 0.0
                     and state.half_open_until <= now
                 )
+                if (
+                    abandoned_half_open_lease
+                    and state is not None
+                    and self._http_bridge_retry_circuit_half_open_owner_is_live(state)
+                ):
+                    # A request can legitimately run past the default
+                    # six-hundred-second probe window (the bridge budget is
+                    # currently two hours). Keep the owner exclusive and
+                    # renew its local fence through that request's deadline;
+                    # a deadline alone must never reclaim a live probe.
+                    owner_token = state.half_open_owner_token
+                    assert owner_token is not None
+                    if allow_fresh_hard_account_switch or allow_proof_gated_continuity_replay:
+                        return True
+                    renewed_until = self._http_bridge_retry_circuit_half_open_lease_until(owner_token, now=now)
+                    state.half_open_until = renewed_until
+                    state.last_touched_monotonic = now
+                    if hasattr(owner_token, "claimed_half_open_until"):
+                        setattr(owner_token, "claimed_half_open_until", renewed_until)
+                    return False
                 if state is not None and (
                     state.cooldown_until > 0 or state.elapsed_durable_cooldown_pending or abandoned_half_open_lease
                 ):
                     state.cooldown_until = 0.0
                     state.elapsed_durable_cooldown_pending = False
-                    state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
                     state.half_open_owner_session = session
                     owner_token = probe_owner if probe_owner is not None else session
                     state.half_open_owner_token = owner_token
+                    state.half_open_until = self._http_bridge_retry_circuit_half_open_lease_until(owner_token, now=now)
                     next_lease_generation = getattr(self, "_http_bridge_retry_circuit_half_open_generation", 0) + 1
                     self._http_bridge_retry_circuit_half_open_generation = next_lease_generation
                     state.half_open_lease_generation = next_lease_generation
+                    if hasattr(owner_token, "claimed_half_open_until"):
+                        setattr(owner_token, "claimed_half_open_until", state.half_open_until)
+                        setattr(
+                            owner_token,
+                            "claimed_half_open_episode",
+                            (
+                                state.persisted_updated_at_epoch,
+                                state.consecutive_failures,
+                                state.persisted_admission_generation,
+                            ),
+                        )
                     if claimed_lease_out is not None:
                         # The exact lease this admission claimed, handed out
                         # under the same lock that installed it, so a
@@ -2551,7 +2636,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         settled_detail: str | None = None,
         settled_detail_authoritative: bool = False,
-        expected_episode: tuple[float, int, int] | None = None,
+        expected_episode: tuple[float, int, int] | tuple[float, int, int, int] | None = None,
     ) -> bool:
         """Settle a hard key's retry circuit; ``True`` when settlement held.
 
@@ -2583,7 +2668,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         settled_detail: str | None = None,
         settled_detail_authoritative: bool = False,
-        expected_episode: tuple[float, int, int] | None = None,
+        expected_episode: tuple[float, int, int] | tuple[float, int, int, int] | None = None,
     ) -> bool:
         key = session.key
         durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
@@ -2607,6 +2692,15 @@ class _HTTPBridgeRetryCircuitMixin:
                 # replay depends on and admit a second dispatch beside it.
                 or fenced_state.persisted_admission_generation != expected_episode[2]
             ):
+                return False
+            if len(expected_episode) > 3 and (
+                fenced_state is None
+                or fenced_state.half_open_lease_generation != cast(tuple[float, int, int, int], expected_episode)[3]
+            ):
+                # A completion can arrive after its 600-second lease expired
+                # and a replacement probe claimed the same hard key. The
+                # durable episode may be unchanged, so fence on the
+                # process-local lease generation as well.
                 return False
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.pop(key, None)

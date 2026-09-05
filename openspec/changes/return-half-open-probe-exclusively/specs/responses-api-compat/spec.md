@@ -49,6 +49,15 @@ active, the process MUST retain that active lease and its local failure fence
 until the probe settles. A newer durable reset MUST clear stale local detail
 only when no local probe is active.
 
+The active owner MUST remain exclusive while its request is still pending,
+has attempted `response.create`, and has not entered terminal settlement, even
+when the default half-open lease window elapses. While that request remains
+live, the local lease MUST be renewed through the request's
+`bridge_request_deadline` when that deadline is later than the default lease
+window. A completion or other settlement MUST carry the durable episode and
+process-local lease generation captured at admission; a late settlement whose
+generation no longer matches the active lease MUST be ignored.
+
 #### Scenario: Real expiry admits one local probe
 
 - **GIVEN** a hard-key circuit at or above the failure threshold with a real
@@ -68,6 +77,26 @@ only when no local probe is active.
 - **AND** the failure count, last upstream failure detail, and durable row are
   unchanged
 - **AND** the next local admission acquires one fresh half-open lease
+
+#### Scenario: A live probe outlives the default lease window
+
+- **GIVEN** a session owns a half-open probe whose request has attempted
+  `response.create` and remains pending
+- **AND** the request `bridge_request_deadline` is later than the default
+  half-open lease window
+- **WHEN** the default lease window elapses
+- **THEN** the owning session remains the exclusive local probe owner
+- **AND** the lease is renewed through the request deadline
+- **AND** a sibling admission remains suppressed
+
+#### Scenario: Late completion cannot clear a replacement probe
+
+- **GIVEN** a half-open probe settles after its local lease was replaced by a
+  newer probe for the same hard key
+- **WHEN** the old completion carries its captured durable episode and
+  process-local lease generation
+- **THEN** the settlement is ignored
+- **AND** the replacement probe and its failure fence remain active
 
 #### Scenario: Replica-wide durable state and local lease state stay distinct
 
@@ -93,6 +122,13 @@ session MUST be closed through cancellation-deferred cleanup before that error
 returns, so its upstream socket, account and durable leases, reader, and
 detached-registry capacity cannot outlive the failed reconnect.
 
+If account-lease release fails during detached cleanup, the failed lease handle
+MUST remain attached to that detached session. An explicit account cleanup pass
+MUST retry each retained handle, and concurrent retry passes for one session
+MUST share one close/release task so a handle is not released twice. The
+detached session MUST remain discoverable until all retained account leases are
+released successfully.
+
 #### Scenario: Reset teardown cannot manufacture a circuit strike
 
 - **GIVEN** a proxy-owned continuity reset has an active half-open probe and
@@ -104,6 +140,15 @@ detached-registry capacity cannot outlive the failed reconnect.
   eligible
 - **AND** cancellation does not leave the session registered or the probe
   owner unresolved
+
+#### Scenario: Retained account lease release is retried after transport close
+
+- **GIVEN** detached session cleanup closes the upstream transport successfully
+  but account-lease release fails
+- **WHEN** an explicit cleanup pass for that account runs later
+- **THEN** the retained lease handle is retried exactly once
+- **AND** the detached session is removed only after the retry succeeds
+- **AND** concurrent cleanup passes do not issue duplicate release calls
 
 ### Requirement: Retry-circuit failure accounting distinguishes proxy continuity loss
 

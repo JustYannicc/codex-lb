@@ -59,6 +59,13 @@ local release timestamp keeps that marker when a subsequent durable lookup
 misses, so the next admission can still install exactly one fresh lease without
 making a durable claim.
 
+An owner request that remains pending after the default lease window is not an
+abandoned probe when it has attempted `response.create` and has not entered
+terminal settlement. Keep that owner exclusive and renew the lease through its
+`bridge_request_deadline`. Completion settlement captures the durable episode
+and local lease generation at admission; a generation mismatch is a no-op even
+when a replacement probe reused the same session/token.
+
 ### Reuse the existing failure funnel for classification
 
 Classify the established proxy continuity-loss details before the genuine
@@ -81,6 +88,12 @@ after the registry and lease state are consistent. The required-owner
 unavailable exit from an in-place reconnect uses the same lifecycle-ordered
 detach and disarm transition before it releases the probe, then closes the
 detached session through the same cancellation-deferred cleanup owner.
+
+Account-lease release is part of detached-session ownership. A failed release
+is retained on the detached session after transport close, and an explicit
+account-scoped cleanup pass retries it. The session stays discoverable until
+all retained handles clear; concurrent retry callers join one in-flight retry
+task so they cannot double-release the same handle.
 
 ### Port only the accepted #1857 recovery exits
 

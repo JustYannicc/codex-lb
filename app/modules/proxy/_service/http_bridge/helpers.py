@@ -392,6 +392,73 @@ async def _release_http_bridge_account_lease_deferring_cancellation(
     return cancellation
 
 
+async def _release_http_bridge_session_account_leases(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    release_none_when_empty: bool,
+) -> None:
+    """Release all session-owned account leases, retaining failed handles.
+
+    Resource close is single-flight, but a balancer can reject a release after
+    the socket has already closed. Keep those handles on the session so a
+    later close or explicit cleanup pass can retry them without repeating the
+    rest of transport teardown.
+    """
+    failed_account_leases: list[AccountLease] = []
+    attempted_lease_ids: set[str] = set()
+
+    # Release the current lease before taking ``pending_lock``. Existing close
+    # callers rely on this ordering: a wedged pending-settlement holder must
+    # not prevent account capacity from being returned. The session is already
+    # admission-closed before this helper runs, so no new current lease can be
+    # attached while the release awaits.
+    current_account_lease = session.account_lease
+    session.account_lease = None
+    if current_account_lease is not None:
+        attempted_lease_ids.add(current_account_lease.lease_id)
+        try:
+            await service._load_balancer.release_account_lease(current_account_lease)
+        except (asyncio.CancelledError, Exception):
+            failed_account_leases.append(current_account_lease)
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+
+    async with session.pending_lock:
+        pending_account_leases = list(session.pending_account_lease_releases)
+        session.pending_account_lease_releases.clear()
+
+    deduplicated_leases: list[AccountLease] = []
+    seen_lease_ids: set[str] = set(attempted_lease_ids)
+    for lease in pending_account_leases:
+        if lease.lease_id not in seen_lease_ids:
+            seen_lease_ids.add(lease.lease_id)
+            deduplicated_leases.append(lease)
+
+    if not current_account_lease and not deduplicated_leases and release_none_when_empty:
+        # Preserve the existing close-call contract for balancer doubles and
+        # implementations that use a None release as an explicit close hook.
+        try:
+            await service._load_balancer.release_account_lease(None)
+        except (asyncio.CancelledError, Exception):
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+    for account_lease in deduplicated_leases:
+        try:
+            await service._load_balancer.release_account_lease(account_lease)
+        except (asyncio.CancelledError, Exception):
+            failed_account_leases.append(account_lease)
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+    if failed_account_leases:
+        async with session.pending_lock:
+            existing_lease_ids = {lease.lease_id for lease in session.pending_account_lease_releases}
+            session.pending_account_lease_releases.extend(
+                lease for lease in failed_account_leases if lease.lease_id not in existing_lease_ids
+            )
+
+
+def _http_bridge_session_has_account_lease_releases(session: "_HTTPBridgeSession") -> bool:
+    return session.account_lease is not None or bool(session.pending_account_lease_releases)
+
+
 def _http_bridge_denied_anchor_fence_entry(
     service: Any,
     response_id: str,
@@ -1700,56 +1767,13 @@ async def _close_http_bridge_session_resources(
         await service._unregister_http_bridge_previous_response_ids(session)
     # Release the current session lease before awaiting pending-request
     # ownership. Existing close callers rely on this order when a pending
-    # cleanup lock is held. Replacement leases acquired during a failed
-    # handoff are then drained from the carrier below; their first release may
-    # have been interrupted before they were attached to ``account_lease``.
-    current_account_lease = session.account_lease
-    session.account_lease = None
-    account_leases: list[AccountLease] = []
-    if current_account_lease is not None:
-        account_leases.append(current_account_lease)
-    failed_account_leases: list[AccountLease] = []
-    attempted_account_lease_ids: set[str] = set()
-    for account_lease in account_leases:
-        attempted_account_lease_ids.add(account_lease.lease_id)
-        try:
-            await service._load_balancer.release_account_lease(account_lease)
-        except (asyncio.CancelledError, Exception):
-            failed_account_leases.append(account_lease)
-            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-
-    async with session.pending_lock:
-        pending_account_leases = list(session.pending_account_lease_releases)
-        session.pending_account_lease_releases.clear()
-    account_leases.extend(pending_account_leases)
-    deduplicated_leases: list[AccountLease] = []
-    seen_lease_ids: set[str] = set()
-    for lease in account_leases:
-        if lease.lease_id not in seen_lease_ids:
-            seen_lease_ids.add(lease.lease_id)
-            deduplicated_leases.append(lease)
-    if not deduplicated_leases:
-        # Preserve the existing close-call contract for balancer doubles and
-        # implementations that use a None release as an explicit close hook.
-        try:
-            await service._load_balancer.release_account_lease(None)
-        except (asyncio.CancelledError, Exception):
-            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-    for account_lease in deduplicated_leases:
-        if account_lease.lease_id in attempted_account_lease_ids:
-            continue
-        attempted_account_lease_ids.add(account_lease.lease_id)
-        try:
-            await service._load_balancer.release_account_lease(account_lease)
-        except (asyncio.CancelledError, Exception):
-            failed_account_leases.append(account_lease)
-            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-    if failed_account_leases:
-        async with session.pending_lock:
-            existing_lease_ids = {lease.lease_id for lease in session.pending_account_lease_releases}
-            session.pending_account_lease_releases.extend(
-                lease for lease in failed_account_leases if lease.lease_id not in existing_lease_ids
-            )
+    # cleanup lock is held. A later close retries any handle retained after a
+    # transient release failure.
+    await _release_http_bridge_session_account_leases(
+        service,
+        session,
+        release_none_when_empty=True,
+    )
     durable_release_succeeded = durable_owner_epoch is None
     if durable_release_allowed:
         try:
@@ -1844,7 +1868,18 @@ async def _close_http_bridge_session(
         if existing is not None and (
             not existing.done() or (not existing.cancelled() and existing.exception() is None)
         ):
-            return existing
+            if not existing.done() or not _http_bridge_session_has_account_lease_releases(session):
+                return existing
+            created = asyncio.create_task(
+                _release_http_bridge_session_account_leases(
+                    service,
+                    session,
+                    release_none_when_empty=False,
+                ),
+                name=f"http-bridge-account-lease-retry-{_hash_identifier(session.key.affinity_key)}",
+            )
+            session.resource_close_task = created
+            return created
         created = asyncio.create_task(
             _close_http_bridge_session_resources(
                 service,
@@ -1873,11 +1908,15 @@ async def _close_http_bridge_session(
     # independently owned because cancellation can begin while its lock waits.
     async def finalize_detached_ownership() -> None:
         if turn_state_lock_held:
-            if service._http_bridge_detached_sessions.get(id(session)) is session:
+            if service._http_bridge_detached_sessions.get(
+                id(session)
+            ) is session and not _http_bridge_session_has_account_lease_releases(session):
                 service._http_bridge_detached_sessions.pop(id(session), None)
         else:
             async with service._http_bridge_lock:
-                if service._http_bridge_detached_sessions.get(id(session)) is session:
+                if service._http_bridge_detached_sessions.get(
+                    id(session)
+                ) is session and not _http_bridge_session_has_account_lease_releases(session):
                     service._http_bridge_detached_sessions.pop(id(session), None)
 
     ownership_task = asyncio.create_task(

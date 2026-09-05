@@ -1088,6 +1088,10 @@ class _WebSocketRequestState:
     # Process-local lease generation paired with ``claimed_half_open_until``;
     # a reused request/session token must not return a later probe.
     claimed_half_open_generation: int = 0
+    # Durable retry-circuit episode observed when this request claimed the
+    # process-local half-open probe. A completion uses it to avoid settling a
+    # replacement probe that reused the same hard key.
+    claimed_half_open_episode: tuple[float, int, int] | None = None
     # True while the submit owns an admission-waiter registration taken at
     # submit entry, before the retry-circuit gate, that the dispatch path has
     # not yet taken over. It keeps the turn visible to a concurrent
