@@ -1544,6 +1544,7 @@ async def test_owner_forward_dispatches_ambiguous_delta_after_owner_capability_p
         target_instance="instance-b",
         codex_session_affinity=False,
         downstream_turn_state=None,
+        expected_owner_process_epoch="owner-process-b",
     )
 
     events = [

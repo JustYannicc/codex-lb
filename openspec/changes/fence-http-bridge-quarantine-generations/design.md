@@ -100,6 +100,13 @@ self-contained because its matching calls live behind that anchor.
   existing fail-closed or locally fenced recovery paths available. Binding the
   capability to the durable epoch prevents a replacement process from
   inheriting an earlier process's advertisement under the same instance id.
+- The origin also signs the proven epoch on capability-gated forwards. The
+  receiving process checks it against its own epoch before continuity
+  selection. A rollback after the ring check can put a predecessor parser at
+  the same endpoint, so gated forwards omit both legacy primary signatures.
+  That parser cannot validate the epoch-bound exact-body signature or
+  downgrade to a valid primary signature. Ordinary compatible forwards retain
+  the existing rolling-upgrade fallback.
 - A rejected quarantine admission is returned to its wrapper and caller; it
   does not mutate the rejected session's marker or pretend that the fence was
   installed. An already-active poison-overflow deadline is extended only when

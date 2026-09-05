@@ -25,6 +25,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_request_budget_seconds,
 )
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -52,6 +53,7 @@ HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
 HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER = "x-codex-bridge-origin-instance"
 HTTP_BRIDGE_TARGET_INSTANCE_HEADER = "x-codex-bridge-target-instance"
+HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER = "x-codex-bridge-owner-process-epoch"
 HTTP_BRIDGE_CODEX_AFFINITY_HEADER = "x-codex-bridge-codex-session-affinity"
 HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
@@ -97,6 +99,7 @@ class HTTPBridgeForwardContext:
     client_ip: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
     signature_version: str | None = None
+    expected_owner_process_epoch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,7 @@ def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) 
     for name, value in (
         (HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, context.origin_instance),
         (HTTP_BRIDGE_TARGET_INSTANCE_HEADER, context.target_instance),
+        (HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER, context.expected_owner_process_epoch),
         ("x-codex-turn-state", context.downstream_turn_state),
         (HTTP_BRIDGE_AFFINITY_KIND_HEADER, context.original_affinity_kind),
         (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
@@ -188,7 +192,9 @@ class HTTPBridgeOwnerClient:
         scheduler: Scheduler = REAL_SCHEDULER,
         clock: Clock = REAL_CLOCK,
     ) -> AsyncIterator[str]:
-        if _http_bridge_owner_forward_requires_shape_upgrade(payload) and not owner_supports_input_shape_classifier:
+        if _http_bridge_owner_forward_requires_shape_upgrade(payload) and (
+            not owner_supports_input_shape_classifier or not context.expected_owner_process_epoch
+        ):
             # A pre-change owner normalizes a raw string into an array and uses
             # its older array heuristic. It can therefore turn these delta-only
             # inputs into full resends and suppress the durable anchor. Without
@@ -359,6 +365,8 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
+    if context.expected_owner_process_epoch is not None:
+        forwarded[HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER] = context.expected_owner_process_epoch
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
     signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
@@ -373,12 +381,13 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_FILE_OWNER_HEADER] = context.file_owner_account_id
     if context.client_ip:
         forwarded[HTTP_BRIDGE_CLIENT_IP_HEADER] = context.client_ip
-        forwarded[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
-            payload=payload,
-            context=context,
-            include_client_ip=True,
-            signature_version=signature_version,
-        )
+        if context.expected_owner_process_epoch is None:
+            forwarded[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
+                payload=payload,
+                context=context,
+                include_client_ip=True,
+                signature_version=signature_version,
+            )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
     if context.reservation is not None:
@@ -392,12 +401,16 @@ def build_owner_forward_headers(
     # updated origins during a rolling upgrade. New-code receivers verify the
     # tamper-proofing header below first and fall back to this primary
     # signature only when the tamper-proofing header does not validate.
-    forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-        signature_version=signature_version,
-    )
+    # Capability-gated requests must also reject a predecessor process that
+    # ignores the signed epoch after a rollback. Do not give it a valid
+    # primary fallback.
+    if context.expected_owner_process_epoch is None:
+        forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=False,
+            signature_version=signature_version,
+        )
     # Additive tamper-proofing signature bound to the exact posted forwarding
     # body; covers the full authenticated context (including the unanchored /
     # signature-version domain) so it cannot be replayed against a different
@@ -467,6 +480,7 @@ def parse_forwarded_request(
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
         signature_version=signature_version,
+        expected_owner_process_epoch=_optional_header(headers.get(HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER)),
     )
     # Tamper-proofing fast path (#1203): a VALIDATING tamper-proofing
     # signature proves the received body was not rewritten in transit —
@@ -489,12 +503,28 @@ def parse_forwarded_request(
         ),
     )
     if tools_bound_valid:
+        if (
+            context.expected_owner_process_epoch is not None
+            and context.expected_owner_process_epoch != http_bridge_owner_process_epoch()
+        ):
+            return None, ProxyResponseError(
+                503,
+                openai_error(
+                    "bridge_owner_forward_failed",
+                    "Internal bridge forward reached a different owner process",
+                    error_type="server_error",
+                ),
+            )
         payload._codex_lb_input_shape_wire_version = input_shape_version
         payload._codex_lb_legacy_owner_forwarding_input_shape = (
             input_shape_version != _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
         )
         return HTTPBridgeForwardedRequest(context=context), None
-    if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
+    if (
+        context.expected_owner_process_epoch is not None
+        or context.file_owner_account_id is not None
+        or extract_input_file_ids(payload.input)
+    ):
         # The rolling-upgrade primary signature does not bind the additive
         # file-owner proof. Never allow a stripped/forged proof to downgrade to
         # it, and never allow payloads with file references to fall back after a
@@ -755,6 +785,8 @@ def _structured_bridge_signing_payload(
     }
     if input_shape_version is not None:
         signing_fields["input_shape_version"] = input_shape_version
+    if context.expected_owner_process_epoch is not None:
+        signing_fields["expected_owner_process_epoch"] = context.expected_owner_process_epoch
     return json.dumps(
         signing_fields,
         ensure_ascii=True,

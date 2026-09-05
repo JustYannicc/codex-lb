@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from enum import StrEnum
 from typing import Any, AsyncIterator, Mapping, TypeVar
 
@@ -495,6 +496,12 @@ class _HTTPBridgeOwnerForwardingMixin:
                     "Failed to prove HTTP bridge owner input-shape capability",
                     exc_info=True,
                 )
+
+        if owner_supports_input_shape_classifier:
+            forward_context = replace(
+                forward_context,
+                expected_owner_process_epoch=owner_forward.owner_process_epoch,
+            )
 
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(

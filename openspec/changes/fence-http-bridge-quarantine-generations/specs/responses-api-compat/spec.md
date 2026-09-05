@@ -191,6 +191,13 @@ Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
 authorize dispatch, including an advertisement left by an earlier process
 that reused the same instance id.
 
+Capability-gated forwards MUST carry `x-codex-bridge-owner-process-epoch`
+with the proven process epoch, authenticated by the exact-body signature.
+The receiving owner MUST reject a signed epoch unequal to its local process
+epoch before continuity selection. These forwards MUST NOT include a legacy
+primary signature or accept primary-signature fallback, so a predecessor
+process that ignores the epoch cannot accept the request after a rollback.
+
 An upgraded owner-forward request MUST advertise
 `x-codex-bridge-input-shape-version: 2` when it posts a body whose exact input
 shape is known. The value MUST be included in the exact-body bridge signature.
@@ -240,6 +247,16 @@ selection.
 - **WHEN** the owner validates the primary bridge signature
 - **THEN** it MUST accept only under legacy compatibility classification
 - **AND** it MUST NOT infer current-shape mode from the marker alone
+
+#### Scenario: Owner is replaced after capability proof
+
+- **GIVEN** an origin proved the selected owner's process epoch and classifier
+  capability for an ambiguous delta-only request
+- **WHEN** a replacement process receives the forward at the same instance id
+- **THEN** an upgraded replacement MUST reject the signed process-epoch mismatch
+- **AND** a predecessor replacement MUST fail signature validation without a
+  legacy primary fallback
+- **AND** neither replacement may select continuity or suppress the durable anchor
 
 #### Scenario: Current origin does not expose a delta to a legacy owner
 

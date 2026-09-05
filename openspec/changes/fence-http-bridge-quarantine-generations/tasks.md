@@ -58,3 +58,6 @@
 - [x] 1.24 Return quarantine admission outcomes through wedged/eventless
   wrappers and their callers, preserve the rejected-session boundary, and
   extend an active poison-overflow deadline when a retained poison arm grows.
+- [x] 1.25 Bind capability-gated owner forwards to the proven process epoch,
+  reject replacement processes without legacy signature downgrade, and sync
+  the authenticated input-shape marker contract into the main spec.

@@ -17455,6 +17455,8 @@ async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capab
         capability=ring_membership_module.HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
     )
     assert captured["owner_supports_input_shape_classifier"] is True
+    context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
+    assert context.expected_owner_process_epoch == "owner-process-b"
 
 
 @pytest.mark.asyncio
