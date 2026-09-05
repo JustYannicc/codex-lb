@@ -84,6 +84,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
     _http_bridge_quarantine_clear_fence_details,
+    _http_bridge_request_state_wedged_reattach,
+    _log_http_bridge_quarantine_admission_rejected,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -1703,7 +1705,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         # watchdog and the durable-anchor clear both key on
         # ``response_event_count == 0`` and never trip on it, so quarantine
         # the session here so later requests stop re-attaching to it.
-        _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
+        wedge_proven = any(_http_bridge_request_state_wedged_reattach(state) for state in pending_request_states)
+        quarantined = _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
+        if wedge_proven and not quarantined:
+            _log_http_bridge_quarantine_admission_rejected(
+                session,
+                reason="reattach_missing_response_created",
+            )
         observed_close_code = (
             upstream_close_code if upstream_close_code is not None else session.last_upstream_close_code
         )
@@ -2150,7 +2158,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # generic reader-crash account penalty path.
                                 if expired_proxy_injected_anchor:
                                     await _clear_durable_http_bridge_response_anchor(self, session)
-                                _record_http_bridge_quarantine_eventless_timeout(self, session)
+                                recorded = _record_http_bridge_quarantine_eventless_timeout(self, session)
+                                if not recorded:
+                                    _log_http_bridge_quarantine_admission_rejected(
+                                        session,
+                                        reason="repeated_eventless_timeout",
+                                    )
                                 session.closed = True
                                 await self._fail_http_bridge_reader_and_maybe_retire(
                                     session,
@@ -2170,7 +2183,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # Count the eventless retire toward the repeated-
                             # wedge quarantine; the first strike still goes
                             # through the bounded pre-created recovery below.
-                            _record_http_bridge_quarantine_eventless_timeout(self, session)
+                            recorded = _record_http_bridge_quarantine_eventless_timeout(self, session)
+                            if not recorded:
+                                _log_http_bridge_quarantine_admission_rejected(
+                                    session,
+                                    reason="repeated_eventless_timeout",
+                                )
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,

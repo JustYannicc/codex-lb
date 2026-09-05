@@ -71,7 +71,9 @@ fail closed as poison evidence. The same overflow verdict MUST govern a later
 retained entry for that key whenever the entry does not itself carry active
 poison evidence, including an inactive first-strike entry admitted after a slot
 opens. Re-arming an existing key MAY refresh its entry in place without
-consuming another slot.
+consuming another slot. Quarantine admission wrappers MUST return whether the
+requested fence was installed, and callers MUST consume a rejected result
+without treating the session as quarantined.
 
 #### Scenario: Detached predecessor cannot clear a replacement
 
@@ -163,11 +165,17 @@ preserve a client-supplied string's original shape and character length for
 this decision; normalizing that string into a one-item array MUST NOT add the
 array envelope to its boundary calculation. An internal HTTP bridge
 owner-forward hop MUST preserve that original string shape so the owner's
-request validation reaches the same classification as the origin. During a
-rolling upgrade, when an older origin forwards only a normalized one-item
-array and the owner cannot validate the additive exact-body signature, the
-owner MUST classify that ambiguous one-item array as delta-only instead of
-counting normalization-envelope bytes toward the full-resend boundary. In the
+request validation reaches the same classification as the origin.
+During a rolling upgrade, when an older origin forwards only a normalized
+one-item array and the owner cannot validate the additive exact-body signature,
+the owner MUST use conservative canonical-shape precedence. An exact canonical
+normalized raw-string shape (`role=user` with one `input_text` part) MUST be
+classified by its contained text length, not by its array or item serialization.
+That wire shape is byte-identical to a genuine client array of the same form, so
+the owner cannot recover the original provenance; the contained-text rule
+therefore applies to both origins. A noncanonical one-item array MUST retain the
+legacy compact-item predicate. Neither path may count a normalization envelope
+as client text. In the
 inverse rolling-upgrade direction, an upgraded origin without positive proof
 that the selected owner implements this classifier MUST NOT dispatch a
 delta-only shape that the legacy owner would classify as a full resend. This
@@ -183,6 +191,15 @@ Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
 authorize dispatch, including an advertisement left by an earlier process
 that reused the same instance id.
 
+An upgraded owner-forward request MUST advertise
+`x-codex-bridge-input-shape-version: 2` when it posts a body whose exact input
+shape is known. The value MUST be included in the exact-body bridge signature.
+The owner MUST trust the current-shape mode only when that signature validates
+with the same header value; a missing, malformed, or primary-signature-only
+marker MUST keep legacy compatibility classification. An unsupported nonempty
+version MUST be rejected before the forwarded request reaches continuity
+selection.
+
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
 - **GIVEN** a live bridge session is quarantined and its durable anchor is
@@ -193,15 +210,36 @@ that reused the same instance id.
 - **AND** the request still resolves and receives its durable anchor
 - **AND** no account health, routing, or durable ownership state changes
 
-#### Scenario: Legacy owner forwarding does not inflate a raw string
+#### Scenario: Legacy owner forwarding uses canonical normalized text length
 
 - **GIVEN** an older origin normalized a below-boundary client string into a
   one-item array before forwarding it to a newer owner
 - **AND** the forward validates only through the rolling-upgrade legacy
   signature fallback
 - **WHEN** the newer owner classifies the request shape
-- **THEN** it MUST treat the ambiguous one-item array as delta-only
+- **THEN** it MUST classify the exact canonical normalized shape by its
+  contained text length, not by its normalization envelope
 - **AND** it MUST retain the durable previous-response anchor
+
+#### Scenario: Legacy fallback uses the compact-item predicate for noncanonical arrays
+
+- **GIVEN** an older origin forwards a genuinely noncanonical one-item array
+  such as `["x" * 4094]`
+- **AND** the forward validates only through the rolling-upgrade legacy
+  signature fallback
+- **WHEN** the newer owner classifies the request shape
+- **THEN** it MUST use the compact serialization of that item for the 4096-byte
+  boundary
+- **AND** it MUST classify the item as full-resend-shaped at exactly 4096
+  characters
+
+#### Scenario: Unauthenticated input-shape marker stays legacy
+
+- **GIVEN** a forwarded body carries `x-codex-bridge-input-shape-version: 2`
+- **AND** its exact-body signature is missing or does not bind that marker
+- **WHEN** the owner validates the primary bridge signature
+- **THEN** it MUST accept only under legacy compatibility classification
+- **AND** it MUST NOT infer current-shape mode from the marker alone
 
 #### Scenario: Current origin does not expose a delta to a legacy owner
 

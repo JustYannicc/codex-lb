@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.modules.proxy._service.http_bridge.helpers import _log_http_bridge_event
+from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _HTTPBridgeSession,
@@ -41,6 +42,20 @@ _HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON = "repeated_eventless_timeout"
 # (``stream_incomplete`` / ``stream_idle_timeout``): the anchor it opened on
 # must not be re-injected into the probe admitted after the cooldown (#1852).
 _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON = "retry_circuit_poisoned_anchor"
+
+
+def _log_http_bridge_quarantine_admission_rejected(
+    session: _HTTPBridgeSession,
+    *,
+    reason: str,
+) -> None:
+    """Make a rejected hard-cap admission visible without exposing the key."""
+    logger.warning(
+        "http_bridge_quarantine event=admission_rejected bridge_kind=%s bridge_key=%s reason=%s",
+        session.key.affinity_kind,
+        _hash_identifier(session.key.affinity_key),
+        reason,
+    )
 
 
 @dataclass(slots=True)
@@ -494,7 +509,6 @@ def _quarantine_http_bridge_session(
     if not _admit_http_bridge_quarantine_key(registry, session.key, now):
         if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             _remember_http_bridge_quarantine_poison_overflow(service, registry, now, minimum_seconds)
-        session.quarantined = False
         return False
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
@@ -550,6 +564,13 @@ def _quarantine_http_bridge_session(
             entry.poison_raw_generation = entry.generation
             entry.poison_eventless_timeout_count = entry.consecutive_eventless_timeouts
             entry.poison_quarantined_until = max(entry.poison_quarantined_until, now + ttl_seconds)
+            overflow_until = _http_bridge_quarantine_poison_overflow_until(service, now)
+            if overflow_until > now:
+                setattr(
+                    service,
+                    _HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR,
+                    max(overflow_until, entry.poison_quarantined_until),
+                )
     else:
         # The weaker fence stands on its own evidence; record it, with its
         # own expiry, so a later revocation of the poison arm can downgrade
@@ -581,15 +602,14 @@ def _record_http_bridge_quarantine_wedged_pending(
     """Quarantine the session when a failed/retired pending request proves the wedge shape."""
     if not any(_http_bridge_request_state_wedged_reattach(request_state) for request_state in request_states):
         return False
-    _quarantine_http_bridge_session(
+    return _quarantine_http_bridge_session(
         service,
         session,
         reason=_HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
     )
-    return True
 
 
-def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTTPBridgeSession) -> None:
+def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTTPBridgeSession) -> bool:
     """Count a ``missing_response_created_timeout`` retire; quarantine on repeats.
 
     The first eventless timeout is left to the merged recovery machinery
@@ -605,8 +625,7 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     entry = registry.get(session.key)
     if entry is None:
         if not _admit_http_bridge_quarantine_key(registry, session.key, now):
-            session.quarantined = False
-            return
+            return False
         entry = _HTTPBridgeQuarantineEntry(
             generation=_next_http_bridge_quarantine_generation(service, registry),
         )
@@ -625,8 +644,8 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     entry.consecutive_eventless_timeouts += 1
     entry.last_touched_monotonic = now
     if entry.consecutive_eventless_timeouts < _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD:
-        return
-    _quarantine_http_bridge_session(
+        return True
+    return _quarantine_http_bridge_session(
         service,
         session,
         reason=_HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON,

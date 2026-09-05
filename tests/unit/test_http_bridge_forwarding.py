@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FILE_OWNER_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
+    HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
@@ -81,6 +83,7 @@ def _use_legacy_forward_signature(
 ) -> None:
     headers.pop(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER, None)
     headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER, None)
+    headers.pop(HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER, None)
     # A genuinely pre-#1203 origin sends no tamper-proofing header, so the
     # receiver must exercise the primary-signature fallback rather than the
     # tamper-proofing fast path.
@@ -418,12 +421,172 @@ def test_parse_forwarded_request_falls_back_to_legacy_signature_without_v2() -> 
     assert forwarded.context == context
 
 
-def test_legacy_owner_forward_preserves_ambiguous_raw_string_boundary() -> None:
-    """An old origin's normalized string must stay delta-only on a new owner."""
+def test_parse_forwarded_request_authenticated_input_shape_v2_selects_current_mode() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] == "2"
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+        input_shape_version="2",
+    )
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert payload._codex_lb_input_shape_wire_version == "2"
+    assert payload._codex_lb_legacy_owner_forwarding_input_shape is False
+
+
+@pytest.mark.parametrize("tamper", ["missing", "mismatched"])
+def test_parse_forwarded_request_untrusted_input_shape_marker_stays_legacy(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "missing":
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+    else:
+        headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            input_shape_version=None,
+        )
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert payload._codex_lb_input_shape_wire_version is None
+    assert payload._codex_lb_legacy_owner_forwarding_input_shape is True
+
+
+@pytest.mark.parametrize("drop_signatures", [False, True])
+def test_parse_forwarded_request_rejects_unsupported_input_shape_version(drop_signatures: bool) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] = "3"
+    if drop_signatures:
+        headers.pop(HTTP_BRIDGE_SIGNATURE_HEADER)
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"].get("code") == "bridge_forward_invalid"
+
+
+def test_legacy_owner_forwarding_omits_input_shape_version_marker() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "continue"}],
+            "tools": [],
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert payload._codex_lb_legacy_owner_forwarding_input_shape is True
+
+    legacy_headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    assert HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER not in legacy_headers
+    assert legacy_headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+        input_shape_version=None,
+    )
+
+
+def test_raw_string_and_canonical_array_collision_is_separated_by_shape_proof() -> None:
+    raw_text = "x" * 4035
+    canonical_input = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": raw_text}],
+        }
+    ]
+    raw_payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": raw_text})
+    canonical_payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": canonical_input}
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    assert raw_payload.input == canonical_payload.input
+    assert raw_payload.model_dump_for_forwarding() == canonical_payload.model_dump_for_forwarding()
+    assert _bridge_forward_signature(payload=raw_payload, context=context) == _bridge_forward_signature(
+        payload=canonical_payload,
+        context=context,
+    )
+
+    raw_owner_wire = raw_payload.model_dump_for_http_bridge_owner_forwarding()
+    canonical_owner_wire = canonical_payload.model_dump_for_http_bridge_owner_forwarding()
+    assert raw_owner_wire["input"] == raw_text
+    assert canonical_owner_wire["input"] == canonical_input
+    assert raw_owner_wire != canonical_owner_wire
+    assert _bridge_forward_tools_bound_signature(
+        payload=raw_payload,
+        context=context,
+        input_shape_version="2",
+    ) != _bridge_forward_tools_bound_signature(
+        payload=canonical_payload,
+        context=context,
+        input_shape_version="2",
+    )
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(raw_payload) is False
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(canonical_payload) is True
+
+
+@pytest.mark.parametrize(
+    ("input_length", "expected"),
+    [
+        pytest.param(4035, False, id="canonical-array-envelope-reaches-boundary"),
+        pytest.param(4095, False, id="canonical-text-below-boundary"),
+        pytest.param(4096, True, id="canonical-text-at-boundary"),
+    ],
+)
+def test_legacy_owner_forward_preserves_canonical_raw_string_boundary(input_length: int, expected: bool) -> None:
+    """Legacy fallback uses contained text for the canonical normalized shape."""
     normalized_input = [
         {
             "role": "user",
-            "content": [{"type": "input_text", "text": "x" * 4035}],
+            "content": [{"type": "input_text", "text": "x" * input_length}],
         }
     ]
     old_origin_payload = ResponsesRequest.model_validate(
@@ -443,16 +606,48 @@ def test_legacy_owner_forward_preserves_ambiguous_raw_string_boundary() -> None:
     headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
     _use_legacy_forward_signature(headers, payload=old_origin_payload, context=context)
 
-    forwarded, error = parse_forwarded_request(
-        headers,
-        payload=old_origin_payload,
-        current_instance="instance-b",
-    )
+    owner_payload = ResponsesRequest.model_validate(old_origin_payload.model_dump_for_forwarding())
+    forwarded, error = parse_forwarded_request(headers, payload=owner_payload, current_instance="instance-b")
 
     assert error is None
     assert forwarded is not None
-    assert len(old_origin_payload.model_dump_json()) >= 4096
-    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(old_origin_payload) is False
+    compact_input = json.dumps(normalized_input, ensure_ascii=True, separators=(",", ":"))
+    assert len(compact_input) >= 4096
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(owner_payload) is expected
+
+
+@pytest.mark.parametrize(
+    ("input_length", "expected"),
+    [
+        pytest.param(4035, False, id="raw-string-below-boundary"),
+        pytest.param(4095, False, id="raw-string-below-boundary-near"),
+        pytest.param(4096, True, id="raw-string-at-boundary"),
+    ],
+)
+def test_body_bound_owner_forward_preserves_raw_string_boundary(input_length: int, expected: bool) -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "x" * input_length,
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    owner_payload = ResponsesRequest.model_validate(payload.model_dump_for_http_bridge_owner_forwarding())
+
+    forwarded, error = parse_forwarded_request(headers, payload=owner_payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert owner_payload._codex_lb_input_shape_wire_version == "2"
+    assert owner_payload._codex_lb_legacy_owner_forwarding_input_shape is False
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(owner_payload) is expected
 
 
 def test_body_bound_owner_forward_keeps_one_item_array_classification() -> None:

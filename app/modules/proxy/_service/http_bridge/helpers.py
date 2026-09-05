@@ -69,6 +69,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -2051,14 +2052,16 @@ def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSes
 def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bool:
     raw_input_provenance = payload._codex_lb_raw_input_provenance
     if raw_input_provenance is not None and payload.input is raw_input_provenance.normalized_value:
-        return len(raw_input_provenance.raw_string) >= 4096
-    input_value = payload.input
+        input_value = raw_input_provenance.raw_input
+    else:
+        input_value = payload.input
+
     if isinstance(input_value, str):
         return len(input_value) >= 4096
     if isinstance(input_value, Sequence) and not isinstance(input_value, (str, bytes, bytearray)):
-        if payload._codex_lb_legacy_owner_forwarding_input_shape and len(input_value) == 1:
-            return False
         if len(input_value) > 1:
+            if payload._codex_lb_legacy_owner_forwarding_input_shape:
+                return True
             # Multiple outputs can be one delta-only continuation for
             # parallel calls completed by the anchored response. Without the
             # corresponding call items this payload is not self-contained and
@@ -2067,11 +2070,46 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
                 _http_bridge_input_item_type(item) in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES for item in input_value
             )
         if len(input_value) == 1:
+            if payload._codex_lb_legacy_owner_forwarding_input_shape:
+                normalized_text_length = _http_bridge_legacy_normalized_input_text_length(input_value)
+                if normalized_text_length is not None:
+                    return normalized_text_length >= 4096
+                # Pre-classifier owners measured a one-item array's item,
+                # rather than the array envelope. Keep that predicate for
+                # genuinely array-shaped legacy forwards so a large item is
+                # not silently downgraded to a delta.
+                try:
+                    return len(json.dumps(input_value[0], ensure_ascii=True, separators=(",", ":"))) >= 4096
+                except (OverflowError, TypeError, ValueError):
+                    return False
             try:
                 return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
             except (OverflowError, TypeError, ValueError):
                 return False
     return False
+
+
+def _http_bridge_legacy_normalized_input_text_length(input_value: Sequence[JsonValue]) -> int | None:
+    """Recognize the canonical one-item array produced from a raw string.
+
+    A legacy owner receives the normalized array without the original string
+    provenance. Its envelope is implementation detail, so classify this
+    exact shape by the contained text length and use the legacy item-size
+    rule only for genuinely array-shaped inputs.
+    """
+    if len(input_value) != 1 or not is_json_mapping(input_value[0]):
+        return None
+    item = input_value[0]
+    if set(item) != {"role", "content"} or item.get("role") != "user":
+        return None
+    content = item.get("content")
+    if not is_json_list(content) or len(content) != 1 or not is_json_mapping(content[0]):
+        return None
+    part = content[0]
+    if set(part) != {"type", "text"} or part.get("type") != "input_text":
+        return None
+    text = part.get("text")
+    return len(text) if isinstance(text, str) else None
 
 
 def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -> str | None:
@@ -3392,6 +3430,8 @@ def _http_bridge_reconnect_connect_failure(
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
+    if exc.failure_phase == "owner_forward" and exc.failure_detail == "owner_input_shape_upgrade_required":
+        return True
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
@@ -3539,6 +3579,8 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         return False
     if _sticky_key_from_turn_state_header(headers) is not None:
         return False
+    if exc.failure_phase == "owner_forward" and exc.failure_detail == "owner_input_shape_upgrade_required":
+        return True
     payload = exc.payload
     if not isinstance(payload, dict):
         return False

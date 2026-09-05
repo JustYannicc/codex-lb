@@ -354,6 +354,46 @@ def test_http_bridge_full_resend_shape_preserves_validated_raw_string_boundary(
     assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(revalidated) is expected
 
 
+def test_http_bridge_full_resend_shape_preserves_raw_multi_item_array_after_instruction_hoisting() -> None:
+    raw_input = [
+        {"role": "developer", "content": "developer instructions"},
+        {"role": "user", "content": "follow-up"},
+    ]
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": raw_input,
+        }
+    )
+
+    assert payload.instructions == "developer instructions"
+    assert payload.input == [{"role": "user", "content": "follow-up"}]
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is True
+
+    owner_wire = payload.model_dump_for_http_bridge_owner_forwarding()
+    assert owner_wire["input"] == raw_input
+    assert owner_wire["instructions"] == ""
+    owner_payload = ResponsesRequest.model_validate(owner_wire)
+    assert owner_payload.instructions == "developer instructions"
+    assert owner_payload.input == [{"role": "user", "content": "follow-up"}]
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(owner_payload) is True
+
+
+def test_http_bridge_legacy_one_item_large_array_remains_full_resend() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": ["x" * 4094],
+        }
+    )
+    payload._codex_lb_legacy_owner_forwarding_input_shape = True
+
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is True
+
+
 def test_http_bridge_full_resend_shape_does_not_reuse_raw_string_length_after_input_replacement() -> None:
     payload = ResponsesRequest.model_validate(
         {
@@ -1154,6 +1194,75 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     error["error"].pop("code")
 
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
+
+
+def test_http_bridge_owner_input_shape_upgrade_failure_allows_local_recovery() -> None:
+    error = proxy_service.openai_error(
+        "bridge_owner_forward_failed",
+        "HTTP bridge owner cannot safely classify this continuation",
+    )
+    exc = ProxyResponseError(
+        503,
+        error,
+        failure_phase="owner_forward",
+        failure_detail="owner_input_shape_upgrade_required",
+    )
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is True
+    assert (
+        proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+            exc,
+            key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-shape-upgrade", None),
+            headers={"x-codex-session-id": "sid-shape-upgrade"},
+            previous_response_id=None,
+        )
+        is True
+    )
+
+
+def test_http_bridge_owner_input_shape_upgrade_failure_preserves_affinity_scope() -> None:
+    error = proxy_service.openai_error(
+        "bridge_owner_forward_failed",
+        "HTTP bridge owner cannot safely classify this continuation",
+    )
+    exc = ProxyResponseError(
+        503,
+        error,
+        failure_phase="owner_forward",
+        failure_detail="owner_input_shape_upgrade_required",
+    )
+
+    for key, headers, previous_response_id in (
+        (
+            proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-state", None),
+            {"x-codex-turn-state": "http_turn_123"},
+            None,
+        ),
+        (
+            proxy_service._HTTPBridgeSessionKey("internal_request_parallel", "request-parallel", None),
+            {},
+            None,
+        ),
+        (
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-shape-upgrade", None),
+            {"x-codex-session-id": "sid-shape-upgrade", "x-codex-turn-state": "http_turn_123"},
+            None,
+        ),
+        (
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-shape-upgrade", None),
+            {"x-codex-session-id": "sid-shape-upgrade"},
+            "resp-prev-1",
+        ),
+    ):
+        assert (
+            proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+                exc,
+                key=key,
+                headers=headers,
+                previous_response_id=previous_response_id,
+            )
+            is False
+        )
 
 
 @pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
@@ -18549,6 +18658,141 @@ async def test_stream_via_http_bridge_owner_forward_recovery_without_pending_sta
     assert prepared_inputs == [input_items, input_items]
 
 
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally_without_owner_process_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    input_items = [
+        {"type": "function_call_output", "call_id": "call-1", "output": "one"},
+        {"type": "function_call_output", "call_id": "call-2", "output": "two"},
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": input_items,
+            "previous_response_id": "resp_prev_1",
+        }
+    )
+    started_at = time.monotonic()
+    prepared_inputs: list[Any] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        assert prepared_payload.previous_response_id == "resp_prev_1"
+        prepared_inputs.append(prepared_payload.input)
+        state = proxy_service._WebSocketRequestState(
+            request_id=f"req-{len(prepared_inputs)}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=started_at,
+            event_queue=asyncio.Queue(),
+            transport="http",
+            previous_response_id="resp_prev_1",
+        )
+        return state, '{"type":"response.create"}'
+
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-shape-upgrade", None),
+    )
+    recovery_session = _make_owner_forward_recovery_session()
+    capability_probe = AsyncMock()
+    service._ring_membership = cast(
+        Any,
+        SimpleNamespace(owner_supports_capability=capability_probe),
+    )
+
+    async def fake_submit_http_bridge_request(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del _session, text_data, queue_limit
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        await event_queue.put('data: {"type":"response.completed"}\n\n')
+        await event_queue.put(None)
+
+    get_or_create = AsyncMock(side_effect=[owner_forward, recovery_session])
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    def unexpected_owner_io(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("owner I/O must not start before shape capability is proven")
+
+    monkeypatch.setattr(
+        http_bridge_forwarding_module.aiohttp,
+        "ClientSession",
+        unexpected_owner_io,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-shape-upgrade"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert prepared_inputs == [input_items, input_items]
+    capability_probe.assert_not_awaited()
+    assert get_or_create.await_count == 2
+    recovery_kwargs = get_or_create.await_args_list[1].kwargs
+    assert recovery_kwargs["allow_forward_to_owner"] is False
+    assert recovery_kwargs["allow_previous_response_recovery_rebind"] is True
+    assert recovery_kwargs["previous_response_id"] == "resp_prev_1"
+    assert recovery_kwargs["request_stage"] == "reattach"
+
+
 async def _run_owner_forward_recovery_durable_anchor_stream(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -35078,6 +35322,74 @@ def test_http_bridge_poison_overflow_ignores_a_longer_weaker_fence(
         getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR)
         == now + 700.0
     )
+
+
+def test_http_bridge_poison_rearm_extends_active_overflow_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
+    service = SimpleNamespace()
+    retained = _make_bridge_session(key_value="quarantine-poison-rearm-retained")
+    rejected = _make_bridge_session(key_value="quarantine-poison-rearm-rejected")
+    unknown = proxy_service._HTTPBridgeSessionKey("session_header", "quarantine-poison-rearm-unknown", None)
+
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    assert not http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        rejected,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=650.0,
+    )
+    assert getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR) == 1700.0
+
+    clock[0] = 1500.0
+    assert http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        retained,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=900.0,
+    )
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[retained.key]
+    assert entry.poison_quarantined_until == 2400.0
+    assert getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR) == 2400.0
+
+    clock[0] = 1800.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, unknown) is True
+
+
+def test_http_bridge_wedged_quarantine_reports_rejected_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-wedged-rejected")
+    request_state = _make_wedged_reattach_request_state(request_id="req-wedged-rejected")
+    monkeypatch.setattr(http_bridge_quarantine_module, "_quarantine_http_bridge_session", lambda *args, **kwargs: False)
+
+    assert (
+        http_bridge_quarantine_module._record_http_bridge_quarantine_wedged_pending(
+            service,
+            session,
+            [request_state],
+        )
+        is False
+    )
+
+
+def test_http_bridge_eventless_quarantine_reports_rejected_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SimpleNamespace()
+    session = _make_bridge_session(key_value="quarantine-eventless-rejected")
+    monkeypatch.setattr(
+        http_bridge_quarantine_module,
+        "_admit_http_bridge_quarantine_key",
+        lambda *args, **kwargs: False,
+    )
+
+    assert http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session) is False
 
 
 def test_http_bridge_quarantine_eventless_strikes_require_threshold(caplog: pytest.LogCaptureFixture) -> None:

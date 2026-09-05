@@ -33,10 +33,12 @@
 - [x] 1.15 Discard expired suppressed-weaker markers before deciding whether
   a post-capture first eventless strike survives poison cleanup.
 - [x] 1.16 Preserve raw-string input provenance across the internal owner
-  forwarding wire and bind its signature to the exact posted body.
+  forwarding wire and bind its signature to the exact posted body, including
+  the authenticated input-shape version marker.
 - [x] 1.17 Preserve post-capture first-strike evidence when durable merge
   revokes speculative poison, and keep legacy-origin normalized one-item
-  owner forwards delta-only when no exact-body signature proves raw shape.
+  owner forwards on the refined canonical-text or legacy compact-item
+  classifier when no exact-body signature proves raw shape.
 - [x] 1.18 Fence poison cleanup by the captured eventless-timeout count so an
   expired weaker arm cannot make a pre-capture strike look new.
 - [x] 1.19 Carry the full poison cleanup fence through durable-load miss,
@@ -53,3 +55,6 @@
 - [x] 1.23 Advertise the current input-shape classifier through bridge-ring
   metadata and authorize ambiguous delta forwarding only when that capability
   is bound to the durable owner's exact current process epoch.
+- [x] 1.24 Return quarantine admission outcomes through wedged/eventless
+  wrappers and their callers, preserve the rejected-session boundary, and
+  extend an active poison-overflow deadline when a retained poison arm grows.

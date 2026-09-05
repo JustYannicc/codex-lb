@@ -79,8 +79,17 @@ self-contained because its matching calls live behind that anchor.
   a first strike only when the count itself advanced after capture and drops
   expired suppressed-weaker evidence before making that decision.
 - A new owner marks legacy-signature fallback requests as input-shape
-  ambiguous; a one-item array on that path remains delta-only, while a
-  body-bound current-origin forward retains exact raw-string classification.
+  ambiguous. An exact canonical normalized raw-string one-item array is
+  classified by its contained text length on that path, even though a genuine
+  client array of the same form is byte-identical and cannot be distinguished.
+  Only noncanonical one-item inputs keep the legacy compact-item predicate. A
+  body-bound current-origin forward retains exact raw-string and raw-array
+  classification.
+- Current owner forwards advertise
+  ``x-codex-bridge-input-shape-version: 2``. The value is included in the
+  exact-body bridge signature and is trusted only when that signature
+  validates; a missing, malformed, or primary-signature-only marker leaves
+  the received payload in legacy compatibility mode.
 - A current origin refuses owner dispatch before I/O when legacy normalization
   could reverse its delta-only classification: a below-boundary raw string
   whose normalized one-item array reaches the boundary, or a multi-item array
@@ -91,3 +100,9 @@ self-contained because its matching calls live behind that anchor.
   existing fail-closed or locally fenced recovery paths available. Binding the
   capability to the durable epoch prevents a replacement process from
   inheriting an earlier process's advertisement under the same instance id.
+- A rejected quarantine admission is returned to its wrapper and caller; it
+  does not mutate the rejected session's marker or pretend that the fence was
+  installed. An already-active poison-overflow deadline is extended only when
+  a retained poison arm extends its own deadline, so unknown keys remain
+  fail-closed for the whole active poison window without creating a new
+  overflow fence during ordinary admission.
