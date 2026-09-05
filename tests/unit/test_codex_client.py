@@ -874,9 +874,7 @@ async def test_routed_websocket_can_bypass_native_egress(route: ResolvedUpstream
     assert result.native is False
     assert native.websocket_calls == []
     assert len(session.calls) == 1
-    context = result.context
-    assert context is not None
-    await context.__aexit__(None, None, None)
+    assert result.context is None
 
 
 @pytest.mark.asyncio

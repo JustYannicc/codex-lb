@@ -64,7 +64,10 @@ def _make_request_state(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        # Keep the synthetic request inside the bounded delivery window used
+        # by the production enqueue path. A fixed historical timestamp makes
+        # terminal delivery look expired before the stream is even attached.
+        started_at=http_bridge_helpers._service_time().monotonic(),
         response_id=response_id,
         awaiting_response_created=awaiting_response_created,
         event_queue=event_queue,
