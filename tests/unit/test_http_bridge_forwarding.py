@@ -446,6 +446,43 @@ def test_parse_forwarded_request_authenticated_input_shape_v2_selects_current_mo
     assert payload._codex_lb_legacy_owner_forwarding_input_shape is False
 
 
+def test_parse_forwarded_request_predecessor_v2_normalized_array_stays_legacy() -> None:
+    raw_text = "x" * 4035
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": raw_text}]}],
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    # A predecessor knows the v2 body-bound signature but predates the
+    # additive input-shape marker. Recompute that signature over the same
+    # normalized array with no marker to model its wire format exactly.
+    headers.pop(HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER)
+    headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+        input_shape_version=None,
+    )
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert payload._codex_lb_input_shape_wire_version is None
+    assert payload._codex_lb_legacy_owner_forwarding_input_shape is True
+    # The normalized array is exactly the canonical raw-string shape; its
+    # envelope must not count toward the full-resend boundary.
+    assert http_bridge_helpers_module._http_bridge_payload_looks_like_full_resend(payload) is False
+
+
 @pytest.mark.parametrize("tamper", ["missing", "mismatched"])
 def test_parse_forwarded_request_untrusted_input_shape_marker_stays_legacy(tamper: str) -> None:
     payload = _payload()
