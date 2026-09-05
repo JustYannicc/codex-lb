@@ -670,8 +670,10 @@ class ResponsesTextControls(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class _ResponsesRawInputProvenance:
-    raw_string: str
+    raw_input: str | list[JsonValue]
     normalized_value: JsonValue
+    original_instructions: str
+    normalized_instructions: str
 
 
 class ResponsesRequest(BaseModel):
@@ -679,6 +681,7 @@ class ResponsesRequest(BaseModel):
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
     _codex_lb_raw_input_provenance: _ResponsesRawInputProvenance | None = PrivateAttr(default=None)
+    _codex_lb_input_shape_wire_version: str | None = PrivateAttr(default="2")
     _codex_lb_legacy_owner_forwarding_input_shape: bool = PrivateAttr(default=False)
 
     @model_validator(mode="wrap")
@@ -691,10 +694,16 @@ class ResponsesRequest(BaseModel):
         if isinstance(data, cls):
             return handler(data)
         raw_input = data.get("input") if is_json_mapping(data) else None
+        raw_instructions = data.get("instructions") if is_json_mapping(data) else None
         request = handler(data)
         request._codex_lb_raw_input_provenance = (
-            _ResponsesRawInputProvenance(raw_string=raw_input, normalized_value=request.input)
-            if isinstance(raw_input, str)
+            _ResponsesRawInputProvenance(
+                raw_input=raw_input,
+                normalized_value=request.input,
+                original_instructions=raw_instructions if isinstance(raw_instructions, str) else "",
+                normalized_instructions=request.instructions,
+            )
+            if isinstance(raw_input, str) or is_json_list(raw_input)
             else None
         )
         return request
@@ -830,7 +839,9 @@ class ResponsesRequest(BaseModel):
         payload = self.model_dump_for_forwarding()
         provenance = self._codex_lb_raw_input_provenance
         if provenance is not None and self.input is provenance.normalized_value:
-            payload["input"] = provenance.raw_string
+            payload["input"] = provenance.raw_input
+            if self.instructions == provenance.normalized_instructions:
+                payload["instructions"] = provenance.original_instructions
         return payload
 
     def to_payload(self) -> JsonObject:

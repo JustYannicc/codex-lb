@@ -17,6 +17,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_clear_fence_details,
     _http_bridge_quarantine_registry,
     _http_bridge_session_key_poison_quarantined,
+    _log_http_bridge_quarantine_admission_rejected,
     _quarantine_http_bridge_session,
     _revoke_http_bridge_poison_quarantine,
 )
@@ -909,12 +910,17 @@ class _HTTPBridgeRetryCircuitMixin:
             # the poisoned anchor. The re-arm extends the deadline against
             # the adopted cooldown and refreshes the poison provenance to
             # the lineage that now owns the row.
-            _quarantine_http_bridge_session(
+            installed = _quarantine_http_bridge_session(
                 self,
                 session,
                 reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
                 minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(poison_cooldown_remaining),
             )
+            if not installed:
+                _log_http_bridge_quarantine_admission_rejected(
+                    session,
+                    reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                )
         elif revoke_stale_poison_quarantine and _http_bridge_session_key_poison_quarantined(self, key):
             _revoke_http_bridge_poison_quarantine_at_arm_fence(self, key)
         return True
@@ -1679,18 +1685,24 @@ class _HTTPBridgeRetryCircuitMixin:
                     ):
                         pre_arm_quarantine_reason = prior_entry.reason
                         pre_arm_quarantine_until = prior_entry.quarantined_until
-                    _quarantine_http_bridge_session(
+                    installed = _quarantine_http_bridge_session(
                         self,
                         session,
                         reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
                         minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(quarantine_cooldown_remaining),
                     )
-                    # Captured so a lost cross-replica race can revoke exactly
-                    # this speculative arm and nothing re-armed after it.
-                    armed_quarantine_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
-                    armed_quarantine_generation = armed_quarantine_fence.generation
-                    armed_quarantine_raw_generation = armed_quarantine_fence.raw_generation
-                    armed_quarantine_eventless_timeout_count = armed_quarantine_fence.eventless_timeout_count
+                    if installed:
+                        # Captured so a lost cross-replica race can revoke exactly
+                        # this speculative arm and nothing re-armed after it.
+                        armed_quarantine_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
+                        armed_quarantine_generation = armed_quarantine_fence.generation
+                        armed_quarantine_raw_generation = armed_quarantine_fence.raw_generation
+                        armed_quarantine_eventless_timeout_count = armed_quarantine_fence.eventless_timeout_count
+                    else:
+                        _log_http_bridge_quarantine_admission_rejected(
+                            session,
+                            reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                        )
                 recorded_failures = await self._record_http_bridge_retry_circuit_failure_locked(
                     session,
                     state,
@@ -1814,12 +1826,17 @@ class _HTTPBridgeRetryCircuitMixin:
                         adopted_poison_class and consecutive_failures >= poison_arm_threshold
                     )
             if merged_poison_opened:
-                _quarantine_http_bridge_session(
+                installed = _quarantine_http_bridge_session(
                     self,
                     session,
                     reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
                     minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(merged_cooldown_remaining),
                 )
+                if not installed:
+                    _log_http_bridge_quarantine_admission_rejected(
+                        session,
+                        reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                    )
             elif merged_poison_revoked:
                 _revoke_http_bridge_poison_quarantine(
                     self,
