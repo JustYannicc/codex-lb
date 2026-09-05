@@ -700,7 +700,7 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if item_type == "tool_search_output":
         if item.get("status") == "failed":
             return False
-        has_tools = isinstance(item.get("tools"), list)
+        has_tools = _tools_are_account_neutral(item.get("tools"))
         has_output = isinstance(item.get("output"), str)
         return item.get("execution") in (None, "client") and has_tools != has_output
     output = item.get("output")
