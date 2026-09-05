@@ -1,6 +1,6 @@
 # Experimental Codex history and notes
 
-Source of truth: [Codex context management specification](../openspec/specs/codex-context-management/spec.md).
+Source of truth: [Codex context management specification](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/codex-context-management/spec.md).
 
 This compatibility path supports native Codex notes and history with an account pool. OpenAI's backend stores the content. codex-lb remembers which account owns the notes and which accounts have handled each task.
 
