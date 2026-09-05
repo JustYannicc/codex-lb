@@ -65,9 +65,9 @@ Classify the established proxy continuity-loss details before the genuine
 failure set. Continuity loss invokes the owner-fenced release and returns
 without a durable write. A previous-response rejection is continuity-neutral
 only when request state proves that the rejected anchor was proxy-injected;
-raw/client-supplied rejection remains a genuine strike. Genuine
-`stream_incomplete`, `stream_idle_timeout`, and `clean_close` continue through
-the existing attempt-scoped accounting path. Anchor replay and error
+raw/client-supplied rejection remains outside retry-circuit accounting.
+Genuine `stream_incomplete`, `stream_idle_timeout`, and `clean_close` continue
+through the existing attempt-scoped accounting path. Anchor replay and error
 provenance remain owned by their existing vehicles.
 
 ### Serialize reset's critical section
