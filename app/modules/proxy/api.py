@@ -4580,7 +4580,14 @@ async def _select_responses_model_source_with_continuity(
     anchor that must keep being served.
     """
     turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
-    if turn_state is not None:
+    source_selection = await _select_responses_model_source(
+        payload.model,
+        api_key,
+        raw_model=raw_model,
+        require_streaming=require_streaming,
+    )
+
+    if turn_state is not None and (source_selection is not None or payload.previous_response_id is not None):
         turn_state_owner_account_id = await context.service._resolve_compact_turn_state_owner(
             turn_state=turn_state,
             api_key=api_key,
@@ -4593,13 +4600,12 @@ async def _select_responses_model_source_with_continuity(
         payload._codex_lb_turn_state_owner_lookup_completed = True
         if turn_state_owner_account_id is not None:
             return None, True
+    elif turn_state is not None:
+        # A first-turn subscription request has no recorded ownership to
+        # resolve. Mark the lookup complete so the subscription streaming path
+        # does not repeat a strict lookup for an arbitrary client marker.
+        payload._codex_lb_turn_state_owner_lookup_completed = True
 
-    source_selection = await _select_responses_model_source(
-        payload.model,
-        api_key,
-        raw_model=raw_model,
-        require_streaming=require_streaming,
-    )
     if source_selection is None or payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(

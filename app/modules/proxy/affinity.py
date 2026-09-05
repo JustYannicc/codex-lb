@@ -633,9 +633,12 @@ def _websocket_continuity_aliases_from_headers(
     return tuple(dict.fromkeys(aliases))
 
 
-# Pattern matching turn-state values synthesized by the helpers below.
-# A 32-char lowercase hex (uuid4().hex) suffix follows the prefix.
-_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[0-9a-f]{32}$")
+# Pattern matching the proxy's continuity marker shapes. The production
+# helpers append a 32-char lowercase hex suffix, but tests, older clients, and
+# persisted bridge aliases may carry a readable suffix across reconnects.
+# Compatibility is intentionally shape-based: the sole-candidate bound and
+# independent owner/file-pin checks remain the authorization boundary.
+_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 def _is_synthesized_turn_state(value: str) -> bool:
