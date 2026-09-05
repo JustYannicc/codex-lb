@@ -419,19 +419,43 @@ async def reconcile_recoverable_account_statuses(
             expected_monthly=monthly_entry,
         ):
             continue
+        previous_status = account.status
+        previous_deactivation_reason = account.deactivation_reason
+        previous_reset_at = account.reset_at
+        previous_blocked_at = account.blocked_at
+        previous_plan_type = account.plan_type
         updated = await accounts_repo.update_status_if_current(
             account.id,
             status,
             deactivation_reason,
             reset_at,
             blocked_at=blocked_at,
-            expected_status=account.status,
-            expected_deactivation_reason=account.deactivation_reason,
-            expected_reset_at=account.reset_at,
-            expected_blocked_at=account.blocked_at,
-            expected_plan_type=account.plan_type,
+            expected_status=previous_status,
+            expected_deactivation_reason=previous_deactivation_reason,
+            expected_reset_at=previous_reset_at,
+            expected_blocked_at=previous_blocked_at,
+            expected_plan_type=previous_plan_type,
         )
         if not updated:
+            continue
+        if not await _recovery_usage_watermark_is_current(
+            account=account,
+            usage_repo=usage_repo,
+            expected_primary=latest_primary.get(account.id),
+            expected_secondary=latest_secondary.get(account.id),
+            expected_monthly=monthly_entry,
+        ):
+            await accounts_repo.update_status_if_current(
+                account.id,
+                previous_status,
+                previous_deactivation_reason,
+                previous_reset_at,
+                blocked_at=previous_blocked_at,
+                expected_status=status,
+                expected_deactivation_reason=deactivation_reason,
+                expected_reset_at=reset_at,
+                expected_blocked_at=blocked_at,
+            )
             continue
         account.status = status
         account.deactivation_reason = deactivation_reason
@@ -445,6 +469,10 @@ def _usage_history_identity(entry: UsageHistory | None) -> tuple[int | None, dat
     if entry is None:
         return None
     return (entry.id, entry.recorded_at)
+
+
+def _usage_history_at_or_before(left: UsageHistory, right: UsageHistory) -> bool:
+    return (left.recorded_at, left.id or 0) <= (right.recorded_at, right.id or 0)
 
 
 async def _recovery_usage_watermark_is_current(
@@ -569,12 +597,15 @@ async def _resolve_long_window_reset_evidence(
         )
         current = evidence.get(account.id)
         if current is not None and history:
-            evidence[account.id] = _UsageResetEvidence(
+            anchored_current = _UsageResetEvidence(
                 baseline=history[0],
                 before=current.before,
                 after=current.after,
             )
-            continue
+            if _usage_history_at_or_before(anchored_current.baseline, anchored_current.before):
+                evidence[account.id] = anchored_current
+                continue
+            evidence.pop(account.id, None)
         persisted = _latest_confirmed_reset_transition_after_baseline(
             [entry for entry in history if entry.recorded_at > since],
             expected_reset_at=account.reset_at,
