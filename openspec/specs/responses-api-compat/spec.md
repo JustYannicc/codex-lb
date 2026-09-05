@@ -3676,8 +3676,12 @@ placeholders (`turn_*` / `http_turn_*`) are compatibility markers rather than
 hard account ownership. In an owner-miss continuation, when a marker alias is
 unavailable, a value matching either shape MUST use the same sole-candidate
 compatibility rule without requiring exact server-side issuance provenance; a
-registered marker MUST still resolve to its recorded owner. A resolved
-previous-response owner and an account-pinned file owner remain independent
+registered marker MUST still resolve to its recorded owner.
+HTTP turn-state lookup MUST NOT be skipped merely because there is no
+`previous_response_id` and enabled-source selection found no match. A failed
+disabled-source subscription-owner lookup MUST retain the resolver's sanitized
+HTTP 502 status and error payload at both HTTP route boundaries.
+A resolved previous-response owner and an account-pinned file owner remain independent
 hard constraints, and marker shape
 MUST NOT override either owner or relax strict file routing. For the same
 fail-closed decision, a physically present but blank `x-codex-turn-state`
@@ -3725,6 +3729,23 @@ pre-marker v2 owner verification.
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the request is not rejected as `model_source_disabled`
 - **AND** subscription routing preserves the recorded account owner
+
+#### Scenario: Registered marker-only ownership survives an enabled-source miss
+
+- **GIVEN** an HTTP Responses request has no `previous_response_id`
+- **AND** its `turn_*` or `http_turn_*` marker is registered to a subscription account in the requesting API-key scope
+- **AND** enabled-source lookup finds no match
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the proxy resolves that registered marker before treating the request as ownerless
+- **AND** subscription routing preserves the registered owner even if a disabled source also claims the model
+
+#### Scenario: Disabled-source owner lookup failure keeps its sanitized error
+
+- **GIVEN** a disabled source claims the requested model
+- **AND** the subscription previous-response owner resolver raises a sanitized HTTP 502 error
+- **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
+- **THEN** the route returns that status and sanitized error payload
+- **AND** it does not replace the failure with a generic HTTP 500 or dispatch to an upstream
 
 #### Scenario: Canonical source response ID remains source-routed over HTTP
 
@@ -3826,6 +3847,16 @@ pre-marker v2 owner verification.
 - **THEN** routing remains constrained to that independently resolved owner
 - **AND** marker-shape compatibility does not override the owner or relax file routing
 
+#### Scenario: Supplied synthetic marker keeps HTTP bridge owner-miss compatibility
+
+- **GIVEN** HTTP bridge routing is enabled and the previous-response owner is missing
+- **AND** the client physically supplies an unregistered `turn_*` or `http_turn_*` header
+- **AND** no file owner or required durable bridge owner constrains the request
+- **WHEN** the client calls either HTTP Responses route
+- **THEN** the bridge applies the API-key-scoped sole-candidate check without requiring local marker issuance
+- **AND** exactly one eligible account permits forwarding while zero or multiple candidates fail closed
+- **AND** blank and non-synthetic client headers do not authorize this fallback
+
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
 
 - **GIVEN** no subscription account is recorded as owner of `previous_response_id`
@@ -3846,6 +3877,16 @@ pre-marker v2 owner verification.
 - **AND** the request is forwarded to that sole eligible subscription account
 - **AND** the unregistered marker does not by itself produce
   `turn_state_owner_unavailable`
+
+#### Scenario: Marker-only compact owner miss rejects an ambiguous pool
+
+- **GIVEN** a compact request has no `previous_response_id` and its synthetic-shaped marker resolves to no owner
+- **AND** no independent file owner constrains the request
+- **AND** zero or multiple eligible subscription accounts remain after API-key account-assignment scoping
+- **WHEN** the client calls either compact HTTP route
+- **THEN** the proxy returns HTTP 502 with `previous_response_owner_unavailable`
+- **AND** no account is selected and no upstream request is dispatched
+- **AND** any API-key reservation is settled before error-health writes
 
 #### Scenario: Direct WebSocket preserves a recorded subscription owner
 

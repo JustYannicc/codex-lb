@@ -243,6 +243,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
     _extract_model_class,
+    _is_synthesized_turn_state,
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
@@ -1999,6 +2000,7 @@ class _HTTPBridgeStreamingMixin:
             and request_state.preferred_account_id == continuity_preferred_account_id
         )
         file_required_preferred_account = rewritten_file_account_id is not None
+        owner_miss_fallback_account_id: str | None = None
         if (
             required_continuity_owner_missing
             and request_state.previous_response_id is not None
@@ -2008,7 +2010,10 @@ class _HTTPBridgeStreamingMixin:
             and not model_transition_owner_missing
             and (
                 not _turn_state_header_present(headers)
-                or (synthesized_turn_state is not None and raw_incoming_turn_state_header == synthesized_turn_state)
+                or (
+                    raw_incoming_turn_state_header is not None
+                    and _is_synthesized_turn_state(raw_incoming_turn_state_header)
+                )
             )
         ):
             selection_account_ids = (
@@ -2030,7 +2035,8 @@ class _HTTPBridgeStreamingMixin:
                 )
                 selection_candidates = ()
             if len(selection_candidates) == 1:
-                request_state.preferred_account_id = selection_candidates[0].id
+                owner_miss_fallback_account_id = selection_candidates[0].id
+                request_state.preferred_account_id = owner_miss_fallback_account_id
                 required_continuity_owner_missing = False
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
@@ -2298,11 +2304,18 @@ class _HTTPBridgeStreamingMixin:
                     # row owned by the previous process epoch. Once the old
                     # owner is proven dead, let the initial continuation
                     # rebind locally; clustered deployments still route or
-                    # fail closed through the normal owner path.
+                    # fail closed through the normal owner path. A verified
+                    # sole-candidate owner miss can also create its first
+                    # session, without dropping the incoming response anchor.
                     allow_previous_response_recovery_rebind=(
                         request_state.previous_response_id is not None
-                        and dead_owner_anchor
-                        and not _http_bridge_requires_cluster_registration(settings)
+                        and (
+                            (dead_owner_anchor and not _http_bridge_requires_cluster_registration(settings))
+                            or (
+                                owner_miss_fallback_account_id is not None
+                                and request_state.preferred_account_id == owner_miss_fallback_account_id
+                            )
+                        )
                     ),
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=original_request_unanchored,

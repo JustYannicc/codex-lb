@@ -16579,8 +16579,8 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
         (1, None, "http_turn_generated", False, True),
         (2, None, "http_turn_generated", False, False),
         (1, "client-turn-state", None, False, False),
-        (1, "turn_00000000000000000000000000000000", None, False, False),
-        (1, "http_turn_00000000000000000000000000000000", None, False, False),
+        (1, "turn_00000000000000000000000000000000", None, False, True),
+        (1, "http_turn_00000000000000000000000000000000", None, False, True),
         (1, "", None, False, False),
         (1, "   ", None, False, False),
         (1, "client-turn-state", None, True, False),
@@ -16692,6 +16692,7 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
         get_or_create.assert_awaited_once()
         assert get_or_create.await_args is not None
         assert get_or_create.await_args.kwargs["preferred_account_id"] == candidates[0].id
+        assert get_or_create.await_args.kwargs["allow_previous_response_recovery_rebind"] is True
     else:
         with pytest.raises(ProxyResponseError) as exc_info:
             async for _chunk in service._stream_via_http_bridge(

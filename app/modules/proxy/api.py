@@ -1171,16 +1171,19 @@ async def responses(
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=not backend_non_streaming_requested,
-            context=context,
-            previous_response_id=responses_payload.previous_response_id,
-        )
+        try:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=not backend_non_streaming_requested,
+                context=context,
+                previous_response_id=responses_payload.previous_response_id,
+            )
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
         if disabled_denial is not None:
             return disabled_denial
     if source is not None:
@@ -1381,16 +1384,19 @@ async def v1_responses(
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=responses_payload.stream is True,
-            context=context,
-            previous_response_id=responses_payload.previous_response_id,
-        )
+        try:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=responses_payload.stream is True,
+                context=context,
+                previous_response_id=responses_payload.previous_response_id,
+            )
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
         if disabled_denial is not None:
             return disabled_denial
     if source is not None:
@@ -4593,11 +4599,7 @@ async def _select_responses_model_source_with_continuity(
         require_streaming=require_streaming,
     )
 
-    if turn_state is not None and (
-        source_selection is not None
-        or payload.previous_response_id is not None
-        or not proxy_affinity_module._is_synthesized_turn_state(turn_state)
-    ):
+    if turn_state is not None:
         turn_state_owner_account_id = await context.service._resolve_compact_turn_state_owner(
             turn_state=turn_state,
             api_key=api_key,
@@ -4610,12 +4612,6 @@ async def _select_responses_model_source_with_continuity(
         payload._codex_lb_turn_state_owner_lookup_completed = True
         if turn_state_owner_account_id is not None:
             return None, True
-    elif turn_state is not None:
-        # A first-turn subscription request carrying only a synthetic-shaped
-        # marker has no recorded ownership to resolve. Mark the lookup complete
-        # so the subscription streaming path can use its sole-candidate fallback.
-        payload._codex_lb_turn_state_owner_lookup_completed = True
-
     if source_selection is None or payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(

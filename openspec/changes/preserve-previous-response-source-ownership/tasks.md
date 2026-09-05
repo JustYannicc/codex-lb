@@ -21,7 +21,7 @@
 - [x] 3.2 Cover subscription-owned and canonical source-owned prior responses on both HTTP Responses routes.
 - [x] 3.3 Add direct WebSocket regressions for subscription-owner routing and canonical source-owner HTTP fallback.
 - [x] 3.4 Cover unregistered synthetic-shaped compact turn state with a missing previous-response owner through the sole-candidate compatibility path.
-- [x] 3.5 Cover unregistered synthetic-shaped compact turn state without `previous_response_id` through normal compact selection.
+- [x] 3.5 Cover unregistered synthetic-shaped compact turn state without `previous_response_id` through sole-candidate compact selection.
 - [x] 3.6 Cover marker-bearing file-owner forwards, marker-proof tampering, and marker-free pre-marker signing shapes.
 - [x] 3.7 Exercise authorized-pool exhaustion through downstream WebSocket requests, including pre-created failures and strict replay boundaries.
 
@@ -30,3 +30,11 @@
 - [x] 4.1 Run focused tests, Ruff, ty, and scoped/strict OpenSpec validation; inspect the final diff and worktree status.
 - [x] 4.2 Preserve turn-state ownership before owner-miss fallback and fail closed when WebSocket candidate lookup is unavailable.
 - [x] 4.3 Validate the no-previous-response compact shape-compatibility boundary and strict OpenSpec contract.
+
+## 5. Current-head review corrections
+
+- [x] 5.1 Resolve registered synthetic-shaped HTTP turn-state owners before caching a lookup miss, including disabled-source probes without a previous response.
+- [x] 5.2 Apply shape-based owner-miss compatibility in the HTTP bridge while preserving blank, non-synthetic, file, and durable-owner constraints.
+- [x] 5.3 Enforce API-key-scoped sole-candidate selection for marker-only compact owner misses, including zero and multiple candidates.
+- [x] 5.4 Render disabled-source owner-lookup failures through both HTTP routes' sanitized 502 error envelopes.
+- [ ] 5.5 Prove all four corrections at the affected routes, run isolated-database regressions and required checks, and obtain current-head review and hosted results.

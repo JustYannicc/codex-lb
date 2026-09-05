@@ -252,6 +252,30 @@ is positively classified as pre-dispatch therefore leaves the body unowned and
 eligible for its first real dispatch on another account. Ambiguous failures
 remain owner-bound.
 
+## HTTP alias lookup and marker-only compatibility
+
+The [source-ownership requirement](spec.md#requirement-previous-response-source-routing-follows-proven-ownership)
+distinguishes a marker's shape from the ownership evidence registered under
+it. An HTTP request with only a registered `turn_*` alias still belongs to its
+recorded account, even if no enabled model source matches. Skipping the alias
+lookup would discard ownership before streaming or a disabled-source probe.
+The lookup result is cached only after resolution, and lookup failures retain
+the resolver's sanitized HTTP status and payload.
+
+For example, an unregistered `http_turn_*` echo and a missing previous-response
+owner can continue through the HTTP bridge if the requesting API key permits
+exactly one eligible account. Local issuance history is not required. The
+same scoped count applies to compact requests carrying only an unresolved
+marker. Empty or ambiguous pools fail closed, while file pins and required
+durable bridge owners retain their independent constraints. Both HTTP routes
+are regression-tested, including registered aliases and lookup failures.
+
+For cold bridge continuations, the sole-candidate result also authorizes
+session creation on that account. Passing account resolution alone is not
+enough when the local session has disappeared. The incoming response anchor
+stays in the upstream request; this is not stale-anchor removal or proof of a
+durable owner.
+
 ## WebSocket security retry exhaustion
 
 The [security-work retry requirement](spec.md#requirement-security-work-authorization-errors-can-route-to-authorized-accounts)

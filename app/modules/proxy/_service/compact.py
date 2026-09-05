@@ -1022,8 +1022,10 @@ class _CompactMixin:
                     surface="compact",
                 )
             if (
-                isinstance(previous_response_id, str)
-                and previous_response_id.strip()
+                (
+                    (isinstance(previous_response_id, str) and previous_response_id.strip())
+                    or (synthesized_turn_state and rewritten_file_account_id is None)
+                )
                 and previous_response_preferred_account_id is None
                 and turn_state_owner_account_id is None
             ):
