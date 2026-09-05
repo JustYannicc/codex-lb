@@ -419,46 +419,16 @@ async def test_http_bridge_event_queue_discard_releases_retained_payloads() -> N
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An event consumed after budget selection must still reach the stream."""
-
-    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
-        maxsize=2,
-        revoked=asyncio.Event(),
-    )
-    original_wait = asyncio.wait
-    race_triggered = False
-
-    async def wait_with_budget_race(
-        awaitables: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        nonlocal race_triggered
-        tasks = tuple(awaitables)
-        result = await original_wait(tasks, *args, **kwargs)
-        task_names = {task.get_name() for task in tasks if isinstance(task, asyncio.Task)}
-        if (
-            not race_triggered
-            and "http-bridge-event-consumer" in task_names
-            and "http-bridge-event-budget" in task_names
-        ):
-            race_triggered = True
-            event_queue.put_nowait("raced-event")
-            event_queue.revoke()
-        return result
-
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", wait_with_budget_race)
-
-    async def trip_budget() -> None:
-        await asyncio.sleep(0)
-        event_queue.budget_exceeded.set()
-
-    budget_task = asyncio.create_task(trip_budget())
-    assert await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=None) == "raced-event"
-    await budget_task
+async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race() -> None:
+    """A budget wakeup must not discard the live event that arrived with it."""
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=asyncio.Event())
+    reader = asyncio.create_task(http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=None))
+    await asyncio.sleep(0)
+    assert not reader.done()
+    event_queue.put_nowait("raced-event")
+    event_queue.budget_exceeded.set()
+    event_queue.revoke()
+    assert await asyncio.wait_for(reader, timeout=1.0) == "raced-event"
     assert event_queue.empty()
 
 
@@ -527,121 +497,41 @@ async def test_http_bridge_event_enqueue_deadline_releases_shared_reader() -> No
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_event_wait_preserves_event_after_timeout_wins_race(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An event claimed after timeout selection must still reach the stream."""
-
-    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
-        maxsize=2,
-        revoked=asyncio.Event(),
-    )
-    original_wait = asyncio.wait
-    race_triggered = False
-
-    async def wait_with_timeout_race(
-        awaitables: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        nonlocal race_triggered
-        tasks = tuple(awaitables)
-        result = await original_wait(tasks, *args, **kwargs)
-        task_names = {task.get_name() for task in tasks if isinstance(task, asyncio.Task)}
-        if not race_triggered and "http-bridge-event-timeout" in task_names:
-            race_triggered = True
-            event_queue.put_nowait("raced-timeout-event")
-        return result
-
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", wait_with_timeout_race)
-
+async def test_http_bridge_event_wait_preserves_event_after_timeout_wins_race() -> None:
+    """Cancellation by the deadline races publication before the reader resumes."""
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=asyncio.Event())
+    asyncio.get_running_loop().call_soon(event_queue.put_nowait, "raced-timeout-event")
     assert (
-        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.001)
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0)
         == "raced-timeout-event"
     )
-    assert race_triggered
     assert event_queue.empty()
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_event_queue_cancellation_retains_ready_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancelling a waiting reader cannot remove the event that woke it."""
-
-    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
-        maxsize=2,
-        revoked=asyncio.Event(),
-    )
-    original_wait = asyncio.wait
-    wait_started = asyncio.Event()
-    release_wait = asyncio.Event()
-    observed_ready_task: asyncio.Task[Any] | None = None
-
-    async def hold_queue_wait(
-        awaitables: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        nonlocal observed_ready_task
-        tasks = tuple(awaitables)
-        observed_ready_task = tasks[0]
-        wait_started.set()
-        await release_wait.wait()
-        return await original_wait(tasks, *args, **kwargs)
-
-    monkeypatch.setattr(http_bridge_request_submit_module.asyncio, "wait", hold_queue_wait)
-
-    reader = asyncio.create_task(event_queue.get())
-    await asyncio.wait_for(wait_started.wait(), timeout=1.0)
-    assert observed_ready_task is not None
-
+async def test_http_bridge_event_queue_cancellation_retains_ready_event() -> None:
+    """Cancelling a woken reader leaves both payload and byte credit queued."""
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=asyncio.Event())
+    reader = asyncio.create_task(http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=1.0))
+    await asyncio.sleep(0)
+    assert not reader.done()
     event_queue.put_nowait("response.completed")
-    await asyncio.wait_for(observed_ready_task, timeout=1.0)
-
     reader.cancel()
     with pytest.raises(asyncio.CancelledError):
         await reader
+    assert event_queue.queued_bytes == len("response.completed")
     assert event_queue.get_nowait() == "response.completed"
-    assert event_queue.empty()
+    assert event_queue.queued_bytes == 0
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_event_wait_returns_finished_get_after_reconcile_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A finished consumer result wins even if reconcile reports a timeout."""
-
-    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
-        maxsize=2,
-        revoked=asyncio.Event(),
-    )
+async def test_http_bridge_event_timeout_leaves_late_publication_available() -> None:
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=asyncio.Event())
+    with pytest.raises(TimeoutError):
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0)
     event_queue.put_nowait("response.completed")
-    original_wait = asyncio.wait
-
-    async def select_timeout_after_get_finishes(
-        awaitables: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        tasks = tuple(awaitables)
-        task_by_name = {task.get_name(): task for task in tasks if isinstance(task, asyncio.Task)}
-        if "http-bridge-event-consumer" not in task_by_name:
-            return await original_wait(tasks, *args, **kwargs)
-        get_task = task_by_name["http-bridge-event-consumer"]
-        timeout_task = task_by_name["http-bridge-event-timeout"]
-        while not get_task.done():
-            await asyncio.sleep(0)
-        return {timeout_task}, set(tasks) - {timeout_task}
-
-    async def report_reconcile_timeout(*_args: Any, **_kwargs: Any) -> Any:
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait", select_timeout_after_get_finishes)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "wait_for", report_reconcile_timeout)
-
     assert (
-        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=0.001)
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=1.0)
         == "response.completed"
     )
     assert event_queue.empty()

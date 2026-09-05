@@ -33,6 +33,7 @@ HTTP-bridge request preparation currently attaches `asyncio.Queue(maxsize=0)` to
 
 Alternatives rejected:
 
+- Per-read item, terminal, budget, and timeout tasks: interleaved delivery exposed task fanout even with a buffered fast path. Empty reads now await an owned future in the consumer task. Publication wakes that future without consuming; the reader removes the item only after its await returns. An `asyncio.timeout` scope cancels that same read, and synchronous reconciliation keeps a raced queued payload available without a grace task.
 - Reusing `http_responses_session_bridge_queue_limit`: it counts admitted requests, not event memory, and would couple unrelated units.
 - Reusing durable spool pending-event settings: they govern asynchronous database batching, not downstream live delivery.
 - An unbounded queue plus metrics or dropping: neither applies backpressure nor preserves complete Responses streams.
@@ -45,3 +46,5 @@ Alternatives rejected:
 - **[Repeated cancellation during producer cleanup]** → Cleanup defers cancellation until child tasks terminate and the blocked payload reservation is released.
 - **[Concurrent sessions consume the process envelope]** → A failed reservation revokes only the affected queue; already queued payloads remain accounted until consumed, so pressure cannot be hidden by clearing accounting early.
 - **[Native egress can still block globally]** → HTTP-bridge upstream WebSockets opt out of native egress until native per-stream credits and cancellation exist; unrelated native transport behavior remains unchanged.
+- **[Residual CPU cost]** → Byte accounting and cancellation-safe blocked puts still cost CPU. The benchmark separates producer-ahead reads, interleaved empty reads, and bursts. Unbounded main accumulates a whole burst while this queue applies pressure, so burst timings are not equivalent memory behavior.
+- **[Shorter sibling deadlines]** → The paused request's own deadline releases its enqueue. This does not independently settle a shorter sibling deadline while the shared reader remains blocked.

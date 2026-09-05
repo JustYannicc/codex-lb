@@ -273,8 +273,6 @@ from app.modules.proxy.replay_safety import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
-_HTTP_BRIDGE_EVENT_TIMEOUT_RECONCILE_SECONDS = 0.01
-
 
 class _HTTPBridgeLiveEventQueueBudgetExceeded(RuntimeError):
     """Raised to wake an attached stream when live queue retention fails."""
@@ -285,104 +283,34 @@ async def _next_http_bridge_event_block(
     *,
     timeout: float | None,
 ) -> str | None:
-    """Read one live event while preserving a budget-race delivery."""
+    """Consume in the reader task so a cancelled wait cannot lose an event."""
 
     budget_exceeded = getattr(event_queue, "budget_exceeded", None)
     if budget_exceeded is None:
         if timeout is None:
             return await event_queue.get()
         return await asyncio.wait_for(event_queue.get(), timeout=timeout)
-    # A ready live event is the common path for an active SSE stream.  Reading
-    # it synchronously avoids creating and reaping the consumer/budget/timeout
-    # task fan-out for every event.  ``empty`` and ``get_nowait`` cannot be
-    # interleaved with another task, so the buffered event remains ahead of a
-    # concurrent budget or terminal signal.
     if not event_queue.empty():
         return event_queue.get_nowait()
-    revoked = getattr(event_queue, "revoked", None)
-    terminal_ready = getattr(event_queue, "terminal_ready", None)
-    terminal_budget_exceeded = getattr(event_queue, "terminal_budget_exceeded", False)
-    if revoked is not None and revoked.is_set() and event_queue.empty():
-        if terminal_budget_exceeded:
-            raise _HTTPBridgeLiveEventQueueBudgetExceeded
-        if getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set()):
-            return await event_queue.get()
-        if budget_exceeded.is_set():
-            raise _HTTPBridgeLiveEventQueueBudgetExceeded
-        if terminal_ready is None:
-            return None
 
-    # A budget failure revokes producers. Drain already-buffered events first
-    # so the failure does not reorder an upstream response; with no buffered
-    # event, fail immediately.
-    if event_queue.empty() and (
-        getattr(event_queue, "terminal_pending", False) or (terminal_ready is not None and terminal_ready.is_set())
-    ):
-        if terminal_budget_exceeded:
-            raise _HTTPBridgeLiveEventQueueBudgetExceeded
-        return await event_queue.get()
-    if budget_exceeded.is_set() and event_queue.empty():
-        raise _HTTPBridgeLiveEventQueueBudgetExceeded
-
-    get_task = asyncio.create_task(event_queue.get(), name="http-bridge-event-consumer")
-    budget_task = asyncio.create_task(budget_exceeded.wait(), name="http-bridge-event-budget")
-    tasks: tuple[asyncio.Task[Any], ...] = (get_task, budget_task)
-    revoked_task: asyncio.Task[Any] | None = None
-    if revoked is not None and terminal_ready is None:
-        revoked_task = asyncio.create_task(revoked.wait(), name="http-bridge-event-revoke")
-        tasks += (revoked_task,)
-    timeout_task: asyncio.Task[Any] | None = None
-    if timeout is not None:
-        timeout_task = asyncio.create_task(asyncio.sleep(timeout), name="http-bridge-event-timeout")
-        tasks += (timeout_task,)
     try:
-        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        # If both become ready in one loop turn, preserve queue order and
-        # consume the already-buffered event first.
-        if get_task in done:
-            event_block = get_task.result()
-            if event_block is None and budget_task in done:
-                raise _HTTPBridgeLiveEventQueueBudgetExceeded
-            return event_block
-        if budget_task in done:
-            # The queue revokes producers when the budget trips, but a nested
-            # get can consume an event after this wait selected the budget task.
-            # Await that task before cleanup so the raced event is returned
-            # instead of being removed and discarded by cancellation.
-            event_block = await get_task
-            if event_block is not None:
-                return event_block
-            raise _HTTPBridgeLiveEventQueueBudgetExceeded
-        if revoked_task is not None and revoked_task in done:
-            if getattr(event_queue, "terminal_pending", False) or (
-                terminal_ready is not None and terminal_ready.is_set()
-            ):
-                return await event_queue.get()
-            return None
-        if timeout_task is not None and timeout_task in done:
-            # A queue producer can wake the nested get task in the same loop
-            # turn in which the timeout wins.  Reconcile that task briefly
-            # before the cleanup below cancels it, so a claimed event is
-            # delivered instead of silently discarded.  Shielding keeps the
-            # nested queue get alive while wait_for bounds the grace period.
-            try:
-                event_block = await asyncio.wait_for(
-                    asyncio.shield(get_task),
-                    timeout=_HTTP_BRIDGE_EVENT_TIMEOUT_RECONCILE_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                if get_task.done() and not get_task.cancelled():
-                    return get_task.result()
-                raise
-            if event_block is None and budget_task.done():
-                raise _HTTPBridgeLiveEventQueueBudgetExceeded
-            return event_block
-        raise asyncio.TimeoutError
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if timeout is None:
+            event_block = await event_queue.get()
+        else:
+            async with asyncio.timeout(timeout):
+                event_block = await event_queue.get()
+    except TimeoutError:
+        # No child consumes on our behalf. A producer racing the deadline
+        # leaves its event queued, so reconciliation needs no task or grace.
+        if not event_queue.empty() or getattr(event_queue, "terminal_pending", False):
+            event_block = event_queue.get_nowait()
+        elif getattr(event_queue, "terminal_budget_exceeded", False):
+            raise _HTTPBridgeLiveEventQueueBudgetExceeded from None
+        else:
+            raise
+    if event_block is None and getattr(event_queue, "terminal_budget_exceeded", False):
+        raise _HTTPBridgeLiveEventQueueBudgetExceeded
+    return event_block
 
 
 _REQUEST_TRANSPORT_HTTP = "http"

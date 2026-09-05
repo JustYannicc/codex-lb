@@ -4668,6 +4668,21 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **THEN** existing client-disconnect and upstream-drain behavior is preserved
 - **AND** no completed event is delivered to another request
 
+### Requirement: Live queue reads do not spawn per-event tasks
+
+Buffered and waiting HTTP-bridge live event reads MUST use the consumer task
+without creating child tasks for item, terminal, revocation, or timeout signals.
+Cancellation before consumption MUST leave an arriving event in the queue.
+If a read deadline races an already-buffered event, the reader MUST return
+that event before reporting the timeout.
+
+#### Scenario: Waiting consumer receives an event
+
+- **GIVEN** a live queue is empty and its consumer awaits the next event
+- **WHEN** a producer publishes a live event or ordered terminal sequence
+- **THEN** the consumer wakes without per-event child tasks
+- **AND** cancellation before consumption leaves the payload and byte credit owned by the queue
+
 ### Requirement: HTTP bridge live event delivery is bounded and deadline-aware
 
 For a streamed HTTP bridge Responses request, the proxy MUST retain live
@@ -5653,7 +5668,7 @@ Before an HTTP/SSE Responses request enters the upstream WebSocket session bridg
 
 ### Requirement: Responses WebSocket preserves bidirectional transport semantics
 
-The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
+The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Except for HTTP-bridge upstream WebSockets, which MUST use the bounded-delivery compatibility fallback until native per-stream flow control and cancellation are proven, direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
 
 #### Scenario: Native direct relay preserves frames
 

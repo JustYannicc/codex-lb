@@ -59,3 +59,11 @@
 - [x] 6.3 Keep HTTP-bridge direct and routed WebSockets off native egress while preserving the native default elsewhere
 
 - [x] 6.4 Add deadline, terminal append-exception, and direct/routed native-bypass regressions and rerun the affected proof lanes
+
+## 7. Round-19 performance and proof
+
+- [x] 7.1 Measure producer-ahead and interleaved queue delivery against pinned main and the delivered PR head
+- [x] 7.2 Replace read-side task races with owned futures and same-task timeout cancellation; prove no child tasks and retained raced payloads
+- [x] 7.3 Exercise real shared-reader dispatch and sibling deadline settlement after the paused enqueue reaches its own deadline
+- [x] 7.4 Clarify the HTTP-bridge native-egress exception and record residual costs without claiming native flow control
+- [ ] 7.5 Record immutable benchmark evidence, run affected verification, push with a checked lease, and reply to every round-19 finding
