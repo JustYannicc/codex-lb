@@ -178,6 +178,9 @@ class StubAccountsRepository:
         self._accounts = {account.id: account for account in accounts}
         self.status_updates: list[dict[str, Any]] = []
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self._accounts.get(account_id)
+
     async def update_status_if_current(
         self,
         account_id: str,
@@ -323,16 +326,20 @@ class MutatingUsageAfterSuccessfulCasAccountsRepository(StubAccountsRepository):
         *,
         usage_repo: StubUsageRepository,
         refreshed_secondary: dict[str, UsageHistory],
+        mutate_current_after_recovery: Callable[[Account], None] | None = None,
     ) -> None:
         super().__init__(accounts)
         self._usage_repo = usage_repo
         self._refreshed_secondary = refreshed_secondary
+        self._mutate_current_after_recovery = mutate_current_after_recovery
         self._mutated = False
 
     async def update_status_if_current(self, *args: Any, **kwargs: Any) -> bool:
         updated = await super().update_status_if_current(*args, **kwargs)
         if updated and not self._mutated and args[1] == AccountStatus.ACTIVE:
             self._usage_repo._secondary = self._refreshed_secondary
+            if self._mutate_current_after_recovery is not None:
+                self._mutate_current_after_recovery(next(iter(self._accounts.values())))
             self._mutated = True
         return updated
 
@@ -830,6 +837,87 @@ async def test_reconcile_reblocks_when_latest_usage_changes_after_successful_cas
         [account],
         usage_repo=usage_repo,
         refreshed_secondary={account.id: exhausted_after},
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+        long_window_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == legacy_weekly_reset_at
+    assert account.blocked_at == blocked_at
+    assert [update["status"] for update in accounts_repo.status_updates] == [
+        AccountStatus.ACTIVE,
+        AccountStatus.RATE_LIMITED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reblocks_current_active_row_when_direct_rollback_loses_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_weekly_reset_at = int(now + 3 * 24 * 3600)
+    next_weekly_reset_at = int(now - 60 + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_team_usage_post_cas_rollback_retry",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="team",
+        reset_at=legacy_weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=legacy_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=10080,
+    )
+    after = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=0.0,
+        reset_at=next_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10080,
+    )
+    exhausted_after = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=next_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=10080,
+    )
+    exhausted_after.id = 2
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=0.0,
+                reset_at=int(now + 5 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 60),
+                window_minutes=300,
+            )
+        },
+        secondary={account.id: after},
+    )
+    accounts_repo = MutatingUsageAfterSuccessfulCasAccountsRepository(
+        [account],
+        usage_repo=usage_repo,
+        refreshed_secondary={account.id: exhausted_after},
+        mutate_current_after_recovery=lambda current: setattr(current, "blocked_at", blocked_at + 1),
     )
 
     recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(

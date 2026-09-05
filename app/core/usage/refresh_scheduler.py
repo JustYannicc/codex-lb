@@ -51,6 +51,8 @@ class _UsageResetEvidence:
 
 
 class _RecoverableAccountsRepository(Protocol):
+    async def get_by_id_fresh(self, account_id: str) -> Account | None: ...
+
     async def update_status_if_current(
         self,
         account_id: str,
@@ -445,16 +447,17 @@ async def reconcile_recoverable_account_statuses(
             expected_secondary=latest_secondary.get(account.id),
             expected_monthly=monthly_entry,
         ):
-            await accounts_repo.update_status_if_current(
-                account.id,
-                previous_status,
-                previous_deactivation_reason,
-                previous_reset_at,
-                blocked_at=previous_blocked_at,
-                expected_status=status,
-                expected_deactivation_reason=deactivation_reason,
-                expected_reset_at=reset_at,
-                expected_blocked_at=blocked_at,
+            await _restore_recoverable_account_status(
+                accounts_repo,
+                account_id=account.id,
+                previous_status=previous_status,
+                previous_deactivation_reason=previous_deactivation_reason,
+                previous_reset_at=previous_reset_at,
+                previous_blocked_at=previous_blocked_at,
+                recovery_status=status,
+                recovery_deactivation_reason=deactivation_reason,
+                recovery_reset_at=reset_at,
+                recovery_blocked_at=blocked_at,
             )
             continue
         account.status = status
@@ -463,6 +466,50 @@ async def reconcile_recoverable_account_statuses(
         account.blocked_at = blocked_at
         recovered += 1
     return recovered
+
+
+async def _restore_recoverable_account_status(
+    accounts_repo: _RecoverableAccountsRepository,
+    *,
+    account_id: str,
+    previous_status: AccountStatus,
+    previous_deactivation_reason: str | None,
+    previous_reset_at: int | None,
+    previous_blocked_at: int | None,
+    recovery_status: AccountStatus,
+    recovery_deactivation_reason: str | None,
+    recovery_reset_at: int | None,
+    recovery_blocked_at: int | None,
+) -> None:
+    restored = await accounts_repo.update_status_if_current(
+        account_id,
+        previous_status,
+        previous_deactivation_reason,
+        previous_reset_at,
+        blocked_at=previous_blocked_at,
+        expected_status=recovery_status,
+        expected_deactivation_reason=recovery_deactivation_reason,
+        expected_reset_at=recovery_reset_at,
+        expected_blocked_at=recovery_blocked_at,
+    )
+    if restored:
+        return
+
+    current = await accounts_repo.get_by_id_fresh(account_id)
+    if current is None or current.delete_requested_at is not None or current.status != AccountStatus.ACTIVE:
+        return
+
+    await accounts_repo.update_status_if_current(
+        account_id,
+        previous_status,
+        previous_deactivation_reason,
+        previous_reset_at,
+        blocked_at=previous_blocked_at,
+        expected_status=current.status,
+        expected_deactivation_reason=current.deactivation_reason,
+        expected_reset_at=current.reset_at,
+        expected_blocked_at=current.blocked_at,
+    )
 
 
 def _usage_history_identity(entry: UsageHistory | None) -> tuple[int | None, datetime | None] | None:
