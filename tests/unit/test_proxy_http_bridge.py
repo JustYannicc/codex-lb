@@ -36426,6 +36426,41 @@ async def test_fail_stale_http_bridge_pending_requests_quarantines_wedged_gate_h
 
 
 @pytest.mark.asyncio
+async def test_fail_stale_http_bridge_pending_requests_handles_rejected_wedged_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    wedged = _make_wedged_reattach_request_state(request_id="req-stale-wedged-rejected")
+    session = _make_bridge_session(
+        key_value="quarantine-stale-gate-rejected",
+        pending_requests=deque([wedged]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(
+        http_bridge_quarantine_module,
+        "_quarantine_http_bridge_session",
+        lambda *args, **kwargs: False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        await service._fail_stale_http_bridge_pending_requests(
+            session,
+            [wedged],
+            detail="response_create_gate_timeout_stuck_pending",
+        )
+
+    assert session.quarantined is False
+    assert session.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+    assert any(
+        "event=admission_rejected" in record.getMessage()
+        and "reason=reattach_missing_response_created" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_fail_stale_http_bridge_pending_requests_captures_attempt_before_pending_lock_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
