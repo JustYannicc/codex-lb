@@ -221,10 +221,12 @@ class StubUsageRepository:
         primary: dict[str, UsageHistory] | None = None,
         secondary: dict[str, UsageHistory] | None = None,
         monthly: dict[str, UsageHistory] | None = None,
+        history: dict[str, list[UsageHistory]] | None = None,
     ) -> None:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
+        self._history = history or {}
         self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
 
     async def latest_by_account(
@@ -245,6 +247,13 @@ class StubUsageRepository:
             return rows
         allowed = set(normalized_account_ids)
         return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
+
+    async def history_since(self, account_id: str, window: str, since: datetime) -> list[UsageHistory]:
+        return [
+            entry
+            for entry in self._history.get(account_id, [])
+            if entry.window == window and entry.recorded_at >= since
+        ]
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -354,8 +363,10 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_until_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
 async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_legacy_deadline(
     monkeypatch: pytest.MonkeyPatch,
+    plan_type: str,
 ) -> None:
     now = 1_700_000_000.0
     blocked_at = int(now - 3600)
@@ -369,7 +380,7 @@ async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_lega
     account = _make_account(
         "acc_free_confirmed_reset",
         status=AccountStatus.RATE_LIMITED,
-        plan_type="free",
+        plan_type=plan_type,
         reset_at=legacy_reset_at,
         blocked_at=blocked_at,
     )
@@ -411,6 +422,50 @@ async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_lega
 
     assert recovered == 1
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
+async def test_monthly_reset_history_fallback_supports_free_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    plan_type: str,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+    account = _make_account(
+        "acc_free_history_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type=plan_type,
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43_200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43_200,
+    )
+
+    evidence = await refresh_scheduler_module._resolve_monthly_reset_evidence(
+        accounts=[account],
+        usage_repo=StubUsageRepository(history={account.id: [before, after]}),
+        before_monthly={},
+        after_monthly={},
+    )
+
+    assert evidence[account.id] == _reset_evidence(before, after)
 
 
 @pytest.mark.asyncio

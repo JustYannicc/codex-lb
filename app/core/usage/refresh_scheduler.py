@@ -425,7 +425,7 @@ def _confirmed_free_monthly_reset_recovery(
 ) -> bool:
     if account.status != AccountStatus.RATE_LIMITED:
         return False
-    if normalize_account_plan_type(account.plan_type) != "free":
+    if resolve_capacity_plan_type(account.plan_type) != "free":
         return False
     if account.reset_at is None or account.blocked_at is None:
         return False
@@ -482,7 +482,7 @@ async def _resolve_monthly_reset_evidence(
             )
         if (
             account.status != AccountStatus.RATE_LIMITED
-            or normalize_account_plan_type(account.plan_type) != "free"
+            or resolve_capacity_plan_type(account.plan_type) != "free"
             or account.reset_at is None
             or account.blocked_at is None
         ):
