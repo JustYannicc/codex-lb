@@ -41,5 +41,10 @@
 
 ## Verification
 
+- [x] Cover production admission preregistration under contended-lock level
+  cancellation and complete probe handback plus eligible retirement.
+- [x] Retry detached replacement-account leases by the lease account, with
+  unrelated live sessions preserved.
+
 - [x] Run affected unit/integration tests, Ruff, formatting, `ty`, architecture,
   diff checks, and exact-head Standards/Input reviews.

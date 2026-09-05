@@ -150,6 +150,24 @@ released successfully.
 - **AND** the detached session is removed only after the retry succeeds
 - **AND** concurrent cleanup passes do not issue duplicate release calls
 
+#### Scenario: Level cancellation during admission handback
+
+- **GIVEN** an undispatched submit owns an admission preregistration and a
+  half-open probe
+- **WHEN** an active cancellation scope interrupts it while the pending lock
+  is contended
+- **THEN** cancellation-deferred cleanup MUST return both registrations and
+  finish any newly eligible retirement before propagating the original result
+
+#### Scenario: A retained lease belongs to a replacement account
+
+- **GIVEN** a closed detached session for account A retains a failed lease release
+  for account B after reconnect
+- **WHEN** explicit cleanup for B runs
+- **THEN** it MUST find and retry the retained B lease
+- **AND** it MUST preserve unrelated live session resources and single-flight
+  cleanup ownership
+
 ### Requirement: Retry-circuit failure accounting distinguishes proxy continuity loss
 
 The proxy MUST NOT increment or persist retry-circuit failures for explicitly
