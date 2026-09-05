@@ -31177,6 +31177,189 @@ async def test_http_bridge_submit_cleanup_retries_failed_pre_dispatch_claim_rele
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_submit_cleanup_releases_claim_when_account_release_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-pre-dispatch-account-release-raises")
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    lease = proxy_service.AccountLease(
+        lease_id="lease-account-release-raises",
+        account_id="acc-bridge",
+        kind="stream",
+        acquired_at=1.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-pre-dispatch-account-release-raises",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        response_create_gate=gate,
+        account_response_create_lease=lease,
+        account_response_create_release=AsyncMock(side_effect=RuntimeError("account release failed")),
+        awaiting_response_created=True,
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_claimed_generation=4,
+        verified_stale_anchor_retry_circuit_claimed_attempt_count=0,
+    )
+    clear_claim = AsyncMock(return_value=False)
+    schedule_retry = Mock()
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request_bounded", clear_claim)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    with pytest.raises(RuntimeError, match="account release failed"):
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=False,
+            counted_in_queue=False,
+        )
+
+    clear_claim.assert_awaited_once_with(request_state)
+    schedule_retry.assert_called_once_with(service, request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_submit_cleanup_releases_claim_when_account_release_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-pre-dispatch-account-release-cancelled")
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    release_started = asyncio.Event()
+    lease = proxy_service.AccountLease(
+        lease_id="lease-account-release-cancelled",
+        account_id="acc-bridge",
+        kind="stream",
+        acquired_at=1.0,
+    )
+
+    async def release_account_lease(_lease: proxy_service.AccountLease | None) -> None:
+        release_started.set()
+        await asyncio.Event().wait()
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-pre-dispatch-account-release-cancelled",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        response_create_gate=gate,
+        account_response_create_lease=lease,
+        account_response_create_release=release_account_lease,
+        awaiting_response_created=True,
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_claimed_generation=4,
+        verified_stale_anchor_retry_circuit_claimed_attempt_count=0,
+    )
+    clear_claim = AsyncMock(return_value=False)
+    schedule_retry = Mock()
+    monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit_admission_claim_for_request_bounded", clear_claim)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_schedule_http_bridge_retry_circuit_admission_claim_release_retry",
+        schedule_retry,
+    )
+
+    cleanup_task = asyncio.create_task(
+        service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=False,
+            counted_in_queue=False,
+        )
+    )
+    await release_started.wait()
+    cleanup_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+    clear_claim.assert_awaited_once_with(request_state)
+    schedule_retry.assert_called_once_with(service, request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_bounded_call_runs_abandoned_result_cleanup_after_cancelled_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    outer_task = asyncio.current_task()
+    assert outer_task is not None
+    original_sleep = asyncio.sleep
+    result = SimpleNamespace(admission_claimed_generation=7)
+    callback = AsyncMock()
+
+    async def cancel_during_drain(delay: float) -> None:
+        assert delay == 0
+        outer_task.cancel()
+        await original_sleep(0)
+
+    async def cancellation_resistant_call() -> Any:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return result
+
+    monkeypatch.setattr(http_bridge_retry_circuit_module.asyncio, "sleep", cancel_during_drain)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._await_http_bridge_retry_circuit_call(
+            cancellation_resistant_call(),
+            timeout=0,
+            label="cancelled-drain-result",
+            on_abandoned_result=callback,
+        )
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks)
+    callback.assert_awaited_once_with(result)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_bounded_call_drains_multiple_cancellation_turns() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._background_cleanup_tasks = set()
+    original_sleep = asyncio.sleep
+    result = SimpleNamespace(admission_claimed_generation=8)
+    turns_after_cancel = 2
+
+    async def cancellation_resistant_call() -> Any:
+        nonlocal turns_after_cancel
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            for _ in range(turns_after_cancel):
+                await original_sleep(0)
+            return result
+
+    bounded = await service._await_http_bridge_retry_circuit_call(
+        cancellation_resistant_call(),
+        timeout=0,
+        label="multi-turn-cancelled-drain",
+    )
+
+    assert bounded.completed is False
+    assert bounded.cancellation_settled is True
+    assert cast(Any, service)._http_bridge_retry_circuit_abandoned_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_claim_releases_receipt_when_cancelled_after_durable_cas() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-claim-cancelled-after-cas")
@@ -44979,6 +45162,39 @@ async def test_a_claim_miss_is_a_probe_only_when_the_admission_generation_advanc
     outcome = await service._http_bridge_claim_miss_shows_remote_probe(key, captured_generation)
 
     assert outcome is expect_probe
+
+
+@pytest.mark.asyncio
+async def test_a_claim_miss_remote_probe_lookup_respects_request_deadline() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-claim-miss-deadline", None)
+    lookup_started = asyncio.Event()
+
+    async def stalled_lookup(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await asyncio.Event().wait()
+
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=stalled_lookup)
+    captured_generation = proxy_support_module._HTTPBridgeRetryCircuitGeneration(
+        admission_generation=3,
+        persisted_updated_at_epoch=1000.0,
+        persisted_consecutive_failures=2,
+        durable_cooldown_until_epoch=0.0,
+        local_consecutive_failures=0,
+        last_failure_monotonic=0.0,
+        local_cooldown_until=0.0,
+    )
+
+    lookup_task = asyncio.create_task(
+        service._http_bridge_claim_miss_shows_remote_probe(
+            key,
+            captured_generation,
+            deadline=time.monotonic() + 0.01,
+        )
+    )
+    await lookup_started.wait()
+
+    assert await asyncio.wait_for(lookup_task, timeout=0.2) is False
 
 
 @pytest.mark.asyncio

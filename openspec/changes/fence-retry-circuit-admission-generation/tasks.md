@@ -66,3 +66,6 @@
 - [x] 4.10 Mark every conditional stale-purge miss uncertain before reload and
   keep pre-created admission fail-closed even when the refreshed row is fresh
   and below threshold.
+- [ ] 4.11 Obtain maintainer sign-off on the stranded claim-receipt lockout
+  policy documented in `design.md` (shorter abandonment lease, explicit
+  reclaim owner, or lease-aware retry-after and accepted lockout window).

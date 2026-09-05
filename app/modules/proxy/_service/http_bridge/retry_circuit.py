@@ -47,6 +47,7 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
+_HTTP_BRIDGE_RETRY_CIRCUIT_CANCEL_DRAIN_ITERATIONS = 4
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_CLEANUP_GRACE_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX = "http-bridge-retry-circuit-"
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS = (
@@ -835,6 +836,22 @@ class _HTTPBridgeRetryCircuitMixin:
     ) -> _HTTPBridgeRetryCircuitBoundedCall:
         """Run one durable operation without awaiting cancellation cleanup."""
         task = asyncio.ensure_future(awaitable)
+
+        def consume_settled_task() -> None:
+            _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            if on_abandoned_result is None or task.cancelled():
+                return
+            try:
+                result = task.result()
+            except BaseException:
+                return
+            if result is not None:
+                _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+                    self,
+                    on_abandoned_result(result),
+                    label=label,
+                )
+
         try:
             done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
         except asyncio.CancelledError:
@@ -848,36 +865,28 @@ class _HTTPBridgeRetryCircuitMixin:
                         on_result=on_abandoned_result,
                     )
             else:
-                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
-                if on_abandoned_result is not None and not task.cancelled():
-                    try:
-                        result = task.result()
-                    except BaseException:
-                        result = None
-                    if result is not None:
-                        _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
-                            self,
-                            on_abandoned_result(result),
-                            label=label,
-                        )
+                consume_settled_task()
             raise
         if task in done:
             return _HTTPBridgeRetryCircuitBoundedCall(completed=True, cancellation_settled=True, value=task.result())
 
         task.cancel()
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            if not task.done():
-                _track_abandoned_http_bridge_retry_circuit_task(
-                    self,
-                    task,
-                    label=label,
-                    on_result=on_abandoned_result,
-                )
-            else:
-                _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
-            raise
+        for _ in range(_HTTP_BRIDGE_RETRY_CIRCUIT_CANCEL_DRAIN_ITERATIONS):
+            if task.done():
+                break
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                if task.done():
+                    consume_settled_task()
+                else:
+                    _track_abandoned_http_bridge_retry_circuit_task(
+                        self,
+                        task,
+                        label=label,
+                        on_result=on_abandoned_result,
+                    )
+                raise
         if not task.done():
             _track_abandoned_http_bridge_retry_circuit_task(
                 self,
@@ -886,18 +895,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 on_result=on_abandoned_result,
             )
             return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=False)
-        _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
-        if on_abandoned_result is not None and not task.cancelled():
-            try:
-                result = task.result()
-            except BaseException:
-                result = None
-            if result is not None:
-                _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
-                    self,
-                    on_abandoned_result(result),
-                    label=label,
-                )
+        consume_settled_task()
         return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=True)
 
     async def _claim_http_bridge_retry_circuit_generation(

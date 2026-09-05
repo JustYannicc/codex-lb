@@ -108,6 +108,7 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    _http_bridge_retry_circuit_claim_timeout_seconds,
     _http_bridge_retry_circuit_suppression_message,
     _schedule_http_bridge_retry_circuit_admission_claim_release_retry,
 )
@@ -2326,6 +2327,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 remote_probe_holds_lease = await self._http_bridge_claim_miss_shows_remote_probe(
                                     circuit_key,
                                     request_state.verified_stale_anchor_retry_circuit_generation,
+                                    deadline=request_state.bridge_request_deadline,
                                 )
                             # The block lives on the source hard key: this
                             # replacement session's own unique key never has a
@@ -2837,39 +2839,54 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                 request_state.admission_waiter_preregistered = False
             retire_closed_session = session.closed and session.admission_waiter_count == 0
-        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        if request_state.response_create_gate is not None:
-            if gate_acquired or request_state.response_create_gate_acquired:
+        cleanup_error: BaseException | None = None
+        claim_release_cancellation: asyncio.CancelledError | None = None
+        try:
+            self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+            if request_state.response_create_gate is not None:
+                if gate_acquired or request_state.response_create_gate_acquired:
+                    await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+                else:
+                    account_response_create_lease = request_state.account_response_create_lease
+                    account_response_create_release = request_state.account_response_create_release
+                    request_state.account_response_create_lease = None
+                    request_state.account_response_create_release = None
+                    if account_response_create_lease is not None and account_response_create_release is not None:
+                        await account_response_create_release(account_response_create_lease)
+                    if request_state.response_create_admission is not None:
+                        request_state.response_create_admission.release()
+                        request_state.response_create_admission = None
+                    request_state.awaiting_response_created = False
+                    request_state.response_create_gate = None
+                    request_state.response_create_gate_acquired = False
+            elif gate_acquired:
                 await _release_websocket_response_create_gate(request_state, session.response_create_gate)
-            else:
-                account_response_create_lease = request_state.account_response_create_lease
-                account_response_create_release = request_state.account_response_create_release
-                request_state.account_response_create_lease = None
-                request_state.account_response_create_release = None
-                if account_response_create_lease is not None and account_response_create_release is not None:
-                    await account_response_create_release(account_response_create_lease)
-                if request_state.response_create_admission is not None:
-                    request_state.response_create_admission.release()
-                    request_state.response_create_admission = None
-                request_state.awaiting_response_created = False
-                request_state.response_create_gate = None
-                request_state.response_create_gate_acquired = False
-        elif gate_acquired:
-            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
-        if release_pre_dispatch_claim:
-            claim_released = False
-            try:
-                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
-                    request_state
+        except BaseException as exc:
+            cleanup_error = exc
+            raise
+        finally:
+            if release_pre_dispatch_claim:
+                claim_released = False
+                release_task = asyncio.create_task(
+                    self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state),
+                    name=f"http-bridge-retry-circuit-submit-cleanup-{request_state.request_id}",
                 )
-            except Exception:
-                logger.warning(
-                    "Failed to release HTTP bridge retry-circuit admission claim during submit cleanup request_id=%s",
-                    request_state.request_id,
-                    exc_info=True,
-                )
-            if not claim_released:
-                _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
+                try:
+                    released, claim_release_cancellation = await _await_task_deferring_cancellation(release_task)
+                    claim_released = released is True
+                except BaseException as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        claim_release_cancellation = exc
+                    logger.warning(
+                        "Failed to release HTTP bridge retry-circuit admission claim during submit cleanup "
+                        "request_id=%s",
+                        request_state.request_id,
+                        exc_info=True,
+                    )
+                if not claim_released:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
+            if claim_release_cancellation is not None and cleanup_error is None:
+                raise claim_release_cancellation
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_claimed
@@ -3475,6 +3492,8 @@ class _HTTPBridgeRequestSubmitMixin:
         self: Any,
         circuit_key: Any,
         captured_generation: Any,
+        *,
+        deadline: float | None = None,
     ) -> bool:
         """Whether a claim CAS miss actually means a probe holds the lease.
 
@@ -3491,12 +3510,22 @@ class _HTTPBridgeRequestSubmitMixin:
         captured_lineage_epoch = (
             captured_generation.persisted_updated_at_epoch if captured_generation is not None else 0.0
         )
+        lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if lookup_timeout_seconds is None:
+            return False
         try:
-            moved_row = await self._durable_bridge.lookup_retry_circuit(
-                session_key_kind=circuit_key.affinity_kind,
-                session_key_value=circuit_key.affinity_key,
-                api_key_id=circuit_key.api_key_id,
+            lookup = await self._await_http_bridge_retry_circuit_call(
+                self._durable_bridge.lookup_retry_circuit(
+                    session_key_kind=circuit_key.affinity_kind,
+                    session_key_value=circuit_key.affinity_key,
+                    api_key_id=circuit_key.api_key_id,
+                ),
+                timeout=lookup_timeout_seconds,
+                label="claim-miss-probe-lookup",
             )
+            if not lookup.completed:
+                return False
+            moved_row = lookup.value
         except Exception:
             return False
         return bool(

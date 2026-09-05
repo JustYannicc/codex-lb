@@ -64,6 +64,9 @@ explicitly generation-fenced.
   reload finds a fresh below-threshold row: pre-created admission and its
   cooldown hint fail closed for that call, while an ordinary lookup failure
   keeps the existing local fallback behavior.
+- Record the stranded claim-receipt lockout as an explicit maintainer decision
+  gate; the candidate directions and current fail-closed behavior are captured
+  in `design.md` without selecting a product policy.
 
 ## Scope and non-goals
 

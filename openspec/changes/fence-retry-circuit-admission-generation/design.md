@@ -59,6 +59,31 @@ timeout, or an expired deadline otherwise remain fail-closed.
 After a successful receipt, the local state is checked again under the lock;
 any intervening same-key failure or cooldown suppresses the replay.
 
+## Open decision: stranded claim receipt lockout
+
+The receipt is intentionally retained when a request leaves the pending set
+without proving that its replay was dispatched, or when durable release cannot
+be confirmed. That preserves the generation fence, but a stranded receipt can
+block the same-key replay until its lease expires (the default lease is 7,260
+seconds: the two-hour request budget plus 60 seconds of cleanup grace). The
+current fail-closed response reports the normal minimum `Retry-After: 1`, so it
+does not expose that longer lockout window.
+
+This change does not choose a product policy for that trade-off. Maintainer
+sign-off is required on exactly one reversible direction before this change is
+delivery-complete:
+
+1. Shorten the abandonment lease, for example to the 600-second half-open
+   lease, accepting earlier reclaim of an owner that may still be finishing.
+2. Add an explicit reclaim owner and handoff protocol for receipts orphaned
+   after the request leaves `pending_requests`.
+3. Keep the lease and make `Retry-After` lease-aware, documenting the accepted
+   lockout window to clients and operators.
+
+Until that decision is accepted, the implementation keeps the existing
+fail-closed lease and does not pretend that a one-second retry hint is an
+accurate timer for a stranded receipt.
+
 ## Reset path
 
 Successful response settlement first loads the durable row. A failed lookup
@@ -75,8 +100,10 @@ failure that arrived after the lookup still wins the post-CAS check.
 
 Pre-dispatch submit cleanup captures the response-create attempt count when it
 installs a claim and may release that claim only if the count is unchanged.
-This preserves ownership when a send was ambiguous but produced no operation
-ID. When terminal stale-anchor handling resets a session for a same-owner
+The release is in a failure-isolated `finally` around account/gate cleanup and
+defers caller cancellation while its bounded durable attempt settles. This
+preserves ownership when a send was ambiguous but produced no operation ID.
+When terminal stale-anchor handling resets a session for a same-owner
 retry, it detaches the receipt before reset and transfers the claim key, lease,
 and attempt fence to the retry request state so reset cleanup cannot release
 the retry's marker. The retry attempt fence is initialized from that fresh
