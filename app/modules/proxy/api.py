@@ -4572,13 +4572,28 @@ async def _select_responses_model_source_with_continuity(
     """Select a source unless recorded subscription continuity owns the anchor.
 
     Returns ``(selection, continuity_suppressed)``. ``continuity_suppressed``
-    is ``True`` only when an enabled source claimed the model but a recorded
-    subscription owner for ``previous_response_id`` pinned the turn to a
-    subscription account instead. Callers use it to tell that case apart from
-    a genuine lookup miss: only a genuine miss may consult the disabled-source
+    is ``True`` when a recorded subscription owner for the turn state or
+    ``previous_response_id`` pinned the turn to a subscription account instead
+    of an enabled model source. Callers use it to tell that case apart from a
+    genuine lookup miss: only a genuine miss may consult the disabled-source
     denial, because a continuity-suppressed turn already has a subscription
     anchor that must keep being served.
     """
+    turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
+    if turn_state is not None:
+        turn_state_owner_account_id = await context.service._resolve_compact_turn_state_owner(
+            turn_state=turn_state,
+            api_key=api_key,
+            # Synthetic markers are compatibility placeholders when their
+            # bridge alias is unavailable; non-synthetic client values remain
+            # hard continuity constraints.
+            fail_on_missing=not proxy_affinity_module._is_synthesized_turn_state(turn_state),
+        )
+        payload._codex_lb_turn_state_owner_account_id = turn_state_owner_account_id
+        payload._codex_lb_turn_state_owner_lookup_completed = True
+        if turn_state_owner_account_id is not None:
+            return None, True
+
     source_selection = await _select_responses_model_source(
         payload.model,
         api_key,

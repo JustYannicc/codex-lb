@@ -400,11 +400,12 @@ class _StreamingRetryMixin:
             api_key=api_key,
             synthesized_turn_state=synthesized_turn_state,
         )
-        turn_state_owner_account_id: str | None = None
+        turn_state_owner_account_id: str | None = payload._codex_lb_turn_state_owner_account_id
+        turn_state_owner_lookup_completed = payload._codex_lb_turn_state_owner_lookup_completed
         turn_state_header_present = _turn_state_header_present(headers)
         turn_state = _sticky_key_from_turn_state_header(headers)
         turn_state_is_synthesized = turn_state is not None and _is_synthesized_turn_state(turn_state)
-        if turn_state is not None:
+        if turn_state is not None and not turn_state_owner_lookup_completed:
             # HTTP and WebSocket transports share the bridge turn-state index;
             # treating this as ordinary sticky input would cross replicas or
             # accounts when the token was minted by an HTTP bridge session.
