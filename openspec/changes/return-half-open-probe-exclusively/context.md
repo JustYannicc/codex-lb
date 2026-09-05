@@ -31,6 +31,20 @@ transition. Pending-request settlement and transport close remain outside that
 lock, but inside cancellation-shielded cleanup, so a slow close cannot block a
 new submitter while cancellation also cannot strand the detached session.
 
+An active probe is not reclaimed merely because the default 600-second local
+lease elapsed. If its owning request is still pending after an attempted
+`response.create` and before terminal settlement, the lease is renewed through
+that request's `bridge_request_deadline`. Completion settlement carries both
+the durable episode observed at admission and the process-local lease
+generation, so a late completion cannot settle a replacement probe that reused
+the same hard key.
+
+Detached cleanup also retains failed account-lease handles after transport
+close. The account-scoped cleanup pass retries those handles, and concurrent
+retries share one in-flight close/release task. The detached registry is
+cleared only after all retained releases succeed, so a transient balancer
+failure cannot silently strand account capacity.
+
 ## Issue and vehicle map
 
 This change is intentionally split from the neighboring vehicles. Exact branch
@@ -75,6 +89,10 @@ The successor PR must cite maintainer comments #1908 `5423573461` and #1857
 - If durable lookup fails, the existing local state remains authoritative for
   the process. The release is still best-effort and fenced by the active local
   owner; no durable clear is invented for a process-local lease.
+- If account-lease release fails after transport close, the failed handle stays
+  on the detached session and is retried by explicit account cleanup. A second
+  concurrent retry joins the existing task rather than issuing a duplicate
+  release.
 
 ## Example
 
@@ -89,7 +107,6 @@ a future durable cooldown and merge genuine failures through the durable row.
 ## Validation note
 
 Strict validation of this change passes with
-`pnpm --silent dlx @fission-ai/openspec@1.10.0 validate
+`pnpm --silent dlx @fission-ai/openspec@1.11.0 validate
 return-half-open-probe-exclusively --strict`. The full main-spec validation
-passes 57 of 58 specs; the unrelated existing `model-source-routing` spec
-fails its own validation and is outside this change.
+passes all 58 specs with the same pinned validator.
