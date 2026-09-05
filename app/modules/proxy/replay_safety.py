@@ -648,7 +648,12 @@ def _tool_call_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) 
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("input"), str)
     if item_type == "tool_search_call":
         arguments = item.get("arguments")
-        return isinstance(arguments, dict) and item.get("execution") in (None, "client")
+        return (
+            isinstance(arguments, dict)
+            and item.get("execution") in (None, "client")
+            and not _contains_account_scoped_input_state(arguments)
+            and not _contains_mcp_tool_state(arguments)
+        )
     operation = item.get("operation")
     patch = item.get("patch")
     input_value = item.get("input")
@@ -1066,6 +1071,19 @@ def _contains_account_scoped_input_state(value: JsonValue) -> bool:
             pending.extend(
                 nested for key, nested in current.items() if not (item_type == "additional_tools" and key == "tools")
             )
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
+def _contains_mcp_tool_state(value: JsonValue) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            if current.get("type") == "mcp" or _is_nonblank_string(current.get("server_label")):
+                return True
+            pending.extend(current.values())
         elif isinstance(current, list):
             pending.extend(current)
     return False

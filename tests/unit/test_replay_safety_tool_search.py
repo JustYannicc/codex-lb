@@ -140,6 +140,26 @@ def test_account_neutral_fresh_replay_rejects_tool_search_arguments_with_nested_
     assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
 
 
+def test_account_neutral_fresh_replay_rejects_tool_search_arguments_with_mcp_state() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"type": "mcp", "server_label": "private"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "tools": [{"name": "workspace-search"}],
+            "status": "completed",
+        },
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
+
+
 def test_account_neutral_fresh_replay_rejects_server_executed_tool_search_output() -> None:
     input_items: list[JsonValue] = [
         {
