@@ -16157,10 +16157,14 @@ async def test_http_bridge_live_event_queue_applies_backpressure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pause_at", ["submit", "cooldown", "registration"])
+@pytest.mark.parametrize("stream", [True, False])
 async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delayed_consumer_terminal(
     async_client,
     app_instance,
     monkeypatch: pytest.MonkeyPatch,
+    pause_at: str,
+    stream: bool,
 ) -> None:
     """A delayed route consumer receives the terminal failure after queue revocation."""
 
@@ -16242,6 +16246,17 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
     submit_calls = 0
     original_submit = service._submit_http_bridge_request
     original_fail_pending = service._fail_pending_websocket_requests
+    original_cooldown = service._http_bridge_precreated_retry_cooldown_seconds
+    original_register = service._register_http_bridge_turn_state
+    first_state = None
+    first_owner_task = None
+
+    async def pause_first_consumer() -> None:
+        assert first_state is not None
+        assert first_state.event_queue_consumer_attaching
+        assert not first_state.event_queue_consumer_started
+        first_submit_released.set()
+        await first_consumer_release.wait()
 
     async def gated_submit(
         session,
@@ -16251,7 +16266,7 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
         queue_limit,
         recovery_turn_state=None,
     ) -> None:
-        nonlocal submit_calls
+        nonlocal submit_calls, first_state, first_owner_task
         await original_submit(
             session,
             request_state=request_state,
@@ -16261,10 +16276,25 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
         )
         submit_calls += 1
         if submit_calls == 1:
-            first_submit_released.set()
-            await first_consumer_release.wait()
+            first_state = request_state
+            first_owner_task = asyncio.current_task()
+            if pause_at == "submit":
+                await pause_first_consumer()
 
     monkeypatch.setattr(service, "_submit_http_bridge_request", gated_submit)
+
+    async def gated_cooldown(session) -> float:
+        if pause_at == "cooldown" and asyncio.current_task() is first_owner_task:
+            await pause_first_consumer()
+        return await original_cooldown(session)
+
+    async def gated_register(session, turn_state) -> None:
+        if pause_at == "registration" and asyncio.current_task() is first_owner_task:
+            await pause_first_consumer()
+        await original_register(session, turn_state)
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", gated_cooldown)
+    monkeypatch.setattr(service, "_register_http_bridge_turn_state", gated_register)
 
     async def gated_fail_pending(*args: Any, **kwargs: Any) -> bool:
         if kwargs.get("error_code") == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
@@ -16289,19 +16319,24 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
 
     second_task: asyncio.Task[Any] | None = None
     first_events: list[dict[str, Any]] = []
-    first_task = asyncio.create_task(
-        _collect_sse_events(
-            async_client,
-            "/v1/responses",
-            json_body={
-                "model": "gpt-5.4",
-                "instructions": "Return exactly OK.",
-                "input": "delayed-consumer-first",
-                "prompt_cache_key": "liveness-queue-regression",
-                "stream": True,
-            },
-        )
-    )
+    request_headers = {"x-codex-turn-state": "liveness-queue-regression"}
+
+    async def collect_first_response() -> list[dict[str, Any]]:
+        body = {
+            "model": "gpt-5.4",
+            "instructions": "Return exactly OK.",
+            "input": "delayed-consumer-first",
+            "prompt_cache_key": "liveness-queue-regression",
+            "stream": stream,
+        }
+        if stream:
+            return await _collect_sse_events(async_client, "/v1/responses", json_body=body, headers=request_headers)
+        response = await async_client.post("/v1/responses", json=body, headers=request_headers)
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+        return []
+
+    first_task = asyncio.create_task(collect_first_response())
     try:
         await asyncio.wait_for(first_submit_released.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
         await asyncio.wait_for(upstream.first_response_queued.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
@@ -16317,6 +16352,7 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
                     "prompt_cache_key": "liveness-queue-regression",
                     "stream": True,
                 },
+                headers=request_headers,
             )
         )
         await asyncio.wait_for(terminal_finalize_started.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
@@ -16344,11 +16380,12 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
             first_task.cancel()
         await asyncio.gather(first_task, return_exceptions=True)
 
-    assert [event["type"] for event in first_events] == ["response.created", "response.failed"]
-    # The queue is revoked before the delayed consumer attaches, but remains
-    # retained while terminal finalization owns it. The consumer waits for and
-    # receives that exact terminal failure instead of a synthetic truncation.
-    assert first_events[-1]["response"]["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    if stream:
+        assert [event["type"] for event in first_events] == ["response.created", "response.failed"]
+        # The queue is revoked before the delayed consumer attaches, but remains
+        # retained while terminal finalization owns it. The consumer waits for and
+        # receives that exact terminal failure instead of a synthetic truncation.
+        assert first_events[-1]["response"]["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
     assert live_event_budget.used_bytes == baseline_budget_bytes
 
 

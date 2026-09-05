@@ -49,7 +49,7 @@ The process-wide byte-budget thread lock is retained. This experiment does not i
 
 1. Native slow-consumer abort: HTTP-bridge socket opens pass `use_native_egress=False` in direct, routed, and reconnect paths. Direct and Codex-routed client tests assert the bypass, while unrelated transports retain the native default. This is a compatibility fallback, not native per-stream flow control. The native 100-frame slow-reader reproduction has not been rerun against an implemented native fix because no native fix is present. Maintainer acceptance of the fallback remains required.
 2. Read CPU fanout: buffered reads stay synchronous; empty reads await owned futures. Timeout cancellation stays in the reader task. Publication never consumes on the reader's behalf. The no-child-task test was red on the delivered implementation and is green now. The tables include both requested schedules and the remaining burst cost.
-3. Delayed terminal delivery: the live generator's attaching state prevents finalization from discarding its revoked queue. The route regression waits for the failing second request's finalization before releasing the first consumer, then observes the actual liveness failure and released byte credits. This adversarial route case covers streaming, not a separately parameterized `stream=False` case.
+3. Delayed terminal delivery: the live generator's attaching state prevents finalization from discarding its revoked queue. The route regression pauses after submission, during cooldown, or during turn-state registration; each runs with both streaming and non-streaming responses. All six cases finish the failing sibling's finalization before releasing the first consumer, observe the actual liveness failure, and return byte credits to baseline.
 4. Shared-reader deadlines: `test_paused_enqueue_deadline_allows_shared_reader_to_settle_expired_sibling` uses the real relay, real event dispatch, and real deadline/failure settlement. A full paused queue releases on its own deadline; the sibling receives `response.failed/request_timeout` plus EOS and pending state clears. Clearing the enqueue deadline in a red control made this test time out. This does not promise that a shorter sibling deadline settles before the paused owner's deadline.
 5. Duplicate helpers: one terminal enqueue helper and one cancellation-deferring wrapper remain outside the batcher branch. The fallback uses the same revocation-aware delivery result.
 6. Terminal contract: disposal requires explicit detachment or proven absence of a downstream owner. Delta/main specs and design preserve the actual terminal for a live delayed generator. The broad native-egress requirement now names the bridge exception.
@@ -74,6 +74,31 @@ The prescribed full local gate remains an explicit workflow exception under the 
 
 ### Input
 
-The read-side task-fanout cause is removed and tested. Native mitigation, residual CPU, non-stream delayed-terminal coverage, and shorter sibling timing remain limited as described above. Maintainer acceptance cannot be inferred from local checks.
+No actionable implementation blocker found in the reviewed changes. The read-side task-fanout cause is removed and tested. Native mitigation, residual CPU, and shorter sibling timing remain limited as described above. Maintainer acceptance cannot be inferred from local checks.
 
 Review state is tied to the implementation commit; later evidence-only documentation does not change application source.
+
+## Follow-up top-level P2 on delayed attachment
+
+[CodeRabbit's follow-up](https://github.com/Soju06/codex-lb/pull/1903#issuecomment-5552300932)
+states that the attaching flag starts only at attachment. Delivered
+`4325978b` sets it at `streaming.py:4188`, the generator's first statement,
+before submission, cooldown, and registration. Only explicit detachment or
+successful attachment under the pending lock clears it. The current performance
+implementation preserves this lifecycle.
+
+The six-case route regression checks the exact named windows on both response
+modes. It asserts attaching=true and started=false before each pause. Sibling
+finalization completes before the consumer resumes. All six pass.
+
+The red control clears attaching on the claimed requests immediately before
+calling the real finalizer, recreating the unsafe disposal condition without
+changing files. The streaming cooldown case fails on the exact route result:
+`upstream_stream_truncated != upstream_websocket_liveness_timeout`.
+The production code passes. No runtime change is justified by this finding;
+the test expansion and explicit disposition address the proof gap.
+
+The earlier full integration pair passed 291 tests. After this six-case
+expansion, the full pair passed 296 tests in 184.15 seconds. Ruff, formatting,
+type checking, and diff checks also passed. Runtime source is unchanged from
+the measured implementation commit.

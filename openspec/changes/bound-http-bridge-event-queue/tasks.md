@@ -66,4 +66,6 @@
 - [x] 7.2 Replace read-side task races with owned futures and same-task timeout cancellation; prove no child tasks and retained raced payloads
 - [x] 7.3 Exercise real shared-reader dispatch and sibling deadline settlement after the paused enqueue reaches its own deadline
 - [x] 7.4 Clarify the HTTP-bridge native-egress exception and record residual costs without claiming native flow control
-- [ ] 7.5 Record immutable benchmark evidence, run affected verification, push with a checked lease, and reply to every round-19 finding
+- [x] 7.5 Record immutable benchmark evidence and run affected local verification
+- [x] 7.6 Verify delayed-terminal delivery at submit, cooldown, and registration waits in both response modes; run a truncation-producing red control
+- [ ] 7.7 Obtain maintainer acceptance of the native fallback and residual performance cost before merge
