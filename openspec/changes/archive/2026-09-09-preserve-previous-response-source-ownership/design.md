@@ -56,6 +56,28 @@ false owner failures without adding an account-ownership proof. The
 sole-candidate bound and independent hard-owner checks preserve the safety
 boundary.
 
+### Resolve aliases before applying marker compatibility
+
+A synthetic-shaped value may still be registered to an account. HTTP source
+selection resolves that alias even when the request has no previous response
+and no enabled source matches. Only a real lookup miss is cached as ownerless;
+a recorded owner also suppresses a disabled-source denial. Lookup failures
+retain the resolver's sanitized status and payload at both HTTP route
+boundaries, just as enabled-source continuity failures do.
+
+When an alias is missing, the HTTP bridge uses marker shape rather than local
+issuance identity for its existing sole-candidate fallback. Compact applies
+the same scoped cardinality bound even without a previous response. Neither
+path invents an owner from a marker when the eligible pool is empty or
+ambiguous. Independent file ownership and required durable bridge ownership
+remain authoritative and do not gain a candidate fallback.
+
+The bridge carries its verified sole-candidate result into session creation.
+Otherwise a cold continuation passes account resolution only to fail the
+missing-session check. The existing creation path can rebind to that selected
+account while preserving the incoming previous-response anchor; the result
+does not confer durable-owner provenance or authorize anchor removal.
+
 ### Keep marker provenance additive to the v2 owner-forward signature
 
 The existing `x-codex-bridge-signature-v2` field set is already a rolling-upgrade
