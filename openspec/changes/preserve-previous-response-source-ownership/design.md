@@ -72,6 +72,22 @@ continue to verify the original v2 digest.
 
 An owner miss and source-catalog unavailability are distinct states. Known subscription-model misses fail closed unless the sole-candidate compatibility fallback applies; source-owned HTTP requests remain source-routed. Source-catalog unavailability preserves the existing direct WebSocket subscription fallback. Owner errors use the sanitized `previous_response_owner_unavailable` contract. Compact settles any API-key reservation before emitting diagnostics or leaving the owner-miss path; a confirmed fail-safe release preserves the original owner error, while an unconfirmed settlement failure propagates.
 
+### Restore the security retry exhaustion contract
+
+The WebSocket selector excluded the authorized-pool exhaustion code from the
+missing-pool handler. Connection failover could also defer that result, while
+authentication replay cleared the original security error before reselection.
+Preserve that error across authentication replay and route exhausted security
+retries through the existing warning and terminal-error handler. Signal that
+the terminal error was sent so the connect loop does not send a second one.
+
+This restores the existing security retry contract without adding fallback
+policy. An account-model rejection still returns its original 400 when no
+replacement is available. Hard ownership, response creation, and visible
+output still prevent unsafe account replay. Tests use both downstream
+WebSocket routes and complete a later request on the same socket to verify
+that the response-create gate was released.
+
 ## Risks / Trade-offs
 
 - [A subscription response created outside this proxy has no local owner evidence] -> A source-owned HTTP request remains source-routed; a known subscription-model request uses the one-candidate compatibility fallback and otherwise fails closed, avoiding an account guess.

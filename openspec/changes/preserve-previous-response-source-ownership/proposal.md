@@ -12,6 +12,7 @@
 - Preserve strict file-pinned/account-owned routing, the subscription-only Codex compaction boundary, and the compact sole-candidate fallback.
 - Keep source-catalog unavailability distinct from an owner miss so direct WebSocket requests retain their existing subscription fallback.
 - Settle compact API-key reservations before owner-miss diagnostics, health writes, or exit, and add HTTP and direct WebSocket regressions for the external contract.
+- Restore the existing WebSocket missing-authorized-pool warning and original security error after an authorized retry exhausts its pool. Preserve account-model rejection fallback and hard-owner replay guards.
 
 ## Capabilities
 

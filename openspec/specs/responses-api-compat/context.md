@@ -252,6 +252,26 @@ is positively classified as pre-dispatch therefore leaves the body unowned and
 eligible for its first real dispatch on another account. Ambiguous failures
 remain owner-bound.
 
+## WebSocket security retry exhaustion
+
+The [security-work retry requirement](spec.md#requirement-security-work-authorization-errors-can-route-to-authorized-accounts)
+covers exhaustion after a retry as well as an initially unavailable authorized
+pool. For example, an ordinary account rejects a security task, the authorized
+replacement's session has expired, and excluding that replacement leaves no
+authorized candidate. Authentication replay retains the original security error
+so the client receives the missing-pool warning and that error, rather than an
+internal account-selection code.
+
+Connection failures can reach the same outcome. The selector signals when it
+has already sent the terminal error so the connection loop does not send its
+last failure again. A later independent request on the same socket checks both
+terminal-event ordering and response-create gate release in regression tests.
+
+This handling does not add ordinary-account fallback or change replay safety.
+Owner-pinned requests and requests that have exposed output remain ineligible
+for an account switch. Account-model rejection fallback is separate: when no
+compatible replacement exists, its original 400 remains the useful failure.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this
