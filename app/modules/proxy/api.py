@@ -4587,7 +4587,11 @@ async def _select_responses_model_source_with_continuity(
         require_streaming=require_streaming,
     )
 
-    if turn_state is not None and (source_selection is not None or payload.previous_response_id is not None):
+    if turn_state is not None and (
+        source_selection is not None
+        or payload.previous_response_id is not None
+        or not proxy_affinity_module._is_synthesized_turn_state(turn_state)
+    ):
         turn_state_owner_account_id = await context.service._resolve_compact_turn_state_owner(
             turn_state=turn_state,
             api_key=api_key,
@@ -4601,9 +4605,9 @@ async def _select_responses_model_source_with_continuity(
         if turn_state_owner_account_id is not None:
             return None, True
     elif turn_state is not None:
-        # A first-turn subscription request has no recorded ownership to
-        # resolve. Mark the lookup complete so the subscription streaming path
-        # does not repeat a strict lookup for an arbitrary client marker.
+        # A first-turn subscription request carrying only a synthetic-shaped
+        # marker has no recorded ownership to resolve. Mark the lookup complete
+        # so the subscription streaming path can use its sole-candidate fallback.
         payload._codex_lb_turn_state_owner_lookup_completed = True
 
     if source_selection is None or payload.previous_response_id is None:
