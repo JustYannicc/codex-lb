@@ -292,6 +292,13 @@ async def _next_http_bridge_event_block(
         if timeout is None:
             return await event_queue.get()
         return await asyncio.wait_for(event_queue.get(), timeout=timeout)
+    # A ready live event is the common path for an active SSE stream.  Reading
+    # it synchronously avoids creating and reaping the consumer/budget/timeout
+    # task fan-out for every event.  ``empty`` and ``get_nowait`` cannot be
+    # interleaved with another task, so the buffered event remains ahead of a
+    # concurrent budget or terminal signal.
+    if not event_queue.empty():
+        return event_queue.get_nowait()
     revoked = getattr(event_queue, "revoked", None)
     terminal_ready = getattr(event_queue, "terminal_ready", None)
     terminal_budget_exceeded = getattr(event_queue, "terminal_budget_exceeded", False)
@@ -4178,6 +4185,7 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None,
         request_deadline: float | None = None,
     ) -> AsyncGenerator[str, None]:
+        request_state.event_queue_consumer_attaching = True
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         request_state.bridge_request_deadline = request_deadline
@@ -4595,6 +4603,7 @@ class _HTTPBridgeStreamingMixin:
 
         async def detach_downstream_request() -> None:
             with anyio.CancelScope(shield=True):
+                request_state.event_queue_consumer_attaching = False
                 # The stream is no longer an owner once its generator is
                 # closing.  Mark the queue revoked before preserving a raced
                 # completed-delivery claim so terminal cleanup can discard
@@ -4809,6 +4818,7 @@ class _HTTPBridgeStreamingMixin:
                 queue_revoked = request_state.event_queue_revoked.is_set()
                 if event_queue is not None:
                     request_state.event_queue_consumer_started = True
+                    request_state.event_queue_consumer_attaching = False
             if event_queue is None:
                 # Terminal cleanup may revoke and detach a pre-consumer queue
                 # while the registration/ready awaits above are in flight.

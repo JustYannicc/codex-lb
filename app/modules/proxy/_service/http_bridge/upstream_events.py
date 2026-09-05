@@ -438,13 +438,40 @@ async def _enqueue_http_bridge_event(
             logger.info("Dropping best-effort HTTP bridge advisory before downstream consumer attachment")
             return False
         return True
-    await event_queue.put(event_block)
-    if event_queue_revoked is not None and event_queue_revoked.is_set():
-        return False
-    if terminal:
-        await event_queue.put(None)
-        if event_queue_revoked is not None and event_queue_revoked.is_set():
+
+    async def put_with_request_deadline(item: str | None) -> bool:
+        deadline = getattr(request_state, "bridge_request_deadline", None)
+        has_deadline = deadline is not None
+        remaining_seconds = deadline - _service_time().monotonic() if has_deadline else 0.0
+        if has_deadline and remaining_seconds <= 0:
+            _revoke_http_bridge_event_queue(request_state)
             return False
+
+        try:
+            event_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            if not has_deadline:
+                await event_queue.put(item)
+            else:
+                try:
+                    await asyncio.wait_for(event_queue.put(item), timeout=remaining_seconds)
+                except asyncio.TimeoutError:
+                    # The shared upstream reader must not remain parked behind
+                    # one paused downstream queue after this request's own
+                    # budget expires. Revocation stops this producer and lets
+                    # the reader settle sibling requests normally.
+                    _revoke_http_bridge_event_queue(request_state)
+                    return False
+        return event_queue_revoked is None or not event_queue_revoked.is_set()
+
+    if not await put_with_request_deadline(event_block):
+        return False
+    if terminal and not await put_with_request_deadline(None):
+        # If the terminal payload itself was accepted but its EOS marker could
+        # not fit before the deadline, preserve ordering with the queue's
+        # out-of-band abort marker where available.
+        _enqueue_http_bridge_abort_eos(request_state, event_queue)
+        return False
     return True
 
 
@@ -522,8 +549,15 @@ async def _persist_http_bridge_operation_event(
     async def enqueue_terminal_delivery() -> bool:
         if terminal_event_queue is None:
             return False
-        await terminal_event_queue.put(event_block)
-        await terminal_event_queue.put(None)
+        delivery_queue = cast(asyncio.Queue[str | None], terminal_event_queue)
+        delivered = await _enqueue_http_bridge_event(
+            request_state,
+            delivery_queue,
+            event_block,
+            terminal=True,
+        )
+        if not delivered:
+            return False
         if terminal_delivery_scope is not None:
             async with session.pending_lock:
                 terminal_delivery_scope.terminal_enqueued = True
@@ -555,38 +589,6 @@ async def _persist_http_bridge_operation_event(
             expected_response_id = expected_response_ids[0] if expected_response_ids else None
             alternate_expected_response_id = expected_response_ids[1] if len(expected_response_ids) > 1 else None
             response_id = _websocket_downstream_response_id(request_state)
-            delivery_queue = cast(asyncio.Queue[str | None] | None, terminal_event_queue)
-
-            async def enqueue_terminal_delivery() -> bool:
-                if delivery_queue is None:
-                    return False
-                event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
-                if (event_queue_revoked is not None and event_queue_revoked.is_set()) or not getattr(
-                    request_state, "event_queue_consumer_started", False
-                ):
-                    delivered = _enqueue_http_bridge_terminal_event(request_state, delivery_queue, event_block)
-                    if delivered and terminal_delivery_scope is not None:
-                        async with session.pending_lock:
-                            terminal_delivery_scope.terminal_enqueued = True
-                    return delivered
-                await delivery_queue.put(event_block)
-                if event_queue_revoked is not None and event_queue_revoked.is_set():
-                    return False
-                await delivery_queue.put(None)
-                if event_queue_revoked is not None and event_queue_revoked.is_set():
-                    return False
-                if terminal_delivery_scope is not None:
-                    async with session.pending_lock:
-                        terminal_delivery_scope.terminal_enqueued = True
-                return True
-
-            async def enqueue_terminal_delivery_deferring_cancellation() -> tuple[bool, asyncio.CancelledError | None]:
-                delivery_task = asyncio.create_task(
-                    enqueue_terminal_delivery(),
-                    name=f"http-bridge-terminal-delivery-{operation_id}",
-                )
-                delivered, deferred_cancellation = await _await_task_deferring_cancellation(delivery_task)
-                return bool(delivered), deferred_cancellation
 
             async def append_terminal_batch_capturing_error() -> tuple[Any | None, Exception | None]:
                 try:

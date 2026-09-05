@@ -16237,6 +16237,7 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
     first_submit_released = asyncio.Event()
     first_consumer_release = asyncio.Event()
     terminal_finalize_started = asyncio.Event()
+    terminal_finalize_finished = asyncio.Event()
     release_terminal_finalize = asyncio.Event()
     submit_calls = 0
     original_submit = service._submit_http_bridge_request
@@ -16269,7 +16270,10 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
         if kwargs.get("error_code") == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
             terminal_finalize_started.set()
             await release_terminal_finalize.wait()
-        return await original_fail_pending(*args, **kwargs)
+        result = await original_fail_pending(*args, **kwargs)
+        if kwargs.get("error_code") == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+            terminal_finalize_finished.set()
+        return result
 
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", gated_fail_pending)
 
@@ -16317,11 +16321,14 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
         )
         await asyncio.wait_for(terminal_finalize_started.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
-        first_consumer_release.set()
-        await asyncio.sleep(0.05)
-        assert first_task.done() is False
-
+        # Let sibling liveness finalization finish while the first route
+        # generator is still delayed. The real race is finalization-before-
+        # attachment, not a consumer that happened to attach first.
         release_terminal_finalize.set()
+        await asyncio.wait_for(terminal_finalize_finished.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+        assert first_task.done() is False
+        first_consumer_release.set()
+
         second_response = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
         assert second_response.status_code == 502
         assert second_response.json()["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE

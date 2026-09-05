@@ -49,3 +49,13 @@
 - [x] 5.2 Keep post-commit budget failure inside SSE and defer blocked-put cancellation until task reaping and reservation release finish
 
 - [x] 5.3 Run focused and bridge integration tests, Ruff, formatting, type checks, architecture validation, diff checks, strict targeted OpenSpec validation, and exact-candidate review
+
+## 6. Current-head reconciliation
+
+- [x] 6.1 Bound a full live-queue enqueue by the existing bridge request deadline and preserve sibling reader settlement on expiry
+
+- [x] 6.2 Preserve delayed-generator terminal delivery while discarding only explicitly abandoned queues
+
+- [x] 6.3 Keep HTTP-bridge direct and routed WebSockets off native egress while preserving the native default elsewhere
+
+- [x] 6.4 Add deadline, terminal append-exception, and direct/routed native-bypass regressions and rerun the affected proof lanes

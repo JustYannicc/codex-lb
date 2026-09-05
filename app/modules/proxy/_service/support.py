@@ -980,6 +980,10 @@ class _WebSocketRequestState:
     # queues owned until terminal delivery, while an attached consumer retains
     # ordered backpressure until it detaches.
     event_queue_consumer_started: bool = False
+    # Set while the HTTP stream generator is alive but has not yet entered its
+    # queue-consumer loop. Liveness finalization retains this queue for that
+    # delayed generator; explicit detachment clears the ownership marker.
+    event_queue_consumer_attaching: bool = False
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True

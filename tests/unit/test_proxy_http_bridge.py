@@ -463,6 +463,70 @@ async def test_http_bridge_event_wait_preserves_event_after_budget_wins_race(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_wait_drains_ready_event_without_task_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2,
+        revoked=asyncio.Event(),
+    )
+    event_queue.put_nowait("buffered-event")
+    event_queue.budget_exceeded.set()
+    create_task = http_bridge_streaming_module.asyncio.create_task
+
+    def fail_on_task_creation(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("a ready bridge event must not create wait tasks")
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "create_task", fail_on_task_creation)
+
+    assert (
+        await http_bridge_streaming_module._next_http_bridge_event_block(event_queue, timeout=10.0) == "buffered-event"
+    )
+    assert event_queue.empty()
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "create_task", create_task)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_enqueue_deadline_releases_shared_reader() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=1,
+        revoked=revoked,
+    )
+    event_queue.put_nowait("buffered-event")
+    request_state = SimpleNamespace(
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        event_queue_consumer_started=True,
+        bridge_request_deadline=time.monotonic() + 0.02,
+    )
+    sibling_lifecycle_settled = asyncio.Event()
+
+    async def settle_sibling_lifecycle() -> None:
+        sibling_lifecycle_settled.set()
+
+    producer = asyncio.create_task(
+        http_bridge_upstream_events_module._enqueue_http_bridge_event(
+            request_state,
+            event_queue,
+            "paused-event",
+        )
+    )
+    sibling = asyncio.create_task(settle_sibling_lifecycle())
+
+    await asyncio.wait_for(sibling_lifecycle_settled.wait(), timeout=0.1)
+    assert await asyncio.wait_for(producer, timeout=0.2) is False
+    assert revoked.is_set()
+    assert event_queue.get_nowait() == "buffered-event"
+    await sibling
+    await asyncio.sleep(0)
+    assert not [
+        task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_event_wait_preserves_event_after_timeout_wins_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7865,6 +7929,55 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     )
 
     assert order == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_exception_falls_back_to_live_terminal_delivery() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-append-exception-fallback",
+        response_id="resp-terminal-append-exception-fallback",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_consumer_started=True,
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-terminal-append-exception-fallback"
+    session = _make_bridge_session(
+        key_value="terminal-append-exception-fallback",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-terminal-append-exception-fallback"
+    session.durable_owner_epoch = 5
+    append_terminal_event = AsyncMock(side_effect=RuntimeError("spool unavailable"))
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(append_terminal_event=append_terminal_event),
+    )
+    event_block = 'data: {"type":"response.failed"}\n\n'
+
+    assert (
+        await http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            session,
+            request_state,
+            event_block,
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=event_queue,
+        )
+        is True
+    )
+    append_terminal_event.assert_awaited_once()
+    assert await event_queue.get() == event_block
+    assert await event_queue.get() is None
 
 
 @pytest.mark.asyncio

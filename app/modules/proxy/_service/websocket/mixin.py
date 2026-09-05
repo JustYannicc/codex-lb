@@ -4578,6 +4578,7 @@ class _WebSocketMixin:
         *,
         timeout_seconds: float,
         request_state: "_WebSocketRequestState | None" = None,
+        use_native_egress: bool = True,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4599,6 +4600,7 @@ class _WebSocketMixin:
                         account,
                         headers,
                         request_state=request_state,
+                        use_native_egress=use_native_egress,
                         connect_progress=connect_progress,
                     )
                 recovery.log_recovered()
@@ -4653,6 +4655,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
+        use_native_egress: bool = True,
         connect_progress: _WebSocketConnectProgress | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
@@ -4689,6 +4692,7 @@ class _WebSocketMixin:
                 optional_kwargs={
                     "route": route,
                     "allow_direct_egress": route is None,
+                    "use_native_egress": use_native_egress,
                 },
             )
             if request_state is not None:
@@ -6805,6 +6809,7 @@ class _WebSocketMixin:
                     discard_revoked_preconsumer = (
                         request_state.event_queue is event_queue
                         and not getattr(request_state, "event_queue_consumer_started", False)
+                        and not getattr(request_state, "event_queue_consumer_attaching", False)
                         and not terminal_budget_exceeded
                         and (
                             revoked_before_terminal

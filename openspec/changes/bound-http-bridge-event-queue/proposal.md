@@ -8,11 +8,20 @@ An admitted HTTP-bridge Responses stream currently stores upstream events in an 
 - Apply a fixed process-wide byte budget to retained live-event payloads so many
   concurrent sessions cannot multiply the per-queue envelope into worker OOM.
 - Make the existing awaited producer enqueue apply backpressure when that queue is full.
+- Bound a full-queue enqueue by the request's existing bridge deadline; when the
+  deadline expires, revoke only that request's queue and return the shared
+  upstream reader to sibling lifecycle work without raising through the reader
+  failure handler.
 - When the process budget is exhausted, fail closed for that queue and record the
   pressure without adding an operator-configurable memory setting. An attached
-  stream receives one explicit upstream-unavailable terminal result; a revoked
-  pre-consumer queue may be discarded after terminal bookkeeping and expose only
-  the public bare-EOS/truncated-stream result.
+  stream receives one explicit upstream-unavailable terminal result. A delayed
+  live generator whose queue is still owned must receive the selected terminal
+  failure and end marker after liveness revocation; only an explicitly detached
+  or otherwise ownerless queue may be discarded after terminal bookkeeping.
+- Keep native egress disabled for HTTP-bridge upstream WebSockets until native
+  per-stream flow control can bound a stalled stream without head-of-line
+  blocking the shared native reader. Native egress remains enabled by default
+  for other WebSocket paths.
 - Preserve ordered event delivery for attached consumers, terminal settlement,
   durable spool/replay, disconnect cleanup, and paced-consumer behavior.
 - Add deterministic integration coverage for paused, resumed, and paced consumers without adding a user setting.
