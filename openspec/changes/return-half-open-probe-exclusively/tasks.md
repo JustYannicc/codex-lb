@@ -32,8 +32,8 @@
   equal-version and lookup-failure lease retention, and replica-boundary state.
 - [x] Cover proxy continuity teardown ordering, cancellation, continuity
   neutrality (including injected-anchor provenance), stale-generation no-op
-  releases, raw previous-response failures, and genuine upstream failure
-  through unit and real bridge paths.
+  releases, client previous-response no-op accounting, and genuine upstream
+  failure through unit and real bridge paths.
 
 ## Verification
 

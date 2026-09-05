@@ -45,12 +45,6 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
         "stream_incomplete",
         "clean_close",
         "stream_idle_timeout",
-        # A client-supplied previous-response rejection is upstream evidence,
-        # not proxy continuity loss. The recorder filters these details out
-        # only when the request state explicitly proves that codex-lb injected
-        # the rejected anchor.
-        "previous_response_not_found",
-        "bridge_previous_response_not_found",
         # Pre-response-start bridge silence. Deliberately *not* aliased onto
         # stream_idle_timeout: the whole point is that a circuit opened before
         # any response existed must be distinguishable from one opened by a
