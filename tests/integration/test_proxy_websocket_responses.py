@@ -5010,10 +5010,21 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 
 
-def test_v1_responses_websocket_reconnect_trusts_exact_proxy_turn_state_for_owner_miss(
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_state(
     app_instance,
     monkeypatch,
+    route,
 ):
+    """A generated marker remains compatible after local continuity eviction.
+
+    The first handshake issues a marker, then clearing the bounded local cache
+    models eviction, restart, or a reconnect landing on another replica. The
+    echoed marker is therefore unregistered when the compact continuation
+    arrives and must still use the sole-candidate compatibility path.
+    """
+    from app.dependencies import get_proxy_service_for_app
+
     account = SimpleNamespace(id="acct_v1_turn_state_reconnect")
     upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_v1_turn_state_reconnect"))
     candidate_lookups: list[str] = []
@@ -5036,6 +5047,7 @@ def test_v1_responses_websocket_reconnect_trusts_exact_proxy_turn_state_for_owne
     async def no_turn_state_owner(self, *, turn_state, api_key, fail_on_missing):
         del self, api_key
         assert turn_state.startswith("turn_")
+        assert len(turn_state) == len("turn_") + 32
         assert fail_on_missing is False
         return None
 
@@ -5079,14 +5091,19 @@ def test_v1_responses_websocket_reconnect_trusts_exact_proxy_turn_state_for_owne
     }
 
     with TestClient(app_instance) as client:
-        with client.websocket_connect("/v1/responses") as websocket:
+        with client.websocket_connect(route) as initial_websocket:
             accepted_headers = {
-                key.decode(): value.decode() for key, value in cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+                key.decode(): value.decode()
+                for key, value in cast(list[tuple[bytes, bytes]], initial_websocket.extra_headers)
             }
             turn_state = accepted_headers["x-codex-turn-state"]
 
+        # The follow-up intentionally lands without the process-local state
+        # that the first handshake may have created.
+        get_proxy_service_for_app(app_instance)._websocket_continuity_index.clear()
+
         with client.websocket_connect(
-            "/v1/responses",
+            route,
             headers={"x-codex-turn-state": turn_state},
         ) as reconnect_websocket:
             accepted_headers = {

@@ -1006,12 +1006,6 @@ class _CompactMixin:
                 turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                     turn_state=turn_state,
                     api_key=api_key,
-                    # An unregistered proxy-shaped marker may be a first-turn
-                    # placeholder, but it cannot authorize generic owner-miss
-                    # fallback. The guard below permits it only when another
-                    # independently verified owner (previous response or file)
-                    # pins the request; registered markers resolve strictly in
-                    # the API-key scope above.
                     fail_on_missing=not synthesized_turn_state,
                 )
             previous_response_id = getattr(payload, "previous_response_id", None)
@@ -1028,23 +1022,6 @@ class _CompactMixin:
                     surface="compact",
                 )
             if (
-                synthesized_turn_state
-                and turn_state_owner_account_id is None
-                and previous_response_preferred_account_id is None
-                and rewritten_file_account_id is None
-            ):
-                await settle_compact_usage_before_owner_exit(
-                    "Failed to settle compact API key reservation after unproven synthesized turn-state"
-                )
-                raise ProxyResponseError(
-                    502,
-                    openai_error(
-                        "turn_state_owner_unavailable",
-                        "Turn-state owner account is unavailable; retry the logical turn.",
-                        error_type="server_error",
-                    ),
-                )
-            if (
                 isinstance(previous_response_id, str)
                 and previous_response_id.strip()
                 and previous_response_preferred_account_id is None
@@ -1053,7 +1030,7 @@ class _CompactMixin:
                 # File pins and unresolved client turn-state are hard
                 # continuity boundaries. Header normalization maps blanks
                 # to None, so preserve physical presence for this decision.
-                if rewritten_file_account_id is not None or turn_state_header_present:
+                if rewritten_file_account_id is not None or (turn_state_header_present and not synthesized_turn_state):
                     selection_candidates: tuple[Account, ...] = ()
                 else:
                     # Preserve the compatibility fallback for an owner miss
