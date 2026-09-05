@@ -1059,56 +1059,77 @@ class _HTTPBridgeRequestSubmitMixin:
             body_exception = exc
             raise
         finally:
-            _release_http_bridge_unanchored_handoff(
-                session,
-                request_scope_id=request_scope_id,
-            )
-            # Like the half-open lease below, the admission registration the
-            # submit took at entry is handed back here when no dispatch took
-            # it over.
-            released_admission_waiter = await self._release_http_bridge_admission_preregistration(
-                session, request_state=request_state
-            )
-            claimed_probe = admission_claims[-1] if admission_claims else None
-            if claimed_probe is not None and request_state.response_create_attempt_count == 0:
-                # This admission claimed the half-open probe but the request
-                # never ATTEMPTED the upstream send — a poisoned-anchor
-                # rejection, a recovery-journal or operation-ledger refusal,
-                # a reconnect failure, or a completed-operation spool return.
-                # The attempt marker, not the sent timestamp, decides this:
-                # an ambiguous send failure clears the timestamp while the
-                # frame may already be running upstream, and releasing that
-                # probe would let a second dispatch run beside it.
-                # Hand exactly that probe back and restore the transition
-                # marker (an expired but positive cooldown) so the next
-                # request re-claims the lease instead of the whole window
-                # suppressing traffic behind a probe that never flew.
-                _, release_cancellation = await _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
-                    self,
+            cleanup_task = asyncio.create_task(
+                self._finish_http_bridge_submit_admission(
                     session,
-                    detail="probe_not_dispatched",
-                    probe_owner=claimed_probe[1],
-                    expected_half_open_until=claimed_probe[0],
-                    expected_half_open_generation=claimed_probe[2],
-                )
-                request_state.claimed_half_open_until = 0.0
-                request_state.claimed_half_open_generation = 0
-                request_state.claimed_half_open_episode = None
-                if release_cancellation is not None and body_exception is None:
-                    raise release_cancellation
-            # Inner pre-submit cleanup may clear the reservation before control
-            # returns here, so ownership must be captured before awaiting it.
-            # Only that request, or one whose pre-dispatch exit just released
-            # the admission registration a retirement was deferring on, can
-            # make detached-session retirement newly ready; an ordinary
-            # send/reader failure already owns terminal settlement, and
-            # closing again would run that funnel twice.
-            if (
-                (owned_unanchored_handoff or released_admission_waiter)
-                and session.upstream_control.retire_after_drain
-                and not session.upstream_close_attempted
-            ):
-                await self._retire_http_bridge_after_drain_if_ready(session)
+                    request_state=request_state,
+                    request_scope_id=request_scope_id,
+                    owned_unanchored_handoff=owned_unanchored_handoff,
+                    admission_claims=admission_claims,
+                ),
+                name="http-bridge-submit-admission-cleanup",
+            )
+            _, cleanup_cancellation = await _await_task_deferring_cancellation(cleanup_task)
+            if cleanup_cancellation is not None and body_exception is None:
+                raise cleanup_cancellation
+
+    async def _finish_http_bridge_submit_admission(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        request_scope_id: str,
+        owned_unanchored_handoff: bool,
+        admission_claims: list[tuple[float, object, int]],
+    ) -> None:
+        """Finish all submit-owned cleanup before delivering caller cancellation."""
+        _release_http_bridge_unanchored_handoff(
+            session,
+            request_scope_id=request_scope_id,
+        )
+        # Like the half-open lease below, the admission registration the
+        # submit took at entry is handed back here when no dispatch took
+        # it over.
+        released_admission_waiter = await self._release_http_bridge_admission_preregistration(
+            session, request_state=request_state
+        )
+        claimed_probe = admission_claims[-1] if admission_claims else None
+        if claimed_probe is not None and request_state.response_create_attempt_count == 0:
+            # This admission claimed the half-open probe but the request
+            # never ATTEMPTED the upstream send — a poisoned-anchor
+            # rejection, a recovery-journal or operation-ledger refusal,
+            # a reconnect failure, or a completed-operation spool return.
+            # The attempt marker, not the sent timestamp, decides this:
+            # an ambiguous send failure clears the timestamp while the
+            # frame may already be running upstream, and releasing that
+            # probe would let a second dispatch run beside it.
+            # Hand exactly that probe back and restore the transition
+            # marker (an expired but positive cooldown) so the next
+            # request re-claims the lease instead of the whole window
+            # suppressing traffic behind a probe that never flew.
+            await self._release_http_bridge_retry_circuit_half_open(
+                session,
+                detail="probe_not_dispatched",
+                probe_owner=claimed_probe[1],
+                expected_half_open_until=claimed_probe[0],
+                expected_half_open_generation=claimed_probe[2],
+            )
+            request_state.claimed_half_open_until = 0.0
+            request_state.claimed_half_open_generation = 0
+            request_state.claimed_half_open_episode = None
+        # Inner pre-submit cleanup may clear the reservation before control
+        # returns here, so ownership must be captured before awaiting it.
+        # Only that request, or one whose pre-dispatch exit just released
+        # the admission registration a retirement was deferring on, can
+        # make detached-session retirement newly ready; an ordinary
+        # send/reader failure already owns terminal settlement, and
+        # closing again would run that funnel twice.
+        if (
+            (owned_unanchored_handoff or released_admission_waiter)
+            and session.upstream_control.retire_after_drain
+            and not session.upstream_close_attempted
+        ):
+            await self._retire_http_bridge_after_drain_if_ready(session)
 
     async def _http_bridge_operation_fenced_continuity_replay_allowed(
         self: Any,

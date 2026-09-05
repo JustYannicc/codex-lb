@@ -17284,20 +17284,51 @@ async def test_close_http_bridge_session_continues_when_lease_release_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retained_account_id", ["acc-retained-account-lease", "acc-reconnect-selected"])
+@pytest.mark.parametrize("live_owner_detached", [False, True])
 async def test_close_http_bridge_sessions_for_account_retries_retained_lease_after_successful_close(
     monkeypatch: pytest.MonkeyPatch,
+    retained_account_id: str,
+    live_owner_detached: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="close-retained-account-lease")
     session.account.id = "acc-retained-account-lease"
     lease = proxy_service.AccountLease(
         lease_id="lease-retained-account-lease",
-        account_id=session.account.id,
+        account_id=retained_account_id,
         kind="stream",
         acquired_at=1.0,
     )
-    session.account_lease = lease
+    if retained_account_id == session.account.id:
+        session.account_lease = lease
+    else:
+        session.pending_account_lease_releases.append(lease)
+    live_session = _make_bridge_session(key_value="unrelated-live-account")
+    live_session.account.id = "acc-unrelated-live-owner"
+    live_lease = proxy_service.AccountLease(
+        lease_id="lease-unrelated-live-owner",
+        account_id=live_session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    live_session.account_lease = live_lease
+    live_close = AsyncMock()
+    live_session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=live_close))
+    live_retained_lease = proxy_service.AccountLease(
+        lease_id="lease-unrelated-live-retained",
+        account_id=retained_account_id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    live_session.pending_account_lease_releases.append(live_retained_lease)
+    if live_owner_detached:
+        service._http_bridge_detached_sessions[id(live_session)] = live_session
+    else:
+        service._http_bridge_sessions[live_session.key] = live_session
     service._http_bridge_detached_sessions[id(session)] = session
+    closed_upstream = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=closed_upstream))
     release_account_lease = AsyncMock(side_effect=[RuntimeError("release failed"), None])
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
 
@@ -17311,13 +17342,22 @@ async def test_close_http_bridge_sessions_for_account_retries_retained_lease_aft
     assert session.pending_account_lease_releases == [lease]
     assert service._http_bridge_detached_sessions[id(session)] is session
 
-    closed = await service.close_http_bridge_sessions_for_account(session.account.id)
+    closed = await service.close_http_bridge_sessions_for_account(retained_account_id)
 
     assert closed == 1
     assert release_account_lease.await_count == 2
     assert release_account_lease.await_args_list == [call(lease), call(lease)]
     assert session.pending_account_lease_releases == []
-    assert service._http_bridge_detached_sessions == {}
+    assert id(session) not in service._http_bridge_detached_sessions
+    if live_owner_detached:
+        assert service._http_bridge_detached_sessions[id(live_session)] is live_session
+    else:
+        assert service._http_bridge_sessions[live_session.key] is live_session
+    assert live_session.closed is False
+    assert live_session.account_lease is live_lease
+    assert live_session.pending_account_lease_releases == [live_retained_lease]
+    live_close.assert_not_awaited()
+    closed_upstream.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -17328,11 +17368,11 @@ async def test_close_http_bridge_session_retained_lease_retry_is_single_flight(
     session = _make_bridge_session(key_value="close-retained-account-lease-race")
     lease = proxy_service.AccountLease(
         lease_id="lease-retained-account-lease-race",
-        account_id=session.account.id,
+        account_id="acc-reconnect-selected",
         kind="stream",
         acquired_at=1.0,
     )
-    session.account_lease = lease
+    session.pending_account_lease_releases.append(lease)
     service._http_bridge_detached_sessions[id(session)] = session
     retry_started = asyncio.Event()
     allow_retry = asyncio.Event()
@@ -17353,9 +17393,9 @@ async def test_close_http_bridge_session_retained_lease_retry_is_single_flight(
     assert session.pending_account_lease_releases == [lease]
     assert service._http_bridge_detached_sessions[id(session)] is session
 
-    first_retry = asyncio.create_task(service._close_http_bridge_session(session))
+    first_retry = asyncio.create_task(service.close_http_bridge_sessions_for_account(lease.account_id))
     await asyncio.wait_for(retry_started.wait(), timeout=1.0)
-    second_retry = asyncio.create_task(service._close_http_bridge_session(session))
+    second_retry = asyncio.create_task(service.close_http_bridge_sessions_for_account(lease.account_id))
     await asyncio.sleep(0)
     assert release_calls == 2
     assert session.resource_close_task is not None
@@ -45145,6 +45185,95 @@ async def test_submit_cancellation_after_admission_returns_the_claimed_probe(
     assert state.half_open_owner_session is None
     assert state.half_open_owner_token is None
     assert state.last_half_open_release_monotonic > 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed_error", [False, True])
+async def test_submit_real_admission_cleanup_defers_level_cancellation(
+    monkeypatch: pytest.MonkeyPatch, typed_error: bool
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-real-admission-cancel")
+    state = _activate_half_open_probe(service, session)
+    state.half_open_until = 0.0
+    state.cooldown_until = time.monotonic() - 1.0
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-real-admission-cancel",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"continue"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    admission_claimed = asyncio.Event()
+    pending_lock_held = asyncio.Event()
+    release_started = asyncio.Event()
+    original_admission = service._http_bridge_precreated_retry_allowed
+    original_release = service._release_http_bridge_admission_preregistration
+
+    async def hold_pending_lock() -> None:
+        await admission_claimed.wait()
+        async with session.pending_lock:
+            pending_lock_held.set()
+            await release_started.wait()
+
+    async def fail_after_real_admission(*args: Any, **kwargs: Any) -> bool:
+        allowed = await original_admission(*args, **kwargs)
+        assert allowed and kwargs["claimed_lease_out"]
+        assert session.admission_waiter_count == 1
+        assert request_state.admission_waiter_preregistered
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+        admission_claimed.set()
+        await pending_lock_held.wait()
+        cancel_scope.cancel()
+        if typed_error:
+            raise ProxyResponseError(409, openai_error("typed_body_failure", "before dispatch"))
+        await asyncio.Event().wait()
+        return allowed
+
+    async def release_admission(*args: Any, **kwargs: Any) -> bool:
+        release_started.set()
+        return await original_release(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", fail_after_real_admission)
+    monkeypatch.setattr(service, "_release_http_bridge_admission_preregistration", release_admission)
+    holder = asyncio.create_task(hold_pending_lock())
+    caught: BaseException | None = None
+    try:
+        with anyio.CancelScope() as cancel_scope:
+            try:
+                await service._submit_http_bridge_request(
+                    session, request_state=request_state, text_data=request_state.request_text or "{}", queue_limit=8
+                )
+            except BaseException as exc:
+                caught = exc
+    finally:
+        release_started.set()
+        await asyncio.wait_for(holder, timeout=1.0)
+
+    assert session.admission_waiter_count == 0
+    assert not request_state.admission_waiter_preregistered
+    assert state.half_open_until == 0.0
+    assert state.half_open_owner_session is None
+    assert state.half_open_owner_token is None
+    assert session.upstream_close_attempted
+    cast(AsyncMock, session.upstream.close).assert_awaited_once()
+    if typed_error:
+        assert isinstance(caught, ProxyResponseError)
+        assert caught.status_code == 409
+        assert caught.payload["error"]["code"] == "typed_body_failure"
+    else:
+        assert isinstance(caught, asyncio.CancelledError)
 
 
 @pytest.mark.asyncio
