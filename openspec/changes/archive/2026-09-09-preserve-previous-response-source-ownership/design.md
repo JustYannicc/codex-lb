@@ -37,6 +37,25 @@ The reuse guard will run after the existing prior-response owner resolution. The
 
 Alternative considered: persist a separate source-response-ID index. Rejected for this change because the configured model source already identifies the only available source route; the missing decision is whether recorded subscription ownership must veto it.
 
+### Use marker shape for compatibility fallback
+
+`turn_*` and `http_turn_*` values are proxy-shaped first-turn placeholders,
+but their exact issuance history can disappear during HTTP bridge eviction,
+process restart, or replica handoff. When no recorded previous-response owner
+or file pin requires a specific account, a matching marker therefore follows
+the existing sole-candidate compatibility path even when its alias is not
+registered locally. Exact process-local issuance provenance is not a routing
+precondition. Registered markers still resolve to their recorded owner;
+non-synthetic values and physically present blank headers remain hard client
+continuity input, and file ownership remains strict.
+
+Alternative considered: require an exact handshake marker or a retained
+process-local provenance bit before allowing fallback. Rejected because that
+turns normal reconnect, eviction, and replica-boundary marker echoes into
+false owner failures without adding an account-ownership proof. The
+sole-candidate bound and independent hard-owner checks preserve the safety
+boundary.
+
 ### Keep marker provenance additive to the v2 owner-forward signature
 
 The existing `x-codex-bridge-signature-v2` field set is already a rolling-upgrade
@@ -56,6 +75,7 @@ An owner miss and source-catalog unavailability are distinct states. Known subsc
 ## Risks / Trade-offs
 
 - [A subscription response created outside this proxy has no local owner evidence] -> A source-owned HTTP request remains source-routed; a known subscription-model request uses the one-candidate compatibility fallback and otherwise fails closed, avoiding an account guess.
+- [A client can present a marker-shaped turn state] -> Shape compatibility is limited to the existing sole-candidate owner-miss path; blank or non-synthetic input, file ownership, and a resolved previous-response owner still fail closed or remain pinned.
 - [Moving the reuse guard changes its timing] -> Keep it before any upstream send and add direct WebSocket tests proving both subscription forwarding and source HTTP fallback.
 - [HTTP and WebSocket logic could drift again] -> Both paths use the same model-source selector and the existing subscription-owner resolver; regression tests cover both transports and canonical response-ID shapes.
 
