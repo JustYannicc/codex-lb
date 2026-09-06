@@ -5,6 +5,13 @@ Support experimental native Codex history and notes across an authenticated acco
 
 ## Requirements
 
+### Requirement: Context request logs remain readable in the dashboard
+The dashboard request-log response schema SHALL accept `requestKind: "codex_context"` for successful and failed context operations without rejecting other rows or pagination metadata in the same response.
+
+#### Scenario: Inference and context operations share a page
+- **WHEN** a request-log response contains normal inference rows and successful or failed context rows
+- **THEN** the dashboard accepts the complete page and preserves each row's request kind, status and pagination metadata
+
 ### Requirement: Explicit context backend endpoints
 The proxy SHALL accept POST under `/backend-api/codex/alpha/history/v2/` for `list_windows`, `list_items`, `read_item`, and `search_contents`, and under `/backend-api/codex/alpha/notes/v2/` for `thread_hint`, `list_files_by_prefix`, `read_file`, `search_contents`, `append_to_file`, and `write_file`. It MUST NOT provide a wildcard upstream path relay. A single trailing slash SHALL accept the same POST method and body.
 
