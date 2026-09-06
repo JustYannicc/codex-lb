@@ -65,6 +65,7 @@ class _RecoverableAccountsRepository(Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = None,
+        expected_refresh_token_encrypted: bytes | None = None,
         expected_plan_type: str | None | object = None,
     ) -> bool: ...
 
@@ -426,6 +427,7 @@ async def reconcile_recoverable_account_statuses(
         previous_reset_at = account.reset_at
         previous_blocked_at = account.blocked_at
         previous_plan_type = account.plan_type
+        previous_refresh_token_encrypted = account.refresh_token_encrypted
         updated = await accounts_repo.update_status_if_current(
             account.id,
             status,
@@ -458,6 +460,8 @@ async def reconcile_recoverable_account_statuses(
                 recovery_deactivation_reason=deactivation_reason,
                 recovery_reset_at=reset_at,
                 recovery_blocked_at=blocked_at,
+                recovery_plan_type=previous_plan_type,
+                recovery_refresh_token_encrypted=previous_refresh_token_encrypted,
             )
             continue
         account.status = status
@@ -480,6 +484,8 @@ async def _restore_recoverable_account_status(
     recovery_deactivation_reason: str | None,
     recovery_reset_at: int | None,
     recovery_blocked_at: int | None,
+    recovery_plan_type: str | None,
+    recovery_refresh_token_encrypted: bytes,
 ) -> None:
     restored = await accounts_repo.update_status_if_current(
         account_id,
@@ -491,12 +497,16 @@ async def _restore_recoverable_account_status(
         expected_deactivation_reason=recovery_deactivation_reason,
         expected_reset_at=recovery_reset_at,
         expected_blocked_at=recovery_blocked_at,
+        expected_refresh_token_encrypted=recovery_refresh_token_encrypted,
+        expected_plan_type=recovery_plan_type,
     )
     if restored:
         return
 
     current = await accounts_repo.get_by_id_fresh(account_id)
     if current is None or current.delete_requested_at is not None or current.status != AccountStatus.ACTIVE:
+        return
+    if current.plan_type != recovery_plan_type or current.refresh_token_encrypted != recovery_refresh_token_encrypted:
         return
 
     await accounts_repo.update_status_if_current(
@@ -509,6 +519,8 @@ async def _restore_recoverable_account_status(
         expected_deactivation_reason=current.deactivation_reason,
         expected_reset_at=current.reset_at,
         expected_blocked_at=current.blocked_at,
+        expected_refresh_token_encrypted=recovery_refresh_token_encrypted,
+        expected_plan_type=recovery_plan_type,
     )
 
 

@@ -193,6 +193,7 @@ class StubAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
         expected_plan_type: str | None | object = _UNSET,
     ) -> bool:
         account = self._accounts.get(account_id)
@@ -203,6 +204,11 @@ class StubAccountsRepository:
         if account.reset_at != expected_reset_at:
             return False
         if expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at:
+            return False
+        if (
+            expected_refresh_token_encrypted is not None
+            and account.refresh_token_encrypted != expected_refresh_token_encrypted
+        ):
             return False
         if expected_plan_type is not _UNSET and account.plan_type != expected_plan_type:
             return False
@@ -934,6 +940,93 @@ async def test_reconcile_reblocks_current_active_row_when_direct_rollback_loses_
     assert [update["status"] for update in accounts_repo.status_updates] == [
         AccountStatus.ACTIVE,
         AccountStatus.RATE_LIMITED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_preserves_replacement_credentials_when_rollback_loses_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_weekly_reset_at = int(now + 3 * 24 * 3600)
+    next_weekly_reset_at = int(now - 60 + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_team_usage_post_cas_replacement",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="team",
+        reset_at=legacy_weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=legacy_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=10080,
+    )
+    after = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=0.0,
+        reset_at=next_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10080,
+    )
+    exhausted_after = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=next_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=10080,
+    )
+    exhausted_after.id = 2
+
+    def replace_credentials(current: Account) -> None:
+        current.plan_type = "plus"
+        current.refresh_token_encrypted = b"replacement-refresh"
+
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=0.0,
+                reset_at=int(now + 5 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 60),
+                window_minutes=300,
+            )
+        },
+        secondary={account.id: after},
+    )
+    accounts_repo = MutatingUsageAfterSuccessfulCasAccountsRepository(
+        [account],
+        usage_repo=usage_repo,
+        refreshed_secondary={account.id: exhausted_after},
+        mutate_current_after_recovery=replace_credentials,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+        long_window_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+    assert account.plan_type == "plus"
+    assert account.refresh_token_encrypted == b"replacement-refresh"
+    assert [update["status"] for update in accounts_repo.status_updates] == [
+        AccountStatus.ACTIVE,
     ]
 
 
