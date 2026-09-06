@@ -706,9 +706,15 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if item_type == "tool_search_output":
         if item.get("status") == "failed":
             return False
-        has_tools = _tool_search_output_tools_are_account_neutral(item.get("tools"))
-        has_output = isinstance(item.get("output"), str)
-        return item.get("execution") in (None, "client") and has_tools != has_output
+        if item.get("execution") not in (None, "client"):
+            return False
+        has_tools_field = "tools" in item
+        has_output_field = "output" in item
+        if has_tools_field == has_output_field:
+            return False
+        if has_tools_field:
+            return _tool_search_output_tools_are_account_neutral(item.get("tools"))
+        return isinstance(item.get("output"), str)
     output = item.get("output")
     if isinstance(output, str):
         return True
