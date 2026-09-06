@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
+    _http_bridge_canonical_inflight_key_locked,
     _http_bridge_capacity_after_planned_closes,
     _http_bridge_claim_allows_takeover,
     _http_bridge_compatible,
@@ -681,6 +682,10 @@ class _HTTPBridgeMixin(
                         force_durable_takeover = True
                     self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
+                if existing is not None:
+                    key = existing.key
+                else:
+                    key = _http_bridge_canonical_inflight_key_locked(self, key)
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
@@ -1376,7 +1381,7 @@ class _HTTPBridgeMixin(
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
                     if await _wait_for_http_bridge_aborted_owner_within_budget(
-                        capacity_wait_future, wait_timeout_seconds, request_deadline
+                        self, capacity_wait_future, wait_timeout_seconds, request_deadline
                     ):
                         continue
                     raise timeout_error from exc
@@ -1387,6 +1392,7 @@ class _HTTPBridgeMixin(
                         self,
                         capacity_wait_future,
                         timeout=wait_timeout_seconds,
+                        request_deadline=request_deadline,
                     )
                 continue
             if inflight_future is not None and not owns_creation:
@@ -1414,7 +1420,7 @@ class _HTTPBridgeMixin(
                     if _http_bridge_key_is_synthesized_turn_state(key):
                         raise timeout_error from exc
                     if await _wait_for_http_bridge_aborted_owner_within_budget(
-                        inflight_future, wait_timeout_seconds, request_deadline
+                        self, inflight_future, wait_timeout_seconds, request_deadline
                     ):
                         continue
                     raise timeout_error from exc
