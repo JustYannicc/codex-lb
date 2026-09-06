@@ -7,7 +7,7 @@ from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, 
 from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.quota import apply_usage_quota
+from app.core.usage.quota import apply_usage_quota, has_usable_credits
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -395,7 +395,11 @@ def _has_credit_override(
     credits_unlimited: bool | None,
     credits_balance: float | None,
 ) -> bool:
-    return credits_unlimited is True or credits_has is True or (credits_balance is not None and credits_balance > 0)
+    return has_usable_credits(
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
 
 
 def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):
