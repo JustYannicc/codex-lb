@@ -308,6 +308,123 @@ and durable circuit state.
 - **THEN** the settlement is ignored
 - **AND** the replacement probe remains active
 
+### Requirement: Proxy continuity reset teardown is ordered and cancellation-safe
+
+When a proxy-owned continuity reset returns a half-open probe, the proxy MUST
+hold the session lifecycle ownership while detaching the session from active
+bridge routing and marking every pending response-create attempt on that session
+as disarmed. It MUST return the probe only after detachment and disarming, then
+settle pending requests and close the session through a cancellation-shielded
+cleanup path. A late submit MUST NOT append an undisarmed attempt between the
+reset's disarm and detach steps. This ordering MUST also apply when an in-place
+reconnect fails because its required continuity owner is unavailable. Failure
+to release a selected account lease during that terminal cleanup MUST NOT
+replace the stable continuity-owner error returned to the client. The detached
+session MUST be closed through cancellation-deferred cleanup before that error
+returns, so its upstream socket, account and durable leases, reader, and
+detached-registry capacity cannot outlive the failed reconnect.
+
+If account-lease release fails during detached cleanup, the failed lease handle
+MUST remain attached to that detached session. An explicit account cleanup pass
+MUST retry each retained handle, and concurrent retry passes for one session
+MUST share one close/release task so a handle is not released twice. The
+detached session MUST remain discoverable until all retained account leases are
+released successfully.
+
+These cleanup tasks MUST use the owning service's scheduler, and retry-circuit
+deadlines MUST use its clock. Injected time and task ownership MUST preserve
+the same cancellation deferral, typed-error precedence, and lease fences as
+the real-time defaults.
+
+#### Scenario: Cleanup and probe expiry follow injected time
+
+- **GIVEN** a bridge service with an injected clock and scheduler
+- **WHEN** a cancelled admission returns its probe or a retained lease is retried
+- **THEN** all cleanup tasks are owned by that scheduler
+- **AND** cancelled admission handback and eligible retirement finish before
+  the caller observes its original terminal result
+- **AND** probe expiry and renewal use the injected clock without wall-clock waits
+- **AND** stale generations cannot release a replacement probe
+
+#### Scenario: Reset teardown cannot manufacture a circuit strike
+
+- **GIVEN** a proxy-owned continuity reset has an active half-open probe and
+  pending response-create attempts
+- **WHEN** the reset runs
+- **THEN** the session is detached and its attempts are disarmed before the
+  probe is returned
+- **AND** reader teardown classifies those attempts as settled rather than
+  eligible
+- **AND** cancellation does not leave the session registered or the probe
+  owner unresolved
+
+#### Scenario: Retained account lease release is retried after transport close
+
+- **GIVEN** detached session cleanup closes the upstream transport successfully
+  but account-lease release fails
+- **WHEN** an explicit cleanup pass for that account runs later
+- **THEN** the retained lease handle is retried exactly once
+- **AND** the detached session is removed only after the retry succeeds
+- **AND** concurrent cleanup passes do not issue duplicate release calls
+
+#### Scenario: Level cancellation during admission handback
+
+- **GIVEN** an undispatched submit owns an admission preregistration and a
+  half-open probe
+- **WHEN** an active cancellation scope interrupts it while the pending lock
+  is contended
+- **THEN** cancellation-deferred cleanup MUST return both registrations and
+  finish any newly eligible retirement before propagating the original result
+
+#### Scenario: A retained lease belongs to a replacement account
+
+- **GIVEN** a closed detached session for account A retains a failed lease release
+  for account B after reconnect
+- **WHEN** explicit cleanup for B runs
+- **THEN** it MUST find and retry the retained B lease
+- **AND** it MUST preserve unrelated live session resources and single-flight
+  cleanup ownership
+
+### Requirement: Retry-circuit failure accounting distinguishes proxy continuity loss
+
+The proxy MUST NOT increment or persist retry-circuit failures for explicitly
+identified proxy continuity-ownership loss, including
+`continuity_owner_unavailable`, `previous_response_owner_unavailable`,
+`bridge_owner_unreachable`, and `bridge_instance_mismatch`. A
+`previous_response_not_found` or `bridge_previous_response_not_found` detail
+MUST remain outside retry-circuit failure accounting when it is raw or
+client-supplied. When the request state explicitly proves that the rejected
+anchor was injected by this proxy, the detail MAY be treated as continuity-
+neutral and return the active local probe. The proxy MUST continue to
+increment and persist genuine upstream `stream_incomplete`,
+`stream_idle_timeout`, and `clean_close` failures when their attempt is
+eligible. Anchor replay and error-provenance policy remain governed by their
+existing contracts.
+
+#### Scenario: Proxy continuity loss is neutral
+
+- **GIVEN** an eligible local half-open probe
+- **WHEN** the proxy loses continuity ownership and the request carries
+  explicit proxy continuity provenance
+- **THEN** the circuit count does not increase
+- **AND** the owner lease is returned when the reporting session owns it
+
+#### Scenario: Client previous-response rejection does not strike the circuit
+
+- **GIVEN** an eligible local half-open probe
+- **WHEN** the upstream rejects a raw or client-supplied
+  `previous_response_not_found` anchor without proxy continuity provenance
+- **THEN** the retry-circuit failure count is unchanged
+- **AND** no retry-circuit failure row is persisted
+- **AND** the active half-open lease remains owned by its original probe
+
+#### Scenario: Genuine upstream failure still opens the circuit
+
+- **GIVEN** two eligible eventless upstream failures for one hard key
+- **WHEN** each failure is recorded
+- **THEN** the circuit reaches its configured threshold and suppresses later
+  admissions with a real cooldown
+
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
 

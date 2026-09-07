@@ -4181,7 +4181,7 @@ class _HTTPBridgeStreamingMixin:
             if cleanup_error is not None:
                 raise cleanup_error
 
-        cleanup_task = asyncio.create_task(
+        cleanup_task = scheduler_for(self).create_task(
             cleanup(),
             name=f"http-bridge-local-reset-{_hash_identifier(session.key.affinity_key)}",
         )

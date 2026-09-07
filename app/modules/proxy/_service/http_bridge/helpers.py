@@ -349,7 +349,7 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
                 await settle_pending_owner_unavailable()
                 await service._close_http_bridge_session(session)
 
-    cleanup_task = asyncio.create_task(cleanup())
+    cleanup_task = scheduler_for(service).create_task(cleanup())
     _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
     if cancellation is not None:
         raise cancellation
@@ -388,7 +388,7 @@ async def _release_http_bridge_account_lease_deferring_cancellation(
                     item for item in session.pending_account_lease_releases if item.lease_id != lease.lease_id
                 ]
 
-    release_task = asyncio.create_task(release(), name="http-bridge-account-lease-release")
+    release_task = scheduler_for(service).create_task(release(), name="http-bridge-account-lease-release")
     _, cancellation = await _await_task_deferring_cancellation(release_task)
     return cancellation
 
