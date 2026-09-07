@@ -41,6 +41,11 @@
 
 ## Verification
 
+- [x] Reconcile accepted output-free replay with request-bound probe admission,
+  gate contention, cancellation, and retained replacement-account cleanup.
+- [x] Verify the combined paths, upstream cancellation guard, and exact-candidate
+  Standards/Input reviews before updating the PR.
+
 - [x] Integrate the bounded detached-retirement sweep while retaining mandatory
   lifecycle cleanup, live turn ownership, and single-flight retained-lease retry.
 - [x] Verify changed AnyIO and cancellation-cascade dependencies with focused

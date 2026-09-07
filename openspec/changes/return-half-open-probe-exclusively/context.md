@@ -133,6 +133,27 @@ alongside its API and keepalive cancellation-cascade fixes. Those outer task
 boundaries complement the PR's deferred admission/probe cleanup; they do not
 replace its typed-error precedence or ownership fences.
 
+## Upstream accepted replay integration
+
+Accepted output-free replay now shares the internal retry path with half-open
+probe admission. The request may already have one send attempt when the retry
+claims its probe. Undispatched handback therefore compares against the retry's
+send-attempt baseline, not zero. If admission's durable lookup yields while the
+pending request is replaced, the admitted request identity must still match
+before the retry claims the session create gate.
+
+The upstream replay contract owns lifecycle identity, duplicate-prelude
+suppression, gate reclamation, and account/anchor safety. This change retains
+those rules together with its probe and cleanup ownership. In particular, a
+failed replay must not strand a replacement account's lease on an already
+closed original transport.
+
+Admission already extends a newly claimed probe through the original request
+deadline. A staged accepted terminal can retain its abort-settlement claim
+while reconnect waits without shortening that lease to the default window.
+After the request budget expires, retry admission checks prevent another send;
+late handback must leave any replacement probe untouched.
+
 ## Validation note
 
 With pinned `@fission-ai/openspec@1.11.0`, strict validation passes for this
