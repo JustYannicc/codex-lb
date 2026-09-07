@@ -436,7 +436,7 @@ async def _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
     expected_half_open_generation: int | None,
 ) -> tuple[bool, asyncio.CancelledError | None]:
     """Return an undispatched probe even when the caller is cancelled."""
-    release_task = asyncio.create_task(
+    release_task = scheduler_for(service).create_task(
         service._release_http_bridge_retry_circuit_half_open(
             session,
             detail=detail,
@@ -1059,7 +1059,7 @@ class _HTTPBridgeRequestSubmitMixin:
             body_exception = exc
             raise
         finally:
-            cleanup_task = asyncio.create_task(
+            cleanup_task = scheduler_for(self).create_task(
                 self._finish_http_bridge_submit_admission(
                     session,
                     request_state=request_state,

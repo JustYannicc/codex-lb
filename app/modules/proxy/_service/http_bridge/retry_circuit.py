@@ -1844,7 +1844,7 @@ class _HTTPBridgeRetryCircuitMixin:
             owner_generation = getattr(probe_owner, "claimed_half_open_generation", None)
             if isinstance(owner_generation, int) and owner_generation > 0:
                 expected_half_open_generation = owner_generation
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.half_open_until <= now:

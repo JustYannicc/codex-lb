@@ -17361,10 +17361,18 @@ async def test_close_http_bridge_sessions_for_account_retries_retained_lease_aft
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("virtual_time", [False, True])
 async def test_close_http_bridge_session_retained_lease_retry_is_single_flight(
     monkeypatch: pytest.MonkeyPatch,
+    virtual_time: bool,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    clock = VirtualClock(monotonic_value=100.0) if virtual_time else None
+    scheduler = _RecordingVirtualScheduler(clock) if clock is not None else None
+    service = (
+        proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+        if clock is not None and scheduler is not None
+        else proxy_service.ProxyService(cast(Any, nullcontext()))
+    )
     session = _make_bridge_session(key_value="close-retained-account-lease-race")
     lease = proxy_service.AccountLease(
         lease_id="lease-retained-account-lease-race",
@@ -17407,6 +17415,12 @@ async def test_close_http_bridge_session_retained_lease_retry_is_single_flight(
     assert release_calls == 2
     assert session.pending_account_lease_releases == []
     assert service._http_bridge_detached_sessions == {}
+    if scheduler is not None:
+        await scheduler.drain()
+        assert scheduler.task_coroutines.count("_release_http_bridge_session_account_leases") == 1
+        assert scheduler.task_coroutines.count("_close_http_bridge_session_resources") == 1
+        assert not scheduler.owned_tasks
+        assert scheduler.pending_timers == 0
 
 
 @pytest.mark.asyncio
@@ -33504,15 +33518,16 @@ async def test_http_bridge_retry_circuit_newer_durable_reset_preserves_active_pr
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persisted_failures, persisted_detail", [(0, None), (1, "stream_incomplete")])
 async def test_http_bridge_retry_circuit_newer_durable_row_preserves_expired_live_probe(
-    monkeypatch: pytest.MonkeyPatch,
     persisted_failures: int,
     persisted_detail: str | None,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
     owner = _make_bridge_session(key_value=f"bridge-expired-live-row-{persisted_failures}")
     sibling = _make_bridge_session(key_value=f"bridge-expired-live-row-{persisted_failures}")
     request_state = _make_eventless_http_bridge_owner(request_id=f"req-expired-live-row-{persisted_failures}")
-    start = time.monotonic()
+    start = clock.monotonic()
     request_state.bridge_request_deadline = start + 7200.0
     request_state.response_create_attempt_count = 1
     owner.pending_requests.append(request_state)
@@ -33521,7 +33536,7 @@ async def test_http_bridge_retry_circuit_newer_durable_row_preserves_expired_liv
         cooldown_until=0.0,
         last_detail="stream_incomplete",
         last_touched_monotonic=start,
-        persisted_updated_at_epoch=time.time(),
+        persisted_updated_at_epoch=clock.time(),
         last_durable_load_monotonic=start,
         half_open_until=start + http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
         half_open_owner_session=owner,
@@ -33536,8 +33551,7 @@ async def test_http_bridge_retry_circuit_newer_durable_row_preserves_expired_liv
         updated_at_epoch=state.persisted_updated_at_epoch + 1.0,
     )
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=persisted))
-    expired_now = start + http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS + 1.0
-    monkeypatch.setattr(http_bridge_retry_circuit_module.time, "monotonic", lambda: expired_now)
+    await scheduler.advance(http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS + 1.0)
 
     assert await service._load_http_bridge_retry_circuit(owner) is True
     assert state.half_open_owner_session is owner
@@ -33819,15 +33833,15 @@ async def test_http_bridge_retry_circuit_reacquires_probe_after_abandoned_lease_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retry_circuit_keeps_live_probe_after_lease_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_http_bridge_retry_circuit_keeps_live_probe_after_lease_window() -> None:
     """A pending probe may outlive the default lease while its request runs."""
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
     owner = _make_bridge_session(key_value="bridge-live-probe")
     sibling = _make_bridge_session(key_value="bridge-live-probe")
     request_state = _make_eventless_http_bridge_owner(request_id="req-live-probe")
-    start = time.monotonic()
+    start = clock.monotonic()
     request_state.bridge_request_deadline = start + 7200.0
     request_state.response_create_attempt_count = 1
     owner.pending_requests.append(request_state)
@@ -33844,11 +33858,7 @@ async def test_http_bridge_retry_circuit_keeps_live_probe_after_lease_window(
     cast(Any, service)._http_bridge_retry_circuits[owner.key] = state
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
 
-    monkeypatch.setattr(
-        http_bridge_retry_circuit_module.time,
-        "monotonic",
-        lambda: start + http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS + 1.0,
-    )
+    await scheduler.advance(http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS + 1.0)
 
     assert await service._http_bridge_precreated_retry_allowed(sibling) is False
     assert state.half_open_owner_session is owner
@@ -45189,14 +45199,23 @@ async def test_submit_cancellation_after_admission_returns_the_claimed_probe(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("typed_error", [False, True])
+@pytest.mark.parametrize("virtual_time", [False, True])
 async def test_submit_real_admission_cleanup_defers_level_cancellation(
-    monkeypatch: pytest.MonkeyPatch, typed_error: bool
+    monkeypatch: pytest.MonkeyPatch, typed_error: bool, virtual_time: bool
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    clock = VirtualClock(monotonic_value=100.0) if virtual_time else None
+    scheduler = _RecordingVirtualScheduler(clock) if clock is not None else None
+    service = (
+        proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+        if clock is not None and scheduler is not None
+        else proxy_service.ProxyService(cast(Any, nullcontext()))
+    )
+    now = service._clock.monotonic()
     session = _make_bridge_session(key_value="bridge-real-admission-cancel")
     state = _activate_half_open_probe(service, session)
     state.half_open_until = 0.0
-    state.cooldown_until = time.monotonic() - 1.0
+    state.cooldown_until = now - 1.0
+    state.last_touched_monotonic = now
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
@@ -45207,7 +45226,7 @@ async def test_submit_real_admission_cleanup_defers_level_cancellation(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=time.monotonic(),
+        started_at=now,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.4","input":"continue"}',
@@ -45268,6 +45287,11 @@ async def test_submit_real_admission_cleanup_defers_level_cancellation(
     assert state.half_open_owner_token is None
     assert session.upstream_close_attempted
     cast(AsyncMock, session.upstream.close).assert_awaited_once()
+    if scheduler is not None:
+        await scheduler.drain()
+        assert "http-bridge-submit-admission-cleanup" in scheduler.task_names
+        assert not scheduler.owned_tasks
+        assert scheduler.pending_timers == 0
     if typed_error:
         assert isinstance(caught, ProxyResponseError)
         assert caught.status_code == 409
