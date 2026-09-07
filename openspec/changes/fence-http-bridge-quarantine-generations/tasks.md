@@ -64,3 +64,7 @@
 - [x] 1.26 Reconcile with the upstream clock and scheduler contracts, retain
   exact quarantine and owner-epoch fences, and verify cleanup and forwarding
   with injected time without introducing raw timing sites.
+- [x] 1.27 Gate owner forwarding on classification disagreement in either
+  direction and prove one-item array boundary behavior at HTTP dispatch.
+- [x] 1.28 Use raw-generation completion fences after poison expiry, clearing
+  an observed weaker-only tail while preserving later weak or poison arms.

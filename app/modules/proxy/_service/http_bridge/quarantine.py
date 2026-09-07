@@ -426,13 +426,21 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
     return _http_bridge_quarantine_clear_fence_details(service, key).generation
 
 
+def _http_bridge_quarantine_has_active_poison(entry: _HTTPBridgeQuarantineEntry, now: float) -> bool:
+    return (
+        entry.quarantined_until > now
+        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        and entry.poison_quarantined_until > now
+    )
+
+
 def _http_bridge_quarantine_clear_fence_details(
     service: Any,
     key: _HTTPBridgeSessionKey,
 ) -> _HTTPBridgeQuarantineClearFence:
     """Capture both quarantine provenance and raw generation atomically.
 
-    Poison entries fence on their poison provenance so a weaker arm during
+    Active poison entries fence on their poison provenance so a weaker arm during
     the completion's durable awaits cannot block the clear; other entries
     fence on the raw generation. An absent entry returns ``None`` for both
     values, so a quarantine armed afterwards survives the clear. The first
@@ -447,7 +455,7 @@ def _http_bridge_quarantine_clear_fence_details(
     entry = registry.get(key)
     if entry is None:
         return _HTTPBridgeQuarantineClearFence()
-    if entry.quarantined_until > now and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+    if _http_bridge_quarantine_has_active_poison(entry, now):
         return _HTTPBridgeQuarantineClearFence(
             generation=entry.poison_generation,
             raw_generation=entry.generation,
@@ -725,11 +733,8 @@ def _clear_http_bridge_quarantine(
                 # entries cannot be cleared by a completion guessing its
                 # ownership.
                 return False
-        fence_generation = (
-            entry.poison_generation
-            if (entry.quarantined_until > now and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON)
-            else entry.generation
-        )
+        active_poison = _http_bridge_quarantine_has_active_poison(entry, now)
+        fence_generation = entry.poison_generation if active_poison else entry.generation
         if captured_generation is None or fence_generation != captured_generation:
             return False
         if entry.quarantined_until <= now:
@@ -743,7 +748,7 @@ def _clear_http_bridge_quarantine(
             entry.suppressed_weaker_until = 0.0
         captured_raw = captured_raw_generation if captured_raw_generation is not None else captured_generation
         if (
-            entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            active_poison
             and entry.generation != captured_raw
             and entry.consecutive_eventless_timeouts > captured_eventless_timeout_count
             and entry.suppressed_weaker_reason is None
@@ -761,11 +766,7 @@ def _clear_http_bridge_quarantine(
             entry.poison_quarantined_until = 0.0
             entry.suppressed_weaker_until = 0.0
             return True
-        if (
-            entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-            and entry.suppressed_weaker_reason is not None
-            and entry.suppressed_weaker_until > now
-        ):
+        if active_poison and entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > now:
             # The concurrent weaker fence stands on its own evidence:
             # downgrade to it instead of evicting the entry with the
             # disproved poison classification.

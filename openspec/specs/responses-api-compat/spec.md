@@ -4984,16 +4984,18 @@ therefore applies to both origins. A noncanonical one-item array MUST retain the
 legacy compact-item predicate. Neither path may count a normalization envelope
 as client text. In the inverse rolling-upgrade direction, an upgraded origin
 without positive proof that the selected owner implements this classifier MUST
-NOT dispatch a delta-only shape that the legacy owner would classify as a full
-resend. This guard MUST cover a client string below 4096 characters whose
-normalized one-item array reaches 4096 compact-serialization characters, and a
-multi-item array containing only the allowed tool-output item types. The origin
+NOT dispatch an input whose current and legacy classifications disagree in
+either direction. This guard MUST cover a client string below 4096 characters
+whose normalized item reaches 4096 compact-serialization characters, a multi-item
+array containing only the allowed tool-output item types, and a one-item array
+whose whole-array serialization reaches 4096 characters while its item
+serialization does not. The origin
 MUST fail closed or enter an already-authorized local recovery path before owner
 I/O.
 Positive proof MUST come from a live bridge-ring advertisement containing the
 exact input-shape-classifier capability and a process epoch equal to the
 durable owner's recorded `owner_process_epoch`. When that proof matches, the
-origin MAY dispatch the ambiguous delta-only shape to the upgraded owner.
+origin MAY dispatch the classification-ambiguous shape to the upgraded owner.
 Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
 authorize dispatch, including an advertisement left by an earlier process
 that reused the same instance id.
@@ -5128,7 +5130,11 @@ including an inactive first-strike entry admitted after a slot opens.
 
 For a poison quarantine, the cleanup fence MUST capture the poison provenance
 generation, the entry's raw generation, and its eventless-timeout count at the
-same observation. Clearing matched poison provenance MUST retain an inactive
+same observation. Poison provenance MUST fence capture and cleanup only while
+the poison-specific deadline is active. A completion during a surviving
+weaker-only window MUST capture and clear the observed raw generation; newer
+weak or poison evidence armed after capture MUST survive that completion.
+Clearing matched poison provenance MUST retain an inactive
 first-strike counter only when both the raw generation and eventless-timeout
 count advanced after that capture; a strike already present at capture MUST be
 reset with the poison arm. An expired suppressed weaker fence MUST be discarded

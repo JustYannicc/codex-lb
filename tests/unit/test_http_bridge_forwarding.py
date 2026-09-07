@@ -1448,6 +1448,8 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     "input_value",
     [
         pytest.param("x" * 4095, id="raw-string-boundary"),
+        pytest.param(["x" * 4092], id="array-full-legacy-delta"),
+        pytest.param(["x" * 4093], id="array-full-legacy-delta-upper"),
         pytest.param(
             [
                 {"type": "function_call_output", "call_id": "call-1", "output": "first"},
@@ -1457,7 +1459,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
         ),
     ],
 )
-async def test_owner_forward_blocks_delta_shapes_that_legacy_owners_reclassify(
+async def test_owner_forward_blocks_shapes_that_legacy_owners_reclassify(
     monkeypatch: pytest.MonkeyPatch,
     input_value: object,
 ) -> None:

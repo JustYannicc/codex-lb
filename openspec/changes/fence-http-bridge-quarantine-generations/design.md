@@ -95,10 +95,12 @@ epoch; it does not change the existing transport-security policy.
   exact-body bridge signature and is trusted only when that signature
   validates; a missing, malformed, or primary-signature-only marker leaves
   the received payload in legacy compatibility mode.
-- A current origin refuses owner dispatch before I/O when legacy normalization
-  could reverse its delta-only classification: a below-boundary raw string
-  whose normalized one-item array reaches the boundary, or a multi-item array
-  containing only tool outputs. The origin accepts ring-level classifier proof
+- A current origin refuses owner dispatch before I/O when current and legacy
+  classification disagree in either direction. This includes a below-boundary
+  raw string whose normalized item reaches the boundary, parallel tool outputs,
+  and a one-item array whose envelope crosses the boundary while its item does
+  not. For example, an array containing 4092 ASCII characters serializes to
+  4096 characters, while its item serializes to 4094. The origin accepts ring-level classifier proof
   only from a live advertisement whose process epoch equals the durable owner's
   recorded process epoch. An exact match permits forwarding to an upgraded
   owner; missing, malformed, stale, or epoch-mismatched proof leaves only the
@@ -118,3 +120,8 @@ epoch; it does not change the existing transport-security policy.
   a retained poison arm extends its own deadline, so unknown keys remain
   fail-closed for the whole active poison window without creating a new
   overflow fence during ordinary admission.
+- After poison expiry, a retained poison reason is historical evidence, not an
+  active cleanup fence. Capture and cleanup use the raw generation during a
+  surviving weaker-only tail. A healthy completion clears that observed tail;
+  any later weak arm, poison arm, or first strike changes the generation and
+  survives. Active poison cleanup retains its existing downgrade rules.

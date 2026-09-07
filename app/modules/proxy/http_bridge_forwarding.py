@@ -195,12 +195,9 @@ class HTTPBridgeOwnerClient:
         if _http_bridge_owner_forward_requires_shape_upgrade(payload) and (
             not owner_supports_input_shape_classifier or not context.expected_owner_process_epoch
         ):
-            # A pre-change owner normalizes a raw string into an array and uses
-            # its older array heuristic. It can therefore turn these delta-only
-            # inputs into full resends and suppress the durable anchor. Without
-            # a current-process capability proof from the ring, fail
-            # before dispatch and let the caller's existing local-recovery
-            # gates decide.
+            # Classifier disagreement can either suppress required context or
+            # reinject a quarantined anchor. Require current-process proof
+            # before dispatch; existing local-recovery gates decide otherwise.
             raise ProxyResponseError(
                 503,
                 openai_error(
@@ -297,26 +294,22 @@ class HTTPBridgeOwnerClient:
 
 
 def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest) -> bool:
-    """Keep delta-only input away from owners that may run the old classifier."""
-    if _http_bridge_payload_looks_like_full_resend(payload):
-        return False
+    """Fence either classification reversal at a pre-change owner."""
+    current_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+    # Pre-change owners normalize raw strings before classifying. Compare the
+    # normalized input's legacy item-size rule with the current raw-shape rule.
     input_value = payload.input
     if not isinstance(input_value, list):
         return False
     if len(input_value) > 1:
-        # The current classifier reaches this delta-only result only when every
-        # item is a tool output. The legacy owner classified every multi-item
-        # array as a full resend.
-        return True
+        return not current_full_resend
     if len(input_value) != 1:
         return False
     try:
-        # Request validation normalizes a raw string into this one-item array.
-        # If its compact form crosses the legacy boundary while the preserved
-        # raw shape remains below it, the two owner versions disagree.
-        return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
+        legacy_full_resend = len(json.dumps(input_value[0], ensure_ascii=True, separators=(",", ":"))) >= 4096
     except (OverflowError, TypeError, ValueError):
-        return False
+        legacy_full_resend = False
+    return current_full_resend != legacy_full_resend
 
 
 def build_owner_forward_headers(

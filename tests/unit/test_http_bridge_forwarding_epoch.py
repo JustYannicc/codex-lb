@@ -39,18 +39,31 @@ def _payload() -> ResponsesRequest:
     )
 
 
+@pytest.mark.parametrize(
+    ("text_length", "requires_upgrade"),
+    [(4091, False), (4092, True), (4093, True), (4094, False)],
+)
+def test_one_item_array_compatibility_boundary(text_length: int, requires_upgrade: bool) -> None:
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": ["x" * text_length]},
+    )
+    assert forwarding._http_bridge_owner_forward_requires_shape_upgrade(payload) is requires_upgrade
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replacement_epoch", [False, True], ids=["same-process", "replacement-process"])
 @pytest.mark.parametrize(
     "input_value",
     [
         "x" * 4095,
+        ["x" * 4092],
+        ["x" * 4093],
         [
             {"type": "function_call_output", "call_id": "call-1", "output": "first"},
             {"type": "function_call_output", "call_id": "call-2", "output": "second"},
         ],
     ],
-    ids=["raw-string", "parallel-tool-outputs"],
+    ids=["raw-string", "array-boundary", "array-boundary-upper", "parallel-tool-outputs"],
 )
 async def test_owner_forward_checks_proven_epoch_at_http_receive(
     monkeypatch: pytest.MonkeyPatch,
