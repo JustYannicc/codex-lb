@@ -216,7 +216,15 @@ owning bridge session, owner token, deadline, and process-local generation.
 Only that owner may return the probe; a return with a mismatched session,
 token, deadline, or generation MUST be a no-op. A returned probe MUST leave
 durable failure fields unchanged and install an elapsed local marker so the
-next local admission can acquire one fresh lease. If the owner request remains
+next local admission can acquire one fresh lease. This pending transition MUST
+survive same-tick durable misses and unchanged-row reloads until a new local
+lease consumes it. Durable operations started before the return MUST NOT erase
+that newer transition, but MUST still merge any stronger future cooldown they
+observe so it suppresses admission. A fresh authoritative reset without an active owner
+MUST still clear it. A durable operation started before that reset MUST NOT
+restore the cleared episode, even on the same clock tick. An untouched zero
+clock MUST NOT create a transition.
+If the owner request remains
 pending after the default lease window, has attempted `response.create`, and
 has not entered terminal settlement, the lease MUST remain exclusive and be
 renewed through its `bridge_request_deadline` when that deadline is later than
@@ -323,6 +331,9 @@ replace the stable continuity-owner error returned to the client. The detached
 session MUST be closed through cancellation-deferred cleanup before that error
 returns, so its upstream socket, account and durable leases, reader, and
 detached-registry capacity cannot outlive the failed reconnect.
+When the caller is the registered upstream reader, child cleanup MUST NOT
+cancel or await that caller. Cleanup invoked by a different task MUST still
+cancel and await the foreign reader before completing resource closure.
 
 If account-lease release fails during detached cleanup, the failed lease handle
 MUST remain attached to that detached session. An explicit account cleanup pass

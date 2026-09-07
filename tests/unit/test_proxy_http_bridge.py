@@ -35079,6 +35079,7 @@ async def test_http_bridge_retry_circuit_newer_durable_refresh_preserves_returne
         last_detail="stream_incomplete",
         last_touched_monotonic=now_monotonic,
         last_half_open_release_monotonic=now_monotonic,
+        half_open_return_generation=1,
         last_durable_load_monotonic=now_monotonic - 1.0,
         persisted_updated_at_epoch=time.time() - 10.0,
     )

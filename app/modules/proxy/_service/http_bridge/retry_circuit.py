@@ -174,6 +174,9 @@ class _HTTPBridgeRetryCircuitState:
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     last_half_open_release_monotonic: float = 0.0
+    half_open_return_generation: int = 0
+    consumed_half_open_return_generation: int = 0
+    durable_reset_generation: int = 0
     half_open_until: float = 0.0
     # One poisoned anchor is abandoned once. Capping the poison threshold at
     # the circuit threshold makes every later strike in the same episode meet
@@ -197,6 +200,11 @@ class _HTTPBridgeRetryCircuitState:
     # separate from ``persisted_admission_generation``, which versions a
     # durable replay claim and may be shared by another replica.
     half_open_lease_generation: int = 0
+
+    @property
+    def half_open_return_pending(self) -> bool:
+        # Clock ticks do not order a return against a durable reconciliation.
+        return self.half_open_return_generation > self.consumed_half_open_return_generation
 
 
 @dataclass(slots=True)
@@ -684,6 +692,8 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(key)
+            observed_return_generation = local_state.half_open_return_generation if local_state is not None else 0
+            observed_reset_generation = local_state.durable_reset_generation if local_state is not None else 0
             if local_state is not None:
                 local_state.last_touched_monotonic = now_monotonic
         try:
@@ -724,7 +734,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     local_state is not None
                     and (
                         local_state.last_failure_monotonic > local_state.last_durable_load_monotonic
-                        or local_state.last_half_open_release_monotonic > local_state.last_durable_load_monotonic
+                        or local_state.half_open_return_pending
+                        or local_state.half_open_return_generation != observed_return_generation
                     )
                 )
                 # A confirmed miss past the stale-lookup guards is durable
@@ -855,8 +866,8 @@ class _HTTPBridgeRetryCircuitMixin:
                         current_local_state is not None
                         and (
                             current_local_state.last_failure_monotonic > current_local_state.last_durable_load_monotonic
-                            or current_local_state.last_half_open_release_monotonic
-                            > current_local_state.last_durable_load_monotonic
+                            or current_local_state.half_open_return_pending
+                            or current_local_state.half_open_return_generation != observed_return_generation
                         )
                     )
                     if current_local_state is None or (
@@ -896,6 +907,12 @@ class _HTTPBridgeRetryCircuitMixin:
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[key] = state
+            if local_state is not None and state is not local_state:
+                return True
+            if state.durable_reset_generation != observed_reset_generation:
+                # A reset applied while lookup was in flight ends this
+                # result's episode, even without a clock advance.
+                return True
             key_watermark = self._http_bridge_retry_circuit_reconcile_watermarks.get(key, 0.0)
             if now_monotonic < state.last_durable_load_monotonic or now_monotonic < key_watermark:
                 # This load's lookup began before a same-key strike or
@@ -907,6 +924,13 @@ class _HTTPBridgeRetryCircuitMixin:
                 # the per-key watermark records past the pop); an older
                 # snapshot has nothing newer to add.
                 self._http_bridge_retry_circuit_loaded_keys.add(key)
+                return True
+            if state.half_open_return_generation != observed_return_generation:
+                # Keep the later return and leave this version unconsumed,
+                # but never discard stronger durable suppression.
+                state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
+                state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                state.last_detail = state.last_detail or persisted.last_detail
                 return True
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
             # A foreign write is identified by ANY observed column moving,
@@ -949,7 +973,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     and active_local_probe
                     and (durable_reset or max(0, persisted.consecutive_failures) < state.consecutive_failures)
                 )
-                returned_local_probe = state.last_half_open_release_monotonic > state.last_durable_load_monotonic
+                returned_local_probe = state.half_open_return_pending
                 if episode_replaced:
                     # A write this worker did not produce: either the same
                     # episode struck elsewhere (then a set marker means the
@@ -983,6 +1007,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.consecutive_failures = 0
                     state.cooldown_until = 0.0
                     state.last_detail = None
+                    state.consumed_half_open_return_generation = state.half_open_return_generation
+                    state.durable_reset_generation += 1
                 elif active_local_probe:
                     # A remote writer may clear or lower its row while this
                     # process is probing. Preserve the local lease and fence;
@@ -1165,6 +1191,8 @@ class _HTTPBridgeRetryCircuitMixin:
             # now.
             if self._http_bridge_retry_circuits.get(session.key) is not state:
                 return
+            observed_return_generation = state.half_open_return_generation
+            observed_reset_generation = state.durable_reset_generation
             consecutive_failures = state.consecutive_failures
             cooldown_until = state.cooldown_until
             last_detail = state.last_detail
@@ -1242,14 +1270,23 @@ class _HTTPBridgeRetryCircuitMixin:
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
+                        if state.durable_reset_generation != observed_reset_generation:
+                            return
+                        if state.half_open_return_generation != observed_return_generation:
+                            # Preserve the later return without consuming
+                            # this version or losing stronger suppression.
+                            state.consecutive_failures = max(
+                                state.consecutive_failures, max(0, persisted.consecutive_failures)
+                            )
+                            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                            state.last_detail = state.last_detail or persisted.last_detail
+                            return
                         local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
                         active_local_probe = self._http_bridge_retry_circuit_has_active_half_open_lease(
                             state,
                             now=now_monotonic,
                         )
-                        returned_local_probe = (
-                            state.last_half_open_release_monotonic > state.last_durable_load_monotonic
-                        )
+                        returned_local_probe = state.half_open_return_pending
                         episode_replaced = (
                             persisted.updated_at_epoch != state.persisted_updated_at_epoch
                             or persisted.consecutive_failures != state.consecutive_failures
@@ -1330,6 +1367,8 @@ class _HTTPBridgeRetryCircuitMixin:
                                 state.consecutive_failures = 0
                                 state.cooldown_until = 0.0
                                 state.last_detail = None
+                                state.consumed_half_open_return_generation = state.half_open_return_generation
+                                state.durable_reset_generation += 1
                             elif active_local_probe:
                                 # Preserve the local probe lease and failure
                                 # fence while merging stronger durable state.
@@ -1459,10 +1498,14 @@ class _HTTPBridgeRetryCircuitMixin:
                         setattr(owner_token, "claimed_half_open_until", renewed_until)
                     return False
                 if state is not None and (
-                    state.cooldown_until > 0 or state.elapsed_durable_cooldown_pending or abandoned_half_open_lease
+                    state.cooldown_until > 0
+                    or state.elapsed_durable_cooldown_pending
+                    or state.half_open_return_pending
+                    or abandoned_half_open_lease
                 ):
                     state.cooldown_until = 0.0
                     state.elapsed_durable_cooldown_pending = False
+                    state.consumed_half_open_return_generation = state.half_open_return_generation
                     state.half_open_owner_session = session
                     owner_token = probe_owner if probe_owner is not None else session
                     state.half_open_owner_token = owner_token
@@ -1875,6 +1918,7 @@ class _HTTPBridgeRetryCircuitMixin:
             state.half_open_owner_token = None
             state.half_open_lease_generation = 0
             state.last_half_open_release_monotonic = now
+            state.half_open_return_generation += 1
             state.last_touched_monotonic = now
             consecutive_failures = state.consecutive_failures
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

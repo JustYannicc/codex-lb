@@ -41,6 +41,9 @@
 
 ## Verification
 
+- [x] Fix and verify reader-origin owner-loss self-cancellation and same-tick
+  returned-probe reconciliation with current-candidate independent reviews.
+
 - [x] Reconcile accepted output-free replay with request-bound probe admission,
   gate contention, cancellation, and retained replacement-account cleanup.
 - [x] Verify the combined paths, upstream cancellation guard, and exact-candidate

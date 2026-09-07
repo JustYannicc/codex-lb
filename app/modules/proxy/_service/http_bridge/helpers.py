@@ -262,6 +262,10 @@ async def _fail_http_bridge_owner_unavailable_after_probe(
 ) -> None:
     """Finish owner-loss cleanup before surfacing cancellation or failure."""
     lifecycle_lock_held = session.lifecycle_lock.statistics().owner == anyio.get_current_task()
+    # Capture the caller before moving cleanup into a child task. A reader
+    # awaiting this cleanup cannot also be cancelled and awaited by close.
+    if session.upstream_reader is asyncio.current_task():
+        session.upstream_reader = None
 
     async def detach_session() -> None:
         session.closed = True
