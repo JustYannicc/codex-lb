@@ -81,3 +81,12 @@
 The final lease-push and hosted CI/review results are recorded in the PR delivery
 reply for its exact head. This implementation checklist is not a claim that
 external gates have passed or that task 7.7 has been accepted.
+
+## 9. Formal review follow-up
+
+- [x] 9.1 Prove and fix post-submit startup cooldown cleanup of downstream attachment state and idle-session lease eligibility
+- [x] 9.2 Validate the failed sender versus delayed sibling ownership finding against the real submit exception path
+- [x] 9.3 Run affected tests, static checks, and independent review
+
+New-head hosted gates remain a separate delivery requirement recorded in the
+PR reply, as in section 8.

@@ -9106,6 +9106,84 @@ async def test_http_bridge_startup_cooldown_preserves_pending_terminal_delivery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("propagate_http_errors", [False, True])
+@pytest.mark.parametrize("cancel_during_detach", [False, True])
+async def test_http_bridge_post_submit_cooldown_clears_downstream_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    propagate_http_errors: bool,
+    cancel_during_detach: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-cooldown-detach", None, "hard"),
+    )
+    session.last_used_at = 0.0
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cooldown-detach",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        session_id="turn-cooldown-detach",
+        hard_continuity_anchor=True,
+    )
+    submit = AsyncMock()
+    cooldown = AsyncMock(side_effect=[0.0, 30.0])
+    release_idle = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", release_idle)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_block", AsyncMock(return_value=(30.0, "session")))
+    original_detach = service._detach_http_bridge_request
+    detach_finished = False
+
+    async def detach(target_session, *, request_state):
+        nonlocal detach_finished
+        if cancel_during_detach:
+            cancel_scope.cancel()
+            await anyio.sleep(0)
+        result = await original_detach(target_session, request_state=request_state)
+        detach_finished = True
+        return result
+
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    async def collect() -> list[str]:
+        return [
+            event
+            async for event in service._stream_http_bridge_session_events(
+                session,
+                request_state=request_state,
+                text_data='{"type":"response.create"}',
+                queue_limit=8,
+                propagate_http_errors=propagate_http_errors,
+                downstream_turn_state=None,
+            )
+        ]
+
+    with anyio.CancelScope() as cancel_scope:
+        if propagate_http_errors:
+            with pytest.raises(ProxyResponseError) as caught:
+                await collect()
+            assert caught.value.status_code == 503
+        else:
+            events = await collect()
+            assert len(events) == 1
+            assert '"code":"bridge_eventless_timeout"' in events[0]
+    submit.assert_awaited_once()
+    assert cooldown.await_count == 2
+    assert not request_state.event_queue_consumer_attaching
+    assert request_state.event_queue_revoked.is_set()
+    assert request_state.event_queue is None
+    assert session.last_used_at > 0.0
+    assert detach_finished
+    release_idle.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_one_shot_hard_turn_waits_through_startup_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
