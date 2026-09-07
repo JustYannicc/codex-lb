@@ -477,11 +477,7 @@ def _http_bridge_poison_quarantine_arm_fence_details(
     now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
-    if (
-        entry is None
-        or entry.quarantined_until <= now
-        or entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-    ):
+    if entry is None or not _http_bridge_quarantine_has_active_poison(entry, now):
         return _HTTPBridgeQuarantineClearFence()
     return _HTTPBridgeQuarantineClearFence(
         generation=entry.poison_generation,

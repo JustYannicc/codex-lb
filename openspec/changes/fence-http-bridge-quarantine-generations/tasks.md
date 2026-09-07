@@ -68,3 +68,5 @@
   direction and prove one-item array boundary behavior at HTTP dispatch.
 - [x] 1.28 Use raw-generation completion fences after poison expiry, clearing
   an observed weaker-only tail while preserving later weak or poison arms.
+- [x] 1.29 Apply poison-specific expiry to durable-revocation arm capture and
+  prove completion through a durable-load miss with active overflow evidence.

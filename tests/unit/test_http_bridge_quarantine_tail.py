@@ -14,9 +14,12 @@ from tests.unit.test_proxy_http_bridge import _make_bridge_session, _make_eventl
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completion_time", [1600.0, 1601.0], ids=["at-expiry", "after-expiry"])
 @pytest.mark.parametrize("race", [None, "weaker", "poison", "first-strike"])
+@pytest.mark.parametrize("durable_miss", [False, True], ids=["local", "overflow-durable-miss"])
 async def test_healthy_completion_clears_observed_weaker_tail_but_preserves_new_evidence(
+    monkeypatch: pytest.MonkeyPatch,
     completion_time: float,
     race: str | None,
+    durable_miss: bool,
 ) -> None:
     clock = VirtualClock(monotonic_value=1000.0)
     service = proxy_service.ProxyService(Mock(), clock=clock)
@@ -62,7 +65,15 @@ async def test_healthy_completion_clears_observed_weaker_tail_but_preserves_new_
     service._write_request_log = AsyncMock()
     service._handle_stream_error = AsyncMock()
     service._durable_bridge = None
-    service._load_http_bridge_retry_circuit = AsyncMock()
+    durable_lookup = AsyncMock(return_value=None)
+    persisted_keys = {session.key}
+    if durable_miss:
+        service._durable_bridge = Mock(lookup_retry_circuit=durable_lookup)
+        monkeypatch.setattr(service, "_http_bridge_retry_circuit_persisted_keys", persisted_keys)
+        monkeypatch.setattr(service, "_http_bridge_quarantine_poison_overflow_until", 2200.0, raising=False)
+        assert quarantine._http_bridge_session_key_poison_quarantined(service, session.key)
+    else:
+        service._load_http_bridge_retry_circuit = AsyncMock()
     service._clear_http_bridge_retry_circuit = AsyncMock(return_value=True)
     owner = _make_eventless_http_bridge_owner(request_id="req-late-weaker")
     owner.event_queue = asyncio.Queue()
@@ -73,6 +84,11 @@ async def test_healthy_completion_clears_observed_weaker_tail_but_preserves_new_
         session, '{"type":"response.completed","response":{"id":"resp_late"}}'
     )
     service._register_http_bridge_previous_response_id.assert_awaited_once()
+    if durable_miss:
+        durable_lookup.assert_awaited_once()
+        assert session.key not in persisted_keys
+        expected_overflow = max(2200.0, completion_time + 600.0) if race == "poison" else 2200.0
+        assert quarantine._http_bridge_quarantine_poison_overflow_until(service, clock.monotonic()) == expected_overflow
     after = quarantine._http_bridge_quarantine_registry(service).get(session.key)
     if race is None:
         assert after is None

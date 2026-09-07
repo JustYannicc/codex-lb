@@ -125,3 +125,8 @@ epoch; it does not change the existing transport-security policy.
   surviving weaker-only tail. A healthy completion clears that observed tail;
   any later weak arm, poison arm, or first strike changes the generation and
   survives. Active poison cleanup retains its existing downgrade rules.
+- Durable revocation captures no poison arm once that entry's poison deadline
+  expires. A separate active overflow deadline may still require fail-closed
+  anchor planning, but it does not authorize revoking expired poison on a
+  retained weaker-only tail. This keeps a durable-load miss from replacing the
+  generation already observed by healthy completion.

@@ -5134,6 +5134,10 @@ same observation. Poison provenance MUST fence capture and cleanup only while
 the poison-specific deadline is active. A completion during a surviving
 weaker-only window MUST capture and clear the observed raw generation; newer
 weak or poison evidence armed after capture MUST survive that completion.
+Poison-arm fence capture for durable revocation MUST return absence after the
+entry's poison deadline expires, even while service-level overflow remains
+active. A durable-load miss MUST NOT replace an observed weaker-only tail's
+generation by revoking expired poison provenance.
 Clearing matched poison provenance MUST retain an inactive
 first-strike counter only when both the raw generation and eventless-timeout
 count advanced after that capture; a strike already present at capture MUST be
