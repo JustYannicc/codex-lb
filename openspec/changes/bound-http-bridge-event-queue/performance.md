@@ -10,11 +10,19 @@
 - CPU uses process CPU time. Wall time includes event-loop scheduling. Task counts come from a separate loop task-factory pass, including tasks created through `ensure_future`.
 - Raw samples: [main](benchmarks/main.json), [before](benchmarks/before.json), [after](benchmarks/after.json). The before record is dirty because the benchmark script was untracked; application source still matched the delivered head. The final after run is on the clean implementation commit.
 
-Run the same committed script from the candidate environment with `--repo` pointing to each registered worktree:
+These are historical results. The September 7 timing integration has separate
+[current evidence](integration-20260907.md).
+
+Run the same committed script with `--repo` pointing to each registered
+worktree. Before any Python import, set both `CODEX_LB_DATABASE_URL` and
+`CODEX_LB_TEST_DATABASE_URL` to the same absolute SQLite URL inside a dedicated
+temporary directory. Verify the foreground, background, and test-fixture engine
+targets resolve inside that directory before running reset-capable tests.
+Never use the host history database or a live database for this proof.
 
 ```sh
-uv run python scripts/benchmark_http_bridge_queue.py --repo .
-uv run python scripts/benchmark_http_bridge_queue.py --repo /tmp/pr1903-perf-main-20260906
+# After the isolation checks above, use the same interpreter for every worktree.
+python scripts/benchmark_http_bridge_queue.py --repo <registered-worktree>
 ```
 
 For the before control, use a separate worktree at `4325978b598cfefe327e9620543f38a5a022a0ff` and pass its path to the same script. Do not change the interpreter between runs.
