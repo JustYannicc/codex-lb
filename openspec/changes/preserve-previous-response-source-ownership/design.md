@@ -33,7 +33,9 @@ Alternative considered: retain or broaden the regular expression. Rejected becau
 
 ### Resolve direct WebSocket ownership before applying the source fallback guard
 
-The reuse guard will run after the existing prior-response owner resolution. The reuse and connect guards will bypass HTTP fallback only when prior-response continuity resolved to a subscription account (or another existing structural exclusion applies). Otherwise a configured source model continues to emit `model_source_requires_http_transport`, allowing the client to retry through HTTP.
+The reuse guard runs after prior-response and registered turn-state owner reconciliation. Both reuse and connect guards preserve a resolved subscription owner from either index, along with existing structural exclusions. A preferred account alone is not proof of registered ownership because compatibility fallback and injected continuity can also supply one. Keep the resolved turn-state result distinct from that selection preference. Otherwise a configured source model continues to emit `model_source_requires_http_transport`, allowing the client to retry through HTTP.
+
+For example, an initial request with a registered `http_turn_*` alias and no previous response stays on the alias owner's subscription socket even when the model catalog also lists a source. A later frame on that socket follows the same rule. An alias that disagrees with an independent file or previous-response owner fails closed before either guard can hide the conflict. This correction does not change marker-shape compatibility, API-key scoping, anchor injection, or replay policy.
 
 Alternative considered: persist a separate source-response-ID index. Rejected for this change because the configured model source already identifies the only available source route; the missing decision is whether recorded subscription ownership must veto it.
 

@@ -1196,6 +1196,9 @@ class _WebSocketRequestState:
     # continuity index/request-log lookup. Identifier syntax is never used as
     # an ownership signal, so ``None`` leaves configured source routing intact.
     previous_response_owner_account_id: str | None = None
+    # Registered alias evidence, separate from injected or fallback preferences.
+    # Refreshed and reconciled before either direct-WebSocket source guard.
+    turn_state_owner_account_id: str | None = None
     # Cache the first model-source ownership lookup for this response.create.
     # A catalog failure is a distinct result: it preserves the pre-guard
     # subscription-selection behavior and must not be re-resolved later in the

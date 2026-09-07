@@ -1832,88 +1832,6 @@ class _WebSocketMixin:
                                             request_state.previous_response_owner_account_id,
                                         ),
                                     )
-                                if (
-                                    upstream is not None
-                                    and account is not None
-                                    # A reader that has already finished means the upstream is
-                                    # gone but the cleanup that nulls it runs further below, so
-                                    # without this the turn would take the reuse path (terminal
-                                    # error) when it should reconnect and take the connect path
-                                    # (503, which the client transparently falls back from).
-                                    and upstream_reader is not None
-                                    and not upstream_reader.done()
-                                    # Requests the HTTP route excludes from
-                                    # source routing (a terminal compaction
-                                    # trigger, ``input_file`` references)
-                                    # must stay on subscription accounts even
-                                    # when their model is also source-owned;
-                                    # the owner-routing below dispatches them
-                                    # to the pinned account instead of this
-                                    # guard failing the turn.
-                                    and not request_state.source_route_excluded
-                                    # A model source may emit the same canonical
-                                    # response-id shape as the subscription
-                                    # backend. Only recorded account ownership,
-                                    # resolved above, may bypass this guard.
-                                    and request_state.previous_response_owner_account_id is None
-                                    and (
-                                        await self._resolve_cached_websocket_source_ownership(
-                                            request_state,
-                                            model=request_state.model,
-                                            api_key=request_state.api_key or api_key,
-                                        )
-                                    )
-                                    is ResponsesModelSourceOwnership.SOURCE_OWNED
-                                ):
-                                    # Socket reuse bypasses connect-time selection, so a later
-                                    # response.create that switches to a source-owned model
-                                    # would otherwise be forwarded to the subscription account
-                                    # already attached to the open upstream. Model sources are
-                                    # only reachable from the HTTP request path. Ownership
-                                    # includes disabled sources, which no subscription account
-                                    # can serve either; over HTTP those meet the 503
-                                    # ``model_source_disabled`` denial.
-                                    #
-                                    # Gated on an existing upstream on purpose: a first turn has
-                                    # no socket yet and must fall through to the connect guard,
-                                    # which fails with a service-level 503 so the client falls
-                                    # back to HTTP. Emitting a terminal error here would preempt
-                                    # that fallback and make source models unreachable.
-                                    source_model = request_state.raw_source_model or request_state.model
-                                    source_message = (
-                                        f"Model {source_model!r} is served by an "
-                                        "OpenAI-compatible model source, which is only reachable "
-                                        "over the HTTP transport; retry the request over HTTPS."
-                                    )
-                                    _facade().logger.info(
-                                        "Websocket model source requires http transport "
-                                        "request_id=%s model=%s raw_model=%s stage=response_create",
-                                        request_state.request_log_id or request_state.request_id,
-                                        request_state.model,
-                                        request_state.raw_source_model,
-                                    )
-                                    await proxy._release_websocket_request_state_reservation(request_state)
-                                    # The prepared request already owns a request-log row; without
-                                    # this the row is never finalized, so the same logical failure
-                                    # is only visible in request logs when it happens on the first
-                                    # turn (where the connect path writes it).
-                                    await proxy._write_websocket_connect_failure(
-                                        account_id=account.id,
-                                        api_key=request_state.api_key or api_key,
-                                        request_state=request_state,
-                                        error_code="model_source_requires_http_transport",
-                                        error_message=source_message,
-                                    )
-                                    await proxy._emit_websocket_terminal_error(
-                                        websocket,
-                                        client_send_lock=client_send_lock,
-                                        request_state=request_state,
-                                        error_code="model_source_requires_http_transport",
-                                        error_message=source_message,
-                                        error_type="invalid_request_error",
-                                        downstream_activity=downstream_activity,
-                                    )
-                                    continue
                             except ProxyResponseError as exc:
                                 error = _parse_openai_error(exc.payload)
                                 error_code = _normalize_error_code(
@@ -2080,6 +1998,7 @@ class _WebSocketMixin:
                             if turn_state is not None
                             else None
                         )
+                        request_state.turn_state_owner_account_id = turn_state_owner_account_id
                         previous_response_owner_account_id = request_state.previous_response_owner_account_id
                         if (
                             request_state.previous_response_id is not None
@@ -2223,6 +2142,90 @@ class _WebSocketMixin:
                         text_data = None
                         payload = None
                         continue
+
+                if (
+                    request_state is not None
+                    # Replays retain their existing connect/failover handling.
+                    and request_state.request_stage != "reattach"
+                    and upstream is not None
+                    and account is not None
+                    # A finished reader must reconnect through the 503 guard,
+                    # not produce a terminal socket-reuse error.
+                    and upstream_reader is not None
+                    and not upstream_reader.done()
+                    # Requests the HTTP route excludes from
+                    # source routing (a terminal compaction
+                    # trigger, ``input_file`` references)
+                    # must stay on subscription accounts even
+                    # when their model is also source-owned;
+                    # the owner-routing below dispatches them
+                    # to the pinned account instead of this
+                    # guard failing the turn.
+                    and not request_state.source_route_excluded
+                    # A model source may emit the same canonical
+                    # response-id shape as the subscription
+                    # backend. Only recorded account ownership,
+                    # resolved above, may bypass this guard.
+                    and request_state.previous_response_owner_account_id is None
+                    and request_state.turn_state_owner_account_id is None
+                    and (
+                        await self._resolve_cached_websocket_source_ownership(
+                            request_state,
+                            model=request_state.model,
+                            api_key=request_state.api_key or api_key,
+                        )
+                    )
+                    is ResponsesModelSourceOwnership.SOURCE_OWNED
+                ):
+                    # Socket reuse bypasses connect-time selection, so a later
+                    # response.create that switches to a source-owned model
+                    # would otherwise be forwarded to the subscription account
+                    # already attached to the open upstream. Model sources are
+                    # only reachable from the HTTP request path. Ownership
+                    # includes disabled sources, which no subscription account
+                    # can serve either; over HTTP those meet the 503
+                    # ``model_source_disabled`` denial.
+                    #
+                    # Gated on an existing upstream on purpose: a first turn has
+                    # no socket yet and must fall through to the connect guard,
+                    # which fails with a service-level 503 so the client falls
+                    # back to HTTP. Emitting a terminal error here would preempt
+                    # that fallback and make source models unreachable.
+                    source_model = request_state.raw_source_model or request_state.model
+                    source_message = (
+                        f"Model {source_model!r} is served by an "
+                        "OpenAI-compatible model source, which is only reachable "
+                        "over the HTTP transport; retry the request over HTTPS."
+                    )
+                    _facade().logger.info(
+                        "Websocket model source requires http transport "
+                        "request_id=%s model=%s raw_model=%s stage=response_create",
+                        request_state.request_log_id or request_state.request_id,
+                        request_state.model,
+                        request_state.raw_source_model,
+                    )
+                    await proxy._release_websocket_request_state_reservation(request_state)
+                    # The prepared request already owns a request-log row; without
+                    # this the row is never finalized, so the same logical failure
+                    # is only visible in request logs when it happens on the first
+                    # turn (where the connect path writes it).
+                    await proxy._write_websocket_connect_failure(
+                        account_id=account.id,
+                        api_key=request_state.api_key or api_key,
+                        request_state=request_state,
+                        error_code="model_source_requires_http_transport",
+                        error_message=source_message,
+                    )
+                    await proxy._emit_websocket_terminal_error(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        request_state=request_state,
+                        error_code="model_source_requires_http_transport",
+                        error_message=source_message,
+                        error_type="invalid_request_error",
+                        downstream_activity=downstream_activity,
+                    )
+                    continue
 
                 if request_state is not None and await _websocket_full_resend_conflicts_with_visible_pending(
                     request_state,
@@ -3690,13 +3693,14 @@ class _WebSocketMixin:
         # refresh mid-session cannot make this disagree with the equivalent
         # check on the prepared-request path.
         #
-        # Structural HTTP exclusions and a recorded previous-response account
-        # owner skip the guard. Response-id syntax is provider-opaque, so a
+        # Structural HTTP exclusions and recorded previous-response or turn-state
+        # owners skip the guard. Response-id syntax is provider-opaque, so a
         # configured source with no recorded subscription owner still falls
         # back to the HTTP source path.
         if (
             not request_state.source_route_excluded
             and request_state.previous_response_owner_account_id is None
+            and request_state.turn_state_owner_account_id is None
             and (
                 await self._resolve_cached_websocket_source_ownership(
                     request_state,

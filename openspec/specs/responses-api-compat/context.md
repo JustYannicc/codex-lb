@@ -276,6 +276,20 @@ enough when the local session has disappeared. The incoming response anchor
 stays in the upstream request; this is not stale-anchor removal or proof of a
 durable owner.
 
+## Direct WebSocket registered alias ownership
+
+Both direct WebSocket source guards run after registered alias ownership has
+been reconciled with independent file and previous-response ownership. For
+example, a registered `http_turn_*` alias keeps an initial request on its
+subscription owner even when the requested model also appears in the source
+catalog. The same decision applies to a later frame on the open socket.
+
+The resolved alias owner stays separate from the preferred account because
+compatibility selection and injected continuity can also set that preference.
+A conflict fails closed before dispatch. Source-only requests still fall back
+to HTTP, and existing replay handling remains unchanged. See the
+[source-ownership requirement](spec.md#requirement-previous-response-source-routing-follows-proven-ownership).
+
 ## WebSocket security retry exhaustion
 
 The [security-work retry requirement](spec.md#requirement-security-work-authorization-errors-can-route-to-authorized-accounts)

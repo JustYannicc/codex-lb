@@ -75,6 +75,13 @@ hard account ownership. In an owner-miss continuation, when a marker alias is
 unavailable, a value matching either shape MUST use the same sole-candidate
 compatibility rule without requiring exact server-side issuance provenance; a
 registered marker MUST still resolve to its recorded owner.
+Direct WebSocket requests MUST reconcile registered turn-state ownership with
+previous-response and file ownership before either initial-connect or socket-reuse
+model-source guards. A resolved turn-state subscription owner MUST veto source
+HTTP fallback, including synthetic-shaped aliases and requests without a
+previous response. Conflicting independent owners MUST fail closed before
+upstream dispatch; an unregistered marker or a socket-local injected anchor
+MUST NOT by itself establish registered turn-state ownership.
 HTTP turn-state lookup MUST NOT be skipped merely because there is no
 `previous_response_id` and enabled-source selection found no match. A failed
 disabled-source subscription-owner lookup MUST retain the resolver's sanitized
@@ -293,6 +300,16 @@ pre-marker v2 owner verification.
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the request remains on the owner-bound subscription WebSocket path
 - **AND** the proxy does not emit `model_source_requires_http_transport`
+
+#### Scenario: Registered turn-state ownership overrides a WebSocket model source
+
+- **GIVEN** a `turn_*` or `http_turn_*` alias is registered to a subscription account in the requesting API-key scope
+- **AND** a source also claims the requested model
+- **WHEN** either direct Responses WebSocket route handles an initial request or a request on a reused socket
+- **THEN** the proxy reconciles the alias with any independent previous-response and file owners before source fallback
+- **AND** matching ownership preserves the required subscription account without emitting `model_source_requires_http_transport`
+- **AND** conflicting ownership fails closed without upstream dispatch
+- **AND** any client-supplied previous-response anchor is preserved
 
 #### Scenario: Direct WebSocket source continuation falls back to HTTP
 

@@ -38,3 +38,9 @@
 - [x] 5.3 Enforce API-key-scoped sole-candidate selection for marker-only compact owner misses, including zero and multiple candidates.
 - [x] 5.4 Render disabled-source owner-lookup failures through both HTTP routes' sanitized 502 error envelopes.
 - [ ] 5.5 Prove all four corrections at the affected routes, run isolated-database regressions and required checks, and obtain current-head review and hosted results.
+
+## 6. Direct WebSocket registered-owner correction
+
+- [x] 6.1 Reproduce registered marker ownership with source-overlapping models through initial and reused direct WebSocket routes.
+- [x] 6.2 Preserve resolved turn-state ownership before both source guards and synchronize the explicit contract without relaxing independent owner constraints.
+- [ ] 6.3 Verify affected routes and safeguards, obtain independent reviews, and deliver the corrected head with hosted and CodeRabbit evidence.
