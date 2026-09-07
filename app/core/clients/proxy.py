@@ -104,6 +104,7 @@ from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_t
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_event_type_from_block
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
@@ -1020,6 +1021,8 @@ def _build_upstream_transcribe_headers(
             headers[key] = value
         elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
             headers[key] = value
+    if not _is_native_codex_request(inbound):
+        _normalize_non_native_upstream_fingerprint(headers)
     return headers
 
 
@@ -1439,7 +1442,11 @@ async def _iter_sse_events(
             return
         task.cancel()
         try:
-            await task
+            # Not ``await task``: a level-cancelled caller scope would cascade
+            # a fresh cancel into the chunk task on every loop iteration. The
+            # canonical helper waits through a proxy future and re-raises the
+            # chunk task's own cancellation, which is what is swallowed here.
+            await _await_task_deferring_cancellation(task)
         except asyncio.CancelledError:
             pass
 
