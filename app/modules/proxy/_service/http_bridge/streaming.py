@@ -36,7 +36,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
-from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
+from app.core.clock import REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
@@ -273,6 +273,48 @@ from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+
+
+class _HTTPBridgeLiveEventQueueBudgetExceeded(RuntimeError):
+    """Raised to wake an attached stream when live queue retention fails."""
+
+
+async def _next_http_bridge_event_block(
+    event_queue: asyncio.Queue[str | None],
+    *,
+    timeout: float | None,
+    scheduler: Scheduler = REAL_SCHEDULER,
+) -> str | None:
+    """Consume in the reader task so a cancelled wait cannot lose an event."""
+
+    budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+    if budget_exceeded is None:
+        if timeout is None:
+            return await event_queue.get()
+        return await scheduler.wait_for(event_queue.get(), timeout=timeout)
+    if not event_queue.empty():
+        return event_queue.get_nowait()
+
+    try:
+        if timeout is None:
+            event_block = await event_queue.get()
+        else:
+            async with scheduler.timeout(timeout):
+                event_block = await event_queue.get()
+    except TimeoutError:
+        # No child consumes on our behalf. A producer racing the deadline
+        # leaves its event queued, so reconciliation needs no task or grace.
+        if not event_queue.empty() or getattr(event_queue, "terminal_pending", False):
+            event_block = event_queue.get_nowait()
+        elif getattr(event_queue, "terminal_budget_exceeded", False):
+            raise _HTTPBridgeLiveEventQueueBudgetExceeded from None
+        else:
+            raise
+    if event_block is None and getattr(event_queue, "terminal_budget_exceeded", False):
+        raise _HTTPBridgeLiveEventQueueBudgetExceeded
+    return event_block
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
@@ -4103,6 +4145,7 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None,
         request_deadline: float | None = None,
     ) -> AsyncGenerator[str, None]:
+        request_state.event_queue_consumer_attaching = True
         scheduler = scheduler_for(self)
         clock = clock_for(self)
         if request_deadline is None:
@@ -4520,6 +4563,18 @@ class _HTTPBridgeStreamingMixin:
                 )
             )
 
+        async def detach_downstream_request() -> None:
+            with anyio.CancelScope(shield=True):
+                request_state.event_queue_consumer_attaching = False
+                # The stream is no longer an owner once its generator is
+                # closing.  Mark the queue revoked before preserving a raced
+                # completed-delivery claim so terminal cleanup can discard
+                # unread bytes if terminal bookkeeping aborts.
+                request_state.event_queue_revoked.set()
+                await self._detach_http_bridge_request(session, request_state=request_state)
+                session.last_used_at = clock.monotonic()
+                await self._maybe_release_idle_http_bridge_session_lease(session)
+
         while True:
             budget_terminal_event = await operation_fenced_request_budget_terminal_event()
             if budget_terminal_event is not None:
@@ -4619,10 +4674,25 @@ class _HTTPBridgeStreamingMixin:
                 # injected previous_response_id and its continuity anchor.
                 text_data = request_state.request_text or text_data
                 continue
+            except BaseException:
+                await detach_downstream_request()
+                raise
             break
-        event_queue = request_state.event_queue
-        assert event_queue is not None
-        initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+        try:
+            # Terminal cleanup may revoke and detach a pre-consumer queue
+            # between submission and this handoff. Keep the assertion inside
+            # the cleanup funnel so that race still releases the request
+            # ownership before the failure is propagated.
+            event_queue = request_state.event_queue
+            if event_queue is None:
+                if request_state.event_queue_revoked.is_set():
+                    await detach_downstream_request()
+                    return
+                raise AssertionError("HTTP bridge stream reached handoff without an event queue")
+            initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+        except BaseException:
+            await detach_downstream_request()
+            raise
         if (
             initial_retry_cooldown_seconds > 0
             and session.key.strength == "hard"
@@ -4630,6 +4700,7 @@ class _HTTPBridgeStreamingMixin:
             and not request_state.verified_stale_anchor_replay
             and request_state.response_id is None
             and request_state.response_event_count == 0
+            and not getattr(event_queue, "terminal_pending", False)
             and event_queue.empty()
         ):
             if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
@@ -4702,8 +4773,28 @@ class _HTTPBridgeStreamingMixin:
                 request_state.capacity_startup_wait_event.clear()
             if request_state.capacity_startup_ready_event is not None:
                 request_state.capacity_startup_ready_event.set()
-            event_queue = request_state.event_queue
-            assert event_queue is not None
+            # Submission and upstream delivery can run before this generator
+            # reaches its queue consumer. Snapshot the queue and publish
+            # attachment under the same pending lock used by liveness
+            # settlement. A retained revoked queue still owns terminal
+            # delivery: its get path waits for terminal publication before
+            # returning EOS, so the delayed consumer must attach to it.
+            async with session.pending_lock:
+                event_queue = request_state.event_queue
+                queue_revoked = request_state.event_queue_revoked.is_set()
+                if event_queue is not None:
+                    request_state.event_queue_consumer_started = True
+                    request_state.event_queue_consumer_attaching = False
+            if event_queue is None:
+                # Terminal cleanup may revoke and detach a pre-consumer queue
+                # while the registration/ready awaits above are in flight.
+                # Treat that revoked missing queue as the expected terminal
+                # handoff, just as the earlier post-submit lookup does.
+                if queue_revoked:
+                    await detach_downstream_request()
+                    return
+                raise AssertionError("HTTP bridge stream reached attachment without an event queue")
+
             yielded_any = False
             keepalive_sent = False
             keepalive_count = 0
@@ -4730,7 +4821,12 @@ class _HTTPBridgeStreamingMixin:
                         # share this lock. Revoking the mutable queue here
                         # prevents a later completion from claiming an
                         # orphaned downstream consumer.
+                        orphaned_event_queue = request_state.event_queue
                         request_state.event_queue = None
+                        request_state.event_queue_revoked.set()
+                        discard = getattr(orphaned_event_queue, "discard", None)
+                        if callable(discard):
+                            discard()
 
                 if completed_delivery_owns_queue and not completed_delivery_suppression_logged:
                     logger.info(
@@ -4766,6 +4862,27 @@ class _HTTPBridgeStreamingMixin:
                         )
                     )
                 return _codex_keepalive_frame()
+
+            async def budget_exhausted_terminal_event() -> str:
+                """Fail closed when live-event retention cannot continue."""
+
+                response_id = _websocket_downstream_response_id(request_state)
+                message = "HTTP bridge live event queue byte budget exhausted"
+                if propagate_http_errors and not yielded_any:
+                    raise ProxyResponseError(
+                        503,
+                        openai_error("upstream_unavailable", message, error_type="server_error"),
+                    )
+                return format_sse_event(
+                    cast(
+                        Mapping[str, JsonValue],
+                        response_failed_event(
+                            "upstream_unavailable",
+                            message,
+                            response_id=response_id,
+                        ),
+                    )
+                )
 
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
@@ -4819,7 +4936,12 @@ class _HTTPBridgeStreamingMixin:
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
                     try:
-                        event_block = await scheduler.wait_for(event_queue.get(), timeout=wait_timeout)
+                        event_block = await _next_http_bridge_event_block(
+                            event_queue, timeout=wait_timeout, scheduler=scheduler
+                        )
+                    except _HTTPBridgeLiveEventQueueBudgetExceeded:
+                        yield await budget_exhausted_terminal_event()
+                        break
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
@@ -5206,7 +5328,13 @@ class _HTTPBridgeStreamingMixin:
                             yield keepalive_event
                         continue
                 else:
-                    event_block = await event_queue.get()
+                    try:
+                        event_block = await _next_http_bridge_event_block(
+                            event_queue, timeout=None, scheduler=scheduler
+                        )
+                    except _HTTPBridgeLiveEventQueueBudgetExceeded:
+                        yield await budget_exhausted_terminal_event()
+                        break
                 if event_block is None:
                     break
                 keepalive_count = 0
@@ -5287,6 +5415,4 @@ class _HTTPBridgeStreamingMixin:
                             "HTTP bridge idle poison settlement failed during stream finalization",
                             exc_info=True,
                         )
-                await self._detach_http_bridge_request(session, request_state=request_state)
-                session.last_used_at = clock.monotonic()
-                await self._maybe_release_idle_http_bridge_session_lease(session)
+                await detach_downstream_request()
