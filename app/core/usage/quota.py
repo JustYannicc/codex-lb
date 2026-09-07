@@ -33,6 +33,15 @@ def apply_usage_quota(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
     )
+    if primary_used is not None and primary_used >= 100.0 and infer_status_from_usage:
+        used_percent = 100.0
+        if primary_reset is not None:
+            reset_at = primary_reset
+        else:
+            reset_at = _fallback_primary_reset(primary_window_minutes, now=now) or reset_at
+        status = AccountStatus.RATE_LIMITED
+        return status, used_percent, reset_at
+
     if secondary_used is not None:
         if secondary_used >= 100.0:
             if has_credit_override:
@@ -66,15 +75,6 @@ def apply_usage_quota(
             reset_at = None
 
     if primary_used is not None:
-        if primary_used >= 100.0:
-            used_percent = 100.0
-            if infer_status_from_usage:
-                if primary_reset is not None:
-                    reset_at = primary_reset
-                else:
-                    reset_at = _fallback_primary_reset(primary_window_minutes, now=now) or reset_at
-                status = AccountStatus.RATE_LIMITED
-                return status, used_percent, reset_at
         if status == AccountStatus.RATE_LIMITED:
             if runtime_reset and runtime_reset > now:
                 reset_at = runtime_reset

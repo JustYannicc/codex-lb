@@ -20,7 +20,7 @@ The existing usage-refresh policy allowed any snapshot with `credits_has = true`
 
 - Use the quota module as the shared owner for usable-credit semantics. The account mapper and proxy selector delegate to that rule instead of carrying separate interpretations.
 - Ignore bare `credits_has = true` for override purposes. It is retained as metadata but is not proof of spendable credits when `credits_balance` is missing or zero.
-- Keep the selector guard narrow: existing advisory long-window behavior remains unchanged when no credit metadata is present, but an exhausted long window with explicit non-spendable credit metadata derives `quota_exceeded` and stays out of routing.
+- Keep the selector guard narrow: existing advisory long-window behavior remains unchanged in foreground selection. Explicit non-spendable credit metadata only prevents a persisted long-window quota block from being cleared.
 
 ## Risks / Trade-offs
 
