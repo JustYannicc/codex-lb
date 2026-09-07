@@ -4694,6 +4694,16 @@ proxy MUST revoke only that request's queue, return control to the shared
 reader without raising the enqueue timeout through the reader failure handler,
 and allow sibling request lifecycle and deadline settlement to continue.
 
+If the request's enqueue deadline expires before an event payload is accepted,
+the live queue MUST retain that delivery failure independently of producer
+revocation. The downstream consumer MUST receive the retained prefix followed
+by `response.failed` with `request_timeout` and EOS, never a later successful
+completion after dropped output. If the failure payload cannot fit the process
+byte budget, the existing fail-closed budget result MAY replace it. Terminal
+persistence and settlement MUST still complete for the upstream result.
+Expiry while adding only EOS after an accepted terminal payload MUST preserve
+that payload and append EOS without inventing a payload loss.
+
 If liveness or another terminal path revokes a queue while its live stream
 generator is still attaching or consuming, the proxy MUST retain that queue
 until the selected terminal failure and end-of-stream marker are delivered.
@@ -4702,6 +4712,14 @@ owner MAY discard the queue and release unread-byte reservations.
 HTTP-bridge upstream WebSockets MUST bypass native egress until native
 per-stream flow control and cancellation can be proven; this constraint MUST
 NOT disable native egress for unrelated WebSocket transports.
+
+#### Scenario: Terminal flush loses deferred output at the enqueue deadline
+
+- **GIVEN** an attached consumer is paused and a terminal frame flushes more deferred reasoning events than its finite queue can retain
+- **WHEN** a deferred payload enqueue reaches the request deadline before the consumer resumes
+- **THEN** the producer and its owned tasks finish without another downstream read
+- **AND** the consumer receives the retained prefix followed by a timeout failure and EOS, not successful completion
+- **AND** terminal persistence, settlement, and queue byte release still complete
 
 #### Scenario: Paused queue reaches its request deadline
 

@@ -495,7 +495,13 @@ async def test_http_bridge_event_enqueue_deadline_releases_shared_reader() -> No
         revoked=revoked,
     )
     event_queue.put_nowait("buffered-event")
-    request_state = SimpleNamespace(
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="enqueue-deadline",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
         event_queue=event_queue,
         event_queue_revoked=revoked,
         event_queue_consumer_started=True,
@@ -519,6 +525,9 @@ async def test_http_bridge_event_enqueue_deadline_releases_shared_reader() -> No
     assert await asyncio.wait_for(producer, timeout=0.2) is False
     assert revoked.is_set()
     assert event_queue.get_nowait() == "buffered-event"
+    failure = event_queue.get_nowait()
+    assert failure is not None and '"code":"request_timeout"' in failure
+    assert event_queue.get_nowait() is None
     await sibling
     await asyncio.sleep(0)
     assert not [

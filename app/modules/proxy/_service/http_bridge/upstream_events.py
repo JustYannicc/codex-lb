@@ -411,6 +411,25 @@ def _enqueue_http_bridge_terminal_event(
         return False
 
 
+def _expire_http_bridge_event_delivery(
+    request_state: Any,
+    event_queue: asyncio.Queue[str | None],
+    item: str | None,
+) -> None:
+    fail_deadline = getattr(event_queue, "fail_delivery_deadline", None)
+    if item is not None and callable(fail_deadline):
+        fail_deadline(
+            format_sse_event(
+                response_failed_event(
+                    "request_timeout",
+                    "HTTP bridge request deadline expired while delivering queued output",
+                    response_id=_websocket_downstream_response_id(request_state),
+                )
+            )
+        )
+    _revoke_http_bridge_event_queue(request_state)
+
+
 async def _enqueue_http_bridge_event(
     request_state: Any,
     event_queue: asyncio.Queue[str | None],
@@ -446,7 +465,7 @@ async def _enqueue_http_bridge_event(
         has_deadline = deadline is not None
         remaining_seconds = deadline - clock.monotonic() if has_deadline else 0.0
         if has_deadline and remaining_seconds <= 0:
-            _revoke_http_bridge_event_queue(request_state)
+            _expire_http_bridge_event_delivery(request_state, event_queue, item)
             return False
 
         try:
@@ -462,7 +481,7 @@ async def _enqueue_http_bridge_event(
                     # one paused downstream queue after this request's own
                     # budget expires. Revocation stops this producer and lets
                     # the reader settle sibling requests normally.
-                    _revoke_http_bridge_event_queue(request_state)
+                    _expire_http_bridge_event_delivery(request_state, event_queue, item)
                     return False
         return event_queue_revoked is None or not event_queue_revoked.is_set()
 

@@ -280,3 +280,47 @@ async def test_revoked_terminal_delivery_settles_without_waiting_for_idle_timeou
     assert queue.get_nowait() == "buffered"
     assert queue.get_nowait() == 'data: {"type":"response.failed"}\n\n'
     assert queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+async def test_deadline_failed_delivery_still_persists_and_settles_upstream_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = _live_queue(maxsize=1)
+    queue.put_nowait("buffered")
+    request_state = _request_state(queue)
+    monkeypatch.setattr(proxy_service, "get_settings", _settings)
+    service = cast(Any, proxy_service.ProxyService)(cast(Any, SimpleNamespace()))
+    append_terminal_event = AsyncMock(
+        return_value=TerminalOperationEventAppendResult(persisted=True, settlement_required=True)
+    )
+    settle_terminal_event = AsyncMock()
+    service._http_bridge_operation_event_batcher = cast(
+        Any, SimpleNamespace(append_terminal_event=append_terminal_event, settle_terminal_event=settle_terminal_event)
+    )
+    failure = 'data: {"type":"response.failed","response":{"error":{"code":"request_timeout"}}}\n\n'
+    queue.fail_delivery_deadline(failure)
+    completed = 'data: {"type":"response.completed"}\n\n'
+    try:
+        assert not await asyncio.wait_for(
+            upstream_events_module._persist_http_bridge_operation_event(
+                service,
+                _session(),
+                request_state,
+                completed,
+                terminal=True,
+                terminal_state="completed",
+                terminal_event_queue=queue,
+            ),
+            timeout=0.5,
+        )
+        append_terminal_event.assert_awaited_once()
+        settle_terminal_event.assert_awaited_once()
+        assert append_terminal_event.await_args is not None
+        assert append_terminal_event.await_args.kwargs["event_text"] == completed
+        assert append_terminal_event.await_args.kwargs["state"] == "completed"
+        assert await queue.get() == "buffered"
+        assert await queue.get() == failure
+        assert await queue.get() is None
+    finally:
+        queue.discard()

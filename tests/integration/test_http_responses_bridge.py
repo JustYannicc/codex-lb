@@ -27,6 +27,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     UpstreamWebSocketTransportError,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.types import JsonValue
@@ -60,6 +61,7 @@ from app.modules.proxy.load_balancer import (
 )
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.integration
 _TEST_SYNC_TIMEOUT_SECONDS = 5.0
@@ -16208,6 +16210,111 @@ async def test_http_bridge_live_event_queue_applies_backpressure(
     assert not [
         task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("virtual", [False, True])
+@pytest.mark.parametrize("propagate_http_errors", [False, True])
+async def test_http_bridge_terminal_flush_deadline_cannot_report_success_after_lost_output(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    virtual: bool,
+    propagate_http_errors: bool,
+) -> None:
+    account_id = await _import_account(async_client, "acc_flush_deadline", "flush-deadline@example.com")
+    service = get_proxy_service_for_app(app_instance)
+    clock = VirtualClock(monotonic_value=100.0) if virtual else REAL_CLOCK
+    scheduler = VirtualScheduler(clock) if isinstance(clock, VirtualClock) else REAL_SCHEDULER
+    monkeypatch.setattr(service, "_clock", clock)
+    monkeypatch.setattr(service, "_scheduler", scheduler)
+    payload = proxy_module.ResponsesRequest(model="gpt-5.4", instructions="Return OK.", input="flush deadline")
+    request_state, _ = service._prepare_http_bridge_request(
+        payload, {}, api_key=None, api_key_reservation=None, request_id="req_flush_deadline"
+    )
+    session = _make_dummy_bridge_session(proxy_module._HTTPBridgeSessionKey("prompt_cache", "flush-deadline", None))
+    session.account = await _get_account(account_id)
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    queue = request_state.event_queue
+    assert queue is not None
+    baseline_bytes = http_bridge_request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET.used_bytes
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    async def dispatch(event: dict[str, Any]) -> None:
+        await service._process_http_bridge_upstream_text(session, json.dumps(event, separators=(",", ":")))
+
+    await dispatch({"type": "response.created", "response": {"id": "resp_flush_deadline", "status": "in_progress"}})
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=propagate_http_errors,
+        downstream_turn_state=None,
+    )
+    try:
+        first = proxy_module.parse_sse_data_json(await anext(stream))
+        assert first is not None and first["type"] == "response.created"
+        assert request_state.event_queue_consumer_started
+        for event in (
+            {"type": "response.output_item.added", "item": {"id": "rs_flush", "type": "reasoning"}},
+            {"type": "response.reasoning_summary_text.delta", "item_id": "rs_flush", "delta": "kept"},
+            {"type": "response.reasoning_summary_text.delta", "item_id": "rs_flush", "delta": "LOST"},
+        ):
+            await dispatch({**event, "response_id": "resp_flush_deadline"})
+        assert len(request_state.deferred_reasoning_downstream_texts) == 3
+        assert queue.empty()
+        request_state.bridge_request_deadline = clock.monotonic() + 0.05
+        terminal_task = scheduler.create_task(
+            dispatch(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_flush_deadline", "status": "completed", "output": []},
+                }
+            )
+        )
+        if isinstance(scheduler, VirtualScheduler):
+            await scheduler.advance(0.049)
+            assert queue.full()
+            assert not terminal_task.done()
+            assert not request_state.event_queue_revoked.is_set()
+            await scheduler.advance(0.001)
+        await asyncio.wait_for(terminal_task, timeout=2.0)
+        assert request_state.event_queue_revoked.is_set()
+        delivered = [first]
+        async for block in stream:
+            event = proxy_module.parse_sse_data_json(block)
+            if event is not None:
+                delivered.append(event)
+        assert all(event["type"] != "response.completed" for event in delivered), delivered
+        assert delivered[-1]["type"] == "response.failed"
+        failure_response = delivered[-1]["response"]
+        assert isinstance(failure_response, dict)
+        failure_error = failure_response["error"]
+        assert isinstance(failure_error, dict)
+        assert failure_error["code"] == "request_timeout"
+        assert [event.get("delta") for event in delivered if "delta" in event] == ["kept"]
+        assert [event["type"] for event in delivered] == [
+            "response.created",
+            "response.output_item.added",
+            "response.reasoning_summary_text.delta",
+            "response.failed",
+        ]
+        assert not session.pending_requests
+        assert session.queued_request_count == 0
+        assert request_state.api_key_reservation is None
+    finally:
+        await stream.aclose()
+    assert http_bridge_request_submit_module._HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET.used_bytes == baseline_bytes
+    await asyncio.wait_for(asyncio.gather(*service._request_log_tasks), timeout=2.0)
+    if isinstance(scheduler, VirtualScheduler):
+        await scheduler.drain()
+        assert scheduler.pending_timers == 0
+        assert all(task.done() for task in scheduler.owned_tasks), [
+            (task.get_name(), repr(task.get_coro())) for task in scheduler.owned_tasks if not task.done()
+        ]
 
 
 @pytest.mark.asyncio

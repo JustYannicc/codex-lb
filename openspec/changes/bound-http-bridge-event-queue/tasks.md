@@ -90,3 +90,12 @@ external gates have passed or that task 7.7 has been accepted.
 
 New-head hosted gates remain a separate delivery requirement recorded in the
 PR reply, as in section 8.
+
+## 10. Terminal flush deadline finding
+
+- [x] 10.1 Reproduce lost deferred output followed by successful completion through the bridge stream
+- [x] 10.2 Preserve truthful terminal failure after enqueue deadline expiry without changing benign revocation ownership
+- [x] 10.3 Sync the contract and run affected proof and independent review
+
+Exact-head delivery checks remain recorded in the PR reply, separately from
+the completed local implementation tasks.

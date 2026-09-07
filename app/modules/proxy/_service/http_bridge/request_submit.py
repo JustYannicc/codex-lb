@@ -328,6 +328,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         self._terminal_ready = asyncio.Event()
         self._read_waiters: deque[asyncio.Future[None]] = deque()
         self._terminal_budget_exceeded = False
+        self._delivery_deadline_exceeded = False
         self._discarded = False
         # ``asyncio.Queue.put`` invokes ``self._put`` after a blocked putter
         # wakes.  Keep the reservation attached to that task so ``_put`` can
@@ -414,7 +415,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
 
     def enqueue_terminal_event_nowait(self, event_block: str) -> bool:
         """Queue a terminal event and EOS without waiting for live capacity."""
-        if self._discarded:
+        if self._discarded or self._delivery_deadline_exceeded:
             return False
         if self._revoked.is_set():
             if self._terminal_pending and self._terminal_items != deque((None,)):
@@ -424,6 +425,15 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._terminal_pending = False
         self._revoked.set()
         return self._queue_terminal_items((event_block, None))
+
+    def fail_delivery_deadline(self, event_block: str) -> None:
+        """Keep a dropped payload from being followed by successful completion."""
+        if self._discarded or self._delivery_deadline_exceeded:
+            return
+        self.enqueue_terminal_event_nowait(event_block)
+        # Keep this cause after the failure and EOS are consumed. A later
+        # upstream terminal must not reopen this failed delivery.
+        self._delivery_deadline_exceeded = True
 
     def enqueue_terminal_nowait(self) -> bool:
         """Reserve an ordered end marker without growing the live queue.
