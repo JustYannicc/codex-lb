@@ -276,7 +276,7 @@ async def test_reconcile_recoverable_account_statuses_scopes_latest_usage_to_can
         blocked_at=int(now - 30),
     )
     unrelated = _make_account("acc_unrelated", status=AccountStatus.ACTIVE)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -315,7 +315,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_until_r
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
     blocked_at = int(now - 130)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -373,7 +373,7 @@ async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_lega
     legacy_reset_at = int(now + 7 * 24 * 3600)
     previous_monthly_reset = legacy_reset_at
     next_monthly_reset = int(now - 60 + 30 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -475,7 +475,7 @@ async def test_confirmed_monthly_reset_recovery_loses_cas_to_newer_marker(
     now = 1_700_000_000.0
     blocked_at = int(now - 3600)
     legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -524,7 +524,7 @@ async def test_confirmed_monthly_reset_recovery_honors_post_429_floor(
     now = 1_700_000_000.0
     blocked_at = int(now - 10)
     legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -573,7 +573,7 @@ async def test_reconcile_keeps_free_blocked_without_confirmed_monthly_reset(
     blocked_at = int(now - 3600)
     legacy_reset_at = int(now + 7 * 24 * 3600)
     monthly_reset_at = legacy_reset_at
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -625,7 +625,7 @@ async def test_reconcile_keeps_free_blocked_when_current_monthly_quota_is_exhaus
     now = 1_700_000_000.0
     blocked_at = int(now - 3600)
     legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -681,7 +681,7 @@ async def test_reconcile_keeps_free_blocked_when_matching_baseline_predates_bloc
     now = 1_700_000_000.0
     blocked_at = int(now - 90)
     legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -733,7 +733,7 @@ async def test_reconcile_does_not_apply_monthly_reset_override_to_plus(
     now = 1_700_000_000.0
     blocked_at = int(now - 3600)
     legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -795,7 +795,7 @@ async def test_reconcile_recoverable_account_statuses_restores_rate_limited_afte
     now = 1_700_000_000.0
     past_reset = int(now - 300)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -847,7 +847,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_elapsed_reset_until_
     now = 1_700_000_000.0
     past_reset = int(now - 1)
     blocked_at = int(now - 10)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -890,7 +890,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_legacy_rate_limited_
 ) -> None:
     now = 1_700_000_000.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -933,7 +933,7 @@ async def test_reconcile_recoverable_account_statuses_restores_legacy_rate_limit
 ) -> None:
     now = 1_700_000_000.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -976,7 +976,7 @@ async def test_reconcile_recoverable_account_statuses_clears_deactivation_reason
     now = 1_700_000_000.0
     past_reset = int(now - 300)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1021,7 +1021,7 @@ async def test_reconcile_recoverable_account_statuses_skips_concurrent_marker_ch
     now = 1_700_000_000.0
     past_reset = int(now - 300)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1063,7 +1063,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_without
 ) -> None:
     now = 1_700_000_000.0
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1107,7 +1107,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
     blocked_at = int(now - 130)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1160,7 +1160,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
     now = 1_700_000_000.0
     future_reset = int(now + 30 * 24 * 3600)
     blocked_at = int(now - 130)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1214,7 +1214,7 @@ async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
     now = 1_700_000_000.0
     blocked_at = int(now - 7200)
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -1295,7 +1295,7 @@ async def test_reconcile_recovers_free_alias_from_monthly_usage(monkeypatch: pyt
     now = 1_700_000_000.0
     blocked_at = int(now - 7200)
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
@@ -1340,7 +1340,7 @@ async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_an
     primary_reset = int(now + 300)
     secondary_reset = int(now + 7200)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1411,7 +1411,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_when_pr
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
     blocked_at = int(now - 130)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -1453,7 +1453,7 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_when_re
     now = 1_700_000_000.0
     past_reset = int(now - 300)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 

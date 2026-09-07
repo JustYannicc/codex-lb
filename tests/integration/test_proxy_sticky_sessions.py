@@ -878,7 +878,7 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     # A fresh usage sample is not proof the upstream block ended. Reconnects
     # must not revive the soft-sticky owner while its weekly quota is exhausted.
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now_epoch + 5)
+    monkeypatch.setattr("time.time", lambda: now_epoch + 5)
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
         await usage_repo.add_entry(
