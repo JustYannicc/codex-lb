@@ -1414,6 +1414,15 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "Bigbadboybob",
+      "name": "Lucas Klein",
+      "avatar_url": "https://avatars.githubusercontent.com/u/20326866?v=4",
+      "profile": "https://github.com/Bigbadboybob",
+      "contributions": [
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
