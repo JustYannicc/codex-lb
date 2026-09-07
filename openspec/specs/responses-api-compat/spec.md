@@ -3691,9 +3691,10 @@ HTTP 502 status and error payload at both HTTP route boundaries.
 A resolved previous-response owner and an account-pinned file owner remain independent
 hard constraints, and marker shape
 MUST NOT override either owner or relax strict file routing. For the same
-fail-closed decision, a physically present but blank `x-codex-turn-state`
-header MUST be treated as client input rather than as an omitted header and
-MUST NOT authorize synthesized-marker compatibility or sole-candidate
+fail-closed decision, an empty or whitespace-only `x-codex-turn-state` value
+MUST normalize to blank client input while preserving physical-header presence.
+Such a value MUST NOT establish ownership, be treated as an omitted header,
+or authorize synthesized-marker compatibility or sole-candidate
 fallback. Shape-based marker compatibility applies across HTTP bridge forwards,
 direct Responses WebSocket reconnects, and compact request echoes when local
 marker aliases are unavailable; exact process-local issuance provenance is not
@@ -3827,8 +3828,8 @@ pre-marker v2 owner verification.
 - **GIVEN** the requested model is known to subscription routing
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
-- **AND** the client sends a physically present but blank `x-codex-turn-state`
-  header
+- **AND** the client sends a physically present `x-codex-turn-state` header
+  whose value is empty or whitespace-only
 - **AND** exactly one eligible subscription account remains
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy returns HTTP status `502`
