@@ -104,9 +104,23 @@ next request acquires a fresh probe. A different replica may admit a local
 probe after loading the same elapsed durable row, but both replicas still honor
 a future durable cooldown and merge genuine failures through the durable row.
 
+## Upstream timing integration
+
+The upstream clock and scheduler collaborators also own the PR's added cleanup
+tasks. Cancellation deferral still spans admission handback, probe return, and
+eligible retirement; changing the task-spawn primitive does not change that
+ownership or the original typed-error precedence. Retained account-lease retries
+use the same scheduler while preserving single-flight close ownership and the
+guard against closing an unrelated live session.
+
+Virtual-time regressions drive long-lived probe expiry and durable reloads with
+the service clock. Admission cancellation and retained-lease retry tests cover
+both real defaults and a recording virtual scheduler, asserting that cleanup
+tasks finish with no owned task or timer left behind.
+
 ## Validation note
 
-Strict validation of this change passes with
-`pnpm --silent dlx @fission-ai/openspec@1.11.0 validate
-return-half-open-probe-exclusively --strict`. The full main-spec validation
-passes all 58 specs with the same pinned validator.
+With pinned `@fission-ai/openspec@1.11.0`, strict validation passes for this
+change and the synchronized Responses spec. The repository's canonical
+`validate --specs` gate passes all 58 specs. Adding `--strict` reports 22 failures
+in other, unchanged specs; it is not an all-repository strict pass.

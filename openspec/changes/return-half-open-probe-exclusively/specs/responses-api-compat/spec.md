@@ -129,6 +129,21 @@ MUST share one close/release task so a handle is not released twice. The
 detached session MUST remain discoverable until all retained account leases are
 released successfully.
 
+These cleanup tasks MUST use the owning service's scheduler, and retry-circuit
+deadlines MUST use its clock. Injected time and task ownership MUST preserve
+the same cancellation deferral, typed-error precedence, and lease fences as
+the real-time defaults.
+
+#### Scenario: Cleanup and probe expiry follow injected time
+
+- **GIVEN** a bridge service with an injected clock and scheduler
+- **WHEN** a cancelled admission returns its probe or a retained lease is retried
+- **THEN** all cleanup tasks are owned by that scheduler
+- **AND** cancelled admission handback and eligible retirement finish before
+  the caller observes its original terminal result
+- **AND** probe expiry and renewal use the injected clock without wall-clock waits
+- **AND** stale generations cannot release a replacement probe
+
 #### Scenario: Reset teardown cannot manufacture a circuit strike
 
 - **GIVEN** a proxy-owned continuity reset has an active half-open probe and

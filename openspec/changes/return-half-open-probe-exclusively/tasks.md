@@ -41,6 +41,11 @@
 
 ## Verification
 
+- [x] Reconcile the PR onto upstream timing seams without weakening cancellation,
+  probe ownership, retained lease, or live-resource guards.
+- [x] Verify injected-clock expiry and scheduler-owned cleanup, sync the delta
+  into the main spec, and run timing guards plus integration-scope reviews.
+
 - [x] Cover production admission preregistration under contended-lock level
   cancellation and complete probe handback plus eligible retirement.
 - [x] Retry detached replacement-account leases by the lease account, with
