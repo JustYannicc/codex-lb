@@ -76,6 +76,20 @@ The successor PR must cite maintainer comments #1908 `5423573461` and #1857
 
 ## Failure modes and controls
 
+The September 7 review reproduced two timing gaps. Reader-origin owner loss
+spawned cleanup which cancelled and awaited the reader waiting for that same
+cleanup. The caller identity must be removed from the reader slot before
+spawning cleanup, while a foreign reader remains owned and is cancelled.
+Separately, equal monotonic timestamps cannot order durable loads and probe
+returns. A logical pending-return marker must survive same-tick reconciliation
+and be consumed by the next admission or a fresh authoritative reset.
+An in-flight result cannot erase the later return, but its stronger future
+cooldown still suppresses replacement admission. Discarding that whole result
+would let the returned probe bypass newly observed durable protection.
+An applied reset is a later ordering boundary of its own. Results started
+before that reset cannot merge the ended episode back into local state,
+including when return, reset and reconciliation share a clock tick.
+
 - A stale session cannot return a newer session's probe because the release
   checks the owning session identity.
 - A continuity-owner failure does not increment `consecutive_failures` or

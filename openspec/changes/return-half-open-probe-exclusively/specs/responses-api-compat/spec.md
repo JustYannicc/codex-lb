@@ -58,6 +58,17 @@ window. A completion or other settlement MUST carry the durable episode and
 process-local lease generation captured at admission; a late settlement whose
 generation no longer matches the active lease MUST be ignored.
 
+#### Scenario: A returned probe remains exclusive without a clock advance
+
+- **GIVEN** a local probe returns on the same monotonic clock tick as its durable load
+- **WHEN** later lookups miss or reload the unchanged durable row
+- **THEN** the return MUST remain a pending single-flight transition until one fresh local lease consumes it
+- **AND** a durable operation started before that return MUST NOT erase the newer transition
+- **AND** any stronger future durable cooldown it observes MUST still suppress admission
+- **AND** a fresh authoritative durable reset with no active owner MUST still clear the transition
+- **AND** a durable operation started before that reset MUST NOT restore the cleared episode, even on the same clock tick
+- **AND** a default zero clock without a return MUST NOT manufacture a transition
+
 #### Scenario: Real expiry admits one local probe
 
 - **GIVEN** a hard-key circuit at or above the failure threshold with a real
@@ -133,6 +144,14 @@ These cleanup tasks MUST use the owning service's scheduler, and retry-circuit
 deadlines MUST use its clock. Injected time and task ownership MUST preserve
 the same cancellation deferral, typed-error precedence, and lease fences as
 the real-time defaults.
+
+#### Scenario: Reader-origin owner loss cannot await its own caller
+
+- **GIVEN** the registered upstream reader reconnects and its required owner is unavailable
+- **WHEN** cancellation-deferred owner-loss cleanup closes the session
+- **THEN** cleanup MUST NOT cancel or await the reader that is awaiting that cleanup
+- **AND** pending requests MUST receive the typed owner-unavailable terminal and resource cleanup MUST complete
+- **AND** cleanup invoked by a different task MUST still cancel and await the foreign reader
 
 #### Scenario: Cleanup and probe expiry follow injected time
 
