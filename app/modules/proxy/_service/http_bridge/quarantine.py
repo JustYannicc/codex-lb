@@ -466,7 +466,7 @@ def _http_bridge_poison_quarantine_arm_fence_details(
 ) -> _HTTPBridgeQuarantineClearFence:
     """Return the fence captured when the surviving poison arm was installed."""
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     if (

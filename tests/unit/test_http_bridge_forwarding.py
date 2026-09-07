@@ -1535,7 +1535,7 @@ async def test_owner_forward_dispatches_ambiguous_delta_after_owner_capability_p
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
+    clock = VirtualClock(monotonic_value=10.0)
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": "x" * 4095},
     )
@@ -1556,6 +1556,7 @@ async def test_owner_forward_dispatches_ambiguous_delta_after_owner_capability_p
             context=context,
             request_started_at=10.0,
             owner_supports_input_shape_classifier=True,
+            clock=clock,
         )
     ]
 

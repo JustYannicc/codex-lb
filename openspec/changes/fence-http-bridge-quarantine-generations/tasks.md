@@ -61,3 +61,6 @@
 - [x] 1.25 Bind capability-gated owner forwards to the proven process epoch,
   reject replacement processes without legacy signature downgrade, and sync
   the authenticated input-shape marker contract into the main spec.
+- [x] 1.26 Reconcile with the upstream clock and scheduler contracts, retain
+  exact quarantine and owner-epoch fences, and verify cleanup and forwarding
+  with injected time without introducing raw timing sites.

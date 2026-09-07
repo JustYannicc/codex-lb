@@ -48,6 +48,11 @@ self-contained because its matching calls live behind that anchor.
 
 ## Proof seams
 
+The current-main reconciliation retains the upstream clock and scheduler
+collaborators. Quarantine expiry and fence capture use the same service clock.
+Owner forwarding carries those collaborators alongside the signed process
+epoch; it does not change the existing transport-security policy.
+
 - Direct retirement and completion on one session clear a matching entry.
 - A replacement under the same key keeps its newer entry when the detached
   predecessor completes.

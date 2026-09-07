@@ -17405,7 +17405,9 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
 async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    clock = VirtualClock(monotonic_value=10.0)
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler, clock=clock)
     owner_forward = proxy_service._HTTPBridgeOwnerForward(
         owner_instance="instance-b",
         owner_endpoint="http://instance-b",
@@ -17455,6 +17457,8 @@ async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capab
         capability=ring_membership_module.HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
     )
     assert captured["owner_supports_input_shape_classifier"] is True
+    assert captured["clock"] is clock
+    assert captured["scheduler"] is scheduler
     context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
     assert context.expected_owner_process_epoch == "owner-process-b"
 
@@ -35618,10 +35622,9 @@ def test_http_bridge_quarantine_eviction_order_is_deterministic_for_equal_age(
 def test_http_bridge_quarantine_cap_can_evict_a_weaker_fence_after_its_poison_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = [1000.0]
-    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: clock[0])
+    clock = VirtualClock(monotonic_value=1000.0)
     monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
-    service = SimpleNamespace()
+    service = SimpleNamespace(_clock=clock)
     retained = _make_bridge_session(key_value="expired-poison-retained-weaker")
     replacement = _make_bridge_session(key_value="replacement-weaker")
 
@@ -35636,7 +35639,7 @@ def test_http_bridge_quarantine_cap_can_evict_a_weaker_fence_after_its_poison_de
         reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
         minimum_seconds=900.0,
     )
-    clock[0] = 1700.0
+    clock.advance(700.0)
 
     assert http_bridge_quarantine_module._quarantine_http_bridge_session(
         service,
@@ -35720,9 +35723,8 @@ def test_http_bridge_poison_overflow_ignores_a_longer_weaker_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1000.0
-    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: now)
     monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
-    service = SimpleNamespace()
+    service = SimpleNamespace(_clock=VirtualClock(monotonic_value=now))
     retained = _make_bridge_session(key_value="quarantine-poison-retained")
     rejected = _make_bridge_session(key_value="quarantine-poison-rejected")
 
@@ -35757,10 +35759,9 @@ def test_http_bridge_poison_overflow_ignores_a_longer_weaker_fence(
 def test_http_bridge_poison_rearm_extends_active_overflow_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = [1000.0]
-    monkeypatch.setattr(http_bridge_quarantine_module.time, "monotonic", lambda: clock[0])
+    clock = VirtualClock(monotonic_value=1000.0)
     monkeypatch.setattr(http_bridge_quarantine_module, "_HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES", 1)
-    service = SimpleNamespace()
+    service = SimpleNamespace(_clock=clock)
     retained = _make_bridge_session(key_value="quarantine-poison-rearm-retained")
     rejected = _make_bridge_session(key_value="quarantine-poison-rearm-rejected")
     unknown = proxy_service._HTTPBridgeSessionKey("session_header", "quarantine-poison-rearm-unknown", None)
@@ -35779,7 +35780,7 @@ def test_http_bridge_poison_rearm_extends_active_overflow_deadline(
     )
     assert getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR) == 1700.0
 
-    clock[0] = 1500.0
+    clock.advance(500.0)
     assert http_bridge_quarantine_module._quarantine_http_bridge_session(
         service,
         retained,
@@ -35790,7 +35791,7 @@ def test_http_bridge_poison_rearm_extends_active_overflow_deadline(
     assert entry.poison_quarantined_until == 2400.0
     assert getattr(service, http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISON_OVERFLOW_UNTIL_ATTR) == 2400.0
 
-    clock[0] = 1800.0
+    clock.advance(300.0)
     assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, unknown) is True
 
 
@@ -36313,22 +36314,28 @@ def test_http_bridge_quarantine_poison_clear_preserves_post_fence_first_strike()
     assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON
 
 
-def test_http_bridge_quarantine_poison_revoke_preserves_post_fence_first_strike() -> None:
+@pytest.mark.parametrize("capture_at_arm", [False, True], ids=["clear-fence", "arm-fence"])
+def test_http_bridge_quarantine_poison_revoke_preserves_post_fence_first_strike(capture_at_arm: bool) -> None:
     """Revoking speculative poison must retain a first strike recorded later."""
-    service = SimpleNamespace()
+    clock = VirtualClock(monotonic_value=5000.0)
+    service = SimpleNamespace(_clock=clock)
     session = _make_bridge_session(key_value="quarantine-poison-revoke-first-strike")
     http_bridge_quarantine_module._quarantine_http_bridge_session(
         service,
         session,
         reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     )
-    captured_fence = http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details(
-        service,
-        session.key,
+    capture = (
+        http_bridge_quarantine_module._http_bridge_poison_quarantine_arm_fence_details
+        if capture_at_arm
+        else http_bridge_quarantine_module._http_bridge_quarantine_clear_fence_details
     )
+    clock.advance(10.0)
+    captured_fence = capture(service, session.key)
     assert captured_fence.generation is not None
     assert captured_fence.raw_generation is not None
 
+    clock.advance(10.0)
     http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, session)
 
     assert (
