@@ -183,6 +183,25 @@ the real-time defaults.
 - **AND** it MUST preserve unrelated live session resources and single-flight
   cleanup ownership
 
+#### Scenario: A bounded sweep cannot abandon retained ownership
+
+- **GIVEN** a detached session retains a failed replacement-account lease release
+  and another task holds its pending lock beyond the per-request sweep bound
+- **WHEN** the sweep skips that session
+- **THEN** the retained lease and detached tracking MUST remain unchanged
+- **AND** after the lock is released a later sweep and concurrent account cleanup
+  MUST share one lease retry without repeating transport closure
+
+#### Scenario: Bounded retirement preserves live turn owners
+
+- **GIVEN** an otherwise drained detached session has an admission waiter or a
+  foreign unanchored handoff reservation
+- **WHEN** the per-request sweep obtains its pending lock
+- **THEN** it MUST preserve the session and its account lease until that owner
+  releases ownership
+- **AND** mandatory admission, probe-return, and close cleanup MUST retain the
+  lifecycle owner's unbounded pending-lock wait
+
 ### Requirement: Retry-circuit failure accounting distinguishes proxy continuity loss
 
 The proxy MUST NOT increment or persist retry-circuit failures for explicitly

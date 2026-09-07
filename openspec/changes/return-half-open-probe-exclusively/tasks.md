@@ -41,6 +41,11 @@
 
 ## Verification
 
+- [x] Integrate the bounded detached-retirement sweep while retaining mandatory
+  lifecycle cleanup, live turn ownership, and single-flight retained-lease retry.
+- [x] Verify changed AnyIO and cancellation-cascade dependencies with focused
+  integration proof, repository guards, and independent integration reviews.
+
 - [x] Reconcile the PR onto upstream timing seams without weakening cancellation,
   probe ownership, retained lease, or live-resource guards.
 - [x] Verify injected-clock expiry and scheduler-owned cleanup, sync the delta
