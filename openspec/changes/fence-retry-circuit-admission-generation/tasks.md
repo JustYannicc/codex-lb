@@ -69,3 +69,9 @@
 - [ ] 4.11 Obtain maintainer sign-off on the stranded claim-receipt lockout
   policy documented in `design.md` (shorter abandonment lease, explicit
   reclaim owner, or lease-aware retry-after and accepted lockout window).
+- [x] 4.12 Document exact live-receipt adoption after settled reconciliation
+  refusal in both normative specs, retaining one bounded lookup and fail-closed
+  behavior for unconfirmed receipts.
+- [x] 4.13 Fence scheduled purge snapshots on `consecutive_failures` so a
+  lagging-clock failure survives; verify normal and tombstone deletes stay
+  within SQLite's 999-bind limit.

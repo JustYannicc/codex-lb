@@ -11,6 +11,11 @@ For example, a caller with one attempt left cannot spend a second attempt on
 timeout reconciliation. A caller with remaining budget may reconcile once
 after the first write settles cancellation.
 
+If that first write committed but lost its result, the identical retry refuses.
+One bounded lookup can recover the original receipt by its exact generation and
+claim-start epoch, provided the database still considers it live. A competing,
+expired, or unconfirmed receipt does not authorize dispatch.
+
 An ambiguous send or unconfirmed release can retain a receipt until expiry.
 The stranded-receipt policy remains an explicit maintainer decision in the
 [change design](../../changes/fence-retry-circuit-admission-generation/design.md#open-decision-stranded-claim-receipt-lockout).

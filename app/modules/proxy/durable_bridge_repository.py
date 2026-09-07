@@ -80,9 +80,9 @@ _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS = 7260.0
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
-# Keep the eight-column tuple predicate below under SQLite's 999 bind-variable
-# limit while retaining a single writer transaction for each selected batch.
-_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 120
+# Nine binds per key plus at most ten fixed binds must fit SQLite's 999 limit.
+# Keep a single writer transaction for each selected batch.
+_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 109
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -3751,6 +3751,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.api_key_scope,
                     HttpBridgeRetryCircuit.updated_at_epoch,
                     HttpBridgeRetryCircuit.admission_generation,
+                    HttpBridgeRetryCircuit.consecutive_failures,
                     func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
                     func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
                     func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),
@@ -3782,6 +3783,7 @@ class DurableBridgeRepository:
                                 HttpBridgeRetryCircuit.api_key_scope,
                                 HttpBridgeRetryCircuit.updated_at_epoch,
                                 HttpBridgeRetryCircuit.admission_generation,
+                                HttpBridgeRetryCircuit.consecutive_failures,
                                 func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
                                 func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
                                 func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),

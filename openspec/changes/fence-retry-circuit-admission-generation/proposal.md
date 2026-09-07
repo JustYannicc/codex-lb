@@ -68,6 +68,9 @@ explicitly generation-fenced.
   gate; the candidate directions and current fail-closed behavior are captured
   in `design.md` without selecting a product policy.
 
+The change remains incomplete and MUST NOT merge until task 4.11 has an
+accepted, implemented, and verified policy with maintainer sign-off.
+
 ## Scope and non-goals
 
 This change touches retry-circuit state and its direct durable repository/
