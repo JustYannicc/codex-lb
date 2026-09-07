@@ -72,8 +72,12 @@
 
 ## 8. Upstream timing integration
 
-- [ ] 8.1 Replay the scoped queue change onto upstream `35ccf8e9`, preserving native fallback and terminal ownership
-- [ ] 8.2 Inject queue task ownership, enqueue clocks, and same-task timeout scopes without timing-guard exemptions
-- [ ] 8.3 Prove real/virtual timeout races, cancellation, delayed terminal delivery, and shared-reader deadline settlement
-- [ ] 8.4 Rerun affected local checks and benchmark current main, prior head, and the rebased implementation
-- [ ] 8.5 Obtain independent changed-scope review, lease-push the candidate, and verify exact-head hosted gates
+- [x] 8.1 Replay the scoped queue change onto upstream `35ccf8e9`, preserving native fallback and terminal ownership
+- [x] 8.2 Inject queue task ownership, enqueue clocks, and same-task timeout scopes without timing-guard exemptions
+- [x] 8.3 Prove real/virtual timeout races, cancellation, delayed terminal delivery, and shared-reader deadline settlement
+- [x] 8.4 Rerun affected local checks and benchmark current main, prior head, and the rebased implementation
+- [x] 8.5 Record independent changed-scope review and the exact-head delivery verification boundary
+
+The final lease-push and hosted CI/review results are recorded in the PR delivery
+reply for its exact head. This implementation checklist is not a claim that
+external gates have passed or that task 7.7 has been accepted.
