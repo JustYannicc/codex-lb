@@ -118,6 +118,21 @@ the service clock. Admission cancellation and retained-lease retry tests cover
 both real defaults and a recording virtual scheduler, asserting that cleanup
 tasks finish with no owned task or timer left behind.
 
+## Upstream bounded sweep integration
+
+The bounded detached-retirement sweep applies its five-second timeout only to
+each detached session's pending-lock acquisition. Mandatory lifecycle owners
+still wait without that bound. A timed-out pass must preserve retained account
+leases and detached tracking; a later sweep can share the existing close/retry
+owner with account cleanup. Acquiring the lock does not override admission
+waiters or foreign handoff reservations. The bound is not a whole-sweep or
+whole-close deadline.
+
+The integration preserves upstream's AnyIO floor and locked 4.15.1 runtime,
+alongside its API and keepalive cancellation-cascade fixes. Those outer task
+boundaries complement the PR's deferred admission/probe cleanup; they do not
+replace its typed-error precedence or ownership fences.
+
 ## Validation note
 
 With pinned `@fission-ai/openspec@1.11.0`, strict validation passes for this
