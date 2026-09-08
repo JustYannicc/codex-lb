@@ -41,6 +41,10 @@
 
 ## Verification
 
+- [x] Account for an explicit incomplete `stream_incomplete` reason through the
+  existing eligible-attempt path; preserve neutral reasons, terminal payloads,
+  health handling, and exact-owner behavior with real-reader controls.
+
 - [x] Preserve ordinary reconnect selection terminals while retaining ordered
   required-owner cleanup; prove both through the registered reader path.
 

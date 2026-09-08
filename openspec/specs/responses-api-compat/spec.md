@@ -445,6 +445,19 @@ increment and persist genuine upstream `stream_incomplete`,
 eligible. Anchor replay and error-provenance policy remain governed by their
 existing contracts.
 
+#### Scenario: An explicit incomplete reason retains genuine failure accounting
+
+- **GIVEN** an otherwise eligible eventless upstream attempt
+- **WHEN** its `response.incomplete` terminal has no response error and
+  explicitly reports `incomplete_details.reason` as `stream_incomplete`
+- **THEN** the proxy MUST record that detail through the existing attempt-scoped
+  retry-circuit failure path
+- **AND** the existing eligibility and provenance gates MUST remain in force
+- **AND** a missing, unknown, or `max_output_tokens` reason MUST NOT be converted
+  to `stream_incomplete`
+- **AND** downstream terminal payload and account-health treatment MUST remain
+  unchanged
+
 #### Scenario: Proxy continuity loss is neutral
 
 - **GIVEN** an eligible local half-open probe
