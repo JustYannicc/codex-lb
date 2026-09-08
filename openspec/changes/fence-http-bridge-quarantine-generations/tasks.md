@@ -80,3 +80,6 @@
 - [x] 1.33 Keep a proxy-injected anchor on the turn-state takeover path after
   typed shape rejection, refreshing the lease without its response alias and
   preserving the original anchor-account constraint.
+- [x] 1.34 Define deterministic first-touch revocation of settled durable-only
+  poison with existing stale-load and evidence fences, without changing other
+  accepted revocation paths.

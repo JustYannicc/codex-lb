@@ -5116,11 +5116,25 @@ durable context.
 Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), and is cleared when a response completes with the applicable session-identity or exact recovery-generation fence. Each HTTP bridge session lifetime has an immutable, unique session-identity token represented by that session object's object identity and held by quarantine entries only through a weak owner reference; the token MUST be distinct from reusable bridge keys, account IDs, and session headers. Every quarantine generation MUST come from a service-lifetime monotonic allocator and MUST never be reused, including after per-key removal, TTL/size-cap pruning, registry reinitialization, or an allocator reset; any allocator reset MUST resume above every generation already observed in that service lifetime. Quarantine cleanup MUST NOT write account health, alter routing or account selection, or mutate durable bridge ownership. For a registered primary key, only the current canonical session MAY clear its quarantine; the canonical registry wins over a detached session's weak owner token. The weak owner MAY authorize a clear only when no canonical primary is registered, and an ownerless entry MUST remain uncleared through that fallback. A primary completion MUST capture its immutable session-identity token and the key's quarantine generation, including an observed absence, before taking its first await that can arm a replacement; cleanup and equality checks MUST use only those captured identity and generation/absence values, so a completion cannot remove a newer entry or first-strike evidence armed while settlement is in flight. A stale-anchor recovery-origin key MUST be fenced by the exact quarantine generation observed when recovery was authorized; an observed absence or generation mismatch MUST leave a raced quarantine active. The registry MUST prune expired entries before size eviction. An active poison fence whose poison-specific deadline has not expired MUST never be evictable. Inactive first-strike entries and active non-poison quarantine entries MUST share one eviction tier ordered by ascending last-touch time, then ascending generation, then the key tuple (affinity kind, affinity key, API-key id with null ordered as the empty string, and strength). If every slot holds an active poison fence, a new arm MUST be rejected rather than evicting poison evidence or growing beyond the hard size cap; the rejected session MUST remain unquarantined and no new quarantine generation MUST be allocated. Re-arming an existing key MAY refresh its entry in place. When a poison arm is rejected because every slot is an active poison fence, the service MUST maintain one bounded poison-overflow deadline covering the rejected arm's required window and every active retained poison deadline; while that deadline is active, anchor checks for an unknown rejected key MUST fail closed as poison evidence.
 
 The captured-absence rule MUST also retain poison quarantine adopted from a
-durable-only row during the completion's own settlement load. Settling that row
-and registering a fresh anchor MUST NOT authorize recapturing and clearing the
-new quarantine in the same completion. A later first-touch durable reload MAY
-revoke that arm at its captured poison-arm fence when the row has zero failures
-and no abandonment tombstone; newer poison evidence MUST remain fenced.
+durable-only row during the completion's own settlement load. Here, a
+durable-only poison row is a persisted retry-circuit row whose poison
+quarantine was absent locally at the completion's pre-await observation and
+was first adopted by that settlement load. Settling the row and registering a
+fresh anchor MUST NOT authorize recapturing the completion fence or clearing
+that newly adopted quarantine in the same completion.
+
+The next request's first-touch reload is its planning-time durable
+retry-circuit load after settlement invalidates the loaded-key state. When
+that reload accepts a zero-failure row without an abandonment tombstone,
+passes the stale-load guards, and observes no unreconciled newer local
+failure, it MUST revoke the retained active poison arm using its poison-arm
+fence. That fence comprises the poison generation, raw generation, and
+eventless-timeout count recorded when the arm was installed. Absent or
+mismatched poison provenance MUST NOT authorize revocation. Independent
+weaker quarantine, later first-strike evidence, and newer poison evidence
+MUST retain their existing protection. These requirements do not prohibit the
+separately defined durable-miss, supersession, or replacement-lineage
+revocation paths.
 
 Quarantine admission wrappers MUST return whether the requested fence was
 installed, and direct callers MUST consume a rejected result without treating

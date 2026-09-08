@@ -31,11 +31,25 @@ the exact captured generation MAY be cleared; an observed absence or generation
 mismatch MUST leave a raced entry active.
 
 This captured-absence rule MUST also retain poison quarantine adopted from a
-durable-only row during the completion's own settlement load. Settling that row
-and registering a fresh anchor MUST NOT authorize recapturing and clearing the
-new quarantine in the same completion. A later first-touch durable reload MAY
-revoke that arm at its captured poison-arm fence when the row has zero failures
-and no abandonment tombstone; newer poison evidence MUST remain fenced.
+durable-only row during the completion's own settlement load. Here, a
+durable-only poison row is a persisted retry-circuit row whose poison
+quarantine was absent locally at the completion's pre-await observation and
+was first adopted by that settlement load. Settling the row and registering a
+fresh anchor MUST NOT authorize recapturing the completion fence or clearing
+that newly adopted quarantine in the same completion.
+
+The next request's first-touch reload is its planning-time durable
+retry-circuit load after settlement invalidates the loaded-key state. When
+that reload accepts a zero-failure row without an abandonment tombstone,
+passes the stale-load guards, and observes no unreconciled newer local
+failure, it MUST revoke the retained active poison arm using its poison-arm
+fence. That fence comprises the poison generation, raw generation, and
+eventless-timeout count recorded when the arm was installed. Absent or
+mismatched poison provenance MUST NOT authorize revocation. Independent
+weaker quarantine, later first-strike evidence, and newer poison evidence
+MUST retain their existing protection. These requirements do not prohibit the
+separately defined durable-miss, supersession, or replacement-lineage
+revocation paths.
 
 A stale-anchor recovery MUST capture the quarantine generation for its
 recovery-origin key before authorization. A matching generation MAY be cleared

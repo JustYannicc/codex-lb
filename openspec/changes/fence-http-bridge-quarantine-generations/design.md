@@ -141,10 +141,16 @@ epoch; it does not change the existing transport-security policy.
 - Retaining the pre-await absence fence changes #1891's immediate cleanup for
   durable-only poison first adopted during that completion's settle load.
   Even successful settlement and fresh-anchor registration leave this local
-  arm until the next request's first-touch reload can revoke the settled
-  zero-failure, non-tombstone row at its poison-arm fence. Failed settlement,
-  an unreadable row, or newer poison can delay release further. This accepts
-  the extra reload rather than recapturing and clearing raced evidence.
+  arm until the next request's planning-time durable reload after settlement
+  invalidates the loaded-key state. A reload that accepts a zero-failure,
+  non-tombstone row, passes stale-load guards, and observes no unreconciled
+  newer local failure revokes the active poison arm at its stored poison
+  generation, raw generation, and eventless-count fence. Independent weaker
+  quarantine, later first strikes, and newer poison remain protected.
+  Failed settlement or an unreadable row can delay release further. Other
+  durable-miss, supersession, and replacement-lineage revocation paths are
+  unchanged. This accepts the extra reload rather than recapturing the
+  completion fence and clearing raced evidence.
 - A durable anchor injected before owner forwarding is not a client continuity
   choice. After typed shape rejection, turn-state requests still reload the
   lease without that response alias. Any retained injected anchor keeps its
