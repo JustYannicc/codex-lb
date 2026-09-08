@@ -180,7 +180,7 @@ async def test_known_subscription_model_with_missing_owner_fails_closed(
     account = _make_account("acc_ws_known_subscription_owner_miss")
     second_account = _make_account("acc_ws_known_subscription_owner_miss_second")
     selection_calls = 0
-    list_selection_candidates = AsyncMock(return_value=(account, second_account))
+    list_continuity_owner_candidates = AsyncMock(return_value=(account, second_account))
 
     async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         return None
@@ -192,7 +192,7 @@ async def test_known_subscription_model_with_missing_owner_fails_closed(
 
     monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
 
     previous_response_id = "resp_known_subscription_owner_miss_9f0d2f"
@@ -209,9 +209,9 @@ async def test_known_subscription_model_with_missing_owner_fails_closed(
     )
 
     assert selection_calls == 0, "an unknown continuation owner must not fall through to account selection"
-    list_selection_candidates.assert_awaited_once()
-    assert list_selection_candidates.await_args is not None
-    assert list_selection_candidates.await_args.kwargs["account_ids"] is None
+    list_continuity_owner_candidates.assert_awaited_once()
+    assert list_continuity_owner_candidates.await_args is not None
+    assert list_continuity_owner_candidates.await_args.kwargs["account_ids"] is None
     assert any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
     assert not any(previous_response_id in text for text in downstream.sent_text), (
         "the raw previous_response_id must not be exposed in the sanitized error"
@@ -238,7 +238,7 @@ async def test_known_subscription_model_candidate_lookup_failure_fails_closed(
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(
         service._load_balancer,
-        "list_selection_candidates",
+        "list_continuity_owner_candidates",
         AsyncMock(side_effect=RuntimeError("selection database unavailable")),
     )
 
@@ -293,8 +293,10 @@ async def test_turn_state_owner_skips_previous_response_candidate_fallback(
     monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=account.id))
-    list_selection_candidates = AsyncMock(side_effect=AssertionError("turn-state owner must skip candidate fallback"))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    list_continuity_owner_candidates = AsyncMock(
+        side_effect=AssertionError("turn-state owner must skip candidate fallback")
+    )
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
     monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
 
@@ -312,7 +314,7 @@ async def test_turn_state_owner_skips_previous_response_candidate_fallback(
     )
 
     assert selection_calls == 1
-    list_selection_candidates.assert_not_awaited()
+    list_continuity_owner_candidates.assert_not_awaited()
     assert len(upstream.sent_text) == 1
     sent_payload = json.loads(upstream.sent_text[0])
     assert sent_payload["previous_response_id"] == previous_response_id
@@ -351,7 +353,7 @@ async def test_known_subscription_model_owner_miss_uses_sole_candidate(
     )
     selection_calls = 0
     selection_api_keys: list[ApiKeyData | None] = []
-    list_selection_candidates = AsyncMock(return_value=(account,))
+    list_continuity_owner_candidates = AsyncMock(return_value=(account,))
 
     async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         return None
@@ -374,7 +376,7 @@ async def test_known_subscription_model_owner_miss_uses_sole_candidate(
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh_api_key)
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
     monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
 
@@ -392,10 +394,9 @@ async def test_known_subscription_model_owner_miss_uses_sole_candidate(
     )
 
     assert selection_calls == 1, "the sole eligible account must proceed through normal WebSocket selection"
-    list_selection_candidates.assert_awaited_once()
-    assert list_selection_candidates.await_args is not None
-    assert list_selection_candidates.await_args.kwargs["model"] == "gpt-5.6-sol"
-    assert list_selection_candidates.await_args.kwargs["account_ids"] == [account.id]
+    list_continuity_owner_candidates.assert_awaited_once()
+    assert list_continuity_owner_candidates.await_args is not None
+    assert list_continuity_owner_candidates.await_args.kwargs["account_ids"] == [account.id]
     assert selection_api_keys == [refreshed_api_key], (
         "the actual selector must receive the same refreshed assignment scope used for the sole-candidate count"
     )
@@ -429,7 +430,7 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     upstream = _TurnDrivenUpstream(
         [_completed_turn("resp_ws_compaction_first"), _completed_turn("resp_ws_compaction_second")]
     )
-    list_selection_candidates = AsyncMock(return_value=(account,))
+    list_continuity_owner_candidates = AsyncMock(return_value=(account,))
 
     async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
         del self, args, kwargs
@@ -447,7 +448,7 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
 
     await service.proxy_responses_websocket(
@@ -458,7 +459,7 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
         api_key=None,
     )
 
-    list_selection_candidates.assert_awaited_once()
+    list_continuity_owner_candidates.assert_awaited_once()
     assert len(upstream.sent_text) == 2, "the compaction continuation must reach the subscription account"
     sent_payload = json.loads(upstream.sent_text[1])
     assert sent_payload["previous_response_id"] == previous_response_id
@@ -523,7 +524,7 @@ async def test_terminal_compaction_generated_turn_state_uses_shape_compatibility
         )
     account = _make_account("acc_ws_compaction_spoofed_turn_state")
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_ws_compaction_spoofed_turn_state"))
-    list_selection_candidates = AsyncMock(return_value=(account,))
+    list_continuity_owner_candidates = AsyncMock(return_value=(account,))
 
     async def resolve_turn_state_owner(
         *,
@@ -555,7 +556,7 @@ async def test_terminal_compaction_generated_turn_state_uses_shape_compatibility
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", resolve_turn_state_owner)
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
 
     await service.proxy_responses_websocket(
@@ -567,7 +568,7 @@ async def test_terminal_compaction_generated_turn_state_uses_shape_compatibility
         synthesized_turn_state=synthesized_turn_state,
     )
 
-    list_selection_candidates.assert_awaited_once()
+    list_continuity_owner_candidates.assert_awaited_once()
     assert len(upstream.sent_text) == 1
     assert not any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
 
@@ -625,13 +626,13 @@ async def test_owner_miss_rebinds_existing_socket_to_refreshed_account(
         assert effective_api_key is refreshed_api_key
         return refreshed_account, refreshed_upstream
 
-    list_selection_candidates = AsyncMock(return_value=(refreshed_account,))
+    list_continuity_owner_candidates = AsyncMock(return_value=(refreshed_account,))
     monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh_api_key)
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_websocket)
 
     second_payload = json.loads(_create_frame("gpt-5.6-sol"))
@@ -656,9 +657,9 @@ async def test_owner_miss_rebinds_existing_socket_to_refreshed_account(
         (None, stale_api_key),
         (refreshed_account.id, refreshed_api_key),
     ]
-    list_selection_candidates.assert_awaited_once()
-    assert list_selection_candidates.await_args is not None
-    assert list_selection_candidates.await_args.kwargs["account_ids"] == [refreshed_account.id]
+    list_continuity_owner_candidates.assert_awaited_once()
+    assert list_continuity_owner_candidates.await_args is not None
+    assert list_continuity_owner_candidates.await_args.kwargs["account_ids"] == [refreshed_account.id]
     assert len(stale_upstream.sent_text) == 1, "the stale socket must carry only the first turn"
     assert len(refreshed_upstream.sent_text) == 1, "the refreshed account must receive the continuation"
     sent_payload = json.loads(refreshed_upstream.sent_text[0])
