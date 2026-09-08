@@ -41,6 +41,9 @@
 
 ## Verification
 
+- [x] Preserve ordinary reconnect selection terminals while retaining ordered
+  required-owner cleanup; prove both through the registered reader path.
+
 - [x] Prove real persisted exhausted-owner selection returns the exact probe
   and account lease without alternate dispatch or recovery wait; retain
   transient hard-affinity recovery and complete affected independent reviews.
