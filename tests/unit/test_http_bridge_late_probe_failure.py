@@ -154,8 +154,9 @@ async def test_late_failed_probe_preserves_replacement_and_terminal_cleanup(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reuse_owner", [False, True])
+@pytest.mark.parametrize("detail", ["stream_incomplete", "continuity_owner_unavailable"])
 async def test_stale_request_cleanup_keeps_its_captured_probe_claim(
-    monkeypatch: pytest.MonkeyPatch, reuse_owner: bool
+    monkeypatch: pytest.MonkeyPatch, reuse_owner: bool, detail: str
 ) -> None:
     clock = VirtualClock(monotonic_value=1000.0)
     service, session, request = _make_terminal_error_bridge_fixture(
@@ -197,9 +198,7 @@ async def test_stale_request_cleanup_keeps_its_captured_probe_claim(
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record)
     queue = request.event_queue
     assert queue is not None
-    cleanup = asyncio.create_task(
-        service._fail_stale_http_bridge_pending_requests(session, [request], detail="stream_incomplete")
-    )
+    cleanup = asyncio.create_task(service._fail_stale_http_bridge_pending_requests(session, [request], detail=detail))
     try:
         await asyncio.wait_for(recording.wait(), timeout=2)
         assert request not in session.pending_requests

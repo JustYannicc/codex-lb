@@ -1274,6 +1274,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
             if persisted is not None:
                 persisted_cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_wall)
+                positive_durable_cooldown_elapsed = (
+                    persisted.cooldown_until_epoch > 0.0 and persisted_cooldown_remaining == 0.0
+                )
                 persisted_cooldown_until = (
                     now_monotonic + persisted_cooldown_remaining if persisted_cooldown_remaining > 0.0 else 0.0
                 )
@@ -1421,6 +1424,13 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.half_open_owner_token = None
                             state.half_open_lease_generation = 0
                         if not defer_durable_snapshot:
+                            if episode_replaced or session.key not in self._http_bridge_retry_circuit_loaded_keys:
+                                # Persist consumes this snapshot just like load.
+                                # Keep its one-shot transition, without rearming
+                                # an identical row after admission consumed it.
+                                state.elapsed_durable_cooldown_pending = bool(
+                                    positive_durable_cooldown_elapsed and state.consecutive_failures >= threshold
+                                )
                             state.persisted_updated_at_epoch = persisted.updated_at_epoch
                             state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
                         # Post-write time, not this persist's entry time: a
@@ -1978,6 +1988,7 @@ class _HTTPBridgeRetryCircuitMixin:
         never asserts it, so its "upstream answered" guard is unchanged.
         """
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
+        claimed_probe = probe_claim or _HTTPBridgeRetryCircuitProbeClaim.capture(probe_owner)
         if detail in _HTTP_BRIDGE_RETRY_CIRCUIT_PROXY_CONTINUITY_DETAILS and (
             detail not in {"previous_response_not_found", "bridge_previous_response_not_found"}
             or proxy_continuity_provenance
@@ -1985,13 +1996,13 @@ class _HTTPBridgeRetryCircuitMixin:
             await self._release_http_bridge_retry_circuit_half_open(
                 session,
                 detail=detail,
-                probe_owner=probe_owner,
+                probe_owner=claimed_probe.owner if claimed_probe is not None else probe_owner,
+                expected_half_open_generation=claimed_probe.episode[3] if claimed_probe is not None else None,
             )
             return None
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return None
 
-        claimed_probe = probe_claim or _HTTPBridgeRetryCircuitProbeClaim.capture(probe_owner)
         scoped_attempt = attempt
         if scoped_attempt is not None:
             if scoped_attempt.retry_circuit_failure_recorded:

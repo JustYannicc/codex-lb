@@ -79,3 +79,5 @@
   diff checks, and exact-head Standards/Input reviews.
 - [x] Fence stale claimed-probe failure settlement, preserve terminal/account
   cleanup and replacement completion, and verify current/non-probe controls.
+- [x] Preserve captured probe generation for continuity returns and the one-shot
+  positive elapsed durable transition when reconciling a persisted row.
