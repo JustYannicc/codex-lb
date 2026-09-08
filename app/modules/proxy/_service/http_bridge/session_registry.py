@@ -170,7 +170,7 @@ class _HTTPBridgeSessionRegistryMixin:
         self._http_bridge_sessions = {}
         self._http_bridge_detached_sessions = {}
 
-    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> bool:
+    async def _drain_http_bridge_background_cleanup_tasks(self: _HTTPBridgeServiceProtocol, *, reason: str) -> bool:
         clock = clock_for(self)
         deadline = clock.monotonic() + _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS
         no_tasks_turn = False
