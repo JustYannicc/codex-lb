@@ -364,11 +364,7 @@ class LoadBalancer:
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
     ) -> tuple[Account, ...]:
-        """Return request-policy candidates without acquiring a lease.
-
-        This side-effect-free seam shares selection's model, scope, quota,
-        security, and exclusion filters.
-        """
+        """List possible owners without leases or transient routing filters; honor explicit security/retry filters."""
 
         selection_inputs = await self._load_selection_inputs(
             model=model,
