@@ -310,6 +310,14 @@ Owner-pinned requests and requests that have exposed output remain ineligible
 for an account switch. Account-model rejection fallback is separate: when no
 compatible replacement exists, its original 400 remains the useful failure.
 
+The HTTP bridge also reaches pool exhaustion when its last authorized
+replacement fails credential refresh or authentication before dispatch. Its
+retry handler maps that internal selection code to the same missing-pool
+advisory, then forwards the original security denial. For example, an ordinary
+account rejects a security task and the only authorized account returns 401
+both before and after refresh: the client gets the advisory and original
+denial, not the replacement's internal selection failure.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this

@@ -50,3 +50,9 @@
 - [x] 7.1 Reproduce the scoped unknown-owner continuation with mixed security authorization through both direct WebSocket routes.
 - [x] 7.2 Count possible owners before security-capability filtering while preserving subsequent authorization and synchronize the contract.
 - [ ] 7.3 Verify scoped regressions and current-upstream composition, obtain independent reviews, and deliver current-head CI, CodeRabbit, and hosted Codex clearance.
+
+## 8. HTTP bridge authorized-pool exhaustion advisory
+
+- [x] 8.1 Reproduce the missing advisory through HTTP bridge requests when the last authorized replacement is excluded after refresh or authentication failure.
+- [x] 8.2 Map authorized-pool exhaustion to the existing missing-pool warning while preserving the original security denial and replay guards.
+- [ ] 8.3 Verify affected routes and cleanup, obtain independent reviews, and deliver current-head hosted CI and review clearance.

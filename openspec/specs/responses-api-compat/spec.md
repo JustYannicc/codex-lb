@@ -2009,6 +2009,14 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **AND** a later independent request on the same WebSocket can acquire the response-create gate and complete
 - **AND** this handling MUST NOT replace an account-model rejection fallback or relax owner-pinning and output-exposure replay guards
 
+#### Scenario: HTTP bridge authorized retry pool is exhausted before dispatch
+
+- **GIVEN** a safely replayable HTTP bridge request received a security-work authorization error
+- **WHEN** the last authorized replacement is excluded after a transient credential-refresh failure or repeated upstream authentication failure before retry dispatch
+- **THEN** codex-lb MUST emit a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"` and `action="forward_original_security_work_error"` before returning the original security-work authorization error exactly once
+- **AND** the client MUST NOT receive the internal `security_work_authorized_accounts_exhausted` selection error
+- **AND** the retry MUST preserve the existing owner-pinning and output-exposure replay guards and complete request cleanup
+
 #### Scenario: Pinned requests are not moved to another account
 
 - **WHEN** a security-work authorization error occurs for a request pinned by file ownership or previous-response ownership
