@@ -25,6 +25,7 @@ from app.modules.proxy._service.observability import _hash_identifier, _service_
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitProbeClaim,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
 )
@@ -558,6 +559,15 @@ class _HTTPBridgeRetryCircuitMixin:
     ) -> int | None:
         attempt = selection.attempt
         if attempt is not None:
+            if selection.probe_claim is not None:
+                return await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=detail,
+                    attempt=attempt,
+                    probe_owner=selection.probe_claim.owner,
+                    probe_claim=selection.probe_claim,
+                    proxy_continuity_provenance=proxy_continuity_provenance,
+                )
             if proxy_continuity_provenance:
                 return await self._record_http_bridge_retry_circuit_failure(
                     session,
@@ -1953,6 +1963,7 @@ class _HTTPBridgeRetryCircuitMixin:
         detail: str,
         attempt: _HTTPBridgeResponseCreateAttempt | None = None,
         probe_owner: object | None = None,
+        probe_claim: _HTTPBridgeRetryCircuitProbeClaim | None = None,
         terminal_pre_response_frame: bool = False,
         proxy_continuity_provenance: bool = False,
     ) -> int | None:
@@ -1980,6 +1991,7 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return None
 
+        claimed_probe = probe_claim or _HTTPBridgeRetryCircuitProbeClaim.capture(probe_owner)
         scoped_attempt = attempt
         if scoped_attempt is not None:
             if scoped_attempt.retry_circuit_failure_recorded:
@@ -2024,6 +2036,23 @@ class _HTTPBridgeRetryCircuitMixin:
             # durable load for merge bookkeeping.
             now = clock_for(self).monotonic()
             async with self._http_bridge_retry_circuit_lock:
+                active_probe = self._http_bridge_retry_circuits.get(session.key)
+                if claimed_probe is not None and (
+                    active_probe is None
+                    or active_probe.half_open_owner_session is not session
+                    or active_probe.half_open_owner_token is not claimed_probe.owner
+                    or (
+                        active_probe.persisted_updated_at_epoch,
+                        active_probe.consecutive_failures,
+                        active_probe.persisted_admission_generation,
+                        active_probe.half_open_lease_generation,
+                    )
+                    != claimed_probe.episode
+                ):
+                    # Terminal bookkeeping may outlive its probe lease. The
+                    # old request still finalizes, but cannot charge or clear
+                    # a replacement admitted while this recorder was waiting.
+                    return None
                 if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                     duplicate_attempt = scoped_attempt
                 elif scoped_attempt is not None and (

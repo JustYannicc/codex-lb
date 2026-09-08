@@ -949,9 +949,30 @@ class _HTTPBridgeResponseCreateAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitProbeClaim:
+    owner: object
+    episode: tuple[float, int, int, int]
+
+    @classmethod
+    def capture(cls, owner: object | None) -> _HTTPBridgeRetryCircuitProbeClaim | None:
+        episode = getattr(owner, "claimed_half_open_episode", None)
+        generation = getattr(owner, "claimed_half_open_generation", 0)
+        if (
+            owner is None
+            or not isinstance(episode, tuple)
+            or len(episode) != 3
+            or not isinstance(generation, int)
+            or generation <= 0
+        ):
+            return None
+        return cls(owner=owner, episode=(episode[0], episode[1], episode[2], generation))
+
+
+@dataclass(frozen=True, slots=True)
 class _HTTPBridgeRetryCircuitAttemptSelection:
     kind: Literal["absent", "eligible", "recorded", "settled", "ineligible"]
     attempts: tuple[_HTTPBridgeResponseCreateAttempt, ...] = ()
+    probe_claim: _HTTPBridgeRetryCircuitProbeClaim | None = None
 
     def __post_init__(self) -> None:
         carries_attempts = self.kind in {"eligible", "recorded", "settled"}

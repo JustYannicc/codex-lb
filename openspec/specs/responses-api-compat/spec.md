@@ -228,9 +228,12 @@ If the owner request remains
 pending after the default lease window, has attempted `response.create`, and
 has not entered terminal settlement, the lease MUST remain exclusive and be
 renewed through its `bridge_request_deadline` when that deadline is later than
-the default window. Completion settlement MUST carry the captured durable
-episode and process-local generation so a late completion cannot clear a
-replacement probe. These leases are process-local; each replica may manage
+the default window. Completion and failure settlement MUST carry the captured
+durable episode and process-local generation. A late settlement whose generation
+no longer matches the active lease MUST NOT mutate the retry circuit, including
+its failure count, cooldown, episode, or replacement probe ownership. This fence
+MUST NOT skip the old request's terminal delivery or account settlement.
+These leases are process-local; each replica may manage
 only its own owner after a shared durable deadline elapses.
 
 The clean-close retry jitter maximum MUST be read from the
@@ -444,6 +447,20 @@ increment and persist genuine upstream `stream_incomplete`,
 `stream_idle_timeout`, and `clean_close` failures when their attempt is
 eligible. Anchor replay and error-provenance policy remain governed by their
 existing contracts.
+
+#### Scenario: A stale probe failure cannot invalidate its replacement
+
+- **GIVEN** a probe has entered terminal settlement and a replacement probe has
+  subsequently claimed a different process-local lease generation
+- **WHEN** the old probe reports a genuine upstream failure
+- **THEN** the old failure MUST NOT change the retry-circuit count, cooldown,
+  durable episode, replacement owner, or replacement lease
+- **AND** terminal delivery and account settlement for the old request MUST
+  still complete
+- **AND** the replacement's successful completion MUST remain eligible to
+  settle its captured episode and generation
+- **AND** current-generation probe failures and ordinary non-probe failures
+  MUST retain their existing eligible attempt-scoped accounting
 
 #### Scenario: An explicit incomplete reason retains genuine failure accounting
 

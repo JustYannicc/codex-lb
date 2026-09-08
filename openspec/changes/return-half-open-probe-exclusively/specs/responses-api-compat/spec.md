@@ -251,6 +251,20 @@ increment and persist genuine upstream `stream_incomplete`,
 eligible. Anchor replay and error-provenance policy remain governed by their
 existing contracts.
 
+#### Scenario: A stale probe failure cannot invalidate its replacement
+
+- **GIVEN** a probe has entered terminal settlement and a replacement probe has
+  subsequently claimed a different process-local lease generation
+- **WHEN** the old probe reports a genuine upstream failure
+- **THEN** the old failure MUST NOT change the retry-circuit count, cooldown,
+  durable episode, replacement owner, or replacement lease
+- **AND** terminal delivery and account settlement for the old request MUST
+  still complete
+- **AND** the replacement's successful completion MUST remain eligible to
+  settle its captured episode and generation
+- **AND** current-generation probe failures and ordinary non-probe failures
+  MUST retain their existing eligible attempt-scoped accounting
+
 #### Scenario: An explicit incomplete reason retains genuine failure accounting
 
 - **GIVEN** an otherwise eligible eventless upstream attempt
