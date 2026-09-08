@@ -27,6 +27,11 @@ pytestmark = pytest.mark.unit
 async def test_accepted_replay_probe_covers_original_budget_and_cannot_send_after_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=proxy_service.get_settings())),
+    )
     clock = VirtualClock(monotonic_value=1000.0)
     scheduler = VirtualScheduler(clock)
     service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
