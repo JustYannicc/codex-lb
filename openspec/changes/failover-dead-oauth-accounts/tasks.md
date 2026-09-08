@@ -2,13 +2,13 @@
 
 - [x] 1.1 Classify `token_revoked` as a permanent reauthentication failure.
 - [x] 1.2 Preserve canonical HTTP 401 mapping for the upstream error spelling.
+- [x] 1.3 Classify `token_revoked` through the shared WebSocket authentication-failure code set.
 
-## 2. Compact recovery
+## 2. Scope and regression coverage
 
-- [x] 2.1 Exclude a dead account after a permanent post-401 refresh failure and
-  retry movable compact work on another eligible account.
-- [x] 2.2 Keep account-owned compact work fail-closed.
-- [x] 2.3 Preserve API-key settlement before deferred account-health mutation.
+- [x] 2.1 Remove the overlapping compact requirement; #2080 owns forced-refresh failover.
+- [x] 2.2 Cover revoked-token classification and its use with existing compact account ownership and settlement behavior.
+- [x] 2.3 Make the HTTP bridge file-affinity ordering regression hermetic.
 
 ## 3. Validation
 

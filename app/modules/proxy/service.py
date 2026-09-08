@@ -513,7 +513,9 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _call_stream_with_supported_optional_kwargs as _call_stream_with_supported_optional_kwargs,
 )
-from app.modules.proxy._service.streaming.helpers import _classify_upstream_close as _classify_upstream_close
+from app.modules.proxy._service.streaming.helpers import (
+    _classify_upstream_close as _classify_upstream_close,
+)
 from app.modules.proxy._service.streaming.helpers import (
     _is_account_neutral_transport_drop as _is_account_neutral_transport_drop,
 )
@@ -804,7 +806,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
-
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -864,7 +865,9 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "server_is_overloaded",
     }
 )
-_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication", "token_invalidated"})
+_WEBSOCKET_AUTH_FAILURE_CODES = frozenset(
+    {"invalid_api_key", "invalid_authentication", "token_invalidated", "token_revoked"}
+)
 _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS = (
     "session has ended",
     "session expired",
