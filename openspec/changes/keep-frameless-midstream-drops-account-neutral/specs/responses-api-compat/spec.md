@@ -21,6 +21,9 @@ that the transport ended; for close-kind messages with an absent close code, it
 MUST require positive adapter provenance that no close frame was received.
 Protocol errors or upstream-authored empty close frames without that provenance
 MUST retain their existing account-health treatment.
+Protocol-error replay eligibility MUST remain governed by the existing replay
+guards; transport-ending provenance in this requirement governs health
+attribution, not an additional replay restriction.
 It MUST NOT make a post-output request eligible for transparent redispatch, and
 an operation with response events or buffered model output MUST remain
 acknowledged rather than recoverable. Only a frame-less drop with zero response events and no

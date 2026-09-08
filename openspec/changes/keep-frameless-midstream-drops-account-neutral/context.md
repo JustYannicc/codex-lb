@@ -17,7 +17,20 @@ not redispatched.
 | No frame / `None` or `1006` | No | Neutral | Existing windowed signal | Existing pre-visible guards only |
 | No frame / `None` or `1006` | Yes | Neutral | No | No |
 | Upstream-authored close frame | Any | Existing behavior | No | Existing guards |
-| Protocol-invalid nonterminal message | Any | Existing behavior | No | No |
+| Protocol-invalid nonterminal message | Any | Existing behavior | No | Existing guards |
+
+Transport-ending provenance is used for account-health attribution only. This
+change does not tighten upstream's replay gate for protocol errors: accepted,
+output-free requests remain subject to the existing replay guards. Model/tool
+output still blocks replay.
+
+## Rollout
+
+Non-container installations must rebuild the native helper together with the
+Python update. The required `websocket_close_frame_provenance_v1` capability
+distinguishes received empty Close frames from EOF. An incompatible helper
+fails closed with `NativeEgressProtocolError` before dispatch; missing
+capabilities do not silently fall back to Python transport.
 
 Unless an existing bounded pre-created recovery succeeds, the current request
 still receives one terminal `stream_incomplete` result. Durable operations that

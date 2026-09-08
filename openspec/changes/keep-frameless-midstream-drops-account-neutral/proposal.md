@@ -43,3 +43,9 @@ The change covers HTTP bridge account-health accounting, the internal
 aiohttp/Codex, and native-egress adapter mappings. It introduces no external
 API, setting, schema, migration, retry, or routing change. It supersedes only
 the observed-output penalty clause in `keep-abrupt-eventless-drop-account-neutral`.
+
+Non-container deployments must rebuild the native helper for the added
+`websocket_close_frame_provenance_v1` capability. Capability mismatch retains
+upstream's fail-closed `NativeEgressProtocolError` contract, not Python fallback.
+Protocol-error replay eligibility remains governed by the existing upstream
+guards; this change only alters transport/account-health attribution.
