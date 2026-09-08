@@ -2012,7 +2012,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260908_000000_add_subscription_overflow"
+    parent_revision = "20260908_020000_merge_overflow_transport_heads"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2078,12 +2078,13 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_until_epoch" not in before_columns
 
         # Seed at the new parent, before the receipt columns exist. Marker
-        # migration must preserve both upstream overflow state and generation 4.
+        # migration must preserve both upstream branches and generation 4.
         async with engine.begin() as conn:
             updated_settings = await conn.execute(
                 text(
                     "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "
-                    "subscription_overflow_drain_until = '2026-09-09 12:00:00'"
+                    "subscription_overflow_drain_until = '2026-09-09 12:00:00', "
+                    "upstream_stream_transport = 'websocket'"
                 )
             )
             assert updated_settings.rowcount > 0
@@ -2770,3 +2771,57 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
     assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
+
+
+@pytest.mark.asyncio
+async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replicas(tmp_path):
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.models import RequestLog
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retired-prewarm-canary-columns.sqlite'}"
+    retired_columns = {"prewarm_canary_bucket", "prewarm_eligible_reason"}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+    # The ORM no longer maps the retired columns...
+    assert not (retired_columns & set(RequestLog.__table__.columns.keys()))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            head_columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")}
+            )
+            # ...but the head schema still carries them, so a replica running the
+            # previous release (which maps them and renders explicit NULLs in its
+            # INSERT) keeps writing request logs while the migration Job has
+            # already run ahead of the workload roll.
+            assert retired_columns <= head_columns
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO request_logs (
+                        id, account_id, request_id, requested_at, model, input_tokens, output_tokens,
+                        cached_input_tokens, reasoning_tokens, reasoning_effort, latency_ms, status,
+                        error_code, error_message, prewarm_status, prewarm_canary_bucket, prewarm_eligible_reason
+                    )
+                    VALUES (
+                        1, 'acc_prewarm_legacy', 'req_prewarm_legacy', '2026-07-01 00:00:00', 'gpt-5', 10, 20,
+                        0, 0, NULL, 100, 'ok', NULL, NULL, 'success', NULL, NULL
+                    )
+                    """
+                )
+            )
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT account_id, model, status, prewarm_status FROM request_logs WHERE id = 1")
+                )
+            ).one()
+        assert tuple(row) == ("acc_prewarm_legacy", "gpt-5", "ok", "success")
+    finally:
+        await engine.dispose()
+
+    # The retained physical columns are an allow-listed drift, not a schema defect.
+    assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()

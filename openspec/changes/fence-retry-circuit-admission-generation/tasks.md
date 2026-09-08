@@ -78,3 +78,9 @@
 - [x] 4.14 Reparent the unmerged marker migration onto main's subscription
   overflow revision, preserve one Alembic head, and verify upgrade, guarded
   downgrade, and re-upgrade preserve upstream schema/data and retry generations.
+- [x] 4.15 Follow the merged overflow/transport graph repair, preserve both
+  parent migrations and transport settings, and recheck populated marker
+  upgrade, guarded downgrade, writer exclusion, and re-upgrade.
+- [x] 4.16 Keep the upstream merge regression bound to its historical merge
+  while proving that later descendants reach the sole current head without
+  comparing a historical schema against a later ORM model.

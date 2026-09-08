@@ -29,12 +29,19 @@ rollback therefore cannot race a durable claim that does not use the broader
 migration lock.
 
 The unmerged marker migration follows
-`20260908_000000_add_subscription_overflow`, the main-branch head introduced
-by #2165. This keeps one Alembic head. Its operations affect only the retry
-circuit table; upgrading or rolling back the marker must preserve the parent's
-subscription-overflow settings, model-source pins, and existing retry
-generations. The merged parent migration is unchanged. This graph correction
-does not choose the stranded-receipt policy or add late-receipt recovery.
+`20260908_020000_merge_overflow_transport_heads`, the shared graph repair from
+#2198. That merge joins the subscription-overflow and transport-sentinel
+revisions without changing either. The marker's operations affect only the
+retry-circuit table; upgrading or rolling it back must preserve both parent
+schemas, overflow settings, explicit transport choices, model-source pins,
+and existing retry generations. All three merged revisions remain unchanged.
+This graph correction does not choose the stranded-receipt policy or add
+late-receipt recovery.
+
+The upstream merge regression tests the historical merge boundary explicitly.
+Separate populated upgrades go directly to the current head and compare against
+current ORM metadata. A later child revision must not make that historical
+no-op merge appear to add the child's columns or fail current-head assertions.
 
 ## Claim path
 
