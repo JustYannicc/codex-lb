@@ -279,22 +279,10 @@ async def test_http_bridge_event_put_releases_blocked_budget_on_cancellation() -
 
 @pytest.mark.asyncio
 async def test_http_bridge_event_put_releases_blocked_budget_after_repeated_cancellation() -> None:
-    cleanup_started = asyncio.Event()
-    release_cleanup = asyncio.Event()
-
-    class SlowCancellationEvent(asyncio.Event):
-        async def wait(self):
-            try:
-                return await super().wait()
-            except asyncio.CancelledError:
-                cleanup_started.set()
-                await release_cleanup.wait()
-                raise
-
     budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=32)
     event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
         maxsize=1,
-        revoked=SlowCancellationEvent(),
+        revoked=asyncio.Event(),
         byte_budget=budget,
     )
     event_queue.put_nowait("first")
@@ -304,9 +292,7 @@ async def test_http_bridge_event_put_releases_blocked_budget_after_repeated_canc
     assert budget.used_bytes == len("first") + len("blocked-payload")
 
     producer.cancel()
-    await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
     producer.cancel()
-    release_cleanup.set()
 
     with pytest.raises(asyncio.CancelledError):
         await producer
@@ -1000,8 +986,10 @@ async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hold_detach_lock", [False, True])
 async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
     monkeypatch: pytest.MonkeyPatch,
+    hold_detach_lock: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="cancel-before-consumer")
@@ -1063,10 +1051,20 @@ async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
         downstream_turn_state=None,
     )
     consumer_task = asyncio.create_task(anext(stream))
+    lock_held = False
 
     try:
         await asyncio.wait_for(cooldown_entered.wait(), timeout=1.0)
+        if hold_detach_lock:
+            await session.pending_lock.acquire()
+            lock_held = True
         consumer_task.cancel()
+        if lock_held:
+            # Producer wakeup must precede detach's pending-lock wait. The
+            # shared reader can otherwise hold a lock that cleanup needs.
+            await asyncio.wait_for(producer_released.wait(), timeout=1.0)
+            session.pending_lock.release()
+            lock_held = False
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(consumer_task, timeout=1.0)
         await asyncio.wait_for(producer_released.wait(), timeout=1.0)
@@ -1090,6 +1088,8 @@ async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
             if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
         ]
     finally:
+        if lock_held:
+            session.pending_lock.release()
         consumer_task.cancel()
         if producer_task is not None:
             producer_task.cancel()

@@ -1,5 +1,29 @@
 ## ADDED Requirements
 
+### Requirement: Live queue writes do not spawn per-event tasks
+
+HTTP-bridge live event writes MUST wait for finite queue capacity in the
+producer task without creating child enqueue, revocation, or cleanup tasks.
+A blocked payload MUST retain one process-wide byte reservation owned by that
+producer until the payload is enqueued or the wait ends. Cancellation or
+revocation before enqueue MUST release that reservation before returning,
+without an asynchronous cleanup wait. A producer cancelled after a capacity
+wakeup MUST NOT insert its payload or strand another waiting producer.
+
+#### Scenario: Blocked producer resumes without child tasks
+
+- **GIVEN** a live queue is full and a producer waits with a reserved payload
+- **WHEN** its consumer drains a slot
+- **THEN** the producer enqueues that payload without spawning a child task
+- **AND** dequeue releases its byte reservation exactly once
+
+#### Scenario: Cancellation races a capacity wakeup
+
+- **GIVEN** multiple producers are waiting on a full live queue
+- **WHEN** a slot is drained and one awakened producer is cancelled before enqueue
+- **THEN** its payload reservation is released without inserting the payload
+- **AND** another waiting producer can use the available slot
+
 ### Requirement: Live queue reads do not spawn per-event tasks
 
 Buffered and waiting HTTP-bridge live event reads MUST use the consumer task
@@ -23,7 +47,7 @@ Across all live HTTP-bridge queues, retained event payload bytes MUST remain wit
 
 The HTTP route MAY translate budget exhaustion into an HTTP 503 only before it has emitted its first stream event. Once any SSE event has been emitted, later budget exhaustion MUST remain inside the committed stream and emit the `response.failed` terminal result instead of raising a route-level HTTP error.
 
-Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader and its enqueue tasks do not leak. Repeated cancellation while a blocked enqueue is cleaning up MUST NOT interrupt task reaping or release of the payload's process-wide byte reservation; cancellation MUST propagate only after that cleanup finishes. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
+Downstream detachment or cancellation MUST release any relay wait on that request's full queue so the shared upstream reader does not leak. Repeated cancellation MUST NOT interrupt release of the blocked payload's process-wide byte reservation; cancellation MUST propagate only after that synchronous cleanup finishes. Revocation of downstream delivery MUST NOT prevent terminal persistence, reservation settlement, request logging, or request/session cleanup.
 
 Failure finalization for an attached stream MUST publish its ordered terminal result without waiting for live queue capacity. A full queue and stalled attached consumer MUST NOT keep session lifecycle ownership from a later request, and the consumer MUST still receive every buffered event before the terminal result and end marker.
 
@@ -109,8 +133,8 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 #### Scenario: Repeated cancellation releases a blocked reservation
 
 - **GIVEN** a live-event producer whose payload reservation is waiting on a full queue
-- **WHEN** cancellation is requested again while the producer is reaping its enqueue-owned tasks
-- **THEN** the producer finishes reaping those tasks and releases the blocked payload reservation
+- **WHEN** cancellation is requested repeatedly before the producer resumes
+- **THEN** the producer releases the blocked payload reservation without an asynchronous cleanup wait
 - **AND** cancellation propagates only after the process-wide byte budget reflects that release
 
 ## MODIFIED Requirements

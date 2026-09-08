@@ -27,6 +27,8 @@ An admitted HTTP-bridge Responses stream currently stores upstream events in an 
 - Add deterministic integration coverage for paused, resumed, and paced consumers without adding a user setting.
 - Route queue tasks, deadline reads, and same-task read timeouts through the
   clock and scheduler introduced by upstream's lifecycle simulation work.
+- Keep blocked puts in their producer task using capacity futures and locally
+  owned byte reservations, without per-event enqueue or cleanup tasks.
 
 ## Capabilities
 
