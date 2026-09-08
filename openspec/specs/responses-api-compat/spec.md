@@ -711,16 +711,35 @@ Public Responses endpoints MUST NOT return an OpenAI-shaped `previous_response_n
 - **AND** the missing `previous_response_id` is not exposed in the response body
 
 ### Requirement: Public /v1 responses SSE stream emits only OpenAI Responses contract events
-When serving streaming `POST /v1/responses`, the service MUST emit only event types defined by the OpenAI Responses SSE contract (the `response.*` and `error` families) on the public stream. The service MUST drop any vendor-internal event types — specifically, any event whose `type` begins with `codex.` (for example `codex.rate_limits`) — before they reach the public stream. The `/backend-api/codex/*` routes are NOT subject to this requirement and MUST continue forwarding these events unchanged.
+
+When serving streaming `POST /v1/responses`, the service MUST forward a
+string-valued event type only when it is exactly `error` or begins with
+`response.`. Other string-valued event types MUST be dropped before they reach
+the public stream. OpenAI-shaped backend requests with public contract
+enforcement enabled MUST follow the same filtering rule. Native Codex requests
+with public contract enforcement disabled MUST retain upstream vendor events.
 
 #### Scenario: Codex-internal rate-limit event is dropped before response.created
-- **WHEN** the upstream Codex backend emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
-- **THEN** the public stream MUST NOT contain the `codex.rate_limits` event
-- **AND** the first event the public stream emits MUST be `response.created`
+
+- **WHEN** upstream emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
+- **THEN** the public stream MUST NOT contain `codex.rate_limits`
+- **AND** its first event MUST be `response.created`
+
+#### Scenario: Timing diagnostics are filtered without losing text or completion
+
+- **WHEN** upstream emits `responsesapi.websocket_timing` before, between, or after standard response events
+- **THEN** a public-contract stream MUST NOT contain that diagnostic
+- **AND** standard text deltas and completion events MUST remain in order
+
+#### Scenario: OpenAI-shaped backend request filters vendor events
+
+- **WHEN** an OpenAI-shaped `/backend-api/codex/responses` request enables public contract enforcement
+- **THEN** its response stream MUST apply the public event-family filtering rule
 
 #### Scenario: Codex-internal events on the Codex CLI route are preserved
-- **WHEN** the upstream emits `codex.rate_limits` for a `POST /backend-api/codex/responses` request
-- **THEN** the response stream forwards the `codex.rate_limits` event to the Codex CLI client unchanged
+
+- **WHEN** a native `/backend-api/codex/responses` request disables public contract enforcement
+- **THEN** the response stream MUST retain `codex.rate_limits` and `responsesapi.websocket_timing` in upstream order
 
 ### Requirement: Streamed /v1 responses terminal output is backfilled from item events
 When serving streaming `POST /v1/responses`, if the upstream's terminal `response.completed` or `response.incomplete` event carries `output` as missing or as an empty list, the service MUST reconstruct `output` from the `response.output_item.done` events emitted earlier in the same stream before yielding the terminal SSE event. The reconstructed `output` MUST preserve the `output_index` ordering and the raw item payloads. When the terminal `response.completed` / `response.incomplete` already carries a non-empty `output`, the service MUST forward it unchanged.
@@ -6042,14 +6061,14 @@ cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
 ### Requirement: Native compact Responses preserve terminal and ownership contracts
 
 Direct and account-routed compact requests MUST use native transport when the
-helper has negotiated `http_compact_sse_v1`. Native SSE framing MUST apply only
+helper has negotiated `http_compact_sse_v1` and `http_compact_collect_v1`. Native SSE framing MUST apply only
 to successful responses selected by the outbound HTTP Content-Type rule; other
-responses MUST retain raw body handling. Python MUST retain request shaping, output collection,
+responses MUST retain raw body handling. Python MUST retain request shaping,
 compact normalization, terminal error mapping, archives, routing, and settlement.
 Responses MUST remain open until consumption finishes, and owned responses and
 routed sessions MUST close on completion, failure, and cancellation. Missing
 helpers MAY use Python transport only before dispatch. An installed helper lacking
-`http_compact_sse_v1` MUST fail negotiation before dispatch without Python fallback. Native failures after
+either required compact capability MUST fail negotiation before dispatch without Python fallback. Native failures after
 dispatch MUST NOT replay the POST through Python or another proxy endpoint.
 
 #### Scenario: Compact completes before HTTP EOF
@@ -6081,3 +6100,68 @@ dispatch MUST NOT replay the POST through Python or another proxy endpoint.
 - **WHEN** an already cancelled caller scope interrupts native response-head waiting
 - **THEN** request cancellation completes and its stream registration is removed
 - **AND** a completed native exchange wins a simultaneous shutdown/cancel race without an additional terminal event
+
+### Requirement: Native compact collection preserves terminal output assembly
+
+For direct and account-routed compact SSE requests with negotiated native
+collection, Rust MUST collect output items and assemble the terminal response.
+The last item for each integer output index MUST win; indexed items MUST be
+ordered numerically, followed by unindexed done items in arrival order. A
+nonempty terminal output array MUST take precedence over collected items.
+Unknown JSON fields and integer values MUST be preserved. Python MUST retain
+public shape normalization, error translation, archives, routing, and settlement.
+
+#### Scenario: Completion without terminal output
+
+- **WHEN** output-item events precede a completed response with missing or empty output
+- **THEN** the result includes collected items in the documented order
+- **AND** returns on completion without waiting for HTTP EOF or interpreting later events
+
+#### Scenario: Existing terminal output
+
+- **WHEN** the completed response contains a nonempty output array
+- **THEN** that array is returned without merging earlier collected items
+
+#### Scenario: Terminal failure or missing completion
+
+- **WHEN** an SSE stream fails, is incomplete, has no valid completed response object, or ends before completion
+- **THEN** the existing compact error envelope and failure classification are preserved
+
+#### Scenario: Missing-helper compatibility
+
+- **WHEN** the native helper is unavailable before dispatch
+- **THEN** Python transport and collection preserve the same output assembly contract
+
+### Requirement: Native HTTP interprets Responses stream events compatibly
+
+Native direct and routed HTTP Responses streams MUST preserve the existing event
+classification and legacy text/audio/audio-transcript alias normalization.
+Unmodified events MUST retain their original text. SSE field parsing MUST
+recognize only CR, LF, and CRLF boundaries and join data fields with LF.
+Canonical event-line classification, malformed JSON, native passthrough mode,
+unknown fields, and terminal behavior MUST match the Python path.
+
+The synchronous Rust Responses library MUST own eligible alias normalization and
+event classification. Python MUST retain request-context-dependent error mapping.
+When alias serialization contains floating numbers, integers outside the Rust
+JSON integer domain, or escaped surrogate strings, the interpreter MUST signal
+Python normalization of the original event rather than lose data or reinterpret
+its representation. This handoff MUST NOT replay the request.
+
+#### Scenario: Legacy alias on framing and payload
+
+- **WHEN** an event uses a supported legacy alias in its event line or payload
+- **THEN** both surfaces are normalized according to the existing Python rules
+- **AND** unrelated data and fields retain their values
+
+#### Scenario: Unsupported alias JSON representation
+
+- **WHEN** rewriting an alias requires a JSON representation outside the native serializer's supported domain
+- **THEN** Python receives the original event and an explicit normalization marker
+- **AND** the public result matches the ordinary Python transport
+
+#### Scenario: Native error passthrough
+
+- **WHEN** native passthrough receives an error event
+- **THEN** it remains an error event and ends the stream under the existing policy
+- **AND** SDK mode retains the existing request-context-dependent error conversion
