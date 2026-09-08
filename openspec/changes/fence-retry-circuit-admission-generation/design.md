@@ -28,6 +28,14 @@ while SQLite uses `BEGIN IMMEDIATE` to take the writer slot. A direct Alembic
 rollback therefore cannot race a durable claim that does not use the broader
 migration lock.
 
+The unmerged marker migration follows
+`20260908_000000_add_subscription_overflow`, the main-branch head introduced
+by #2165. This keeps one Alembic head. Its operations affect only the retry
+circuit table; upgrading or rolling back the marker must preserve the parent's
+subscription-overflow settings, model-source pins, and existing retry
+generations. The merged parent migration is unchanged. This graph correction
+does not choose the stranded-receipt policy or add late-receipt recovery.
+
 ## Claim path
 
 At stale-anchor authorization, the bridge captures an immutable

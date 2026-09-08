@@ -75,3 +75,6 @@
 - [x] 4.13 Fence scheduled purge snapshots on `consecutive_failures` so a
   lagging-clock failure survives; verify normal and tombstone deletes stay
   within SQLite's 999-bind limit.
+- [x] 4.14 Reparent the unmerged marker migration onto main's subscription
+  overflow revision, preserve one Alembic head, and verify upgrade, guarded
+  downgrade, and re-upgrade preserve upstream schema/data and retry generations.

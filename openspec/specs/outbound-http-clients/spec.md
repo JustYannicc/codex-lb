@@ -645,8 +645,8 @@ The native protocol MUST advertise and the Python adapter MUST require
 `http_sse_v1` before dispatch. HTTP requests MAY include SSE framing options
 with positive idle timeout and event byte limit. Without these options, and
 for HTTP statuses at least 400, the worker MUST preserve raw chunk output.
-With these options and a successful HTTP response, Rust MUST emit complete
-SSE text blocks and own byte framing and the deadline between body reads.
+With these options and a successful HTTP response selected for framing, Rust
+MUST emit complete SSE text blocks and own byte framing and the deadline between body reads.
 Python MUST NOT reframe these blocks or replay a dispatched request.
 IPC text fragments MUST be bounded to at most 16 KiB of UTF-8, with an explicit
 continuation flag; the adapter MUST join them before exposing an event and
@@ -701,3 +701,161 @@ retain selected route metadata and native framed-response consumption.
 
 - **WHEN** a caller supplies native SSE options with buffered response consumption
 - **THEN** the request fails before either native or Python dispatch
+
+### Requirement: Compact native framing supports response content negotiation
+
+The native protocol MUST advertise and the adapter MUST require
+`http_compact_sse_v1` before dispatching content-type-aware SSE requests.
+Such requests MUST frame successful responses when the Content-Type media type
+is exactly `text/event-stream`, ignoring parameters and case, or when the header
+is absent or empty. Other successful
+responses and HTTP errors MUST retain raw body consumption. Ordinary SSE
+requests without the content-type-aware option MUST retain their existing
+framing behavior. A null native total timeout MUST mean no total deadline;
+positive explicit total, connection, and SSE idle limits MUST be preserved.
+The compact SSE idle limit MUST retain the existing Python policy: use the
+effective compact timeout when set, otherwise use `stream_idle_timeout_seconds`.
+
+#### Scenario: Compact success returns JSON
+
+- **WHEN** a compact request receives a successful application/json response
+- **THEN** the worker and adapter expose raw bytes for the existing JSON parser
+- **AND** SSE event limits and decoding are not applied to that JSON body
+
+#### Scenario: Compact success returns SSE or omits Content-Type
+
+- **WHEN** a compact success has a text/event-stream or absent/empty Content-Type
+- **THEN** Rust owns byte framing, original-byte limits, and body-read idle deadlines
+- **AND** Python consumes framed text without rescanning bytes
+
+#### Scenario: Non-SSE media type mentions event-stream
+
+- **WHEN** compact succeeds with `text/event-stream+json` or a JSON Content-Type parameter containing `text/event-stream`
+- **THEN** native and missing-helper Python transports use raw-body JSON parsing
+- **AND** the SSE event byte limit does not apply to the JSON body
+
+#### Scenario: Explicit compact timeout preserves its idle budget
+
+- **WHEN** a compact request has an effective compact timeout longer than the ordinary stream idle timeout
+- **THEN** native and missing-helper Python transports permit a body-read gap within that compact timeout
+- **AND** the compact total deadline still bounds the complete request
+
+#### Scenario: Optional total timeout
+
+- **WHEN** compact has no total timeout
+- **THEN** native transport does not substitute a default total timeout
+- **AND** its configured connection and SSE idle limits remain active
+
+#### Scenario: Incompatible helper
+
+- **WHEN** an installed helper lacks http_compact_sse_v1
+- **THEN** the adapter fails before dispatch rather than silently ignoring compact options
+- **AND** it does not replay through Python
+
+### Requirement: Native compact collection is negotiated and bounded across IPC
+
+The adapter MUST require `http_compact_collect_v1` before requesting native
+compact collection. Collection MUST apply only to successful responses selected
+for SSE by the compact Content-Type contract. Other bodies MUST retain raw-body
+handling. Collected result IPC text fragments MUST NOT exceed 16 KiB of UTF-8.
+The adapter MUST reject malformed or truncated results without replaying the
+request. Missing-helper fallback MUST remain limited to the pre-dispatch boundary.
+
+#### Scenario: Large collected result
+
+- **WHEN** a compact result exceeds one IPC text fragment
+- **THEN** the adapter reconstructs one complete result with all unknown fields intact
+- **AND** ready consumers receive scheduling opportunities between fragments
+
+#### Scenario: Incompatible installed helper
+
+- **WHEN** a launched helper lacks the compact collection capability
+- **THEN** negotiation fails before dispatch and no Python replay occurs
+
+#### Scenario: Cancellation while collecting
+
+- **WHEN** a compact caller cancels before a terminal result
+- **THEN** its native request and owned response/session close
+- **AND** another request sharing the helper remains usable
+
+### Requirement: Native event dispatch schedules ready consumers
+
+The native helper event reader MUST give ready response consumers a scheduling
+opportunity between accepted events, including when helper output is already
+buffered. A burst exceeding the per-request queue capacity MUST complete without
+data loss when its consumer keeps draining. A stalled consumer MUST retain a
+bounded queue and fail independently without blocking sibling requests.
+
+#### Scenario: Buffered burst with active consumer
+
+- **GIVEN** a helper emits more events than the queue capacity in one buffered burst
+- **WHEN** the caller continuously consumes the response body
+- **THEN** all body bytes arrive in order and the response completes
+
+#### Scenario: Stalled consumer shares the helper
+
+- **GIVEN** one caller stops consuming while another request shares its helper
+- **WHEN** the stalled request exceeds its bounded event queue
+- **THEN** only the stalled request fails and the other request completes
+
+#### Scenario: Responses consumes buffered native bursts
+
+- **GIVEN** direct or account-routed Responses uses the native helper
+- **WHEN** framed SSE events, raw JSON success chunks, or raw HTTP error chunks arrive in a buffered burst exceeding queue capacity
+- **THEN** an active consumer receives ordered SSE events, the complete JSON response, or the original HTTP error respectively
+- **AND** the response is not replaced by a consumer-backpressure error
+
+### Requirement: Interpreted Responses SSE is negotiated across IPC
+
+The adapter MUST require `http_responses_events_v1` before requesting interpreted
+Responses events. Ordinary framing and compact collection MUST retain their
+separate contracts. Interpreted text fragments MUST remain at most 16 KiB of
+UTF-8. Type metadata MUST remain at most 16 KiB of UTF-8 and count toward the
+queue byte budget; longer types MUST use Python normalization without metadata.
+Only the final fragment MAY carry a type or request Python normalization.
+Event type and Python-normalization metadata MUST be validated before use;
+malformed or truncated events MUST fail without replay. Body-read deadlines,
+original-byte event limits, cancellation and ready-consumer scheduling MUST remain
+active. Missing-helper fallback MUST occur only before dispatch.
+
+#### Scenario: Fragmented interpreted event
+
+- **WHEN** one interpreted event spans multiple IPC fragments
+- **THEN** the adapter emits one complete event with its validated metadata
+- **AND** an active consumer can drain a burst beyond queue capacity
+
+#### Scenario: Incompatible installed helper
+
+- **WHEN** the installed helper lacks the required interpretation capability
+- **THEN** the adapter rejects negotiation before dispatch without Python replay
+
+### Requirement: Native SSE writes coalesce ready records without delaying delivery
+
+The native helper MAY coalesce SSE IPC records already available from the current
+body read. It MUST bound each coalesced write by encoded bytes and record count,
+allowing an individual existing protocol record larger than the batch byte budget
+to be written alone. It MUST flush all ready records before another upstream read
+and before terminal or framing-error delivery. It MUST NOT wait for another event
+or a batching timer. Existing JSON-line records, ordering, text-fragment bounds,
+consumer scheduling and replay rules MUST remain unchanged.
+
+Cancellation during an output write MUST NOT truncate or interleave IPC records.
+Any accepted but unfinished write MUST remain owned by the shared output until it
+completes or the output itself fails. A subsequent writer MUST finish that output
+before emitting its own record.
+
+#### Scenario: Quiet upstream after one event
+
+- **WHEN** one event arrives and the upstream waits for the next request action
+- **THEN** the event reaches the consumer without requiring another body read or EOF
+
+#### Scenario: Valid prefix before a framing failure
+
+- **WHEN** ready valid events precede an oversized event in the same body read
+- **THEN** the valid prefix arrives in order before the typed size failure
+
+#### Scenario: Cancel while output is backpressured
+
+- **WHEN** a request is cancelled after its output write starts
+- **THEN** a sibling event or cancellation acknowledgement follows complete JSON lines
+- **AND** unrelated requests retain valid streams

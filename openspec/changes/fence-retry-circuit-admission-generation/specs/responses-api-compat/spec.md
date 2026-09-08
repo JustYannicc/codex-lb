@@ -97,6 +97,16 @@ table, and SQLite MUST acquire `BEGIN IMMEDIATE` before inspecting receipts.
 This serialization MUST cover direct Alembic downgrade invocations that bypass
 the application migration mutex.
 
+#### Scenario: Marker migration preserves its main-branch parent
+
+- **GIVEN** the subscription-overflow parent revision is applied with existing
+  settings, model-source pins, and retry-circuit generations
+- **WHEN** the marker migration is upgraded, safely downgraded to that parent,
+  and upgraded again
+- **THEN** the migration graph MUST retain one head
+- **AND** the parent schema, settings, pins, and retry generations MUST remain
+  intact while only the nullable claim-marker columns are added or removed
+
 #### Scenario: An active receipt blocks migration rollback
 
 - **GIVEN** the marker migration is applied and a retry row has a claim-until

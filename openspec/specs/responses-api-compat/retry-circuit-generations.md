@@ -16,6 +16,12 @@ One bounded lookup can recover the original receipt by its exact generation and
 claim-start epoch, provided the database still considers it live. A competing,
 expired, or unconfirmed receipt does not authorize dispatch.
 
+The unmerged claim-marker migration follows main's
+`20260908_000000_add_subscription_overflow` revision. It adds or removes only
+the nullable retry-circuit marker columns, preserving the parent's overflow
+settings, model-source pins, and existing retry generations. A live receipt
+still blocks rollback before schema or version changes.
+
 An ambiguous send or unconfirmed release can retain a receipt until expiry.
 The stranded-receipt policy remains an explicit maintainer decision in the
 [change design](../../changes/fence-retry-circuit-admission-generation/design.md#open-decision-stranded-claim-receipt-lockout).

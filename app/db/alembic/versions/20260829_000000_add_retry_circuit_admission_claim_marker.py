@@ -1,7 +1,7 @@
 """add retry-circuit admission claim lease
 
 Revision ID: 20260829_000000_add_retry_circuit_admission_claim_marker
-Revises: 20260830_000000_add_quota_warmup_claim_expiry
+Revises: 20260908_000000_add_subscription_overflow
 Create Date: 2026-08-29
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
-down_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+down_revision = "20260908_000000_add_subscription_overflow"
 branch_labels = None
 depends_on = None
 

@@ -2005,14 +2005,19 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
 @pytest.mark.asyncio
 async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
     from alembic import command
+    from alembic.script import ScriptDirectory
     from sqlalchemy import inspect as sa_inspect
     from sqlalchemy.exc import OperationalError
 
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    parent_revision = "20260908_000000_add_subscription_overflow"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
+    script = ScriptDirectory.from_config(_build_alembic_config(db_url))
+    assert script.get_heads() == [marker_revision]
+    marker_script = script.get_revision(marker_revision)
+    assert marker_script is not None and marker_script.down_revision == parent_revision
 
     def _schema_state(sync_conn):
         inspector = sa_inspect(sync_conn)
@@ -2021,6 +2026,37 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         return {
             "columns": {column["name"] for column in columns},
             "marker_nullable": marker["nullable"],
+        }
+
+    def _preexisting_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "overflow_schema": {
+                table: {
+                    "columns": [
+                        (column["name"], str(column["type"]), column["nullable"], column["default"])
+                        for column in inspector.get_columns(table)
+                    ],
+                    "primary_key": inspector.get_pk_constraint(table),
+                    "foreign_keys": inspector.get_foreign_keys(table),
+                    "indexes": inspector.get_indexes(table),
+                }
+                for table in ("dashboard_settings", "model_source_pins")
+            },
+            "settings": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM dashboard_settings ORDER BY id"))],
+            "pins": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM model_source_pins ORDER BY pin_key"))],
+            "legacy_retry": tuple(
+                sync_conn.execute(
+                    text(
+                        """
+                        SELECT session_key_kind, session_key_hash, api_key_scope,
+                               consecutive_failures, cooldown_until_epoch, last_detail,
+                               updated_at_epoch, admission_generation
+                        FROM http_bridge_retry_circuits WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                ).one()
+            ),
         }
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
@@ -2041,9 +2077,60 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_generation" not in before_columns
         assert "admission_claimed_until_epoch" not in before_columns
 
+        # Seed at the new parent, before the receipt columns exist. Marker
+        # migration must preserve both upstream overflow state and generation 4.
+        async with engine.begin() as conn:
+            updated_settings = await conn.execute(
+                text(
+                    "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "
+                    "subscription_overflow_drain_until = '2026-09-09 12:00:00'"
+                )
+            )
+            assert updated_settings.rowcount > 0
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO model_source_pins (
+                        pin_key, kind, source_id, api_key_id,
+                        created_at, last_seen_at, expires_at, purge_at
+                    ) VALUES (
+                        'retained-thread-pin', 'thread', 'retained-overflow-source', NULL,
+                        '2026-09-08 10:00:00', '2026-09-08 10:30:00',
+                        '2026-09-09 10:00:00', '2026-09-10 10:00:00'
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_retry_circuits (
+                        session_key_kind, session_key_hash, api_key_scope,
+                        consecutive_failures, cooldown_until_epoch, last_detail,
+                        updated_at_epoch, admission_generation
+                    ) VALUES (
+                        'session_header', 'legacy-hash', '__anonymous__',
+                        2, 1300.0, 'stream_incomplete', 1200.0, 4
+                    )
+                    """
+                )
+            )
+            preexisting_state = await conn.run_sync(_preexisting_state)
+
         await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
         async with engine.connect() as conn:
             state = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
+            initial_receipt = (
+                await conn.execute(
+                    text(
+                        "SELECT admission_claimed_at_epoch, admission_claimed_generation, "
+                        "admission_claimed_until_epoch FROM http_bridge_retry_circuits "
+                        "WHERE session_key_hash = 'legacy-hash'"
+                    )
+                )
+            ).one()
+        assert tuple(initial_receipt) == (None, None, None)
         assert {
             "admission_claimed_at_epoch",
             "admission_claimed_generation",
@@ -2055,16 +2142,11 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             await conn.execute(
                 text(
                     """
-                    INSERT INTO http_bridge_retry_circuits (
-                        session_key_kind, session_key_hash, api_key_scope,
-                        consecutive_failures, cooldown_until_epoch, last_detail,
-                        updated_at_epoch, admission_generation,
-                        admission_claimed_at_epoch, admission_claimed_generation,
-                        admission_claimed_until_epoch
-                    ) VALUES (
-                        'session_header', 'legacy-hash', '__anonymous__',
-                        2, 1300.0, 'stream_incomplete', 1200.0, 4, 1100.0, 4, :claim_until_epoch
-                    )
+                    UPDATE http_bridge_retry_circuits
+                    SET admission_claimed_at_epoch = 1100.0,
+                        admission_claimed_generation = 4,
+                        admission_claimed_until_epoch = :claim_until_epoch
+                    WHERE session_key_hash = 'legacy-hash'
                     """
                 ),
                 {"claim_until_epoch": claim_until_epoch},
@@ -2077,6 +2159,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
         async with engine.connect() as conn:
             after_downgrade = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
             row = (
                 await conn.execute(
                     text(
@@ -2170,6 +2253,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             downgrade_future.result(timeout=5)
 
         async with engine.connect() as conn:
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
             after_release_downgrade = await conn.run_sync(
                 lambda sync_conn: {
                     column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
@@ -2183,9 +2267,11 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_until_epoch" not in after_release_downgrade
         assert revision_after_release_downgrade == parent_revision
 
-        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert reupgrade.current_revision == marker_revision
         async with engine.connect() as conn:
             state = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
             row = (
                 await conn.execute(
                     text(
@@ -2362,3 +2448,325 @@ async def test_http_bridge_event_chunks_migration_preserves_legacy_and_guards_do
             ).scalar_one() == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subscription_overflow_settings_columns_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the two nullable overflow designation columns without touching
+    the seeded row; downgrade drops them; a partially applied schema (one column
+    pre-created) upgrades idempotently; a final walk to head proves the revision
+    sits on a single-head graph."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'subscription-overflow-settings.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+    column_names = {"subscription_overflow_source_id", "subscription_overflow_drain_until"}
+
+    def _overflow_columns(sync_conn) -> dict[str, dict[str, object]]:
+        return {
+            column["name"]: {"nullable": column["nullable"], "type": str(column["type"]).upper()}
+            for column in sa_inspect(sync_conn).get_columns("dashboard_settings")
+            if column["name"] in column_names
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_overflow_columns) == {}
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_overflow_columns)
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT subscription_overflow_source_id, subscription_overflow_drain_until "
+                        "FROM dashboard_settings"
+                    )
+                )
+            ).all()
+        assert columns == {
+            "subscription_overflow_source_id": {"nullable": True, "type": "VARCHAR"},
+            "subscription_overflow_drain_until": {"nullable": True, "type": "DATETIME"},
+        }
+        # The seeded settings row keeps NULLs: overflow stays off and no drain
+        # deadline is armed on existing installs (no backfill, no server default).
+        assert rows
+        assert all(row == (None, None) for row in rows)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_overflow_columns) == {}
+
+        # Idempotent re-run: a column pre-created by an interrupted earlier
+        # attempt is kept and only the missing one is added.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("ALTER TABLE dashboard_settings ADD COLUMN subscription_overflow_source_id VARCHAR")
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert set(await conn.run_sync(_overflow_columns)) == column_names
+
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert set(await conn.run_sync(_overflow_columns)) == column_names
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade creates ``model_source_pins`` with its primary key, no foreign key,
+    and the purge-at index; downgrade removes it; a table pre-created without
+    its index (interrupted earlier attempt) receives the index on re-run."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-source-pins.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_source_pins"):
+            return None
+        columns = inspector.get_columns("model_source_pins")
+        return {
+            "nullable": {column["name"]: column["nullable"] for column in columns},
+            "types": {column["name"]: str(column["type"]).upper() for column in columns},
+            "primary_key": inspector.get_pk_constraint("model_source_pins")["constrained_columns"],
+            "foreign_keys": inspector.get_foreign_keys("model_source_pins"),
+            "indexes": {
+                index["name"]: tuple(index["column_names"]) for index in inspector.get_indexes("model_source_pins")
+            },
+        }
+
+    expected_state = {
+        "nullable": {
+            "pin_key": False,
+            "kind": False,
+            "source_id": False,
+            "api_key_id": True,
+            "created_at": False,
+            "last_seen_at": False,
+            "expires_at": False,
+            "purge_at": False,
+        },
+        "types": {
+            "pin_key": "VARCHAR",
+            "kind": "VARCHAR",
+            "source_id": "VARCHAR",
+            "api_key_id": "VARCHAR",
+            "created_at": "DATETIME",
+            "last_seen_at": "DATETIME",
+            "expires_at": "DATETIME",
+            "purge_at": "DATETIME",
+        },
+        "primary_key": ["pin_key"],
+        # source_id deliberately carries no foreign key: pins outlive a deleted
+        # source for the drain window instead of cascading away.
+        "foreign_keys": [],
+        "indexes": {"ix_model_source_pins_purge_at": ("purge_at",)},
+    }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) == expected_state
+            assert (await conn.execute(text("SELECT COUNT(*) FROM model_source_pins"))).scalar_one() == 0
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        # Idempotent re-run: the table guard skips CREATE TABLE for a
+        # pre-existing table, and the independently guarded index step must
+        # still add the missing purge-at index.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE model_source_pins (
+                        pin_key VARCHAR NOT NULL PRIMARY KEY,
+                        kind VARCHAR NOT NULL,
+                        source_id VARCHAR NOT NULL,
+                        api_key_id VARCHAR,
+                        created_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        expires_at DATETIME NOT NULL,
+                        purge_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) == expected_state
+
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) == expected_state
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoy_index_ddl",
+    [
+        pytest.param("CREATE INDEX ix_model_source_pins_purge_at ON model_source_pins (kind)", id="kind-column"),
+        pytest.param(
+            "CREATE UNIQUE INDEX ix_model_source_pins_purge_at ON model_source_pins (purge_at)", id="unique-purge-at"
+        ),
+    ],
+)
+async def test_model_source_pins_index_migration_replaces_valid_decoy_index(tmp_path, decoy_index_ddl):
+    """A pre-existing, valid index that merely shares the purge-at index name is rebuilt.
+
+    The table guard skips ``CREATE TABLE`` for a pre-existing table, so the
+    index step must inspect the reflected definition instead of accepting the
+    name: a same-named index on ``kind`` (or a unique one on ``purge_at``) would
+    otherwise leave the revision marked applied without the index this
+    revision promises.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-source-pins-decoy.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+
+    def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
+        return {
+            index["name"]: (tuple(index["column_names"]), bool(index["unique"]))
+            for index in sa_inspect(sync_conn).get_indexes("model_source_pins")
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE model_source_pins (
+                        pin_key VARCHAR NOT NULL PRIMARY KEY,
+                        kind VARCHAR NOT NULL,
+                        source_id VARCHAR NOT NULL,
+                        api_key_id VARCHAR,
+                        created_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        expires_at DATETIME NOT NULL,
+                        purge_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            await conn.execute(text(decoy_index_ddl))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) != {"ix_model_source_pins_purge_at": (("purge_at",), False)}
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        assert result.current_revision == overflow_revision
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) == {"ix_model_source_pins_purge_at": (("purge_at",), False)}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid pin-index repair test",
+)
+@pytest.mark.parametrize("mark_invalid", [pytest.param(True, id="invalid"), pytest.param(False, id="valid-decoy")])
+async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql(db_setup, mark_invalid):
+    """A pre-existing ``model_source_pins`` table whose purge-at index is wrong is repaired.
+
+    The table guard skips ``CREATE TABLE`` when the table already exists, so the
+    index step must not accept a same-named index by name: neither one left
+    invalid by an interrupted out-of-band ``CREATE INDEX CONCURRENTLY`` nor a
+    valid one on the wrong column. Step the schema back below the overflow
+    revision, plant a decoy key-only index (optionally marked invalid), and
+    assert the re-applied migration replaces it with a valid index on
+    ``purge_at``.
+    """
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    index_name = "ix_model_source_pins_purge_at"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE model_source_pins (
+                    pin_key VARCHAR NOT NULL PRIMARY KEY,
+                    kind VARCHAR NOT NULL,
+                    source_id VARCHAR NOT NULL,
+                    api_key_id VARCHAR,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    purge_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+                """
+            )
+        )
+        await session.execute(text(f"CREATE INDEX {index_name} ON model_source_pins (kind)"))
+        if mark_invalid:
+            await session.execute(
+                text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+                {"name": index_name},
+            )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        indisvalid = (
+            await session.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+                ),
+                {"name": index_name},
+            )
+        ).scalar_one()
+        indexdef = (
+            await session.execute(
+                text("SELECT pg_get_indexdef(CAST(:name AS regclass))"),
+                {"name": index_name},
+            )
+        ).scalar_one()
+
+    assert indisvalid is True
+    assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
+    assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
