@@ -3007,7 +3007,7 @@ def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_fl
 
 
 @pytest.mark.parametrize("primary_used", [None, 100.0], ids=["missing-primary", "synthetic-exhausted-primary"])
-@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum", "unknown"])
+@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
 def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(
     monkeypatch, primary_used, plan_type
 ):
@@ -3052,6 +3052,46 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
     )
 
     assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_unknown_plan_keeps_primary_exhaustion_during_recovery(monkeypatch):
+    # An unrecognized plan is not evidence of a zero-primary-capacity account.
+    # Preserve primary exhaustion until the persisted rate-limit deadline is
+    # known to have elapsed rather than treating unknown as a Free alias.
+    now = 1_700_000_000.0
+    blocked_at = now - 10.0
+    persisted_reset = int(now + 20)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=persisted_reset,
+        blocked_at=int(blocked_at),
+        plan_type="unknown",
+    )
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 2),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="monthly",
+            used_percent=10.0,
+            reset_at=int(now + 30 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 2),
+            window_minutes=43200,
+        ),
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked_at),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == persisted_reset
 
 
 def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_marked_block(monkeypatch):

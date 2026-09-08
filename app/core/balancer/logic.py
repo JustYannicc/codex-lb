@@ -85,7 +85,6 @@ CAPACITY_PLAN_ALIASES = {
     "go": "free",
     "free_workspace": "free",
     "quorum": "free",
-    "unknown": "free",
 }
 
 
