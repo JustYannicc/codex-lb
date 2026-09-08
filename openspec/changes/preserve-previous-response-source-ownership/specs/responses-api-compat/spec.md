@@ -4,6 +4,14 @@
 
 When an upstream Responses request fails because the work requires cybersecurity authorization, codex-lb MUST retry the request on an account marked as security-work-authorized when the request can be safely replayed on a different account. The retry MUST exclude the account that produced the authorization error.
 
+The service MUST generate the non-terminal security advisories described below
+before HTTP event normalization. HTTP streams with public OpenAI contract
+enforcement enabled, including `/v1/responses` and OpenAI-shaped backend requests,
+MUST filter `codex_lb.warning` under the public event-family requirement.
+Native Codex HTTP streams with that enforcement disabled MUST retain those
+advisories. Filtering an advisory MUST NOT suppress or replace the original
+terminal security error. Direct WebSocket advisory delivery remains unchanged.
+
 #### Scenario: Unpinned stream request retries on an authorized account
 
 - **WHEN** an unpinned streamed Responses request fails with a security-work authorization error on an account that is not security-work-authorized
@@ -34,6 +42,13 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **THEN** codex-lb MUST emit a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"` and `action="forward_original_security_work_error"` before returning the original security-work authorization error exactly once
 - **AND** the client MUST NOT receive the internal `security_work_authorized_accounts_exhausted` selection error
 - **AND** the retry MUST preserve the existing owner-pinning and output-exposure replay guards and complete request cleanup
+
+#### Scenario: Public HTTP filtering preserves the terminal security denial
+
+- **GIVEN** HTTP bridge authorized-pool exhaustion generates a missing-pool advisory and the original security denial
+- **WHEN** the request uses `/v1/responses` or an OpenAI-shaped backend stream with public contract enforcement
+- **THEN** the public stream MUST omit `codex_lb.warning` and retain the original security denial exactly once
+- **AND** a native backend stream with enforcement disabled MUST retain the advisory before the denial
 
 #### Scenario: Pinned requests are not moved to another account
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Collection, Mapping
 from typing import Literal
+from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
@@ -72,16 +73,20 @@ async def _cleanup_bridge(app_instance: FastAPI) -> AsyncIterator[None]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("client_mode", ["native_backend", "public_backend", "v1"])
 @pytest.mark.parametrize("failure_kind", ["transient_refresh", "repeated_401"])
 async def test_http_bridge_security_exhaustion_preserves_warning_and_denial(
     async_client: AsyncClient,
     app_instance: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
-    path: str,
+    client_mode: Literal["native_backend", "public_backend", "v1"],
     failure_kind: Literal["transient_refresh", "repeated_401"],
 ) -> None:
     _install_bridge_settings(monkeypatch, enabled=True)
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "websocket"
+    native = client_mode == "native_backend"
+    path = "/v1/responses" if client_mode == "v1" else "/backend-api/codex/responses"
     ordinary = await _get_account(await _import_account(async_client, "ordinary", "ordinary@example.com"))
     authorized = await _get_account(await _import_account(async_client, "authorized", "authorized@example.com"))
     authorized.security_work_authorized = True
@@ -140,6 +145,8 @@ async def test_http_bridge_security_exhaustion_preserves_warning_and_denial(
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", select_account)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", refresh)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    advisory = Mock(wraps=proxy_module._security_work_advisory_event)
+    monkeypatch.setattr(proxy_module, "_security_work_advisory_event", advisory)
 
     events = await _collect_sse_events(
         async_client,
@@ -147,10 +154,11 @@ async def test_http_bridge_security_exhaustion_preserves_warning_and_denial(
         json_body={
             "model": "gpt-5.1",
             "input": "Analyze this security task",
-            "instructions": "Return exactly OK.",
+            **({"instructions": "Return exactly OK."} if native else {}),
             "prompt_cache_key": "security-exhaustion",
             "stream": True,
         },
+        headers={"accept": "text/event-stream", "user-agent": "codex-cli/1.0" if native else "custom-client/1.0"},
     )
 
     assert selections == [(False, set()), (True, {ordinary.id}), (True, {ordinary.id, authorized.id})]
@@ -165,8 +173,16 @@ async def test_http_bridge_security_exhaustion_preserves_warning_and_denial(
         expected_attempts.append(("connect", authorized.chatgpt_account_id, False))
     assert attempts == expected_attempts
     assert len(upstream.sent_text) == 1
+    assert [call.kwargs["code"] for call in advisory.call_args_list] == [
+        "security_work_authorization_required",
+        "no_security_work_authorized_accounts",
+    ]
+    assert [call.kwargs["action"] for call in advisory.call_args_list] == [
+        "retry_security_work_authorized",
+        "forward_original_security_work_error",
+    ]
     assert SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED not in json.dumps(events)
-    terminal_type = "response.failed" if path == "/v1/responses" else "error"
+    terminal_type = "error" if native else "response.failed"
     terminal_events = [event for event in events if event["type"] == terminal_type]
     assert len(terminal_events) == 1
     terminal = terminal_events[0]
@@ -174,16 +190,15 @@ async def test_http_bridge_security_exhaustion_preserves_warning_and_denial(
     assert error["type"] == "invalid_request_error"
     assert error["code"] == "invalid_request_error"
     assert error["message"] == SECURITY_MESSAGE
-    expected_types = ["codex_lb.warning", "codex_lb.warning"]
-    if path == "/v1/responses":
-        expected_types.append("response.created")
+    expected_types = ["codex_lb.warning", "codex_lb.warning"] if native else ["response.created"]
     expected_types.append(terminal_type)
     assert [event["type"] for event in events] == expected_types
-    assert [event["warning"]["code"] for event in events[:2]] == [
-        "security_work_authorization_required",
-        "no_security_work_authorized_accounts",
-    ]
-    assert events[1]["warning"]["action"] == "forward_original_security_work_error"
+    if native:
+        assert [event["warning"]["code"] for event in events[:2]] == [
+            "security_work_authorization_required",
+            "no_security_work_authorized_accounts",
+        ]
+        assert events[1]["warning"]["action"] == "forward_original_security_work_error"
     service = get_proxy_service_for_app(app_instance)
     async with service._http_bridge_lock:
         assert not service._http_bridge_inflight_sessions

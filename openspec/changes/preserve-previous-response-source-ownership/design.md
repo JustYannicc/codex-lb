@@ -136,6 +136,13 @@ handler must recognize that internal exhaustion code as a missing-pool outcome,
 enqueue the existing advisory, and let the original security denial finish the
 request. This adds no retry, account fallback, or ownership exception.
 
+Current main filters every non-`response.*`, non-`error` event from public
+OpenAI-contract HTTP streams. Keep security advisory generation in the service,
+then let that existing boundary filter `codex_lb.warning` on `/v1` and
+OpenAI-shaped backend requests. Native backend HTTP retains the warning before
+the original denial. Direct WebSocket delivery is unchanged. This reconciles
+advisory generation with external delivery without changing the terminal error.
+
 ## Risks / Trade-offs
 
 - [A subscription response created outside this proxy has no local owner evidence] -> A source-owned HTTP request remains source-routed; a known subscription-model request uses the one-candidate compatibility fallback and otherwise fails closed, avoiding an account guess.

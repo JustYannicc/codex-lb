@@ -169,6 +169,10 @@ from app.core.utils.shared_future import (
 from app.core.utils.shared_future import (
     _await_result_deferring_cancellation as _shared_await_result_deferring_cancellation,
 )
+from app.core.utils.shared_future import (
+    _await_task_deferring_cancellation as _shared_await_task_deferring_cancellation,
+)
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -343,6 +347,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "reasoning",
         "web_search_call",
         "file_search_call",
+        "tool_search_output",
         "computer_call",
         "code_interpreter_call",
         "mcp_approval_request",
@@ -7898,15 +7903,32 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        first = await first_task
+        # Not ``await first_task``: a level-cancelled Starlette scope re-cancels
+        # the consuming task on every loop iteration, and ``Task.cancel()``
+        # cascades down the ``_fut_waiter`` chain into the awaited task. The
+        # probe task defers cancellation while its bridge cleanup finishes, so
+        # a direct await turned every client disconnect into a busy spin that
+        # lasted as long as that cleanup (2026-09-07 production: ~1.4e9
+        # re-cancels across 15 wedged requests). The per-waiter proxy future
+        # absorbs the level cancellation here; the probe sees only the single
+        # explicit teardown ``cancel()`` below.
+        first = await wait_on_shared_future(first_task)
     except StopAsyncIteration:
         return
     finally:
         # If the wrapping stream is closed before the first item is consumed
         # (client disconnect, request teardown), cancel the still-running probe
-        # task so it does not hold the upstream connection open.
+        # task so it does not hold the upstream connection open, then wait for
+        # its deferred bridge cleanup to settle so the stream it drives is not
+        # closed underneath it. The canonical helper waits without cascading
+        # repeated level cancels into the probe; its exception, if any, is
+        # retrieved here (the probe's done-callback also settles it).
         if not first_task.done():
             first_task.cancel()
+            try:
+                await _shared_await_task_deferring_cancellation(first_task)
+            except BaseException:
+                pass
     yield first
     async for line in stream:
         yield line
@@ -8925,12 +8947,12 @@ async def _normalize_public_responses_stream(
     Args:
         stream: the upstream SSE event blocks (post-error-conversion).
         enforce_openai_sdk_contract: when True (the default, used for /v1),
-            apply OpenAI Responses SSE contract enforcement: drop Codex
-            vendor events (codex.*), backfill terminal output from streamed
+            apply OpenAI Responses SSE contract enforcement: drop events
+            outside response.* and error, backfill terminal output from streamed
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
             response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including codex.* are
+            which feeds the Codex CLI), all events including vendor events are
             forwarded verbatim and no synthesis happens — the Codex CLI
             relies on the upstream's native event shape.
     """
@@ -9488,16 +9510,16 @@ def _normalize_public_stream_payload(
             normalized_payload = dict(payload)
             normalized_payload["part"] = normalized_part
             return normalized_payload, None
-    # Drop Codex-internal vendor events on the public /v1 surface only. The
-    # upstream Codex backend emits non-standard events (notably
-    # ``codex.rate_limits``, which is throttled per rate-limit window and so
-    # leaks intermittently before ``response.created``). The OpenAI Responses
-    # SSE contract does not define any ``codex.*`` event type, and the OpenAI
-    # SDK's stream parser raises ``RuntimeError`` if any other event arrives
-    # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
-    # consume these events and pass ``enforce_openai_sdk_contract=False`` so
-    # they continue to forward unchanged.
-    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
+    # Public Responses streams accept the response.* and error families.
+    # Upstream diagnostics such as codex.rate_limits and
+    # responsesapi.websocket_timing break strict event deserializers.
+    # Native Codex requests disable this contract and retain vendor events.
+    if (
+        enforce_openai_sdk_contract
+        and isinstance(event_type, str)
+        and event_type != "error"
+        and not event_type.startswith("response.")
+    ):
         return None, None
     if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
         if event_type == "error":

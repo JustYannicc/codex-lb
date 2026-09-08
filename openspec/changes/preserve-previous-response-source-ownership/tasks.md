@@ -62,3 +62,8 @@
 - [x] 9.1 Reproduce model-catalog narrowing through affected external routes and compare the ownership contract with the separate conversation-scoping contract.
 - [x] 9.2 Give all previous-response and marker owner-miss callers one account-assignment-scoped enumeration interface without routing-filter inputs; retain normal selection and conversation semantics.
 - [ ] 9.3 Verify catalog, service-tier, scope, unavailable-account, and replay controls; obtain independent review and current-head hosted clearance.
+
+## 10. Reconcile current-main public event filtering
+
+- [x] 10.1 Adopt the current-main event-family filter at the HTTP boundary while preserving internal/native security advisory generation.
+- [ ] 10.2 Verify native backend, public `/v1`, and OpenAI-shaped backend denial delivery, then review the integrated candidate and deliver current-head hosted clearance.
