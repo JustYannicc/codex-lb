@@ -120,6 +120,12 @@ output still prevent unsafe account replay. Tests use both downstream
 WebSocket routes and complete a later request on the same socket to verify
 that the response-create gate was released.
 
+The HTTP bridge's reconnect loop can exhaust the same authorized pool after
+credential refresh or repeated authentication failures. Its retry exception
+handler must recognize that internal exhaustion code as a missing-pool outcome,
+enqueue the existing advisory, and let the original security denial finish the
+request. This adds no retry, account fallback, or ownership exception.
+
 ## Risks / Trade-offs
 
 - [A subscription response created outside this proxy has no local owner evidence] -> A source-owned HTTP request remains source-routed; a known subscription-model request uses the one-candidate compatibility fallback and otherwise fails closed, avoiding an account guess.
