@@ -16653,8 +16653,8 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
     candidates = tuple(
         SimpleNamespace(id=f"acc-owner-miss-{index}", status=AccountStatus.ACTIVE) for index in range(candidate_count)
     )
-    list_selection_candidates = AsyncMock(return_value=candidates)
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    list_continuity_owner_candidates = AsyncMock(return_value=candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     session = _make_bridge_session(key_value="owner-miss-single")
     get_or_create = AsyncMock(return_value=session if candidate_count == 1 else None)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
@@ -16718,9 +16718,9 @@ async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_can
         assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
 
     if client_turn_state is None or allow_fallback:
-        list_selection_candidates.assert_awaited_once()
+        list_continuity_owner_candidates.assert_awaited_once()
     else:
-        list_selection_candidates.assert_not_awaited()
+        list_continuity_owner_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio

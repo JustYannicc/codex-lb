@@ -2053,10 +2053,9 @@ class _WebSocketMixin:
                         ):
                             # Preserve the compatibility fallback for a
                             # subscription-model owner miss when exactly one
-                            # eligible account remains. Account-scoped API
-                            # keys narrow the count; unscoped keys use the
-                            # normal model pool. Security authorization is a
-                            # later routing constraint, not ownership evidence.
+                            # possible owner remains. Account-scoped API keys
+                            # narrow the count; unscoped keys count all visible
+                            # accounts. Routing eligibility is not ownership.
                             # File ownership remains strict;
                             # terminal compaction is deliberately allowed
                             # through this cardinality check because it carries
@@ -2066,12 +2065,8 @@ class _WebSocketMixin:
                             if selection_api_key is not None and selection_api_key.account_assignment_scope_enabled:
                                 selection_account_ids = selection_api_key.assigned_account_ids
                             try:
-                                selection_candidates = await proxy._load_balancer.list_selection_candidates(
-                                    model=request_state.model,
-                                    service_tier=request_state.requested_service_tier,
-                                    additional_limit_name=None,
+                                selection_candidates = await proxy._load_balancer.list_continuity_owner_candidates(
                                     account_ids=selection_account_ids,
-                                    exclude_account_ids=request_state.excluded_account_ids,
                                 )
                             except Exception:
                                 logger.exception(

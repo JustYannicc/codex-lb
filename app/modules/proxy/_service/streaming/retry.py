@@ -1180,16 +1180,10 @@ class _StreamingRetryMixin:
                         selection_candidates: tuple[Account, ...] = ()
                     else:
                         # Preserve the compatibility fallback for an owner miss
-                        # when exactly one eligible subscription account remains.
-                        # An account-scoped API key narrows the candidate set before
-                        # the count; an unscoped key uses the normal model pool. A
-                        # missing owner with multiple or zero candidates still fails
-                        # closed because selection would otherwise guess an account.
+                        # when exactly one subscription account is in scope.
+                        # Routing eligibility cannot identify a missing owner.
                         try:
-                            selection_candidates = await proxy._load_balancer.list_selection_candidates(
-                                model=payload.model,
-                                service_tier=payload.service_tier,
-                                additional_limit_name=None,
+                            selection_candidates = await proxy._load_balancer.list_continuity_owner_candidates(
                                 account_ids=(
                                     api_key.assigned_account_ids
                                     if api_key is not None and api_key.account_assignment_scope_enabled

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from collections.abc import Collection
 from datetime import timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
@@ -211,11 +212,13 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
     owner_lookup = AsyncMock(return_value=None)
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", owner_lookup)
 
-    async def fail_selection_candidates(self, **kwargs):  # noqa: ANN001, ANN003
-        del self, kwargs
+    async def fail_selection_candidates(
+        self: proxy_module.LoadBalancer, *, account_ids: Collection[str] | None = None
+    ) -> tuple[Account, ...]:
+        del self, account_ids
         raise RuntimeError("selection database unavailable")
 
-    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", fail_selection_candidates)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_continuity_owner_candidates", fail_selection_candidates)
 
     response = await async_client.post(
         "/backend-api/codex/responses/compact",

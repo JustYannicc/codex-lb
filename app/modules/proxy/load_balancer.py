@@ -354,37 +354,18 @@ class LoadBalancer:
         self._account_locks_registry_lock = asyncio.Lock()
         self._selection_inputs_cache = get_account_selection_cache()
 
-    async def list_selection_candidates(
+    async def list_continuity_owner_candidates(
         self,
         *,
-        model: str | None,
-        service_tier: str | None = None,
-        additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
-        exclude_account_ids: Collection[str] | None = None,
-        require_security_work_authorized: bool = False,
     ) -> tuple[Account, ...]:
-        """List possible owners without leases or transient routing filters; honor explicit security/retry filters."""
-
-        selection_inputs = await self._load_selection_inputs(
-            model=model,
-            service_tier=service_tier,
-            additional_limit_name=additional_limit_name,
-            account_ids=account_ids,
-        )
-        selection_inputs = _apply_selection_account_filters(
-            selection_inputs,
-            exclude_account_ids=exclude_account_ids,
-            require_security_work_authorized=require_security_work_authorized,
-        )
-        # Preserve paused/quota-filtered owners for owner-miss cardinality.
-        excluded_ids = set(exclude_account_ids or ())
-        owner_candidates = (
-            account
-            for account in selection_inputs.effective_continuity_owner_candidates
-            if account.id not in excluded_ids
-        )
-        return tuple(_clone_account(account) for account in owner_candidates)
+        """List possible owners in the assignment scope, independently of routing eligibility."""
+        async with self._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            allowed_ids = None if account_ids is None else set(account_ids)
+            return tuple(
+                _clone_account(account) for account in accounts if allowed_ids is None or account.id in allowed_ids
+            )
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:

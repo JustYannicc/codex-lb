@@ -2022,10 +2022,7 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             try:
-                selection_candidates = await self._load_balancer.list_selection_candidates(
-                    model=effective_payload.model,
-                    service_tier=request_state.requested_service_tier,
-                    additional_limit_name=None,
+                selection_candidates = await self._load_balancer.list_continuity_owner_candidates(
                     account_ids=selection_account_ids,
                 )
             except Exception:

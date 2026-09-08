@@ -3660,12 +3660,12 @@ syntax. A recorded subscription owner MUST keep the request on subscription
 routing. A missing subscription owner MUST first be evaluated against the
 model-source catalog. If the source catalog confirms source ownership, the
 configured model source remains authoritative even when exactly one subscription
-account is eligible; the request MUST NOT use subscription candidate fallback.
-For HTTP and compact subscription routing, eligible-account counting is
+account is in scope; the request MUST NOT use subscription candidate fallback.
+For HTTP and compact subscription routing, possible-owner counting is
 permitted only after the source catalog lookup succeeds without confirming
 source ownership, applying API-key account-assignment scoping. Exactly one
-eligible account MUST be allowed to proceed through normal subscription
-selection; zero or multiple eligible accounts MUST fail closed with the sanitized
+possible owner MUST be allowed to proceed through normal subscription
+selection; zero or multiple possible owners MUST fail closed with the sanitized
 `previous_response_owner_unavailable` error. Account-pinned file requests remain
 strict and do not use the sole-candidate fallback. Codex compaction remains
 subscription-only; its dedicated compact HTTP selection uses the same
@@ -3679,18 +3679,22 @@ A client-supplied nonblank `x-codex-turn-state` that does not match the
 proxy-synthesized marker shapes is hard continuity evidence. When that token
 cannot be resolved to an owner in the requesting API-key scope, the proxy MUST
 fail closed and MUST NOT apply the sole-candidate fallback, even when exactly
-one subscription account is eligible. Proxy-synthesized first-turn
+one subscription account is in scope. Proxy-synthesized first-turn
 placeholders (`turn_*` / `http_turn_*`) are compatibility markers rather than
 hard account ownership. In an owner-miss continuation, when a marker alias is
 unavailable, a value matching either shape MUST use the same sole-candidate
 compatibility rule without requiring exact server-side issuance provenance; a
 registered marker MUST still resolve to its recorded owner.
-Direct WebSocket owner-miss cardinality MUST count possible subscription owners
-within the API-key account-assignment scope before security-work authorization
-filtering. Requiring the trusted-cyber capability MUST NOT turn multiple possible
-owners into a sole-owner fallback. Subsequent account selection and socket reuse
-MUST still enforce that capability; a sole candidate or independent owner MUST
-NOT authorize dispatch through an account lacking the required authorization.
+Whenever previous-response or unregistered synthesized-marker sole-candidate
+fallback is applicable, possible owners MUST be counted from the account collection
+visible under the existing deletion lifecycle, restricted only by API-key account-assignment
+scope. Model and service-tier support, catalog omissions, account health/status,
+quota or capacity availability, security authorization, and retry exclusions MUST
+NOT remove possible owners from this count. Exactly one possible owner permits
+normal selection to attempt that account; zero or multiple possible owners MUST
+fail closed. Subsequent selection and socket reuse MUST still enforce all routing
+constraints, including security authorization. This owner-miss count MUST NOT
+change the separate model/API-key/security-scoped conversation ambiguity contract.
 Direct WebSocket requests MUST reconcile registered turn-state ownership with
 previous-response and file ownership before either initial-connect or socket-reuse
 model-source guards. A resolved turn-state subscription owner MUST veto source
@@ -3793,7 +3797,7 @@ pre-marker v2 owner verification.
 - **GIVEN** a Responses-compatible source is configured for the requested model
 - **AND** no subscription account is recorded as owner of `source-turn-sole-candidate`
 - **AND** the source catalog confirms that the requested model is source-owned
-- **AND** exactly one eligible subscription account remains after applying
+- **AND** exactly one possible subscription owner remains after applying
   API-key account-assignment scoping
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the request is forwarded to the configured model source
@@ -3804,7 +3808,7 @@ pre-marker v2 owner verification.
 - **GIVEN** the requested model is known to subscription routing
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
-- **AND** zero or multiple eligible subscription accounts remain after applying
+- **AND** zero or multiple possible subscription owners remain after applying
   API-key account-assignment scoping
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy returns HTTP status `502`
@@ -3812,16 +3816,16 @@ pre-marker v2 owner verification.
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
 
-#### Scenario: Sole eligible subscription account preserves an HTTP continuation
+#### Scenario: Sole possible subscription owner preserves an HTTP continuation
 
 - **GIVEN** the requested model is known to subscription routing
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
-- **AND** exactly one eligible subscription account remains after applying
+- **AND** exactly one possible subscription owner remains after applying
   API-key account-assignment scoping
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy proceeds through normal subscription account selection
-- **AND** the request is forwarded to that sole eligible subscription account
+- **AND** the request is forwarded to that sole possible subscription owner only if it passes normal routing checks
 - **AND** the `previous_response_id` is preserved in the upstream request
 
 #### Scenario: Unresolved client turn-state blocks the HTTP sole-candidate fallback
@@ -3831,7 +3835,7 @@ pre-marker v2 owner verification.
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** the client supplies an `x-codex-turn-state` with no owner in the
   requesting API-key scope
-- **AND** exactly one eligible subscription account remains
+- **AND** exactly one possible subscription owner remains
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy returns HTTP status `502`
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
@@ -3844,7 +3848,7 @@ pre-marker v2 owner verification.
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** the client sends a physically present `x-codex-turn-state` header
   whose value is empty or whitespace-only
-- **AND** exactly one eligible subscription account remains
+- **AND** exactly one possible subscription owner remains
 - **WHEN** the client calls `/backend-api/codex/responses` or `/v1/responses`
 - **THEN** the proxy returns HTTP status `502`
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
@@ -3855,11 +3859,11 @@ pre-marker v2 owner verification.
 - **GIVEN** a direct Responses WebSocket continuation has a missing previous-response owner
 - **AND** the client supplies an unregistered `turn_*` or `http_turn_*` marker
 - **AND** no independently resolved previous-response or file owner constrains the request
-- **AND** exactly one eligible subscription account remains after API-key account-assignment scoping
+- **AND** exactly one possible subscription owner remains after API-key account-assignment scoping
 - **WHEN** the client submits the continuation
 - **THEN** the proxy proceeds through normal subscription selection for that sole account
 - **AND** no exact server-side issuance provenance is required
-- **AND** the marker shape alone does not select an account when zero or multiple eligible accounts remain
+- **AND** the marker shape alone does not select an account when zero or multiple possible owners remain
 
 #### Scenario: Independent hard ownership remains authoritative over marker shape
 
@@ -3876,7 +3880,7 @@ pre-marker v2 owner verification.
 - **AND** no file owner or required durable bridge owner constrains the request
 - **WHEN** the client calls either HTTP Responses route
 - **THEN** the bridge applies the API-key-scoped sole-candidate check without requiring local marker issuance
-- **AND** exactly one eligible account permits forwarding while zero or multiple candidates fail closed
+- **AND** exactly one possible owner permits normal routing checks while zero or multiple candidates fail closed
 - **AND** blank and non-synthetic client headers do not authorize this fallback
 
 #### Scenario: Turn-state ownership bypasses owner-miss candidate fallback
@@ -3892,11 +3896,11 @@ pre-marker v2 owner verification.
 - **GIVEN** a compact request has no `previous_response_id`
 - **AND** the client supplies an unregistered `turn_*` or `http_turn_*`
   `x-codex-turn-state` in the requesting API-key scope
-- **AND** exactly one eligible subscription account remains
+- **AND** exactly one possible subscription owner remains
 - **WHEN** the client calls `/backend-api/codex/responses/compact` or
   `/v1/responses/compact`
 - **THEN** the proxy proceeds through normal compact subscription selection
-- **AND** the request is forwarded to that sole eligible subscription account
+- **AND** the request is forwarded to that sole possible subscription owner only if it passes normal routing checks
 - **AND** the unregistered marker does not by itself produce
   `turn_state_owner_unavailable`
 
@@ -3904,7 +3908,7 @@ pre-marker v2 owner verification.
 
 - **GIVEN** a compact request has no `previous_response_id` and its synthetic-shaped marker resolves to no owner
 - **AND** no independent file owner constrains the request
-- **AND** zero or multiple eligible subscription accounts remain after API-key account-assignment scoping
+- **AND** zero or multiple possible subscription owners remain after API-key account-assignment scoping
 - **WHEN** the client calls either compact HTTP route
 - **THEN** the proxy returns HTTP 502 with `previous_response_owner_unavailable`
 - **AND** no account is selected and no upstream request is dispatched
@@ -3954,13 +3958,30 @@ pre-marker v2 owner verification.
 - **GIVEN** the requested model is known to subscription routing
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
-- **AND** zero or multiple eligible subscription accounts remain after applying
+- **AND** zero or multiple possible subscription owners remain after applying
   API-key account-assignment scoping
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the proxy emits a terminal error with HTTP status `502`
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
+
+#### Scenario: Model or service-tier support does not resolve ownership ambiguity
+
+- **GIVEN** an owner-miss continuation may use the sole-candidate compatibility fallback
+- **AND** the API-key assignment scope contains accounts A and B
+- **AND** A omits the requested model or service tier from its catalog while B supports it
+- **WHEN** an HTTP stream, HTTP bridge, compact, or direct WebSocket route processes the request
+- **THEN** both accounts MUST remain possible owners and the request MUST fail closed with `previous_response_owner_unavailable`
+- **AND** no upstream request MUST be dispatched
+
+#### Scenario: Account assignment can establish a sole possible owner
+
+- **GIVEN** an owner-miss continuation may use the sole-candidate compatibility fallback
+- **AND** only account B belongs to the requesting API key's assignment scope
+- **AND** B passes normal routing checks
+- **WHEN** an HTTP stream, HTTP bridge, compact, or direct WebSocket route processes the request
+- **THEN** B MUST be the sole possible owner and receive the request with its previous-response identifier preserved
 
 #### Scenario: Security capability does not resolve WebSocket ownership ambiguity
 
@@ -3983,21 +4004,21 @@ pre-marker v2 owner verification.
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
 - **AND** the continuation is not already attached to its required open owner socket
-- **AND** loading eligible subscription candidates fails
+- **AND** loading possible subscription owners fails
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the proxy emits the sanitized `previous_response_owner_unavailable` terminal error
 - **AND** the lookup failure is not exposed to the client
 
-#### Scenario: Sole eligible subscription account preserves a WebSocket continuation
+#### Scenario: Sole possible subscription owner preserves a WebSocket continuation
 
 - **GIVEN** the requested model is known to subscription routing
 - **AND** the source catalog lookup succeeds without confirming source ownership
 - **AND** no subscription account is recorded as owner of `previous_response_id`
-- **AND** exactly one eligible subscription account remains after applying
+- **AND** exactly one possible subscription owner remains after applying
   API-key account-assignment scoping
 - **WHEN** a direct Responses WebSocket client submits the follow-up
 - **THEN** the proxy proceeds through normal subscription account selection
-- **AND** the request is forwarded to that sole eligible subscription account
+- **AND** the request is forwarded to that sole possible subscription owner only if it passes normal routing checks
 - **AND** the `previous_response_id` is preserved in the upstream request
 
 #### Scenario: Unavailable source-catalog lookup preserves subscription fallback

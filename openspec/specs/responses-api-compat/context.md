@@ -339,13 +339,20 @@ OpenSpec change first.
 
 ## WebSocket capability and owner counting
 
-Direct WebSocket owner-miss counting keeps security capability separate from
-ownership evidence. If the API-key scope contains accounts A and B, requiring
-trusted-cyber authorization on B does not prove that B owns an unknown response.
-Count both possible owners and reject the ambiguous continuation. Once one
-owner is established, the existing connection and socket-reuse selectors still
-enforce security authorization. This changes only the cardinality lookup, not
-capability signaling, lineage persistence, or authorized retry policy.
+Previous-response and marker owner-miss counts use the repository-visible account
+collection narrowed only by API-key assignments. For example, if A may own the
+previous response and only B advertises the next requested model, B is not a
+unique possible owner. The same distinction applies to service tier, health,
+quota, capacity, security authorization, and retry exclusions. A sole possible
+owner still has to pass normal routing checks before dispatch.
+
+This enumeration has a separate interface from routing selection so callers
+cannot accidentally turn routing filters into ownership evidence. Existing
+account-deletion visibility stays unchanged. The
+[conversation ambiguity contract](../sticky-session-operations/spec.md#scenario-account-cap-pressure-does-not-manufacture-a-conversation-owner)
+still uses its model/API-key/security-scoped pool; that is not this owner-miss
+compatibility rule. Source precedence, known owners, hard pins, and replay safety
+also remain unchanged.
 
 The [owner-evidence contract](spec.md#requirement-previous-response-source-routing-follows-proven-ownership)
 defines this boundary. A sole unauthorized candidate is still rejected by

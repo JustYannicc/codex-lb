@@ -94,13 +94,23 @@ continue to verify the original v2 digest.
 
 ### Preserve fail-closed lookup behavior
 
-Direct WebSocket owner-miss counting keeps security capability separate from
-ownership evidence. If the API-key scope contains accounts A and B, requiring
-trusted-cyber authorization on B does not prove that B owns an unknown response.
-Count both possible owners and reject the ambiguous continuation. Once one
-owner is established, the existing connection and socket-reuse selectors still
-enforce security authorization. This changes only the cardinality lookup, not
-capability signaling, lineage persistence, or authorized retry policy.
+Owner-miss counting is independent of routing eligibility. If the API-key scope
+contains accounts A and B, a catalog advertising the next model only on B does
+not prove that B owns an unknown previous response. Neither does B's security
+authorization, A's unavailable quota, or an earlier failed attempt on A. Count
+both owners and reject the ambiguous continuation.
+
+The shared owner-enumeration interface therefore accepts only account-assignment
+scope and reads the existing repository-visible account collection. It does not
+accept model, tier, quota, security, or retry filters. Return detached account
+snapshots without acquiring leases. All four owner-miss callers use this
+interface; subsequent normal selection retains every routing constraint.
+
+Do not alter the normal selection input loader: the separate conversation
+ambiguity contract deliberately uses a model/API-key/security-scoped pool.
+Account deletion visibility also stays with the existing repository lifecycle.
+This correction changes neither contract, source precedence, known-owner lookup,
+hard pins, capability signaling, nor replay policy.
 
 An owner miss and source-catalog unavailability are distinct states. Known subscription-model misses fail closed unless the sole-candidate compatibility fallback applies; source-owned HTTP requests remain source-routed. Source-catalog unavailability preserves the existing direct WebSocket subscription fallback. Owner errors use the sanitized `previous_response_owner_unavailable` contract. Compact settles any API-key reservation before emitting diagnostics or leaving the owner-miss path; a confirmed fail-safe release preserves the original owner error, while an unconfirmed settlement failure propagates.
 

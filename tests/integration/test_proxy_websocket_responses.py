@@ -9,6 +9,7 @@ import threading
 import time
 import tomllib
 from collections import deque
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -5025,9 +5026,9 @@ def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_stat
     """
     from app.dependencies import get_proxy_service_for_app
 
-    account = SimpleNamespace(id="acct_v1_turn_state_reconnect")
+    account = Account(id="acct_v1_turn_state_reconnect")
     upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_v1_turn_state_reconnect"))
-    candidate_lookups: list[str] = []
+    candidate_lookups: list[Collection[str] | None] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -5051,9 +5052,11 @@ def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_stat
         assert fail_on_missing is False
         return None
 
-    async def one_candidate(self, *, model, **kwargs):
-        del self, kwargs
-        candidate_lookups.append(model)
+    async def one_candidate(
+        self: proxy_module.LoadBalancer, *, account_ids: Collection[str] | None = None
+    ) -> tuple[Account, ...]:
+        del self
+        candidate_lookups.append(account_ids)
         return (account,)
 
     async def connect_subscription_upstream(self, *args, request_state, **kwargs):
@@ -5074,7 +5077,7 @@ def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_stat
         "_resolve_compact_turn_state_owner",
         no_turn_state_owner,
     )
-    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_continuity_owner_candidates", one_candidate)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_connect_proxy_websocket",
@@ -5117,7 +5120,7 @@ def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_stat
 
     assert created["type"] == "response.created"
     assert completed["type"] == "response.completed"
-    assert candidate_lookups == ["gpt-5.4"]
+    assert candidate_lookups == [None]
     assert json.loads(upstream.sent_text[0])["previous_response_id"] == "resp_v1_unresolved_owner"
 
 
@@ -5129,9 +5132,9 @@ def test_responses_websocket_blank_turn_state_is_client_input(
     route,
     blank_turn_state,
 ):
-    account = SimpleNamespace(id="acct_blank_turn_state_fallback")
+    account = Account(id="acct_blank_turn_state_fallback")
     upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_blank_turn_state_unexpected"))
-    candidate_lookups: list[str] = []
+    candidate_lookups: list[Collection[str] | None] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -5152,9 +5155,11 @@ def test_responses_websocket_blank_turn_state_is_client_input(
         del model, api_key, raw_model
         return ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
 
-    async def one_candidate(*, model, **kwargs):
-        del kwargs
-        candidate_lookups.append(model)
+    async def one_candidate(
+        self: proxy_module.LoadBalancer, *, account_ids: Collection[str] | None = None
+    ) -> tuple[Account, ...]:
+        del self
+        candidate_lookups.append(account_ids)
         return (account,)
 
     async def connect_subscription_upstream(self, *args, request_state, **kwargs):
@@ -5170,7 +5175,7 @@ def test_responses_websocket_blank_turn_state_is_client_input(
         no_previous_response_owner,
     )
     monkeypatch.setattr(websocket_mixin_module, "resolve_responses_model_source_ownership", no_source_owner)
-    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_continuity_owner_candidates", one_candidate)
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
 
     request_payload = {

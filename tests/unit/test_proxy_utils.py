@@ -5345,14 +5345,14 @@ async def test_compact_unregistered_synthesized_turn_state_uses_sole_owner_miss_
     turn_state = "http_turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     owner_lookup = AsyncMock(return_value=None)
     previous_owner_lookup = AsyncMock(return_value=None)
-    list_selection_candidates = AsyncMock(return_value=(account,))
+    list_continuity_owner_candidates = AsyncMock(return_value=(account,))
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", owner_lookup)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", previous_owner_lookup)
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
@@ -5380,7 +5380,7 @@ async def test_compact_unregistered_synthesized_turn_state_uses_sole_owner_miss_
         fail_on_missing=False,
     )
     previous_owner_lookup.assert_awaited_once()
-    list_selection_candidates.assert_awaited_once()
+    list_continuity_owner_candidates.assert_awaited_once()
     select_account.assert_awaited_once()
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["required_account_id"] == account.id
@@ -15416,8 +15416,8 @@ async def test_compact_owner_miss_uses_one_scoped_candidate(monkeypatch):
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
 
-    list_selection_candidates = AsyncMock(return_value=(account,))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    list_continuity_owner_candidates = AsyncMock(return_value=(account,))
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
@@ -15453,9 +15453,9 @@ async def test_compact_owner_miss_uses_one_scoped_candidate(monkeypatch):
 
     assert result.object == "response.compaction"
     assert result.model_extra == {"output": []}
-    list_selection_candidates.assert_awaited_once()
-    assert list_selection_candidates.await_args is not None
-    assert list_selection_candidates.await_args.kwargs["account_ids"] == [account.id]
+    list_continuity_owner_candidates.assert_awaited_once()
+    assert list_continuity_owner_candidates.await_args is not None
+    assert list_continuity_owner_candidates.await_args.kwargs["account_ids"] == [account.id]
     select_account.assert_awaited_once()
     settle_compact_usage.assert_awaited_once()
     assert settle_compact_usage.await_args is not None
@@ -15499,8 +15499,8 @@ async def test_compact_owner_miss_fails_closed_and_settles_reservation(monkeypat
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
-    list_selection_candidates = AsyncMock(return_value=tuple(candidates))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    list_continuity_owner_candidates = AsyncMock(return_value=tuple(candidates))
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
 
@@ -15535,8 +15535,8 @@ async def test_compact_owner_miss_fails_closed_and_settles_reservation(monkeypat
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
-    list_selection_candidates.assert_awaited_once()
-    assert list_selection_candidates.await_args is not None
+    list_continuity_owner_candidates.assert_awaited_once()
+    assert list_continuity_owner_candidates.await_args is not None
     select_account.assert_not_awaited()
     assert settlement_events == ["settle", "continuity"]
 
@@ -15554,7 +15554,7 @@ async def test_compact_owner_miss_does_not_record_health_when_settlement_is_unco
         model="gpt-5.4",
     )
     owner_lookup = AsyncMock(return_value=None)
-    list_selection_candidates = AsyncMock(return_value=())
+    list_continuity_owner_candidates = AsyncMock(return_value=())
     settlement_events: list[str] = []
 
     async def fail_settlement(**kwargs: object) -> None:
@@ -15570,7 +15570,7 @@ async def test_compact_owner_miss_does_not_record_health_when_settlement_is_unco
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", owner_lookup)
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", fail_settlement)
     monkeypatch.setattr(
         proxy_service,
@@ -15600,7 +15600,7 @@ async def test_compact_owner_miss_does_not_record_health_when_settlement_is_unco
     assert exc_info.value.reservation_released is False
     assert settlement_events == ["settle:start"]
     owner_lookup.assert_awaited_once()
-    list_selection_candidates.assert_awaited_once()
+    list_continuity_owner_candidates.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -15614,13 +15614,13 @@ async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkey
         model="gpt-5.4",
     )
     lookup_error = RuntimeError("selection catalog unavailable")
-    list_selection_candidates = AsyncMock(side_effect=lookup_error)
+    list_continuity_owner_candidates = AsyncMock(side_effect=lookup_error)
     settle_compact_usage = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
 
     payload = ResponsesCompactRequest.model_validate(
@@ -15643,7 +15643,7 @@ async def test_compact_owner_candidate_lookup_failure_settles_reservation(monkey
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "previous_response_owner_unavailable"
     assert _proxy_error_message(exc_info.value) == "Previous response owner account is unavailable; retry later."
-    list_selection_candidates.assert_awaited_once()
+    list_continuity_owner_candidates.assert_awaited_once()
     settle_compact_usage.assert_awaited_once()
     assert settle_compact_usage.await_args is not None
     assert settle_compact_usage.await_args.kwargs["api_key"] is api_key
@@ -42093,8 +42093,8 @@ async def test_stream_previous_response_owner_miss_uses_sole_candidate_or_fails_
     candidates = [] if candidate_count == 0 else [account_other]
     if candidate_count == 2:
         candidates.append(_make_account("acc_second_stream"))
-    list_selection_candidates = AsyncMock(return_value=tuple(candidates))
-    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    list_continuity_owner_candidates = AsyncMock(return_value=tuple(candidates))
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_other))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
@@ -42162,7 +42162,7 @@ async def test_stream_previous_response_owner_candidate_lookup_failure_fails_clo
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(
         service._load_balancer,
-        "list_selection_candidates",
+        "list_continuity_owner_candidates",
         AsyncMock(side_effect=RuntimeError("selection catalog unavailable")),
     )
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)

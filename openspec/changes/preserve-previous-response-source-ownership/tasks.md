@@ -56,3 +56,9 @@
 - [x] 8.1 Reproduce the missing advisory through HTTP bridge requests when the last authorized replacement is excluded after refresh or authentication failure.
 - [x] 8.2 Map authorized-pool exhaustion to the existing missing-pool warning while preserving the original security denial and replay guards.
 - [ ] 8.3 Verify affected routes and cleanup, obtain independent reviews, and deliver current-head hosted CI and review clearance.
+
+## 9. Separate owner-miss cardinality from routing eligibility
+
+- [x] 9.1 Reproduce model-catalog narrowing through affected external routes and compare the ownership contract with the separate conversation-scoping contract.
+- [x] 9.2 Give all previous-response and marker owner-miss callers one account-assignment-scoped enumeration interface without routing-filter inputs; retain normal selection and conversation semantics.
+- [ ] 9.3 Verify catalog, service-tier, scope, unavailable-account, and replay controls; obtain independent review and current-head hosted clearance.
