@@ -325,8 +325,12 @@ as disarmed. It MUST return the probe only after detachment and disarming, then
 settle pending requests and close the session through a cancellation-shielded
 cleanup path. A late submit MUST NOT append an undisarmed attempt between the
 reset's disarm and detach steps. This ordering MUST also apply when an in-place
-reconnect fails because its required continuity owner is unavailable. Failure
-to release a selected account lease during that terminal cleanup MUST NOT
+reconnect fails because its required continuity owner is unavailable. An
+explicit `continuity_owner_unavailable` selection result MUST enter
+that same terminal cleanup without treating a retry hint in its message as
+permission to wait or dispatch on another account. Transient
+`hard_affinity_saturated` and local-capacity recovery rules remain unchanged.
+Failure to release a selected account lease during that terminal cleanup MUST NOT
 replace the stable continuity-owner error returned to the client. The detached
 session MUST be closed through cancellation-deferred cleanup before that error
 returns, so its upstream socket, account and durable leases, reader, and

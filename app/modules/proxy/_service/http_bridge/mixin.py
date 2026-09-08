@@ -2199,7 +2199,7 @@ class _HTTPBridgeMixin(
                 ):
                     preferred_candidate_id = None
                     continue
-                if selection.error_code == USAGE_LIMIT_REACHED and (
+                if selection.error_code in {USAGE_LIMIT_REACHED, CONTINUITY_OWNER_UNAVAILABLE} and (
                     required_preferred_account_id is not None or hard_close_account_bound
                 ):
                     await fail_owner_unavailable_after_probe()
