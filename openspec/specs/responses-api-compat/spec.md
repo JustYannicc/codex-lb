@@ -452,7 +452,17 @@ existing contracts.
   explicitly reports `incomplete_details.reason` as `stream_incomplete`
 - **THEN** the proxy MUST record that detail through the existing attempt-scoped
   retry-circuit failure path
-- **AND** the existing eligibility and provenance gates MUST remain in force
+- **AND** accounting MUST require a hard-affinity bridge key, a pending request,
+  and no prior response event for that attempt
+- **AND** idle, post-response, internal prewarm, request-log-skipped,
+  safe-replay-held, disarmed, and already-recorded attempts MUST NOT add another
+  retry-circuit failure
+- **AND** proxy continuity-loss details and raw or client-supplied
+  `previous_response_not_found` or `bridge_previous_response_not_found` details
+  MUST neither increment nor persist the retry circuit
+- **AND** a rejected anchor MAY return the active local probe as continuity-
+  neutral only when the request state explicitly proves that the proxy injected
+  that anchor
 - **AND** a missing, unknown, or `max_output_tokens` reason MUST NOT be converted
   to `stream_incomplete`
 - **AND** downstream terminal payload and account-health treatment MUST remain
