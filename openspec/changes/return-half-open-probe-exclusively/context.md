@@ -156,6 +156,11 @@ and its message may still contain a retry hint. That explicit owner failure
 enters the existing ordered probe-return cleanup before the generic hint parser.
 This changes neither hard-affinity saturation waits nor local-capacity recovery.
 
+Ordinary selection failure is not continuity loss. Without a required owner,
+reconnect completes its failed handoff and leaves normal reader retirement to
+emit the selection error. Running owner-loss cleanup first would settle the
+downstream queue before the later ordinary error override can take effect.
+
 ## Upstream accepted replay integration
 
 Accepted output-free replay now shares the internal retry path with half-open

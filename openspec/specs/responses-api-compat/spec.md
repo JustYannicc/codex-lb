@@ -330,6 +330,9 @@ explicit `continuity_owner_unavailable` selection result MUST enter
 that same terminal cleanup without treating a retry hint in its message as
 permission to wait or dispatch on another account. Transient
 `hard_affinity_saturated` and local-capacity recovery rules remain unchanged.
+When no continuity owner is required, an exhausted selection MUST retain its
+ordinary selection error and MUST NOT settle pending requests as
+`previous_response_owner_unavailable`.
 Failure to release a selected account lease during that terminal cleanup MUST NOT
 replace the stable continuity-owner error returned to the client. The detached
 session MUST be closed through cancellation-deferred cleanup before that error
@@ -350,6 +353,13 @@ These cleanup tasks MUST use the owning service's scheduler, and retry-circuit
 deadlines MUST use its clock. Injected time and task ownership MUST preserve
 the same cancellation deferral, typed-error precedence, and lease fences as
 the real-time defaults.
+
+#### Scenario: Ordinary reconnect selection failure does not invent owner loss
+
+- **GIVEN** a pending request has no required continuity owner
+- **WHEN** reconnect exhausts selection with `no_accounts`
+- **THEN** the downstream terminal MUST retain `no_accounts`
+- **AND** failed handoff and reader retirement MUST still release session resources
 
 #### Scenario: Cleanup and probe expiry follow injected time
 

@@ -2236,7 +2236,10 @@ class _HTTPBridgeMixin(
                     preferred_candidate_id = resolve_preferred_candidate_id()
                     continue
                 record_selected_account_takeover(None)
-                await fail_owner_unavailable_after_probe()
+                if required_preferred_account_id is not None:
+                    await fail_owner_unavailable_after_probe()
+                else:
+                    complete_failed_handoff()
                 raise _http_bridge_reconnect_selection_failure(selection, required_preferred_account_id)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:

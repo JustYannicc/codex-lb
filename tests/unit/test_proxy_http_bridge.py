@@ -45186,11 +45186,15 @@ async def test_submit_cancellation_after_admission_returns_the_claimed_probe(
             queue_limit=8,
         )
     )
-    await admission_claimed.wait()
-    submit_task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await submit_task
+    try:
+        await asyncio.wait_for(admission_claimed.wait(), timeout=1.0)
+        submit_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(submit_task, timeout=1.0)
+    finally:
+        if not submit_task.done():
+            submit_task.cancel()
+        await asyncio.wait_for(asyncio.gather(submit_task, return_exceptions=True), timeout=1.0)
 
     assert state.half_open_until == 0.0
     assert state.half_open_owner_session is None
@@ -47296,11 +47300,15 @@ async def test_internal_retry_cancellation_after_admission_returns_the_claimed_p
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", pause_after_admission)
     retry_task = asyncio.create_task(service._retry_http_bridge_precreated_request(session))
-    await admission_claimed.wait()
-    retry_task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await retry_task
+    try:
+        await asyncio.wait_for(admission_claimed.wait(), timeout=1.0)
+        retry_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(retry_task, timeout=1.0)
+    finally:
+        if not retry_task.done():
+            retry_task.cancel()
+        await asyncio.wait_for(asyncio.gather(retry_task, return_exceptions=True), timeout=1.0)
 
     assert state.half_open_until == 0.0
     assert state.half_open_owner_session is None
