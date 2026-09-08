@@ -4,9 +4,11 @@
 
 Fresh post-block usage MUST NOT clear an unexpired upstream rate-limit block when
 an applicable known quota window remains exhausted. The marking replica SHALL
-retain the existing reset deadline and block marker until ordinary expiry or
-valid available-quota recovery evidence. This SHALL NOT change active-account
-advisory usage routing or existing credit-backed recovery behavior.
+retain the existing reset deadline and block marker while that deadline remains
+unexpired unless valid available-quota recovery evidence arrives. This SHALL
+NOT change active-account advisory usage routing or existing credit-backed
+recovery behavior. Recovery after expiry follows the canonical account-routing
+evidence rules.
 
 #### Scenario: Fresh primary availability cannot conceal weekly exhaustion
 

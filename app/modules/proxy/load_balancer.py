@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
 
@@ -41,7 +41,6 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
-from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -137,6 +136,13 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
+from app.modules.proxy._load_balancer.usage_recovery import (
+    _extract_credit_status,
+    _rate_limited_freshness_entry,
+    _usage_entry_is_recent_enough,
+    _usage_entry_recorded_after_block,
+    _usage_refresh_interval_seconds,
+)
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
@@ -177,8 +183,6 @@ _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
 _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
-
-_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -2852,89 +2856,6 @@ def _select_long_window_entry(
     if monthly_entry is not None and monthly_capacity is not None:
         return monthly_entry
     return secondary_entry
-
-
-def _rate_limited_freshness_entry(
-    *,
-    account: Account,
-    primary_entry: _UsageWindowEntry | None,
-    long_window_entry: _UsageWindowEntry | None,
-    now: float,
-) -> _UsageWindowEntry | None:
-    if (
-        long_window_entry is not None
-        and long_window_entry.reset_at is not None
-        and long_window_entry.reset_at <= int(now)
-    ):
-        long_window_entry = None
-    if (
-        long_window_entry is not None
-        and long_window_entry.window == "monthly"
-        and capacity_for_routing_plan(account.plan_type, AccountStatus.RATE_LIMITED, "monthly") is None
-    ):
-        long_window_entry = None
-    if long_window_entry is not None and long_window_entry.window == "monthly":
-        return long_window_entry
-    if primary_entry is None:
-        return long_window_entry
-    # A newer long-window row can replace primary evidence only after the
-    # primary reset expires. Availability is evaluated by the caller's
-    # credit-aware, plan-normalized recovery predicate.
-    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= now
-    if (
-        primary_window_expired
-        and long_window_entry is not None
-        and long_window_entry.recorded_at > primary_entry.recorded_at
-    ):
-        return long_window_entry
-    return primary_entry
-
-
-def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_at: float) -> bool:
-    if entry is None or entry.recorded_at is None:
-        return False
-    recorded_at = entry.recorded_at
-    if recorded_at.tzinfo is None:
-        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-    # Persistence truncates block timestamps to whole seconds. A sample
-    # within that same second cannot prove it was captured after the block.
-    return int(recorded_at.timestamp()) > int(blocked_at)
-
-
-def _extract_credit_status(
-    *entries: _UsageWindowEntry | None,
-    recorded_after: float | None = None,
-) -> tuple[bool | None, bool | None, float | None]:
-    credit_entries: list[UsageHistory] = [
-        entry
-        for entry in entries
-        if isinstance(entry, UsageHistory)
-        and (recorded_after is None or _usage_entry_recorded_after_block(entry, recorded_after))
-        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
-    ]
-    if not credit_entries:
-        return None, None, None
-    entry = max(
-        credit_entries,
-        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
-    )
-    if entry is not None:
-        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
-    return None, None, None
-
-
-def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -> bool:
-    if recorded_at is None:
-        return False
-    current_time = datetime.fromtimestamp(now, tz=timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
-    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
-    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-
-
-def _usage_refresh_interval_seconds() -> int:
-    settings = config_settings.get_settings()
-    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _filter_accounts_for_model(

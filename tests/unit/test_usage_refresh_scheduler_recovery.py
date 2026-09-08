@@ -1208,7 +1208,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
-async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
+async def test_reconcile_keeps_elapsed_reset_when_secondary_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1_700_000_000.0
@@ -1255,10 +1255,10 @@ async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
         accounts=[account],
     )
 
-    assert recovered == 1
-    assert account.status == AccountStatus.ACTIVE
-    assert account.reset_at is None
-    assert account.blocked_at is None
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == past_reset
+    assert account.blocked_at == blocked_at
 
 
 @pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.QUOTA_EXCEEDED])
