@@ -30,6 +30,13 @@ checks MUST use only those captured identity and generation/absence values. Only
 the exact captured generation MAY be cleared; an observed absence or generation
 mismatch MUST leave a raced entry active.
 
+This captured-absence rule MUST also retain poison quarantine adopted from a
+durable-only row during the completion's own settlement load. Settling that row
+and registering a fresh anchor MUST NOT authorize recapturing and clearing the
+new quarantine in the same completion. A later first-touch durable reload MAY
+revoke that arm at its captured poison-arm fence when the row has zero failures
+and no abandonment tombstone; newer poison evidence MUST remain fenced.
+
 A stale-anchor recovery MUST capture the quarantine generation for its
 recovery-origin key before authorization. A matching generation MAY be cleared
 on successful completion. An observed absence (`None`) and a mismatched,
@@ -197,6 +204,12 @@ whose current and legacy classifications are both delta-only MUST remain
 outside this upgrade requirement.
 The origin MUST fail
 closed or enter an already-authorized local recovery path before owner I/O.
+For a request with turn state and no client `previous_response_id`, the typed
+`owner_forward` / `owner_input_shape_upgrade_required` failure MUST be eligible
+for the existing local turn-state takeover path. Takeover MUST still require a
+successful fresh durable lookup with no active owner lease and the existing
+continuity-routing checks. A failed lookup or active lease MUST fail closed;
+missing owner capability proof MUST NOT permit owner dispatch.
 Positive proof MUST come from a live bridge-ring advertisement containing the
 exact input-shape-classifier capability and a process epoch equal to the
 durable owner's recorded `owner_process_epoch`. When that proof matches, the

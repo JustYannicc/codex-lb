@@ -73,3 +73,7 @@
 - [x] 1.30 Fence full-resend arrays that normalize to empty input before
   unsupported-owner dispatch, preserving current-owner epoch proof and
   unfenced inputs where both classifiers agree.
+- [x] 1.31 Allow typed pre-dispatch shape failures into local turn-state
+  takeover without weakening capability, lease, or continuity checks.
+- [x] 1.32 Document the durable-only poison completion tradeoff and refresh
+  the PR's current verification and external whole-scope approval boundary.

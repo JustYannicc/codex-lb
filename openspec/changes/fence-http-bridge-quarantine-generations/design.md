@@ -134,3 +134,14 @@ epoch; it does not change the existing transport-security policy.
   their messages into instructions. Their original array shape can still
   classify as a full resend. The legacy owner sees empty input as delta-only,
   so the origin compares that result rather than skipping the upgrade guard.
+- The typed pre-dispatch shape-upgrade failure also enters existing turn-state
+  takeover when no client previous response id is present. The fresh durable
+  lease and continuity checks stay authoritative; an unproven owner is never
+  dispatched to as a fallback.
+- Retaining the pre-await absence fence changes #1891's immediate cleanup for
+  durable-only poison first adopted during that completion's settle load.
+  Even successful settlement and fresh-anchor registration leave this local
+  arm until the next request's first-touch reload can revoke the settled
+  zero-failure, non-tombstone row at its poison-arm fence. Failed settlement,
+  an unreadable row, or newer poison can delay release further. This accepts
+  the extra reload rather than recapturing and clearing raced evidence.

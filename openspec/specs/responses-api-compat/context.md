@@ -48,6 +48,27 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
   advertisement from a replaced process using the same instance id is not
   sufficient.
 
+## Completion fencing and local takeover
+
+A completion keeps the quarantine fence captured before its first await.
+This deliberately changes the immediate-cleanup guarantee from #1891 for a
+durable-only poison row first discovered by that completion's settlement load.
+Even if settlement resets the row and fresh-anchor registration succeeds, the
+completion leaves the newly adopted local quarantine and session marker intact.
+The next request's first-touch reload can revoke that arm after reading the
+settled zero-failure row without an abandonment tombstone. That costs one
+request's reload before reuse. Failed settlement, an unreadable row, or newer
+poison evidence can keep the key fenced longer. Recapturing after the await
+would also authorize clearing a genuinely raced arm, so this change retains
+the accepted generation boundary instead.
+
+The shape-capability gate does not forward to an unproven owner. Its typed
+pre-dispatch failure can use the existing local recovery paths, including
+turn-state takeover when no client previous response id is present. Takeover
+still reloads durable ownership and rejects a live lease or failed lookup.
+For example, two function-call outputs with turn state and no owner process
+epoch may complete locally when the refreshed owner lease is absent.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

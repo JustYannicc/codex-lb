@@ -3236,13 +3236,15 @@ def _http_bridge_turn_state_anchor_for_owner_failure(
     headers: Mapping[str, str],
     previous_response_id: str | None,
 ) -> str | None:
-    """Return the turn-state anchor when an owner forward failed unreachable."""
+    """Return turn state for an unreachable owner or typed pre-dispatch shape failure."""
 
     if previous_response_id is not None:
         return None
     turn_state = _sticky_key_from_turn_state_header(headers)
     if turn_state is None:
         return None
+    if exc.failure_phase == "owner_forward" and exc.failure_detail == "owner_input_shape_upgrade_required":
+        return turn_state
     payload = exc.payload
     if not isinstance(payload, dict):
         return None

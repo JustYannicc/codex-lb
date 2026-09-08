@@ -19070,10 +19070,15 @@ async def test_stream_via_http_bridge_owner_forward_recovery_without_pending_sta
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "continuation", ["previous-response", "turn-state", "turn-state-live-lease", "turn-state-lookup-error"]
+)
 async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally_without_owner_process_epoch(
     monkeypatch: pytest.MonkeyPatch,
+    continuation: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    previous_response_id = "resp_prev_1" if continuation == "previous-response" else None
     input_items = [
         {"type": "function_call_output", "call_id": "call-1", "output": "one"},
         {"type": "function_call_output", "call_id": "call-2", "output": "two"},
@@ -19083,7 +19088,7 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
             "model": "gpt-5.4",
             "instructions": "hi",
             "input": input_items,
-            "previous_response_id": "resp_prev_1",
+            "previous_response_id": previous_response_id,
         }
     )
     started_at = time.monotonic()
@@ -19099,7 +19104,7 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
         client_ip: str | None = None,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id, client_ip
-        assert prepared_payload.previous_response_id == "resp_prev_1"
+        assert prepared_payload.previous_response_id == previous_response_id
         prepared_inputs.append(prepared_payload.input)
         state = proxy_service._WebSocketRequestState(
             request_id=f"req-{len(prepared_inputs)}",
@@ -19110,14 +19115,18 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
             started_at=started_at,
             event_queue=asyncio.Queue(),
             transport="http",
-            previous_response_id="resp_prev_1",
+            previous_response_id=previous_response_id,
         )
         return state, '{"type":"response.create"}'
 
     owner_forward = proxy_service._HTTPBridgeOwnerForward(
         owner_instance="instance-b",
         owner_endpoint="http://instance-b",
-        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-shape-upgrade", None),
+        key=proxy_service._HTTPBridgeSessionKey(
+            "session_header" if previous_response_id is not None else "turn_state_header",
+            "sid-shape-upgrade" if previous_response_id is not None else "turn-shape-upgrade",
+            None,
+        ),
     )
     recovery_session = _make_owner_forward_recovery_session()
     capability_probe = AsyncMock()
@@ -19159,7 +19168,27 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
         ),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    fresh_lookup: proxy_service.DurableBridgeLookup | RuntimeError | None = None
+    if continuation == "turn-state-live-lease":
+        fresh_lookup = proxy_service.DurableBridgeLookup(
+            session_id="durable-shape-upgrade",
+            canonical_kind="turn_state_header",
+            canonical_key="turn-shape-upgrade",
+            api_key_scope="__anonymous__",
+            account_id="acc-1",
+            owner_instance_id="instance-b",
+            owner_epoch=1,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state="turn-shape-upgrade",
+            latest_response_id=None,
+        )
+    elif continuation == "turn-state-lookup-error":
+        fresh_lookup = RuntimeError("durable lookup unavailable")
+    lookup_targets = AsyncMock(side_effect=[None, fresh_lookup])
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_targets)
+    monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
@@ -19175,23 +19204,36 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
         unexpected_owner_io,
     )
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-session-id": "sid-shape-upgrade"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=900.0,
-            max_sessions=8,
-            queue_limit=4,
-        )
-    ]
+    headers = (
+        {"x-codex-session-id": "sid-shape-upgrade"}
+        if previous_response_id is not None
+        else {"x-codex-turn-state": "turn-shape-upgrade"}
+    )
+    stream = service._stream_via_http_bridge(
+        payload,
+        headers=headers,
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=900.0,
+        max_sessions=8,
+        queue_limit=4,
+    )
+    if continuation in {"turn-state-live-lease", "turn-state-lookup-error"}:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            _ = [chunk async for chunk in stream]
+        assert exc_info.value.failure_phase == "owner_forward"
+        assert exc_info.value.failure_detail == "owner_input_shape_upgrade_required"
+        assert prepared_inputs == [input_items]
+        assert get_or_create.await_count == 1
+        assert lookup_targets.await_count == 2
+        capability_probe.assert_not_awaited()
+        return
+    chunks = [chunk async for chunk in stream]
 
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert prepared_inputs == [input_items, input_items]
@@ -19199,9 +19241,14 @@ async def test_stream_via_http_bridge_owner_input_shape_upgrade_recovers_locally
     assert get_or_create.await_count == 2
     recovery_kwargs = get_or_create.await_args_list[1].kwargs
     assert recovery_kwargs["allow_forward_to_owner"] is False
-    assert recovery_kwargs["allow_previous_response_recovery_rebind"] is True
-    assert recovery_kwargs["previous_response_id"] == "resp_prev_1"
+    assert recovery_kwargs["allow_previous_response_recovery_rebind"] is (previous_response_id is not None)
+    assert recovery_kwargs["allow_bootstrap_owner_rebind"] is (previous_response_id is None)
+    assert recovery_kwargs["previous_response_id"] == previous_response_id
     assert recovery_kwargs["request_stage"] == "reattach"
+    if previous_response_id is None:
+        assert lookup_targets.await_count == 2
+        assert lookup_targets.await_args is not None
+        assert lookup_targets.await_args.kwargs["turn_state"] == "turn-shape-upgrade"
 
 
 async def _run_owner_forward_recovery_durable_anchor_stream(
@@ -44408,6 +44455,33 @@ async def test_a_durable_only_poison_row_stays_fenced_after_completion_observed_
     assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
         "a quarantine armed during the settlement load must survive the completion's captured absence fence"
     )
+    assert session.quarantined is True
+    # Once successful settlement and registration are visible durably, the
+    # next request's first-touch load revokes this arm without recapturing a
+    # completion fence or weakening protection for a raced generation.
+    service._durable_bridge.lookup_retry_circuit.return_value = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=time.time(),
+    )
+    await service._load_http_bridge_retry_circuit(session)
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False
+    assert http_bridge_helpers_module._http_bridge_session_reusable_for_lookup(
+        session=session,
+        key=session.key,
+        api_key=None,
+        incoming_turn_state=None,
+        previous_response_id=None,
+        preferred_account_id=None,
+        require_preferred_account=False,
+        service_tier_supported=True,
+        allow_closed_admission_handoff=False,
+        session_key_quarantined=http_bridge_quarantine_module._http_bridge_session_key_quarantined(
+            service, session.key
+        ),
+    )
+    assert session.quarantined is False
 
 
 @pytest.mark.asyncio
