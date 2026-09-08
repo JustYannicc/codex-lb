@@ -77,3 +77,6 @@
   takeover without weakening capability, lease, or continuity checks.
 - [x] 1.32 Document the durable-only poison completion tradeoff and refresh
   the PR's current verification and external whole-scope approval boundary.
+- [x] 1.33 Keep a proxy-injected anchor on the turn-state takeover path after
+  typed shape rejection, refreshing the lease without its response alias and
+  preserving the original anchor-account constraint.

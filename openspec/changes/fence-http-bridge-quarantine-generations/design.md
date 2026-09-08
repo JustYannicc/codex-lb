@@ -145,3 +145,8 @@ epoch; it does not change the existing transport-security policy.
   zero-failure, non-tombstone row at its poison-arm fence. Failed settlement,
   an unreadable row, or newer poison can delay release further. This accepts
   the extra reload rather than recapturing and clearing raced evidence.
+- A durable anchor injected before owner forwarding is not a client continuity
+  choice. After typed shape rejection, turn-state requests still reload the
+  lease without that response alias. Any retained injected anchor keeps its
+  original account constraint even when the fresh lookup identifies another
+  account.

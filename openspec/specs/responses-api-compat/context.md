@@ -68,6 +68,10 @@ turn-state takeover when no client previous response id is present. Takeover
 still reloads durable ownership and rejects a live lease or failed lookup.
 For example, two function-call outputs with turn state and no owner process
 epoch may complete locally when the refreshed owner lease is absent.
+An anchor injected during local planning does not turn that request into an
+explicit client continuation. The refresh uses turn state rather than the
+injected response alias, and a retained anchor stays bound to its original
+account.
 
 ## Fast Mode and Service Tiers
 

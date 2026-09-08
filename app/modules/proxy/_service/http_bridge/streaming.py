@@ -2417,8 +2417,18 @@ class _HTTPBridgeStreamingMixin:
                 owner_forward_fresh_replay = owner_unavailable_allows_account_neutral_replay(exc)
                 if owner_forward_fresh_replay:
                     switch_to_account_neutral_replay()
+                recovery_previous_response_id = effective_payload.previous_response_id
+                if (
+                    proxy_injected_previous_response_id
+                    and incoming_turn_state_header is not None
+                    and exc.failure_phase == "owner_forward"
+                    and exc.failure_detail == "owner_input_shape_upgrade_required"
+                ):
+                    # An injected anchor does not grant explicit-continuation
+                    # recovery authority. Refresh the client's turn-state lease.
+                    recovery_previous_response_id = None
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
-                    effective_payload.previous_response_id is not None
+                    recovery_previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
                 )
                 should_attempt_bootstrap_rebind = (
@@ -2427,7 +2437,7 @@ class _HTTPBridgeStreamingMixin:
                         exc,
                         key=bridge_session_key,
                         headers=headers,
-                        previous_response_id=effective_payload.previous_response_id,
+                        previous_response_id=recovery_previous_response_id,
                     )
                 )
                 should_attempt_turn_state_takeover = False
@@ -2439,7 +2449,7 @@ class _HTTPBridgeStreamingMixin:
                     takeover_turn_state = _http_bridge_turn_state_anchor_for_owner_failure(
                         exc,
                         headers=headers,
-                        previous_response_id=effective_payload.previous_response_id,
+                        previous_response_id=recovery_previous_response_id,
                     )
                     if takeover_turn_state is not None:
                         # Reuse the routing lookup semantics (alias resolution
@@ -2454,7 +2464,7 @@ class _HTTPBridgeStreamingMixin:
                                 api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
                                 session_header=durable_session_header_alias,
-                                previous_response_id=effective_payload.previous_response_id,
+                                previous_response_id=recovery_previous_response_id,
                             )
                         except Exception:
                             logger.warning(
@@ -2476,6 +2486,12 @@ class _HTTPBridgeStreamingMixin:
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
                                     continuity_preferred_account_id = fresh_turn_state_lookup.account_id
                                     request_state.preferred_account_id = resolve_required_account_id(
+                                        (
+                                            "proxy-injected previous response",
+                                            request_state.preferred_account_id
+                                            if proxy_injected_previous_response_id
+                                            else None,
+                                        ),
                                         (
                                             "refreshed previous response or bridge",
                                             continuity_preferred_account_id,

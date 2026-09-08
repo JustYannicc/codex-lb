@@ -210,6 +210,10 @@ for the existing local turn-state takeover path. Takeover MUST still require a
 successful fresh durable lookup with no active owner lease and the existing
 continuity-routing checks. A failed lookup or active lease MUST fail closed;
 missing owner capability proof MUST NOT permit owner dispatch.
+A proxy-injected durable anchor MUST NOT count as a client-supplied previous
+response id for this decision. The origin MUST resolve fresh turn-state
+ownership without using that injected anchor as a lookup alias, and any retained
+anchor MUST remain constrained to its original account.
 Positive proof MUST come from a live bridge-ring advertisement containing the
 exact input-shape-classifier capability and a process epoch equal to the
 durable owner's recorded `owner_process_epoch`. When that proof matches, the
