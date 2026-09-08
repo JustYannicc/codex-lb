@@ -41,6 +41,10 @@
 
 ## Verification
 
+- [x] Prove real persisted exhausted-owner selection returns the exact probe
+  and account lease without alternate dispatch or recovery wait; retain
+  transient hard-affinity recovery and complete affected independent reviews.
+
 - [x] Fix and verify reader-origin owner-loss self-cancellation and same-tick
   returned-probe reconciliation with current-candidate independent reviews.
 

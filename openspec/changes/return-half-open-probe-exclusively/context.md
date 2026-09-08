@@ -147,6 +147,15 @@ alongside its API and keepalive cancellation-cascade fixes. Those outer task
 boundaries complement the PR's deferred admission/probe cleanup; they do not
 replace its typed-error precedence or ownership fences.
 
+## Persisted exhausted-owner selection
+
+Evidence-gated quota recovery can leave a required owner unavailable after a
+fresh exhausted usage sample. The real owner-restricted selector reports
+`continuity_owner_unavailable`, not the ordinary pool's `usage_limit_reached`,
+and its message may still contain a retry hint. That explicit owner failure
+enters the existing ordered probe-return cleanup before the generic hint parser.
+This changes neither hard-affinity saturation waits nor local-capacity recovery.
+
 ## Upstream accepted replay integration
 
 Accepted output-free replay now shares the internal retry path with half-open
