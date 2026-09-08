@@ -102,11 +102,11 @@ the completed local implementation tasks.
 
 ## 11. Round-20 producer performance and delivery progress
 
-- [ ] 11.1 Reproduce blocked-put task overhead on the published head
-- [ ] 11.2 Use producer-owned capacity futures and synchronous reservation cleanup
-- [ ] 11.3 Prove resume, revocation, terminal publication, cancellation races, and byte accounting without child tasks
-- [ ] 11.4 Compare revision-pinned burst benchmarks and run affected regression and independent review
-- [ ] 11.5 Determine whether an established delivery-progress contract bounds shared-reader blocking, or return the policy decision without changing it
+- [x] 11.1 Reproduce blocked-put task overhead on the published head
+- [x] 11.2 Use producer-owned capacity futures and synchronous reservation cleanup
+- [x] 11.3 Prove resume, revocation, terminal publication, cancellation races, and byte accounting without child tasks
+- [x] 11.4 Compare revision-pinned burst benchmarks and run affected regression and independent review
+- [x] 11.5 Determine whether an established delivery-progress contract bounds shared-reader blocking, or return the policy decision without changing it
 
 The native-egress exception remains an owner decision. No new timeout or queue
 capacity policy is accepted by this performance change.

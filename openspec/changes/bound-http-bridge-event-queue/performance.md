@@ -1,4 +1,62 @@
-# Round-19 performance and lifecycle evidence
+# Queue performance evidence
+
+## Round-20 producer-owned put futures
+
+Measured implementation `e72b208526fbffa5e0080abe1b6588cf6610ff58`,
+tree `7357726dbe600afefff3ccde34b24a2aecd1176c`, removes blocked-put child
+tasks. Each waiting producer holds its own byte reservation and awaits a
+non-consuming capacity future. Cancellation releases that reservation
+synchronously; no enqueue, revocation, or cleanup task is created.
+
+Comparison revisions are published head
+`08b38d335e8e07ad1f53badc85064bc3a9cfcbf8` and current main
+`e987c56c85a3dc516e6a543ff13a9513ca41aafb`. All three registered worktrees
+were clean. The unchanged benchmark script is blob
+`09b09a569a63a51d84152f6ba9573f9c676a47e7`.
+The same CPython 3.13.5 interpreter ran 10,000 events per sample, five samples
+after warmup. No test suites ran during these serial measurements.
+Both database URLs and all three engine targets were verified inside the
+dedicated temporary directory before each run.
+
+Median process CPU microseconds per event:
+
+| Order | Schedule | Main | Published head | Producer futures |
+| --- | --- | ---: | ---: | ---: |
+| Main, published, futures | Producer-ahead | 1.3793 | 0.8969 | 1.0150 |
+| Main, published, futures | Interleaved | 10.7546 | 14.0100 | 13.4264 |
+| Main, published, futures | Burst | 1.5042 | 24.6293 | 7.4917 |
+| Futures, published, main | Producer-ahead | 1.4725 | 0.8649 | 0.8763 |
+| Futures, published, main | Interleaved | 9.8919 | 14.8137 | 14.4970 |
+| Futures, published, main | Burst | 1.6047 | 25.5342 | 8.2668 |
+
+Burst tasks/event fell from 1.0000 to 0.0001, the one benchmark producer per
+10,000 events. No per-event child tasks remain. Burst CPU fell 69.6% and 67.6%
+against the published queue in the two orders. Interleaved reads remained
+task-free apart from the benchmark producer.
+
+Raw samples, including wall times:
+[first main](benchmarks/20260908-round20-first-main.json),
+[first published](benchmarks/20260908-round20-first-before.json),
+[first futures](benchmarks/20260908-round20-first-after.json),
+[reverse futures](benchmarks/20260908-round20-reverse-after.json),
+[reverse published](benchmarks/20260908-round20-reverse-before.json),
+[reverse main](benchmarks/20260908-round20-reverse-main.json).
+
+This does not establish CPU parity with main. Bounded burst delivery still
+costs about five times the unbounded baseline, which retains the entire burst
+without applying backpressure. The main and PR memory behavior is not
+equivalent. These local Python 3.13.5 samples are not directly comparable to
+the maintainer's Python 3.14.6 absolute timings or to production throughput.
+The fixed byte-budget lock is unchanged.
+
+Capacity remains two events and the request-deadline policy is unchanged.
+Its default permits a shared-reader stall up to 7200 seconds; eliminating
+child tasks does not fix that liveness limit. A short delivery-progress
+duration and the separate native transport choice await owner acceptance.
+The accepted scope and local/hosted verification are recorded in the
+round-20 PR reply, not inferred from this benchmark.
+
+## Historical round-19 evidence
 
 ## Revisions and method
 
