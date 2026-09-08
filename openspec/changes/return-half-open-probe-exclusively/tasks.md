@@ -77,3 +77,5 @@
 
 - [x] Run affected unit/integration tests, Ruff, formatting, `ty`, architecture,
   diff checks, and exact-head Standards/Input reviews.
+- [x] Fence stale claimed-probe failure settlement, preserve terminal/account
+  cleanup and replacement completion, and verify current/non-probe controls.

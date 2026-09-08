@@ -62,9 +62,11 @@ making a durable claim.
 An owner request that remains pending after the default lease window is not an
 abandoned probe when it has attempted `response.create` and has not entered
 terminal settlement. Keep that owner exclusive and renew the lease through its
-`bridge_request_deadline`. Completion settlement captures the durable episode
-and local lease generation at admission; a generation mismatch is a no-op even
-when a replacement probe reused the same session/token.
+`bridge_request_deadline`. Completion and failure settlement capture the durable
+episode and local lease generation at admission. A stale generation cannot
+mutate the retry circuit, including its failure count, cooldown, episode or
+replacement lease, even when a replacement reused the same session/token.
+Terminal delivery and account settlement for the old request still complete.
 
 ### Reuse the existing failure funnel for classification
 
@@ -74,7 +76,8 @@ without a durable write. A previous-response rejection is continuity-neutral
 only when request state proves that the rejected anchor was proxy-injected;
 raw/client-supplied rejection remains outside retry-circuit accounting.
 Genuine `stream_incomplete`, `stream_idle_timeout`, and `clean_close` continue
-through the existing attempt-scoped accounting path. Anchor replay and error
+through the existing attempt-scoped accounting path after ownership/generation
+eligibility. Anchor replay and error
 provenance remain owned by their existing vehicles.
 
 ### Serialize reset's critical section
