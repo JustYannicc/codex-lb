@@ -4096,11 +4096,12 @@ class _HTTPBridgeStreamingMixin:
         async def cleanup() -> None:
             cleanup_error: BaseException | None = None
 
-            async def run_step(label: str, operation: Awaitable[Any]) -> None:
+            async def run_step(label: str, operation: Awaitable[Any]) -> bool:
                 """Keep reset teardown moving after a best-effort step fails."""
                 nonlocal cleanup_error
                 try:
                     await operation
+                    return True
                 except (asyncio.CancelledError, Exception) as exc:
                     if cleanup_error is None:
                         cleanup_error = exc
@@ -4110,6 +4111,7 @@ class _HTTPBridgeStreamingMixin:
                         _hash_identifier(session.key.affinity_key),
                         exc_info=True,
                     )
+                    return False
 
             async def detach_session() -> None:
                 session.closed = True
@@ -4146,12 +4148,13 @@ class _HTTPBridgeStreamingMixin:
             async def detach_disarm_and_release() -> None:
                 # A submitter may append an attempt until it observes the same
                 # lifecycle state. Keep ownership across detach/disarm/release so
-                # reset cannot leave a late undisarmed send behind. Each step is
-                # independent so one best-effort failure does not skip the rest.
+                # reset cannot leave a late undisarmed send behind. Continue
+                # cleanup after errors, but return the probe only when both
+                # routing detachment and attempt disarming succeeded.
                 async with session.lifecycle_lock:
-                    await run_step("detach", detach_session())
-                    await run_step("disarm", disarm_pending())
-                    if proxy_continuity_loss_detail is not None:
+                    detached = await run_step("detach", detach_session())
+                    disarmed = await run_step("disarm", disarm_pending())
+                    if detached and disarmed and proxy_continuity_loss_detail is not None:
                         await run_step("probe_release", release_probe())
 
             await run_step("lifecycle_transition", detach_disarm_and_release())

@@ -34479,7 +34479,7 @@ async def test_http_bridge_reset_continues_cleanup_after_detach_failure(
         )
 
     detach_session.assert_called_once_with(session.key, expected_session=session)
-    release_probe.assert_awaited_once()
+    release_probe.assert_not_awaited()
     settle_pending.assert_awaited_once()
     close_session.assert_awaited_once_with(session, release_durable_session=True)
 
