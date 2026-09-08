@@ -4989,7 +4989,10 @@ either direction. This guard MUST cover a client string below 4096 characters
 whose normalized item reaches 4096 compact-serialization characters, a multi-item
 array containing only the allowed tool-output item types, and a one-item array
 whose whole-array serialization reaches 4096 characters while its item
-serialization does not. The origin
+serialization does not. It MUST also cover full-resend-shaped
+system/developer-only arrays that normalize to empty input. Truly empty input
+and small single-message arrays whose current and legacy classifications are
+both delta-only MUST remain outside this upgrade requirement. The origin
 MUST fail closed or enter an already-authorized local recovery path before owner
 I/O.
 Positive proof MUST come from a live bridge-ring advertisement containing the

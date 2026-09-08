@@ -304,7 +304,7 @@ def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest)
     if len(input_value) > 1:
         return not current_full_resend
     if len(input_value) != 1:
-        return False
+        return current_full_resend
     try:
         legacy_full_resend = len(json.dumps(input_value[0], ensure_ascii=True, separators=(",", ":"))) >= 4096
     except (OverflowError, TypeError, ValueError):

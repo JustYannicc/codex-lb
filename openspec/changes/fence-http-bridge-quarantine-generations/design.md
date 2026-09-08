@@ -130,3 +130,7 @@ epoch; it does not change the existing transport-security policy.
   anchor planning, but it does not authorize revoking expired poison on a
   retained weaker-only tail. This keeps a durable-load miss from replacing the
   generation already observed by healthy completion.
+- System/developer-only arrays can become empty input when validation hoists
+  their messages into instructions. Their original array shape can still
+  classify as a full resend. The legacy owner sees empty input as delta-only,
+  so the origin compares that result rather than skipping the upgrade guard.

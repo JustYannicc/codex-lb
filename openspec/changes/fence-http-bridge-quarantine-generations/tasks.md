@@ -70,3 +70,6 @@
   an observed weaker-only tail while preserving later weak or poison arms.
 - [x] 1.29 Apply poison-specific expiry to durable-revocation arm capture and
   prove completion through a durable-load miss with active overflow evidence.
+- [x] 1.30 Fence full-resend arrays that normalize to empty input before
+  unsupported-owner dispatch, preserving current-owner epoch proof and
+  unfenced inputs where both classifiers agree.
