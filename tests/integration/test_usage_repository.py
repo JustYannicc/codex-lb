@@ -144,6 +144,49 @@ async def test_reset_transition_candidate_continues_past_temporal_miss(db_setup)
     assert (evidence.before.used_percent, evidence.after.used_percent) == (100.0, 0.0)
 
 
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_keeps_weekly_only_primary_separate_from_five_hour_rows(
+    db_setup,
+) -> None:
+    del db_setup
+    account = _make_account("acc_weekly_only_primary_reset_candidate")
+    now = utcnow()
+    since = now - timedelta(seconds=180)
+    old_weekly_reset_at = naive_utc_to_epoch(now) + 3 * 24 * 60 * 60
+    new_weekly_reset_at = naive_utc_to_epoch(now - timedelta(seconds=60)) + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for offset, used_percent, reset_at, window_minutes in (
+            (-120, 100.0, old_weekly_reset_at, 10_080),
+            (-90, 10.0, naive_utc_to_epoch(now) + 5 * 60 * 60, 300),
+            (-60, 0.0, new_weekly_reset_at, 10_080),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="primary",
+                recorded_at=now + timedelta(seconds=offset),
+                reset_at=reset_at,
+                window_minutes=window_minutes,
+            )
+
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "primary",
+            since,
+            expected_reset_at=old_weekly_reset_at,
+            reset_at_tolerance_seconds=5,
+            min_reset_jump_seconds=60,
+            expected_window_minutes=10_080,
+        )
+
+    assert [(row.used_percent, row.reset_at, row.window_minutes) for row in rows] == [
+        (100.0, old_weekly_reset_at, 10_080),
+        (0.0, new_weekly_reset_at, 10_080),
+    ]
+
+
 class _TrackedSqliteConnection:
     def __init__(self, conn: sqlite3.Connection, closed: list[bool]) -> None:
         self._conn = conn

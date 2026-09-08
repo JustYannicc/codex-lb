@@ -243,7 +243,7 @@ class StubUsageRepository:
         self._monthly = monthly or {}
         self._history = history or {}
         self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
-        self.history_queries: list[tuple[str, str, datetime, int, int]] = []
+        self.history_queries: list[tuple[str, str, datetime, int, int, int | None]] = []
 
     async def latest_by_account(
         self,
@@ -273,13 +273,25 @@ class StubUsageRepository:
         expected_reset_at: int,
         reset_at_tolerance_seconds: int,
         min_reset_jump_seconds: int,
+        expected_window_minutes: int | None = None,
     ) -> list[UsageHistory]:
-        self.history_queries.append((account_id, window, since, expected_reset_at, reset_at_tolerance_seconds))
+        self.history_queries.append(
+            (
+                account_id,
+                window,
+                since,
+                expected_reset_at,
+                reset_at_tolerance_seconds,
+                expected_window_minutes,
+            )
+        )
         history = sorted(
             (
                 entry
                 for entry in self._history.get(window, [])
-                if entry.account_id == account_id and entry.recorded_at > since
+                if entry.account_id == account_id
+                and entry.recorded_at > since
+                and (expected_window_minutes is None or entry.window_minutes == expected_window_minutes)
             ),
             key=lambda entry: (entry.recorded_at, entry.id),
         )
@@ -421,7 +433,9 @@ async def test_resolve_long_window_reset_evidence_restores_team_weekly_transitio
     evidence = await refresh_scheduler_module._resolve_long_window_reset_evidence(
         accounts=[account],
         usage_repo=cast(Any, usage_repo),
+        before_primary={},
         before_secondary={account.id: after_reset},
+        after_primary={},
         after_secondary={account.id: latest},
         before_monthly={},
         after_monthly={},
@@ -436,8 +450,92 @@ async def test_resolve_long_window_reset_evidence_restores_team_weekly_transitio
             _epoch_to_naive_utc(blocked_at),
             legacy_weekly_reset_at,
             5,
+            10080,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_reconcile_pro_weekly_only_primary_reset_from_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000
+    blocked_at = now - 3600
+    legacy_weekly_reset_at = now + 3 * 24 * 3600
+    account = _make_account(
+        "acc_pro_weekly_only_primary_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=legacy_weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before_reset = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=legacy_weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=10080,
+    )
+    before_reset.id = 10
+    after_reset = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=0.0,
+        reset_at=now - 60 + 7 * 24 * 3600,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10080,
+    )
+    after_reset.id = 11
+    latest = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=0.0,
+        reset_at=now + 7 * 24 * 3600,
+        recorded_at=_epoch_to_naive_utc(now),
+        window_minutes=10080,
+    )
+    latest.id = 12
+    usage_repo = StubUsageRepository(
+        primary={account.id: latest},
+        history={"primary": [before_reset, after_reset, latest]},
+    )
+
+    evidence = await refresh_scheduler_module._resolve_long_window_reset_evidence(
+        accounts=[account],
+        usage_repo=cast(Any, usage_repo),
+        before_primary={account.id: after_reset},
+        before_secondary={},
+        after_primary={account.id: latest},
+        after_secondary={},
+        before_monthly={},
+        after_monthly={},
+    )
+
+    assert evidence[account.id].baseline is before_reset
+    assert (evidence[account.id].before, evidence[account.id].after) == (before_reset, after_reset)
+    assert usage_repo.history_queries == [
+        (
+            account.id,
+            "primary",
+            _epoch_to_naive_utc(blocked_at),
+            legacy_weekly_reset_at,
+            5,
+            10080,
+        ),
+    ]
+
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+    accounts_repo = StubAccountsRepository([account])
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+        long_window_reset_evidence=evidence,
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
 
 
 @pytest.mark.asyncio
@@ -482,7 +580,9 @@ async def test_resolve_long_window_reset_evidence_rejects_current_pair_after_mat
     evidence = await refresh_scheduler_module._resolve_long_window_reset_evidence(
         accounts=[account],
         usage_repo=cast(Any, usage_repo),
+        before_primary={},
         before_secondary={account.id: current_before},
+        after_primary={},
         after_secondary={account.id: current_after},
         before_monthly={},
         after_monthly={},

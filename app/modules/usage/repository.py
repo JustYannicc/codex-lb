@@ -968,6 +968,7 @@ class UsageRepository:
         expected_reset_at: int,
         reset_at_tolerance_seconds: int,
         min_reset_jump_seconds: int,
+        expected_window_minutes: int | None = None,
     ) -> list[UsageHistory]:
         """Return a reset marker and the adjacent pair that first proves a reset after it.
 
@@ -991,6 +992,8 @@ class UsageRepository:
             .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
             .limit(1)
         )
+        if expected_window_minutes is not None:
+            baseline_stmt = baseline_stmt.where(UsageHistory.window_minutes == expected_window_minutes)
         baseline = (await self._session.execute(baseline_stmt)).scalar_one_or_none()
         if baseline is None or baseline.reset_at is None:
             return []
@@ -1020,6 +1023,11 @@ class UsageRepository:
             .where(
                 previous_row.account_id == account_id,
                 _window_clause(window, previous_row),
+                *(
+                    (previous_row.window_minutes == expected_window_minutes,)
+                    if expected_window_minutes is not None
+                    else ()
+                ),
                 or_(
                     previous_row.recorded_at < candidate_after.recorded_at,
                     and_(
@@ -1040,6 +1048,14 @@ class UsageRepository:
             .where(
                 candidate_after.account_id == account_id,
                 _window_clause(window, candidate_after),
+                *(
+                    (
+                        candidate_before.window_minutes == expected_window_minutes,
+                        candidate_after.window_minutes == expected_window_minutes,
+                    )
+                    if expected_window_minutes is not None
+                    else ()
+                ),
                 candidate_after.reset_at.is_not(None),
                 candidate_after.reset_at >= baseline_reset_at + min_reset_jump_seconds,
                 candidate_after_precedes,
