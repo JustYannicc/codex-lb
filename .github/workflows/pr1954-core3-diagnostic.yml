@@ -18,9 +18,16 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONFAULTHANDLER: "1"
-      CODEX_LB_DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/pr1954-core3/tests.db
-      CODEX_LB_TEST_DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/pr1954-core3/tests.db
     steps:
+      - name: Initialize dedicated database environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostic_db_url="sqlite+aiosqlite:///$RUNNER_TEMP/pr1954-core3/tests.db"
+          mkdir -p "$RUNNER_TEMP/pr1954-core3"
+          echo "CODEX_LB_DATABASE_URL=$diagnostic_db_url" >> "$GITHUB_ENV"
+          echo "CODEX_LB_TEST_DATABASE_URL=$diagnostic_db_url" >> "$GITHUB_ENV"
+
       - name: Checkout diagnostic runner
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -61,7 +68,6 @@ jobs:
           test "$(git rev-parse HEAD)" = c9aeb6b9dd5de1b609274cd8544b1efea59272cd
           test "$(git rev-parse 'HEAD^{tree}')" = 7f7b8620fc82373af67bd7ae67e1d8dbf116e5f1
           git diff --exit-code
-          mkdir -p "${{ runner.temp }}/pr1954-core3"
           make frontend-build
           uv sync --dev --frozen
           uv --version
