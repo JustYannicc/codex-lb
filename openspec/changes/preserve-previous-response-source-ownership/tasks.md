@@ -44,3 +44,9 @@
 - [x] 6.1 Reproduce registered marker ownership with source-overlapping models through initial and reused direct WebSocket routes.
 - [x] 6.2 Preserve resolved turn-state ownership before both source guards and synchronize the explicit contract without relaxing independent owner constraints.
 - [ ] 6.3 Verify affected routes and safeguards, obtain independent reviews, and deliver the corrected head with hosted and CodeRabbit evidence.
+
+## 7. WebSocket capability and owner-cardinality separation
+
+- [x] 7.1 Reproduce the scoped unknown-owner continuation with mixed security authorization through both direct WebSocket routes.
+- [x] 7.2 Count possible owners before security-capability filtering while preserving subsequent authorization and synchronize the contract.
+- [ ] 7.3 Verify scoped regressions and current-upstream composition, obtain independent reviews, and deliver current-head CI, CodeRabbit, and hosted Codex clearance.

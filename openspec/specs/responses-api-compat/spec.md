@@ -3677,6 +3677,12 @@ hard account ownership. In an owner-miss continuation, when a marker alias is
 unavailable, a value matching either shape MUST use the same sole-candidate
 compatibility rule without requiring exact server-side issuance provenance; a
 registered marker MUST still resolve to its recorded owner.
+Direct WebSocket owner-miss cardinality MUST count possible subscription owners
+within the API-key account-assignment scope before security-work authorization
+filtering. Requiring the trusted-cyber capability MUST NOT turn multiple possible
+owners into a sole-owner fallback. Subsequent account selection and socket reuse
+MUST still enforce that capability; a sole candidate or independent owner MUST
+NOT authorize dispatch through an account lacking the required authorization.
 Direct WebSocket requests MUST reconcile registered turn-state ownership with
 previous-response and file ownership before either initial-connect or socket-reuse
 model-source guards. A resolved turn-state subscription owner MUST veto source
@@ -3947,6 +3953,21 @@ pre-marker v2 owner verification.
 - **AND** the sanitized error code is `previous_response_owner_unavailable`
 - **AND** the sanitized error message is `Previous response owner account is unavailable; retry later.`
 - **AND** no subscription account is selected and no upstream request is dispatched
+
+#### Scenario: Security capability does not resolve WebSocket ownership ambiguity
+
+- **GIVEN** a direct WebSocket continuation requires the trusted-cyber capability and its previous-response owner is unknown
+- **AND** the API-key scope contains one security-work-authorized and one non-authorized possible owner
+- **WHEN** either direct Responses WebSocket route processes the continuation
+- **THEN** both accounts remain in the ownership count and the proxy emits `previous_response_owner_unavailable`
+- **AND** no upstream continuation is dispatched, including on an already-open authorized socket
+
+#### Scenario: Sole WebSocket owner still requires security authorization
+
+- **GIVEN** a direct WebSocket continuation requires the trusted-cyber capability
+- **AND** ownership resolution yields one possible or independently proven account lacking security-work authorization
+- **WHEN** either direct Responses WebSocket route selects or reuses an account
+- **THEN** the proxy rejects dispatch under the existing capability policy without switching to another owner
 
 #### Scenario: Direct WebSocket candidate lookup failure fails closed
 

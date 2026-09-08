@@ -329,6 +329,21 @@ New client guides added to `docs/client-setup.md` should stay configuration-only
 examples of this contract; anything needing new proxy behavior requires its own
 OpenSpec change first.
 
+## WebSocket capability and owner counting
+
+Direct WebSocket owner-miss counting keeps security capability separate from
+ownership evidence. If the API-key scope contains accounts A and B, requiring
+trusted-cyber authorization on B does not prove that B owns an unknown response.
+Count both possible owners and reject the ambiguous continuation. Once one
+owner is established, the existing connection and socket-reuse selectors still
+enforce security authorization. This changes only the cardinality lookup, not
+capability signaling, lineage persistence, or authorized retry policy.
+
+The [owner-evidence contract](spec.md#requirement-previous-response-source-routing-follows-proven-ownership)
+defines this boundary. A sole unauthorized candidate is still rejected by
+normal capability routing, rather than being dispatched or replaced by an
+authorized account outside the ownership constraint.
+
 ## Operational Notes
 
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.

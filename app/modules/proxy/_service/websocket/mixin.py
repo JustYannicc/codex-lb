@@ -2055,7 +2055,9 @@ class _WebSocketMixin:
                             # subscription-model owner miss when exactly one
                             # eligible account remains. Account-scoped API
                             # keys narrow the count; unscoped keys use the
-                            # normal model pool. File ownership remains strict;
+                            # normal model pool. Security authorization is a
+                            # later routing constraint, not ownership evidence.
+                            # File ownership remains strict;
                             # terminal compaction is deliberately allowed
                             # through this cardinality check because it carries
                             # no account pin.
@@ -2070,7 +2072,6 @@ class _WebSocketMixin:
                                     additional_limit_name=None,
                                     account_ids=selection_account_ids,
                                     exclude_account_ids=request_state.excluded_account_ids,
-                                    require_security_work_authorized=request_state.require_security_work_authorized,
                                 )
                             except Exception:
                                 logger.exception(
