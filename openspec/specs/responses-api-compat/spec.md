@@ -4668,6 +4668,30 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **THEN** existing client-disconnect and upstream-drain behavior is preserved
 - **AND** no completed event is delivered to another request
 
+### Requirement: Live queue writes do not spawn per-event tasks
+
+HTTP-bridge live event writes MUST wait for finite queue capacity in the
+producer task without creating child enqueue, revocation, or cleanup tasks.
+A blocked payload MUST retain one process-wide byte reservation owned by that
+producer until the payload is enqueued or the wait ends. Cancellation or
+revocation before enqueue MUST release that reservation before returning,
+without an asynchronous cleanup wait. A producer cancelled after a capacity
+wakeup MUST NOT insert its payload or strand another waiting producer.
+
+#### Scenario: Blocked producer resumes without child tasks
+
+- **GIVEN** a live queue is full and a producer waits with a reserved payload
+- **WHEN** its consumer drains a slot
+- **THEN** the producer enqueues that payload without spawning a child task
+- **AND** dequeue releases its byte reservation exactly once
+
+#### Scenario: Cancellation races a capacity wakeup
+
+- **GIVEN** multiple producers are waiting on a full live queue
+- **WHEN** a slot is drained and one awakened producer is cancelled before enqueue
+- **THEN** its payload reservation is released without inserting the payload
+- **AND** another waiting producer can use the available slot
+
 ### Requirement: Live queue reads do not spawn per-event tasks
 
 Buffered and waiting HTTP-bridge live event reads MUST use the consumer task

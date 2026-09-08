@@ -241,8 +241,8 @@ logger = logging.getLogger("app.modules.proxy.service")
 
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT = 1
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
-# A local startup failure must enqueue its terminal frame and end marker before
-# the downstream consumer loop starts; the third unread live event backpressures.
+# Live capacity stays at two events; terminal event/EOS use a separate ordered
+# slot and do not need space in this deque.
 _HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE = 2
 # Keep queued SSE payloads bounded across all bridge sessions.  This is an
 # implementation safety envelope, not an operator tuning knob: a process with
@@ -305,6 +305,11 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
     """Finite live queue whose blocked producer exits when downstream detaches."""
 
+    # asyncio's stubs omit the join bookkeeping. Blocked writes update these
+    # inherited fields after transferring their existing payload reservation.
+    _unfinished_tasks: int
+    _finished: asyncio.Event
+
     def __init__(
         self,
         *,
@@ -315,7 +320,6 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
     ) -> None:
         super().__init__(maxsize=maxsize)
         self._revoked = revoked
-        self._scheduler = scheduler
         self._byte_budget = byte_budget or _HTTP_BRIDGE_LIVE_EVENT_QUEUE_BYTE_BUDGET
         self._queued_bytes = 0
         self._budget_exceeded = asyncio.Event()
@@ -327,13 +331,10 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         # while terminal bookkeeping is still in flight.
         self._terminal_ready = asyncio.Event()
         self._read_waiters: deque[asyncio.Future[None]] = deque()
+        self._put_waiters: deque[asyncio.Future[None]] = deque()
         self._terminal_budget_exceeded = False
         self._delivery_deadline_exceeded = False
         self._discarded = False
-        # ``asyncio.Queue.put`` invokes ``self._put`` after a blocked putter
-        # wakes.  Keep the reservation attached to that task so ``_put`` can
-        # account for the payload exactly once instead of reserving it again.
-        self._blocked_put_reservations: dict[asyncio.Task[Any], int] = {}
 
     @property
     def queued_bytes(self) -> int:
@@ -386,7 +387,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
                 self._queued_bytes,
                 self._byte_budget.max_bytes,
             )
-            self._revoked.set()
+            self.revoke()
             self._terminal_pending = True
             self._terminal_items.append(None)
             self._terminal_ready.set()
@@ -409,9 +410,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._queued_bytes,
             self._byte_budget.max_bytes,
         )
-        self._revoked.set()
-        self._terminal_ready.set()
-        self._wake_readers()
+        self.revoke()
 
     def enqueue_terminal_event_nowait(self, event_block: str) -> bool:
         """Queue a terminal event and EOS without waiting for live capacity."""
@@ -423,7 +422,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         if self._terminal_pending:
             self._terminal_items.clear()
             self._terminal_pending = False
-        self._revoked.set()
+        self.revoke()
         return self._queue_terminal_items((event_block, None))
 
     def fail_delivery_deadline(self, event_block: str) -> None:
@@ -449,30 +448,25 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             return False
         if self._terminal_pending:
             return True
-        self._revoked.set()
+        self.revoke()
         return self._queue_terminal_items((None,))
 
     def _put(self, item: str | None) -> None:
-        current_task = asyncio.current_task()
-        reserved_bytes = self._blocked_put_reservations.pop(current_task, None) if current_task is not None else None
         item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         if self._revoked.is_set() and item is not None:
-            if reserved_bytes is not None:
-                self._byte_budget.release(reserved_bytes)
             raise _HTTPBridgeLiveEventQueueByteBudgetExceeded
-        if reserved_bytes is not None and reserved_bytes != item_bytes:
-            self._byte_budget.release(reserved_bytes)
-            raise RuntimeError("HTTP bridge blocked put reservation does not match its payload")
-        if reserved_bytes is None and not self._byte_budget.reserve(item_bytes):
+        if not self._byte_budget.reserve(item_bytes):
             self._mark_live_event_budget_exceeded(item_bytes)
             raise _HTTPBridgeLiveEventQueueByteBudgetExceeded
         try:
-            super()._put(item)
+            self._append_reserved(item, item_bytes)
         except BaseException:
             self._byte_budget.release(item_bytes)
             raise
-        self._queued_bytes += item_bytes
 
+    def _append_reserved(self, item: str | None, item_bytes: int) -> None:
+        super()._put(item)
+        self._queued_bytes += item_bytes
         self._wake_readers()
 
     def put_nowait(self, item: str | None) -> None:
@@ -510,7 +504,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         harmless.
         """
 
-        self._revoked.set()
+        self.revoke()
         self._discarded = True
         while True:
             try:
@@ -573,61 +567,59 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
         item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         self._queued_bytes = max(0, self._queued_bytes - item_bytes)
         self._byte_budget.release(item_bytes)
+        self._wake_putters()
         return item
+
+    def _wake_putters(self) -> None:
+        # Wake without claiming a slot. Each producer checks capacity and
+        # transfers its own reservation synchronously after its await returns.
+        while self._put_waiters:
+            waiter = self._put_waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
 
     async def put(self, item: str | None) -> None:
         if self._revoked.is_set():
             return
-        item_bytes = _http_bridge_live_event_queue_item_bytes(item)
         try:
             self.put_nowait(item)
         except asyncio.QueueFull:
+            pass
+        else:
+            return
+        # The waiting producer retains this payload, so it owns the byte credit
+        # until a synchronous enqueue transfers it to the queue. Cleanup has no
+        # await where repeated cancellation could interrupt reservation release.
+        item_bytes = _http_bridge_live_event_queue_item_bytes(item)
+        if not self._byte_budget.reserve(item_bytes):
+            self._mark_live_event_budget_exceeded(item_bytes)
+            return
+        reserved = True
+        try:
+            while self.full() and not self._revoked.is_set():
+                putter = asyncio.get_running_loop().create_future()
+                self._put_waiters.append(putter)
+                try:
+                    await putter
+                finally:
+                    putter.cancel()
+                    try:
+                        self._put_waiters.remove(putter)
+                    except ValueError:
+                        pass
             if self._revoked.is_set():
                 return
-            # The item remains strongly referenced by this blocked producer
-            # while capacity is unavailable. Charge it before awaiting so a
-            # fleet of paused streams cannot bypass the process-wide budget.
-            if not self._byte_budget.reserve(item_bytes):
-                self._mark_live_event_budget_exceeded(item_bytes)
-                return
-            put_task = self._scheduler.create_task(
-                super().put(item),
-                name="http-bridge-event-put",
-            )
-            self._blocked_put_reservations[put_task] = item_bytes
-            revoke_task = self._scheduler.create_task(
-                self._revoked.wait(),
-                name="http-bridge-event-revoke",
-            )
-            tasks = (put_task, revoke_task)
-            try:
-                done, _pending = await self._scheduler.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                if put_task in done:
-                    put_task.result()
-            except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
-                self.revoke()
-            finally:
-
-                async def reap_tasks_and_release_reservation() -> None:
-                    try:
-                        for task in tasks:
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                    finally:
-                        reserved_bytes = self._blocked_put_reservations.pop(put_task, None)
-                        if reserved_bytes is not None:
-                            self._byte_budget.release(reserved_bytes)
-
-                cleanup_task = self._scheduler.create_task(
-                    reap_tasks_and_release_reservation(),
-                    name="http-bridge-event-put-cleanup",
-                )
-                _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
-                if deferred_cancellation is not None:
-                    raise deferred_cancellation
-        except _HTTPBridgeLiveEventQueueByteBudgetExceeded:
-            self.revoke()
+            self._append_reserved(item, item_bytes)
+            reserved = False
+            # Match asyncio.Queue.put_nowait bookkeeping without reserving the
+            # already charged payload again through our _put override.
+            self._unfinished_tasks += 1
+            self._finished.clear()
+            # _append_reserved wakes our reader futures. get() never registers
+            # a reader with asyncio.Queue's separate _getters deque.
+        finally:
+            if reserved:
+                self._byte_budget.release(item_bytes)
 
     def revoke(self) -> None:
         """Stop producers while retaining queued bytes for their consumer."""
@@ -637,6 +629,7 @@ class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
             self._terminal_budget_exceeded = True
             self._terminal_ready.set()
         self._wake_readers()
+        self._wake_putters()
 
 
 @dataclass(frozen=True, slots=True)

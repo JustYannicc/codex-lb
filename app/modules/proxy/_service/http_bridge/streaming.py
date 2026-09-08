@@ -197,6 +197,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _revoke_http_bridge_event_queue,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
@@ -4570,7 +4571,7 @@ class _HTTPBridgeStreamingMixin:
                 # closing.  Mark the queue revoked before preserving a raced
                 # completed-delivery claim so terminal cleanup can discard
                 # unread bytes if terminal bookkeeping aborts.
-                request_state.event_queue_revoked.set()
+                _revoke_http_bridge_event_queue(request_state)
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = clock.monotonic()
                 await self._maybe_release_idle_http_bridge_session_lease(session)
