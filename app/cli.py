@@ -28,6 +28,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    desktop_relay = subparsers.add_parser("desktop-relay", help="Run the optional localhost:8000 Desktop relay.")
+    desktop_relay.add_argument("--lb-url", default="http://127.0.0.1:2455", help="Local LB HTTP(S) origin.")
+
     codex_sessions = subparsers.add_parser(
         "codex-sessions",
         help="Manage local Codex session metadata.",
@@ -90,6 +93,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
+
+    if args.command == "desktop-relay":
+        from app.modules.desktop_relay.api import run
+
+        try:
+            run(args.lb_url)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        return
 
     if args.command == "codex-sessions":
         if args.codex_sessions_command == "retag":
