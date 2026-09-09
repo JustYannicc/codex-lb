@@ -1290,7 +1290,10 @@ async def test_http_bridge_second_attachment_lookup_handles_revoked_queue_during
     async def register_turn_state(
         target_session: proxy_service._HTTPBridgeSession,
         turn_state: str,
+        *,
+        synthesized: bool = False,
     ) -> None:
+        assert synthesized is False
         assert target_session is session
         assert turn_state == "turn-state"
         registration_started.set()
@@ -1382,7 +1385,10 @@ async def test_http_bridge_second_attachment_rechecks_revocation_before_marking_
     async def register_turn_state(
         target_session: proxy_service._HTTPBridgeSession,
         turn_state: str,
+        *,
+        synthesized: bool = False,
     ) -> None:
+        assert synthesized is False
         assert target_session is session
         assert turn_state == "turn-state"
         registration_started.set()
@@ -26787,7 +26793,7 @@ async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    turn_state = "http_turn_drain_rebind"
+    turn_state = "upstream-turn-drain-rebind"
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None)
     payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
     started_at = time.monotonic()
@@ -28121,7 +28127,7 @@ async def test_http_bridge_aborted_owner_wait_clamps_to_remaining_request_budget
 
     assert waited is False
     assert exhausted is False
-    wait_for_owner.assert_awaited_once_with(inflight_future, timeout=pytest.approx(1.25))
+    wait_for_owner.assert_awaited_once_with(inflight_future, timeout=pytest.approx(1.25), scheduler=REAL_SCHEDULER)
 
 
 @pytest.mark.asyncio
@@ -28156,7 +28162,7 @@ async def test_http_bridge_retained_owner_cleanup_clamps_to_remaining_request_bu
                 request_deadline=11.25,
             )
         assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
-        wait_for_owner.assert_awaited_once_with(retained_future, timeout=pytest.approx(1.25))
+        wait_for_owner.assert_awaited_once_with(retained_future, timeout=pytest.approx(1.25), scheduler=REAL_SCHEDULER)
         evict_waiter.assert_not_awaited()
 
         wait_for_owner.reset_mock()
@@ -47624,7 +47630,10 @@ async def test_wait_for_aborted_owner_preserves_observer_cancellation(
     )
     setattr(inflight_future, http_bridge_helpers_module._HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
 
-    async def observer_cancelled_wait(shared: asyncio.Future[Any], *, timeout: float | None = None) -> Any:
+    async def observer_cancelled_wait(
+        shared: asyncio.Future[Any], *, timeout: float | None = None, scheduler: RealScheduler
+    ) -> Any:
+        assert scheduler is REAL_SCHEDULER
         assert shared is owner_task
         owner_task.cancel()
         await asyncio.gather(owner_task, return_exceptions=True)
