@@ -38,10 +38,13 @@ manufacture an upstream failure while the reset is in progress.
 
 This change owns only the half-open probe return contract. #1947 remains the
 vehicle for cooldown-suppressed session retirement; #1891 owns poisoned-anchor
-quarantine; #1902 owns denied-anchor retirement and is the sole attribution
-carrier; #1867 remains the broad anchor-recovery vehicle. This change adds no
-anchor replay/provenance policy, attribution file, migration, setting, or
-durable schema change.
+quarantine; #1902 owns denied-anchor retirement; #1867 remains the broad
+anchor-recovery vehicle. Lucas Klein contributed the carried HTTP half-open
+stale-anchor regression, so the existing Tests credit remains. This change
+adds no anchor replay/provenance policy, migration, setting, or durable schema
+change. Reason-only incomplete classification is independently tracked by
+#2273 and is excluded from this residual. Refs #2272; sibling settlement and
+probe expiry questions remain unresolved.
 
 The durable row remains the replica-wide source for failure counts and real
 cooldown deadlines. The active half-open owner is intentionally process-local:
