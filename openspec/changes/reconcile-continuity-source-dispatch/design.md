@@ -63,6 +63,18 @@ unchanged. The two upstream assertions exposed this coupling in hosted CI.
 
 ## Migration Plan
 
+The `0da41b64e` composition adds upstream agentic HTTP promotion and captured
+automation reclaim budgets. Its sole text conflict joins the new
+`http_continuation_signal` import with the existing security-exhaustion constant;
+both are required. Structured history makes a request eligible for a transport,
+not a new account owner. Inferred locality remains soft and cannot inject an
+anchor or trim history. For example, a promoted history carrying an unknown
+previous response still needs the existing source check and assignment-only
+owner count. Confirmed sources continue through source dispatch before bridge
+admission. Verify public routing and reservation handoff along with retry and
+queue controls. The upstream automation claim-budget column and migration stay
+unchanged; test their reclaim and migration cases without accessing live data.
+
 No migration or deployment is part of this reconciliation. Publish the reviewed
 composition with an exact expected-head lease. Preserve the previous commit and
 its evidence as the recovery point. Inherited upstream migrations are unchanged.

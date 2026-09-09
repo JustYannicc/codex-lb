@@ -18,3 +18,8 @@
 
 - [x] 4.1 Prove marker-only direct WebSocket owner misses fail closed for zero or multiple assignment-scoped owners, then extend the existing source/candidate checks without changing first-turn or independently owned routing.
 - [x] 4.2 Verify both direct routes, sole scoped selection, source-confirmed and source-unavailable controls, registered/file ownership, and relevant reuse regressions; complete independent reviews before republishing.
+
+## 5. Agentic promotion composition
+
+- [x] 5.1 Reconcile the retry import conflict with `0da41b64e`, preserving structured HTTP continuation promotion and security-owner selection.
+- [x] 5.2 Verify promotion, source ownership, reservation handoff, queue/retry behavior, and inherited automation reclaim/migration checks; complete independent reviews before republishing.
