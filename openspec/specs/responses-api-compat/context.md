@@ -323,3 +323,10 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+## Self-contained Codex experimental context replay
+
+Codex 0.153.1 sends inline context with `reasoning.context=all_turns`, local message/tool labels, transcript metadata, correlation IDs, and function/custom tool namespaces. The validator recognizes a closed set of fully supplied items in a temporary projection. The dispatched request keeps the native content and labels.
+
+Context containers authenticate which encrypted tool results came from this proxy for the current key and root session. HTTP and WebSocket replay classification can project those exact ciphertext parts while keeping encrypted reasoning and unknown stored state account bound. In-memory verification evidence is never accepted from client JSON and is not serialized across replicas or durable restoration.
+
+A complete request containing a notes read can therefore retry on eligible B after a pre-visible quota rejection on A. The source-integrated live CLI check did so, kept notes on their Pro owner and queried both Pro and Plus history. Automated tests also cover this behavior on native WebSocket and HTTP bridging. Appending unknown encrypted reasoning still blocks rotation. Sticky selection, API-key scope, retry limits, file ownership and settlement ordering continue to apply.
