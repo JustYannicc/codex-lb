@@ -66,8 +66,10 @@ adapter because native depth-limited queues abort slow consumers instead of
 providing per-stream flow control. Other WebSocket transports keep their native
 default. This fallback does not implement native flow control.
 
-The no-child-task read contract does not cover blocked producers, which retain
-cancellation-safe task cleanup. The process budget still uses a thread lock.
+Blocked producers also create no child tasks. A blocked producer holds its byte
+reservation locally, awaits a capacity future in its own task, and releases the
+reservation synchronously on cancellation or revocation. The process budget
+still uses a thread lock.
 See the bounded-queue change's performance evidence for measured costs and
 the limits of comparison with unbounded main.
 

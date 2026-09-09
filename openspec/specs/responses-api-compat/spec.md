@@ -6115,6 +6115,13 @@ HTTP-bridge upstream WebSockets MUST bypass native egress until native
 per-stream flow control and cancellation can be proven; this constraint MUST
 NOT disable native egress for unrelated WebSocket transports.
 
+#### Scenario: Owner recovery closes an attached child stream
+
+- **GIVEN** owner-forward recovery is yielding an attached local child stream while completion owns its queue
+- **WHEN** the downstream caller closes the owner-recovery stream
+- **THEN** the wrapper MUST await the child stream's closure before its outer detachment
+- **AND** child cleanup MUST revoke downstream delivery without relying on asynchronous-generator garbage collection
+
 #### Scenario: Terminal flush loses deferred output at the enqueue deadline
 
 - **GIVEN** an attached consumer is paused and a terminal frame flushes more deferred reasoning events than its finite queue can retain
