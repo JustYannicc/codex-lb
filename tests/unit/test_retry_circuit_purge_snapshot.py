@@ -154,3 +154,57 @@ async def test_batch_purge_stays_within_sqlite_999_bind_limit(
         assert len(delete_bind_counts) >= 2
         assert max(delete_bind_counts) <= 999, delete_bind_counts
         assert (await session.execute(select(HttpBridgeRetryCircuit))).first() is None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    coordinator = DurableBridgeSessionCoordinator(session_factory)
+    initial_updated_at_epoch = 1200.0
+    delayed_updated_at_epoch = 1200.5
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-batch-timestamp-race",
+        api_key_id="key-batch-timestamp-race",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=initial_updated_at_epoch,
+    )
+
+    async with session_factory() as purge_session:
+        blocked_session = _BlockedSelectSession(purge_session)
+        repository = DurableBridgeRepository(cast(AsyncSession, blocked_session))
+        purge_task = asyncio.create_task(
+            repository.purge_retry_circuits_before(initial_updated_at_epoch + 1.0),
+        )
+        await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
+
+        delayed = await coordinator.persist_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit-batch-timestamp-race",
+            api_key_id="key-batch-timestamp-race",
+            consecutive_failures=3,
+            cooldown_until_epoch=1400.0,
+            last_detail="stream_idle_timeout",
+            updated_at_epoch=delayed_updated_at_epoch,
+            base_updated_at_epoch=initial_updated_at_epoch,
+        )
+        assert delayed is not None
+        assert delayed.updated_at_epoch == delayed_updated_at_epoch
+        assert delayed.admission_generation == 0
+
+        blocked_session.release_delete.set()
+        assert await asyncio.wait_for(purge_task, timeout=1.0) == 0
+
+    remaining = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-batch-timestamp-race",
+        api_key_id="key-batch-timestamp-race",
+    )
+    assert remaining is not None
+    assert remaining.updated_at_epoch == delayed_updated_at_epoch
+    assert remaining.admission_generation == 0
+    assert remaining.consecutive_failures == 3
+
