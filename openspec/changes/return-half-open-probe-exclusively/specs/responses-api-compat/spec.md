@@ -136,9 +136,10 @@ ordinary selection error and MUST NOT settle pending requests as
 `previous_response_owner_unavailable`.
 Failure to release a selected account lease during that terminal cleanup MUST NOT
 replace the stable continuity-owner error returned to the client. The detached
-session MUST be closed through cancellation-deferred cleanup before that error
-returns, so its upstream socket, account and durable leases, reader, and
-detached-registry capacity cannot outlive the failed reconnect.
+session MUST complete cancellation-deferred transport, reader, pending-request,
+and handoff cleanup before that error returns. Failed account-lease handles MUST
+remain attached to the detached session, and the session MUST remain discoverable
+until explicit cleanup retry releases those handles successfully.
 
 If account-lease release fails during detached cleanup, the failed lease handle
 MUST remain attached to that detached session. An explicit account cleanup pass
