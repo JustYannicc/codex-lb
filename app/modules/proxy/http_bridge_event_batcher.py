@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.config.settings import get_settings
 from app.db.models import HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2, HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
@@ -44,11 +45,18 @@ class HttpBridgeOperationEventBatcher:
     """
 
     @classmethod
-    def from_settings(cls, durable_bridge: Any, settings: Any | None = None) -> "HttpBridgeOperationEventBatcher":
+    def from_settings(
+        cls,
+        durable_bridge: Any,
+        settings: Any | None = None,
+        *,
+        scheduler: Scheduler = REAL_SCHEDULER,
+    ) -> "HttpBridgeOperationEventBatcher":
         """Build the event spooler from the operator-facing settings surface."""
         settings = settings or get_settings()
         return cls(
             durable_bridge,
+            scheduler=scheduler,
             max_bytes=int(
                 getattr(settings, "http_responses_session_bridge_operation_event_spool_max_bytes", 2 * 1024 * 1024)
             ),
@@ -78,6 +86,7 @@ class HttpBridgeOperationEventBatcher:
         durable_bridge: Any,
         *,
         max_bytes: int,
+        scheduler: Scheduler = REAL_SCHEDULER,
         batch_size: int = 32,
         flush_interval_seconds: float = 0.1,
         max_pending_events: int = 2048,
@@ -88,6 +97,7 @@ class HttpBridgeOperationEventBatcher:
         if spool_format not in {HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1, HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2}:
             raise ValueError("unsupported durable bridge operation spool format")
         self._durable_bridge = durable_bridge
+        self._scheduler = scheduler
         self._max_bytes = max_bytes
         self._batch_size = batch_size
         self._flush_interval_seconds = flush_interval_seconds
@@ -156,12 +166,12 @@ class HttpBridgeOperationEventBatcher:
 
     def _ensure_task(self) -> None:
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="http-bridge-operation-event-flusher")
+            self._task = self._scheduler.create_task(self._run(), name="http-bridge-operation-event-flusher")
 
     async def _run(self) -> None:
         while True:
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=self._flush_interval_seconds)
+                await self._scheduler.wait_for(self._wake.wait(), timeout=self._flush_interval_seconds)
             except TimeoutError:
                 pass
             self._wake.clear()
@@ -292,7 +302,7 @@ class HttpBridgeOperationEventBatcher:
                 ),
             )
             self._closing_operations.add(operation_id)
-        append_task = asyncio.create_task(
+        append_task = self._scheduler.create_task(
             self._append_terminal_event_unbounded(
                 operation_id=operation_id,
                 event_text=event_text,
@@ -306,7 +316,7 @@ class HttpBridgeOperationEventBatcher:
         self._terminal_append_tasks.add(append_task)
         append_task.add_done_callback(self._terminal_append_done)
         try:
-            done, _ = await asyncio.wait(
+            done, _ = await self._scheduler.wait(
                 {append_task},
                 timeout=max(self._terminal_append_timeout_seconds, 0.0),
             )
@@ -442,7 +452,7 @@ class HttpBridgeOperationEventBatcher:
         expected_recovery_dispatch_count: int,
         expected_state: str,
     ) -> None:
-        finalize_task = asyncio.create_task(
+        finalize_task = self._scheduler.create_task(
             self._finalize_terminal_spool(
                 operation_id=operation_id,
                 session_id=session_id,
@@ -577,7 +587,7 @@ class HttpBridgeOperationEventBatcher:
             return
         for task in tasks:
             task.cancel()
-        _, pending = await asyncio.wait(tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
+        _, pending = await self._scheduler.wait(tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
         if not pending:
             return
         # A cancelled append/finalize whose session rollback/close is shielded
@@ -593,6 +603,6 @@ class HttpBridgeOperationEventBatcher:
             kind,
             len(pending),
             self._terminal_append_timeout_seconds,
-            sorted(task.get_name() for task in pending),
+            sorted(task.get_name() for task in tasks if task in pending),
         )
         await asyncio.gather(*pending, return_exceptions=True)

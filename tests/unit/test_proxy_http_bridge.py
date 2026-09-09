@@ -37882,7 +37882,7 @@ async def test_http_bridge_retry_circuit_stale_purge_preserves_active_local_leas
                 updated_at_epoch=stale_updated_at,
             )
         ),
-        purge_retry_circuit=AsyncMock(),
+        purge_retry_circuit=AsyncMock(return_value=True),
     )
 
     assert await service._load_http_bridge_retry_circuit(session) is True

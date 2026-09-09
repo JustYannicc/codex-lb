@@ -951,7 +951,9 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
-        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
+        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(
+            self._durable_bridge, scheduler=self._scheduler
+        )
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._initialize_http_bridge_session_registry()
         _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)

@@ -1195,17 +1195,19 @@ async def _wait_for_http_bridge_aborted_owner(
     future: Any,
     *,
     timeout: float,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     abort_error = getattr(future, _HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR, None)
     if abort_error is None:
         return False
-    return await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
+    return await _wait_for_http_bridge_retained_owner(future, timeout=timeout, scheduler=scheduler)
 
 
 async def _wait_for_http_bridge_retained_owner(
     future: Any,
     *,
     timeout: float,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     owner_task = getattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, None)
     if not isinstance(owner_task, asyncio.Task):
@@ -1213,7 +1215,7 @@ async def _wait_for_http_bridge_retained_owner(
     if owner_task.done():
         return True
     try:
-        await wait_on_shared_future(owner_task, timeout=timeout)
+        await wait_on_shared_future(owner_task, timeout=timeout, scheduler=scheduler)
     except TimeoutError:
         if owner_task.done():
             return True
@@ -1244,7 +1246,9 @@ async def _evict_http_bridge_retained_capacity_waiter_after_error(
     timeout = _http_bridge_owner_observation_timeout_seconds(service, timeout, request_deadline)
     retained_owner_finished = False
     if timeout > 0:
-        retained_owner_finished = await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
+        retained_owner_finished = await _wait_for_http_bridge_retained_owner(
+            future, timeout=timeout, scheduler=scheduler_for(service)
+        )
     if _http_bridge_inflight_owner_running(future) and not retained_owner_finished:
         raise error
     await service._evict_http_bridge_inflight_waiter(future, error)
@@ -1265,7 +1269,9 @@ async def _wait_for_http_bridge_aborted_owner_within_budget(
     request_deadline: float | None,
 ) -> bool:
     timeout_seconds = _http_bridge_owner_observation_timeout_seconds(service, wait_timeout_seconds, request_deadline)
-    return timeout_seconds > 0 and await _wait_for_http_bridge_aborted_owner(future, timeout=timeout_seconds)
+    return timeout_seconds > 0 and await _wait_for_http_bridge_aborted_owner(
+        future, timeout=timeout_seconds, scheduler=scheduler_for(service)
+    )
 
 
 def _http_bridge_turn_state_session_key(
