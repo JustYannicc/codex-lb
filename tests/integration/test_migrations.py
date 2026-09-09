@@ -2037,7 +2037,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260909_060000_add_report_rollup"
+    parent_revision = "20260909_070000_automation_run_claim_budget"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2071,6 +2071,8 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     "model_source_pins",
                     "account_usage_rollup_state",
                     "request_report_hourly_rollups",
+                    "automation_jobs",
+                    "automation_runs",
                 )
             },
             "settings": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM dashboard_settings ORDER BY id"))],
@@ -2081,6 +2083,12 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             "reports": [
                 tuple(row)
                 for row in sync_conn.execute(text("SELECT * FROM request_report_hourly_rollups ORDER BY bucket_epoch"))
+            ],
+            "automation_jobs": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM automation_jobs ORDER BY id"))
+            ],
+            "automation_runs": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM automation_runs ORDER BY id"))
             ],
             "legacy_retry": tuple(
                 sync_conn.execute(
@@ -2121,6 +2129,35 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             assert (
                 await conn.execute(text("SELECT reports_folded_through FROM account_usage_rollup_state WHERE id = 1"))
             ).scalar_one() == "1970-01-01 00:00:00"
+            await conn.execute(
+                text(
+                    "INSERT INTO automation_jobs (id, name, schedule_time, schedule_timezone, model) "
+                    "VALUES ('retained-job', 'Retained job', '06:00', 'UTC', 'retained-model')"
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO automation_runs (
+                        id, job_id, trigger, slot_key, cycle_key,
+                        scheduled_for, started_at, attempt_count
+                    ) VALUES (
+                        :id, 'retained-job', 'scheduled', :slot, :slot,
+                        '2026-09-09 06:00:00', '2026-09-09 06:00:01', 2
+                    )
+                    """
+                ),
+                [
+                    {"id": "captured-budget-run", "slot": "captured-slot"},
+                    {"id": "legacy-budget-run", "slot": "legacy-slot"},
+                ],
+            )
+            assert (
+                await conn.execute(text("SELECT claim_budget_seconds FROM automation_runs ORDER BY id"))
+            ).scalars().all() == [None, None]
+            await conn.execute(
+                text("UPDATE automation_runs SET claim_budget_seconds = 600.0 WHERE id = 'captured-budget-run'")
+            )
             await conn.execute(
                 text(
                     "UPDATE account_usage_rollup_state SET reports_folded_through = '2026-09-09 06:00:00' WHERE id = 1"
@@ -2894,3 +2931,40 @@ async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replica
 
     # The retained physical columns are an allow-listed drift, not a schema defect.
     assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+
+@pytest.mark.asyncio
+async def test_automation_run_claim_budget_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``automation_runs.claim_budget_seconds`` column,
+    downgrade drops it, and a final walk to head proves the revision sits on a
+    single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'automation-run-claim-budget.sqlite'}"
+    parent_revision = "20260909_060000_add_report_rollup"
+    claim_budget_revision = "20260909_070000_automation_run_claim_budget"
+
+    async def _automation_run_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('automation_runs')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "claim_budget_seconds" not in await _automation_run_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, claim_budget_revision, bootstrap_legacy=False))
+        assert "claim_budget_seconds" in await _automation_run_columns(engine)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "claim_budget_seconds" not in await _automation_run_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "claim_budget_seconds" in await _automation_run_columns(engine)
+    finally:
+        await engine.dispose()

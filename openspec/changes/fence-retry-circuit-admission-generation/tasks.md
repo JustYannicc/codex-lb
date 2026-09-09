@@ -94,3 +94,9 @@
 - [x] 4.19 Follow the merged report-rollup migration without changing it;
   preserve populated report history and fold watermarks through the marker
   lifecycle, and recheck report, retention and request-log integration.
+- [x] 4.20 Follow the merged automation claim-budget migration without changing
+  it; preserve captured budgets and legacy NULL budgets through the populated
+  marker lifecycle and recheck automation reclaim behavior.
+- [x] 4.21 Reconcile HTTP continuation promotion requirements with generation
+  fencing; verify soft locality, hard ownership, Chat reservation handoff and
+  affected retry/queue cleanup paths on the new composition.

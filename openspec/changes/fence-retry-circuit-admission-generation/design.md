@@ -29,14 +29,16 @@ rollback therefore cannot race a durable claim that does not use the broader
 migration lock.
 
 The unmerged marker migration follows
-`20260909_060000_add_report_rollup`, after the dashboard routing/overload,
-resilience and timeout revisions and the overflow/transport repair from #2198.
+`20260909_070000_automation_run_claim_budget`, after report rollups, dashboard
+routing/overload, resilience and timeout revisions and the overflow/transport
+repair from #2198.
 That merge joins the subscription-overflow and transport-sentinel revisions
 without changing either. The marker's operations affect only the retry-circuit
 table; upgrading or rolling it back must preserve the upstream schemas,
 overflow settings, explicit transport choices, model-source pins, dashboard
 resilience, timeout, routing and overload overrides, report history and fold
-watermarks, and retry generations.
+watermarks, captured automation claim budgets and legacy NULL budgets, and
+retry generations.
 All merged revisions remain unchanged.
 This graph correction does not choose the stranded-receipt policy or add
 late-receipt recovery.
@@ -52,6 +54,17 @@ dashboard overrides at its latest parent. It compares the preexisting schema
 and data through upgrade, rollback refusal, writer exclusion, safe rollback
 and re-upgrade. Rolling back only the marker never drops report history, which
 may be the only remaining copy after raw-log retention.
+The same lifecycle preserves automation run rows with captured and NULL
+budgets; marker rollback never traverses the automation budget migration.
+
+HTTP continuation promotion broadens entry to this bridge but does not change
+replay authority. Inferred history and conversation locality remain soft and
+API-key-scoped; hard turn/session ownership and generation-fenced admission
+still govern their existing paths. Conversation payloads retain their own
+identifier without an injected previous-response anchor. Promoted Chat requests
+keep the API's reservation ownership until the existing service-cleanup-ready
+or owner-forward signals transfer it. Reconciliation tests these interfaces
+without selecting a stranded-receipt or deferred-settlement policy.
 
 ## Claim path
 
