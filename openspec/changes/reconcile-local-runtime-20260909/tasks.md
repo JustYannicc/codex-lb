@@ -1,8 +1,8 @@
 ## 1. Source reconciliation
 
 - [x] 1.1 Inventory the accepted runtime, stale updater state and current PR carriers; retain the audit artifact.
-- [ ] 1.2 Compose frozen selected inputs on pinned upstream main; verify each included and excluded source in the aggregate manifest.
-- [ ] 1.3 Preserve deployed migration ancestry; prove one candidate head and upgrade from the prior deployed revision using disposable state.
+- [x] 1.2 Compose frozen selected inputs on pinned upstream main; verify each included and excluded source in the aggregate manifest.
+- [x] 1.3 Preserve deployed migration ancestry; prove one candidate head and upgrade from the prior deployed revision using disposable state.
 
 ## 2. Candidate verification
 

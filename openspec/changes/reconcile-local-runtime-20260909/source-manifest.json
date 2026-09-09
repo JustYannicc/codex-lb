@@ -688,5 +688,47 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "In progress. Read verification.md and deployment receipt; inclusion is not a pass claim."
+  "verification_status": "In progress. Read verification.md and deployment receipt; inclusion is not a pass claim.",
+  "composition_repairs": [
+    {
+      "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
+      "contract": "Retain bounded durable retry-admission receipt cleanup and half-open probe ownership together; never recapture a newer quarantine generation."
+    },
+    {
+      "commit": "5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1",
+      "contract": "Route owner cleanup waits and event batcher task/timeouts through the service scheduler."
+    },
+    {
+      "commit": "8e52e6e8ab5a3eaff587ef514bc8be5cad964359",
+      "contract": "Preserve exact synthesized marker provenance; unchanged encrypted-history expansion preserves raw input identity; current raw input proof stays separate from legacy normalized v2 signatures and epoch-bound forwards fail closed on missing shape proof."
+    },
+    {
+      "commit": "ddf3d70942717365a7cc691a685554cfb46cce68",
+      "contract": "Preserve deployed local migration bytes and original parents while joining with current upstream; retain current credit helper behavior."
+    },
+    {
+      "commit": "f55e9cfddcccb80b15edffff30c65095f1be52b9",
+      "contract": "Combine precise paid/free reset evidence and CAS rollback with spendable-credit and unknown-plan exhaustion rules."
+    },
+    {
+      "commit": "160c03adac4780128a239ee3ebed1981d7e95ef7",
+      "contract": "Combine explicit pre-dispatch drain recovery and release-before-local-reserve with input-shape upgrade and injected-anchor authority fences."
+    },
+    {
+      "commit": "c4703734cf5d2b6817b1ebb593e5acccc586022e",
+      "contract": "Final unshipped aggregate merge revision joins repaired reset-recovery head; adapt old alias test to the generalized long-window evidence resolver."
+    },
+    {
+      "commit": "2fedc5cf376c2000ce29d6ca207bb739d507b518",
+      "contract": "Align bridge registration, scheduler and external-turn fixtures with merged provenance contracts."
+    },
+    {
+      "commit": "0ef59c36a2b7e8b30441d45b951f8db93a24e079",
+      "contract": "Align dynamic import/native capability/frame budget fixtures and register PostgreSQL migration coverage."
+    },
+    {
+      "commit": "9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f",
+      "contract": "Prove branch-specific migration downgrade without removing current upstream siblings; prove real WebSocket denied-anchor retirement on the subsequent complete request."
+    }
+  ]
 }
