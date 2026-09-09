@@ -67,11 +67,13 @@ from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeA
 from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-    _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
+    _abort_http_bridge_inflight_creation_by_future_locked,
+    _abort_http_bridge_inflight_creation_locked,
     _active_http_bridge_instance_ring,
     _alias_fallback_key,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
+    _evict_http_bridge_retained_capacity_waiter_after_error,
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
@@ -79,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
+    _http_bridge_canonical_inflight_key_locked,
     _http_bridge_capacity_after_planned_closes,
     _http_bridge_claim_allows_takeover,
     _http_bridge_compatible,
@@ -86,7 +89,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_has_durable_recovery_anchor,
     _http_bridge_incompatible_model_fork_key,
+    _http_bridge_inflight_creation_can_register,
     _http_bridge_inflight_creation_count,
+    _http_bridge_key_is_synthesized_turn_state,
     _http_bridge_key_strength,
     _http_bridge_locally_owned_fork_key,
     _http_bridge_models_compatible,
@@ -112,8 +117,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
     _http_bridge_turn_state_alias_key,
+    _http_bridge_turn_state_key_from,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
+    _mark_http_bridge_inflight_creation_owner,
     _mark_http_bridge_reader_handoff_reconnect_failed,
     _persist_http_bridge_replacement_account,
     _persistent_http_bridge_affinity,
@@ -125,8 +132,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
-    _settle_failed_http_bridge_creation,
+    _settle_and_close_failed_http_bridge_creation,
     _turn_keys,
+    _wait_for_http_bridge_aborted_owner_within_budget,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _close_http_bridge_session as _helpers_close_http_bridge_session,
@@ -296,20 +304,7 @@ class _HTTPBridgeMixin(
         if inflight_future is None:
             return False
         async with self._http_bridge_lock:
-            current_future = self._http_bridge_inflight_sessions.get(key)
-            if current_future is not inflight_future:
-                return False
-            if getattr(inflight_future, "_http_bridge_handoff", False):
-                return False
-            self._http_bridge_inflight_sessions.pop(key, None)
-            if inflight_future.done():
-                return True
-            if isinstance(exc, asyncio.CancelledError):
-                inflight_future.cancel()
-            else:
-                inflight_future.set_exception(exc)
-                inflight_future.exception()
-            return True
+            return _abort_http_bridge_inflight_creation_locked(self, key, inflight_future, exc)
 
     async def _evict_http_bridge_inflight_waiter(
         self,
@@ -324,13 +319,7 @@ class _HTTPBridgeMixin(
                     break
             if stale_key is None:
                 return None
-            if getattr(inflight_future, "_http_bridge_handoff", False):
-                return None
-            self._http_bridge_inflight_sessions.pop(stale_key, None)
-            if not inflight_future.done():
-                inflight_future.set_exception(exc)
-                inflight_future.exception()
-            return stale_key
+            return _abort_http_bridge_inflight_creation_by_future_locked(self, inflight_future, exc)
 
     @overload
     async def _get_or_create_http_bridge_session(
@@ -433,6 +422,7 @@ class _HTTPBridgeMixin(
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
+        requested_key = key
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key, initial_session_key = _turn_keys(headers, api_key, key, session_header_fallback_key)
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
@@ -573,7 +563,7 @@ class _HTTPBridgeMixin(
                                 bind_account_neutral_recovery_owner(alias_session)
                                 continue
                             self._http_bridge_turn_state_index.pop(alias_index_key, None)
-                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif not _http_bridge_models_compatible(alias_session.request_model, request_model):
                             model_transition_rebind, model_transition_parent_key = True, alias_key
                             if is_http_bridge_account_neutral_replay(
@@ -591,7 +581,7 @@ class _HTTPBridgeMixin(
                                 key = recovery_fork_key
                                 continue
                             else:
-                                key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                                key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif not _http_bridge_compatible(
                             alias_session, request_model, request_service_tier, True
                         ) or not _http_bridge_session_matches_preferred_account(
@@ -675,14 +665,14 @@ class _HTTPBridgeMixin(
                                 kind=key.affinity_kind,
                                 key=key.affinity_key,
                             ):
-                                key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                                key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif (
                             fallback_key := _alias_fallback_key(incoming_session_key, initial_session_key, api_key_id)
                         ) is not None:
                             key = fallback_key
                             used_session_header_fallback = True
                         else:
-                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                             missing_turn_state_alias = True
                 pruned_sessions = self._prune_http_bridge_sessions_locked()
                 if pruned_sessions:
@@ -690,6 +680,10 @@ class _HTTPBridgeMixin(
                         force_durable_takeover = True
                     self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
+                if existing is not None:
+                    key = existing.key
+                else:
+                    key = _http_bridge_canonical_inflight_key_locked(self, key)
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
@@ -1331,10 +1325,9 @@ class _HTTPBridgeMixin(
                                 capacity_error_after_planned_closes = capacity_error
                         else:
                             inflight_future = asyncio.get_running_loop().create_future()
-                            setattr(
+                            _mark_http_bridge_inflight_creation_owner(
                                 inflight_future,
-                                _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
-                                clock_for(self).monotonic(),
+                                started_at=clock_for(self).monotonic(),
                             )
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
@@ -1384,11 +1377,20 @@ class _HTTPBridgeMixin(
                         pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
+                    if await _wait_for_http_bridge_aborted_owner_within_budget(
+                        self, capacity_wait_future, wait_timeout_seconds, request_deadline
+                    ):
+                        continue
                     raise timeout_error from exc
                 except ProxyResponseError:
                     raise
                 except Exception:
-                    pass
+                    await _evict_http_bridge_retained_capacity_waiter_after_error(
+                        self,
+                        capacity_wait_future,
+                        timeout=wait_timeout_seconds,
+                        request_deadline=request_deadline,
+                    )
                 continue
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1412,6 +1414,12 @@ class _HTTPBridgeMixin(
                         pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
+                    if _http_bridge_key_is_synthesized_turn_state(key):
+                        raise timeout_error from exc
+                    if await _wait_for_http_bridge_aborted_owner_within_budget(
+                        self, inflight_future, wait_timeout_seconds, request_deadline
+                    ):
+                        continue
                     raise timeout_error from exc
                 except Exception:
                     raise
@@ -1552,7 +1560,9 @@ class _HTTPBridgeMixin(
                 await self._claim_durable_http_bridge_session(created_session, **claim_kwargs)
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
-                    if current_future is inflight_future:
+                    if current_future is inflight_future and _http_bridge_inflight_creation_can_register(
+                        inflight_future
+                    ):
                         self._http_bridge_inflight_sessions.pop(key, None)
                         if original_request_unanchored:
                             _reserve_http_bridge_unanchored_handoff(created_session, request_scope_id=request_scope_id)
@@ -1566,18 +1576,14 @@ class _HTTPBridgeMixin(
                         code="capacity_exhausted_active_sessions",
                     )
             except BaseException as exc:
-                superseded = await _settle_failed_http_bridge_creation(
+                await _settle_and_close_failed_http_bridge_creation(
                     self,
                     key,
                     inflight_future=inflight_future,
                     created_session=created_session,
+                    session_registered=session_registered,
                     exc=exc,
                 )
-                if created_session is not None and not session_registered:
-                    await self._close_http_bridge_session(
-                        created_session,
-                        release_durable_session=not superseded,
-                    )
                 raise
             assert created_session is not None
             _log_http_bridge_event(
