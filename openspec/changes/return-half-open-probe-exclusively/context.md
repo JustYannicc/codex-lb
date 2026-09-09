@@ -188,3 +188,31 @@ With pinned `@fission-ai/openspec@1.11.0`, strict validation passes for this
 change and the synchronized Responses spec. The repository's canonical
 `validate --specs` gate passes all 58 specs. Adding `--strict` reports 22 failures
 in other, unchanged specs; it is not an all-repository strict pass.
+
+The upstream reconciliation preserves both this change's probe scenarios and
+the synchronized cooldown-suppressed session-retirement scenarios. Existing
+terminal tests cover both text-decoded and native-interpreted events, and
+single-flight probe admission remains independent of the dashboard-managed
+upstream account-breaker toggle. The sibling eventual-success settlement and
+expiry policy questions remain unresolved; this integration does not change
+their behavior.
+
+The later reconciliation with upstream
+`0da41b64e802331faae01077c89e8c8580b4bce0` passes strict validation for all
+64 main specs with the same pinned validator. Upstream has repaired the
+unrelated strict-validation failures recorded above. The accepted HTTP
+continuation promotion uses soft, API-key-scoped locality; it does not grant
+hard-continuity replay or probe ownership. Chat reservation settlement remains
+with the actor that accepted it. Automation run claims use their upstream
+captured-budget contract, independently of the unresolved bridge-expiry
+policy. This reconciliation preserves those contracts without changing the
+sibling-success or probe-expiry decisions.
+
+
+## Independent classifier extraction on current main
+
+The 2026-09-09 reconciliation includes upstream `c0beaaadd96a89f0240582b5449bf4dd50647c7d`, including its fixed bridge constants. It preserves the original contribution history and Lucas Klein's HTTP half-open regression and Tests credit.
+
+Reason-only `response.incomplete` classification now belongs to the independent `count-http-bridge-incomplete-reason` change and issue #2273. This probe change uses the existing explicit-error classification for its delayed terminal ownership regression, so its tests do not require the other branch. Its circuit eligibility and continuity-provenance requirements remain intact. The stuck-gate reader-cleanup test uses upstream's current constant rather than the removed setting.
+
+Both branches start from the same current main. The reduced probe branch passes 103 focused cases on its own; the classifier passes 19 cases on its own. Applying them in either order produces the same tree, and the combined 122-case set passes. These local results do not resolve the sibling-success settlement or abandoned-probe expiry questions tracked in #2272, and do not establish hosted approval or merge readiness.
