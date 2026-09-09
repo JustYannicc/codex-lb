@@ -964,6 +964,67 @@ async def test_context_envelope_429_preserves_replay_boundary(async_client, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_delivery", ["http_status", "sse_event"])
+async def test_stream_previsible_quota_failover_does_not_pin_replay_to_failed_account(
+    async_client,
+    monkeypatch,
+    failure_delivery,
+):
+    """A dispatched nonportable body must not cross accounts after quota failure."""
+    await _import_account(async_client, "acc_stream_previsible_quota_a", "stream_previsible_quota_a@example.com")
+    await _import_account(async_client, "acc_stream_previsible_quota_b", "stream_previsible_quota_b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_previsible_quota_a":
+            if failure_delivery == "http_status":
+                raise ProxyResponseError(
+                    429,
+                    openai_error("usage_limit_reached", "usage limit reached"),
+                    failure_phase="status",
+                )
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": "usage_limit_reached",
+                            "message": "usage limit reached",
+                        },
+                    },
+                }
+            )
+            return
+        yield _success_sse_event("resp_previsible_quota_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue this conversation",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "prior-message-id",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                }
+            ],
+            "stream": True,
+            "prompt_cache_key": "previsible-quota-sticky",
+        },
+    )
+
+    assert response.status_code == (429 if failure_delivery == "http_status" else 200)
+    assert "response.completed" not in response.text
+    assert seen_account_ids == ["acc_stream_previsible_quota_a"]
+
+
+@pytest.mark.asyncio
 async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
     await _import_account(async_client, "acc_h502_b", "h502_b@example.com")
