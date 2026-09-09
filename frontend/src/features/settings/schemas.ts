@@ -32,6 +32,17 @@ const AdditionalQuotaRoutingPolicySchema = z.enum([
   "burn_first",
   "preserve",
 ]);
+const SettingScalarSchema = z.union([z.number(), z.string(), z.boolean()]);
+
+// Where an inheritable setting's effective value comes from: the dashboard
+// column, the environment (column NULL, env differs from the code default) or
+// the code default. Keyed by the backend setting name (snake_case).
+export const SettingProvenanceSchema = z.object({
+  source: z.enum(["dashboard", "env", "default"]),
+  envValue: SettingScalarSchema.nullable().optional().default(null),
+  default: SettingScalarSchema.nullable().optional().default(null),
+});
+
 const AdditionalQuotaPolicySchema = z.object({
   quotaKey: z.string(),
   displayLabel: z.string(),
@@ -162,6 +173,13 @@ export const DashboardSettingsSchema = z
     usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    // Optional so responses from backends that predate provenance still parse.
+    provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
+    // C2-3 resilience toggles: effective values; `provenance[<snake_name>]`
+    // says whether each comes from the dashboard, the environment or the default.
+    softDrainEnabled: z.boolean().optional().default(true),
+    deterministicFailoverEnabled: z.boolean().optional().default(true),
+    circuitBreakerEnabled: z.boolean().optional().default(false),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -241,6 +259,11 @@ export const SettingsUpdateRequestSchema = z
     // alias), value = store the override.
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
+    // C2-3 resilience toggles: tri-state (omitted = unchanged, null = reset to
+    // inherited, boolean = dashboard value).
+    softDrainEnabled: z.boolean().nullable().optional(),
+    deterministicFailoverEnabled: z.boolean().nullable().optional(),
+    circuitBreakerEnabled: z.boolean().nullable().optional(),
   })
   .superRefine((settings, ctx) => {
     if (
@@ -304,6 +327,7 @@ export type DashboardSettings = Omit<
   Partial<StickyThresholdPresenceFlags> &
   Partial<StickyThresholdValues>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type SettingProvenance = z.infer<typeof SettingProvenanceSchema>;
 export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;
 
 export const UpstreamProxyEndpointSchema = z.object({

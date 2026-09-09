@@ -46,6 +46,7 @@ from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
@@ -1950,6 +1951,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     process_text.assert_awaited_once_with(
         session,
         '{"type":"response.completed"}',
+        message=UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}'),
         scheduler=service._scheduler,
         clock=service._clock,
     )
@@ -30894,6 +30896,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     process_text.assert_awaited_once_with(
         session,
         "late response",
+        message=UpstreamWebSocketMessage(kind="text", text="late response"),
         scheduler=service._scheduler,
         clock=service._clock,
     )
@@ -33176,7 +33179,9 @@ async def test_http_bridge_retry_circuit_backoff_is_scoped_to_repeated_hard_keys
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retry_circuit_allows_only_one_half_open_probe() -> None:
+@pytest.mark.parametrize("circuit_breaker_enabled", [False, True])
+async def test_http_bridge_retry_circuit_allows_only_one_half_open_probe(circuit_breaker_enabled: bool) -> None:
+    bind_resilience_toggles(SimpleNamespace(circuit_breaker_enabled=circuit_breaker_enabled))
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-half-open")
     now = time.monotonic()
@@ -33915,8 +33920,10 @@ async def test_http_bridge_retry_circuit_late_completion_cannot_clear_replacemen
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interpreted", [False, True])
 async def test_http_bridge_response_completed_passes_half_open_episode_fence(
     monkeypatch: pytest.MonkeyPatch,
+    interpreted: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     updated_at = time.time()
@@ -33976,16 +33983,19 @@ async def test_http_bridge_response_completed_passes_half_open_episode_fence(
 
     monkeypatch.setattr(service, "_clear_http_bridge_retry_circuit", capture_clear)
 
-    await service._process_http_bridge_upstream_text(
-        old_session,
-        json.dumps(
-            {
-                "type": "response.completed",
-                "response": {"id": "resp-product-old-probe", "output": []},
-            },
-            separators=(",", ":"),
-        ),
+    payload = {
+        "type": "response.completed",
+        "response": {"id": "resp-product-old-probe", "output": []},
+    }
+    text = json.dumps(payload, separators=(",", ":"))
+    message = UpstreamWebSocketMessage(
+        kind="text",
+        text=text,
+        responses_interpreted=interpreted,
+        event_type="response.completed" if interpreted else None,
+        payload=cast(Any, payload) if interpreted else None,
     )
+    await service._process_http_bridge_upstream_text(old_session, text, message=message)
 
     assert captured_clear_kwargs["expected_episode"] == (updated_at, 2, 4, 11)
     assert state.half_open_owner_session is replacement

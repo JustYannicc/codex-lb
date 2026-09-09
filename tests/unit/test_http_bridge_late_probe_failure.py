@@ -20,10 +20,11 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interpreted", [False, True])
 @pytest.mark.parametrize("boundary", ["before_record", "during_load"])
 @pytest.mark.parametrize("event_type", ["response.incomplete", "response.failed"])
 async def test_late_failed_probe_preserves_replacement_and_terminal_cleanup(
-    monkeypatch: pytest.MonkeyPatch, boundary: str, event_type: str
+    monkeypatch: pytest.MonkeyPatch, boundary: str, event_type: str, interpreted: bool
 ) -> None:
     clock = VirtualClock(monotonic_value=1000.0)
     service, session, request = _make_terminal_error_bridge_fixture(
@@ -93,7 +94,14 @@ async def test_late_failed_probe_preserves_replacement_and_terminal_cleanup(
         nonlocal calls
         calls += 1
         if calls == 1:
-            return UpstreamWebSocketMessage(kind="text", text=json.dumps({"type": event_type, "response": response}))
+            payload = {"type": event_type, "response": response}
+            return UpstreamWebSocketMessage(
+                kind="text",
+                text=json.dumps(payload),
+                responses_interpreted=interpreted,
+                event_type=event_type if interpreted else None,
+                payload=cast(Any, payload) if interpreted else None,
+            )
         processed.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")

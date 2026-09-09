@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
+
+from app.core.config.settings import get_settings
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
 ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
@@ -63,9 +64,9 @@ def _default_registry_path() -> Path:
 
 
 def _registry_path() -> Path:
-    configured = os.environ.get("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
+    configured = get_settings().additional_quota_registry_file
+    if configured is not None:
+        return configured.expanduser().resolve()
     return _default_registry_path()
 
 
@@ -324,6 +325,16 @@ def get_additional_quota_definition(quota_key: str | None) -> AdditionalQuotaDef
     if resolved_key is None:
         return None
     return by_quota_key.get(resolved_key)
+
+
+def normalize_additional_quota_key(raw_quota_key: str) -> str | None:
+    """Canonicalize a user-supplied quota key and require a registered definition."""
+    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
+    if canonical_key is None:
+        return None
+    if get_additional_quota_definition(canonical_key) is None:
+        return None
+    return canonical_key
 
 
 def get_additional_quota_query_scope(

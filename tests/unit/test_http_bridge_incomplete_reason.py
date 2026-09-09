@@ -20,12 +20,13 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interpreted", [False, True])
 @pytest.mark.parametrize("half_open", [False, True])
 @pytest.mark.parametrize(
     "kind", ["stream_reason", "neutral_reason", "explicit_error", "unknown_reason", "missing_reason", "other_error"]
 )
 async def test_incomplete_reason_preserves_circuit_accounting(
-    monkeypatch: pytest.MonkeyPatch, half_open: bool, kind: str
+    monkeypatch: pytest.MonkeyPatch, half_open: bool, kind: str, interpreted: bool
 ) -> None:
     service, session, request = _make_terminal_error_bridge_fixture(
         request_id="diagnostic-incomplete",
@@ -82,7 +83,13 @@ async def test_incomplete_reason_preserves_circuit_accounting(
         nonlocal calls
         calls += 1
         if calls == 1:
-            return UpstreamWebSocketMessage(kind="text", text=json.dumps(payload))
+            return UpstreamWebSocketMessage(
+                kind="text",
+                text=json.dumps(payload),
+                responses_interpreted=interpreted,
+                event_type="response.incomplete" if interpreted else None,
+                payload=cast(Any, payload) if interpreted else None,
+            )
         processed.set()
         await asyncio.Event().wait()
         raise AssertionError("Unreachable")

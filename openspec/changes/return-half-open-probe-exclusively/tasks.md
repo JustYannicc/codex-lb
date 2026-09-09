@@ -4,8 +4,9 @@
 
 - [x] Add the focused retry-circuit delta and context with the process-local vs
   durable/replica-wide ownership boundary.
-- [x] Validate the change and all main specs with strict OpenSpec tooling (or
-  record the unavailable validator and equivalent checks).
+- [x] Strictly validate this change and the owning Responses spec, pass
+  canonical validation for all main specs, and record the exact validation
+  scope and any unrelated baseline strict-validation failures in context.md.
 
 ## Implementation
 

@@ -186,5 +186,14 @@ late handback must leave any replacement probe untouched.
 
 With pinned `@fission-ai/openspec@1.11.0`, strict validation passes for this
 change and the synchronized Responses spec. The repository's canonical
-`validate --specs` gate passes all 58 specs. Adding `--strict` reports 22 failures
+`validate --specs` gate passes all 63 specs after reconciling upstream
+`c38e4de15beead64910cf074e9e457781aeb5ff7`. Adding `--strict` reports 22 failures
 in other, unchanged specs; it is not an all-repository strict pass.
+
+The upstream reconciliation preserves both this change's probe scenarios and
+the synchronized cooldown-suppressed session-retirement scenarios. Existing
+terminal tests cover both text-decoded and native-interpreted events, and
+single-flight probe admission remains independent of the dashboard-managed
+upstream account-breaker toggle. The sibling eventual-success settlement and
+expiry policy questions remain unresolved; this integration does not change
+their behavior.

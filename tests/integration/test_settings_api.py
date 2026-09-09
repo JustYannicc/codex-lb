@@ -302,6 +302,137 @@ async def test_settings_api_capacity_overrides_support_absent_null_and_explicit_
 
 
 @pytest.mark.asyncio
+async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_client, monkeypatch):
+    from app.modules.settings import service as settings_service
+
+    # Fresh row: the column is NULL and the test environment leaves the cap at
+    # its code default, so the value is reported as the default.
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    assert initial.json()["provenance"]["proxy_account_stream_limit"] == {
+        "source": "default",
+        "envValue": 8,
+        "default": 8,
+    }
+
+    # PUT a value: dashboard-owned, environment and default still reported.
+    configured = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": 24})
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["proxyAccountStreamLimit"] == 24
+    assert configured_payload["provenance"]["proxy_account_stream_limit"] == {
+        "source": "dashboard",
+        "envValue": 8,
+        "default": 8,
+    }
+
+    # PUT null clears the column; with the environment differing from the
+    # default the value is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={"proxy_account_stream_limit": 12})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyAccountStreamLimit"] == 12
+    assert cleared_payload["proxyAccountStreamLimitOverride"] is None
+    assert cleared_payload["provenance"]["proxy_account_stream_limit"] == {
+        "source": "env",
+        "envValue": 12,
+        "default": 8,
+    }
+
+    # Omitting the field leaves the inherited state untouched, and every
+    # inheritable setting has a provenance entry.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    provenance = unchanged.json()["provenance"]
+    assert provenance["proxy_account_stream_limit"]["source"] == "env"
+    assert set(provenance) == {
+        "proxy_account_response_create_limit",
+        "proxy_account_stream_limit",
+        "proxy_account_stream_recovery_reserve",
+        "proxy_api_key_fair_share_congestion_threshold_pct",
+        "request_log_retention_days",
+        "usage_history_retention_days",
+        "soft_drain_enabled",
+        "deterministic_failover_enabled",
+        "circuit_breaker_enabled",
+    }
+    # Retention is database-only: no environment value, NULL reads as default.
+    assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
+
+
+@pytest.mark.asyncio
+async def test_settings_api_resilience_toggles_round_trip_with_provenance(async_client, monkeypatch):
+    """C2-3 resilience toggles: default -> dashboard -> cleared/env -> unchanged on omit."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["softDrainEnabled"] is True
+    assert payload["deterministicFailoverEnabled"] is True
+    assert payload["circuitBreakerEnabled"] is False
+    assert payload["provenance"]["soft_drain_enabled"] == {"source": "default", "envValue": True, "default": True}
+    assert payload["provenance"]["circuit_breaker_enabled"] == {
+        "source": "default",
+        "envValue": False,
+        "default": False,
+    }
+
+    # Storing a value, including the same value the environment provides, makes
+    # the toggle dashboard-owned.
+    stored = await async_client.put(
+        "/api/settings",
+        json={"circuitBreakerEnabled": True, "softDrainEnabled": True, "deterministicFailoverEnabled": False},
+    )
+    assert stored.status_code == 200
+    stored_payload = stored.json()
+    assert stored_payload["circuitBreakerEnabled"] is True
+    assert stored_payload["softDrainEnabled"] is True
+    assert stored_payload["deterministicFailoverEnabled"] is False
+    for name in ("soft_drain_enabled", "deterministic_failover_enabled", "circuit_breaker_enabled"):
+        assert stored_payload["provenance"][name]["source"] == "dashboard"
+
+    # Explicit null clears the column; with the deprecated env alias differing
+    # from the default the toggle is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={"circuit_breaker_enabled": True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"circuitBreakerEnabled": None, "softDrainEnabled": None})
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["circuitBreakerEnabled"] is True
+    assert cleared_payload["provenance"]["circuit_breaker_enabled"] == {
+        "source": "env",
+        "envValue": True,
+        "default": False,
+    }
+    assert cleared_payload["provenance"]["soft_drain_enabled"] == {
+        "source": "default",
+        "envValue": True,
+        "default": True,
+    }
+    # The untouched toggle keeps its dashboard value.
+    assert cleared_payload["deterministicFailoverEnabled"] is False
+    assert cleared_payload["provenance"]["deterministic_failover_enabled"]["source"] == "dashboard"
+
+    # Omitting the fields (any unrelated save) leaves every toggle as it was:
+    # the dashboard never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["provenance"]["circuit_breaker_enabled"]["source"] == "env"
+    assert unchanged_payload["provenance"]["soft_drain_enabled"]["source"] == "default"
+    assert unchanged_payload["provenance"]["deterministic_failover_enabled"]["source"] == "dashboard"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.circuit_breaker_enabled is None
+        assert row.soft_drain_enabled is None
+        assert row.deterministic_failover_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client, monkeypatch):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1301,7 +1432,7 @@ async def test_settings_api_rejects_unsafe_retention_values(async_client, payloa
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
 
-    # The stored settings are unchanged (NULL = inherit the env alias).
+    # The stored settings are unchanged (NULL = never configured = disabled).
     async with SessionLocal() as session:
         settings = await session.get(DashboardSettings, 1)
         if settings is not None:
@@ -1310,35 +1441,27 @@ async def test_settings_api_rejects_unsafe_retention_values(async_client, payloa
 
 
 @pytest.mark.asyncio
-async def test_settings_api_retention_get_falls_back_to_env_alias(async_client, monkeypatch):
-    response = await async_client.get("/api/settings")
-    assert response.status_code == 200
-
-    from app.modules.settings import service as settings_service
-
-    inherited = settings_service.get_settings().model_copy(
-        update={
-            "request_log_retention_days": 90,
-            "usage_history_retention_days": 45,
-        }
-    )
-    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
-
+async def test_settings_api_retention_null_reads_as_disabled(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90
-    assert body["usageHistoryRetentionDays"] == 45
+    # NULL (never configured) is reported as the effective value 0 = disabled
+    # with the raw override exposed as null.
+    assert body["requestLogRetentionDays"] == 0
+    assert body["usageHistoryRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
     assert body["usageHistoryRetentionOverrideDays"] is None
 
-    # A dashboard override wins over the alias, including 0 (explicit disable).
-    response = await async_client.put("/api/settings", json={"usageHistoryRetentionOverrideDays": 0})
+    # A stored value is the effective value, including an explicit 0.
+    response = await async_client.put(
+        "/api/settings",
+        json={"requestLogRetentionOverrideDays": 90, "usageHistoryRetentionOverrideDays": 0},
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["requestLogRetentionDays"] == 90
     assert body["usageHistoryRetentionDays"] == 0
-    assert body["requestLogRetentionOverrideDays"] is None
+    assert body["requestLogRetentionOverrideDays"] == 90
     assert body["usageHistoryRetentionOverrideDays"] == 0
 
 
@@ -1358,23 +1481,13 @@ async def test_unrelated_settings_update_preserves_inherited_retention_nulls(asy
 
 
 @pytest.mark.asyncio
-async def test_retention_override_tri_state_echo_capture_and_clear(async_client, monkeypatch):
-    """Override semantics: null echoes round-trip, an explicit override equal to
-    the env alias IS stored, and present-null clears back to inherit."""
-    from app.modules.settings import service as settings_service
-
-    inherited = settings_service.get_settings().model_copy(
-        update={
-            "request_log_retention_days": 90,
-            "usage_history_retention_days": 45,
-        }
-    )
-    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
-
+async def test_retention_override_tri_state_echo_capture_and_clear(async_client):
+    """Override semantics: null echoes round-trip, a present value is stored,
+    and present-null clears back to NULL (= disabled)."""
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90
+    assert body["requestLogRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
 
     # A full-save client echoes the override fields verbatim: null stays null.
@@ -1392,8 +1505,6 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         assert settings.request_log_retention_days is None
         assert settings.usage_history_retention_days is None
 
-    # Deliberately PUTting the env-alias value as an override stores it: the
-    # effective value is unchanged (90) but no longer tracks the env alias.
     response = await async_client.put("/api/settings", json={"requestLogRetentionOverrideDays": 90})
     assert response.status_code == 200
     body = response.json()
@@ -1404,12 +1515,11 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         assert settings is not None
         assert settings.request_log_retention_days == 90
 
-    # Present-null clears the override back to inherit; effective falls back
-    # to the env alias.
+    # Present-null clears the stored value; the effective value is disabled again.
     response = await async_client.put("/api/settings", json={"requestLogRetentionOverrideDays": None})
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90  # from the env alias again
+    assert body["requestLogRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
     async with SessionLocal() as session:
         settings = await session.get(DashboardSettings, 1)
