@@ -3289,7 +3289,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session,
                     detail=grouped_terminal_detail,
                     attempt=grouped_request_state.response_create_attempt,
+                    probe_owner=grouped_request_state,
                     terminal_pre_response_frame=True,
+                    proxy_continuity_provenance=bool(grouped_request_state.proxy_injected_previous_response_id),
                 )
                 # A fan-out carrying two or more eventless requests advances the
                 # circuit through its threshold inside this loop, so the anchor
@@ -4005,6 +4007,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         completion_circuit_settlement_failed = False
         completion_pre_settle_poison_detail: str | None = None
         completion_settles_onto_tombstone = False
+        completion_expected_episode: tuple[float, int, int, int] | None = None
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -4023,9 +4026,35 @@ class _HTTPBridgeUpstreamEventsMixin:
             # immutable: a row loaded here may arm a new quarantine, but this
             # completion did not observe that evidence and cannot clear it.
             await self._load_http_bridge_retry_circuit(session)
+            claimed_half_open_episode = getattr(terminal_request_state, "claimed_half_open_episode", None)
+            claimed_half_open_generation = getattr(terminal_request_state, "claimed_half_open_generation", 0)
+            if (
+                isinstance(claimed_half_open_episode, tuple)
+                and len(claimed_half_open_episode) == 3
+                and isinstance(claimed_half_open_generation, int)
+                and claimed_half_open_generation > 0
+            ):
+                completion_expected_episode = (
+                    claimed_half_open_episode[0],
+                    claimed_half_open_episode[1],
+                    claimed_half_open_episode[2],
+                    claimed_half_open_generation,
+                )
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
                 if pre_settle_state is not None:
+                    if (
+                        completion_expected_episode is None
+                        and pre_settle_state.half_open_owner_token is terminal_request_state
+                    ):
+                        active_half_open_generation = pre_settle_state.half_open_lease_generation
+                        if active_half_open_generation > 0:
+                            completion_expected_episode = (
+                                pre_settle_state.persisted_updated_at_epoch,
+                                pre_settle_state.consecutive_failures,
+                                pre_settle_state.persisted_admission_generation,
+                                active_half_open_generation,
+                            )
                     completion_pre_settle_poison_detail = (
                         pre_settle_state.last_detail
                         if _http_bridge_anchor_poison_detail(pre_settle_state.last_detail) is not None
@@ -4071,6 +4100,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if completion_settles_onto_tombstone
                         else None
                     ),
+                    expected_episode=completion_expected_episode,
                 )
                 if not circuit_settled:
                     # The old poison episode was restored. Its owed clear is
@@ -4583,7 +4613,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session,
                     detail=error_code,
                     attempt=terminal_request_state.response_create_attempt,
+                    probe_owner=terminal_request_state,
                     terminal_pre_response_frame=True,
+                    proxy_continuity_provenance=bool(terminal_request_state.proxy_injected_previous_response_id),
                 )
                 terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)
 
