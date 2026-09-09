@@ -1,6 +1,6 @@
 # Aggregate source verification
 
-Pinned upstream base: `f1ff7c7c3309a478a998bd1c66159affd7aed961` (the initial selection snapshot used `efe0f581a18a36f4d491b92a36ef79b0c432d252`). The commit containing this document and `source-manifest.json` identifies the composed candidate. Later deployment receipts must bind its full commit/tree to the image digest and backup. The branch is `codex/integrated-runtime` on the user fork.
+Pinned upstream base: `069b82be3` (full SHA in source-manifest.json; prior verified base `f1ff7c7c3309a478a998bd1c66159affd7aed961`) (the initial selection snapshot used `efe0f581a18a36f4d491b92a36ef79b0c432d252`). The commit containing this document and `source-manifest.json` identifies the composed candidate. Later deployment receipts must bind its full commit/tree to the image digest and backup. The branch is `codex/integrated-runtime` on the user fork.
 
 ## Automated checks
 
@@ -17,7 +17,7 @@ The delayed-terminal oracle remains intact and is stronger: the fixture uses one
 
 ## Migration proof
 
-All four deployed local migration files listed in the manifest are byte-identical to accepted runtime `1a58a0065010cae81bedd0351792d183761a74cc`. The candidate has one Alembic head, `20260909_220000_merge_local_runtime_refresh`.
+All four deployed local migration files listed in the manifest are byte-identical to accepted runtime `1a58a0065010cae81bedd0351792d183761a74cc`. The prior verified candidate had one head, `20260909_220000_merge_local_runtime_refresh`. Latest upstream reconciliation adds a forward merge to `20260909_230000_merge_background_jobs_into_local_runtime`; historical migration bytes remain unchanged.
 
 A synthetic database upgraded from deployed head `20260905_140000_merge_retry_claim_and_codex_context_heads` retained account/token blobs, API keys, usage, pooled context owners/participants, retry claim receipts and operator settings. The existing upstream migration intentionally normalizes transport sentinel `default` to `auto`; no other old field changed. Schema drift and migration policy checks returned no findings. Separate migration tests prove active receipt downgrade rejection, concurrent claim-write exclusion, branch-only downgrade while retaining current upstream state, and rejection of unowned context tables without changing those tables.
 
@@ -32,3 +32,11 @@ Aggregate Standards/Input review, exact remote-commit image build, populated-bac
 ## Retained evidence
 
 The local handoff bundle is `/tmp/codex-lb-relevance-audit/`: `container-final-unit-r2.log`, `container-final-integration.log`, `container-final-repaired-proof.log`, `branchmigrationfix1.log`, `branchmigrationfinal.log`, `container-drain-product-path-r2.log`, `container-integration-fixes-r2.log`, `container-final-e2e.log`, `container-denied-anchor-path-r2.log`, `container-final-migration-r4.log`, `container-final-ruff-r3.log`, `container-final-format-r3.log`, `container-final-ty-r5.log`, `container-final-specs.log`, `root-independent-checks.json` and `root-forwarding-review.md`. The source selection, pins, composition repairs, migration hashes and result summary are tracked in Git; the logs are additional local evidence, not future deployment authority.
+
+## Latest upstream reconciliation
+
+Upstream #2281 adds nullable background-job dashboard controls. Its source is preserved; the sole textual conflict was resolved by retaining both the unowned-context-table test and the background-toggle migration test. A new forward merge revision joins the already published local migration head with upstream without editing either parent. The three new nullable settings inherit existing environment/default behavior. Verification of this delta is recorded below when complete.
+
+Latest-target checks passed: 268 affected Python tests (eight PostgreSQL-only skips); all 1,299 frontend tests in 160 files, lint, TypeScript and build; Ruff/format/Ty, architecture/cancellation/timing/settings checks; strict 67-spec and aggregate-change validation. Fresh database upgrade and drift/policy checks passed. A repeated migration from the deployed head preserved seeded accounts, keys, usage, context ownership, retry receipts and operator choices and reached the sole new head. Prior Rust and unchanged proxy evidence remain applicable.
+
+The independent aggregate Standards review at ad509001 found no actionable findings. Root Input review found the just-advanced main requirement unmet; this reconciliation closes that finding. Root reviewed the small merge-resolution delta: both conflicting tests retained, upstream nullable settings fields retained, and a forward-only migration join added. No further actionable finding. Image build, populated-data rehearsal and live acceptance remain pending.

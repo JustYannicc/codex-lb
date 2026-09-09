@@ -4,7 +4,7 @@
   "branch": "codex/integrated-runtime",
   "base": {
     "initial_main": "efe0f581a18a36f4d491b92a36ef79b0c432d252",
-    "included_main": "f1ff7c7c3309a478a998bd1c66159affd7aed961"
+    "included_main": "069b82be3ceda8e468094f03aee0884061b2b43e"
   },
   "candidate_binding": "The Git commit containing this manifest is the candidate identity. Deployment receipts MUST record its full SHA, tree and built image digest.",
   "accepted_runtime": {
@@ -258,8 +258,8 @@
       "pr": 2281,
       "reviewed_head": "cb563a9da4d15f0ee51fa1d1ae4e9c1f7a6b899c",
       "title": "feat(settings): pause background schedulers from the dashboard",
-      "disposition": "not_selected",
-      "reason": "- **#2281 `cb563a9da4d15f0ee51fa1d1ae4e9c1f7a6b899c`**: feat(settings): pause background schedulers from the dashboard. Exclude: moves scheduler policy into DB/UI with migration; no required scheduler pause outcome."
+      "disposition": "included_upstream",
+      "reason": "Initially excluded as an optional feature; subsequently merged by upstream as 069b82be3 and now included to preserve the current-main contract."
     },
     {
       "pr": 2275,
@@ -667,7 +667,7 @@
   ],
   "migration_contract": {
     "accepted_old_head": "20260905_140000_merge_retry_claim_and_codex_context_heads",
-    "candidate_head": "20260909_220000_merge_local_runtime_refresh",
+    "candidate_head": "20260909_230000_merge_background_jobs_into_local_runtime",
     "deployed_local_files": [
       {
         "path": "app/db/alembic/versions/20260829_000000_add_retry_circuit_admission_claim_marker.py",
@@ -688,7 +688,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "Local automated verification complete, including repaired-case retests. Aggregate review and deployment acceptance pending; see verification.md.",
+  "verification_status": "Source automated checks and aggregate Standards/Input review complete; exact published-image build, populated-backup rehearsal and live acceptance remain pending. See verification.md.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
