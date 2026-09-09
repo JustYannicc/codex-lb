@@ -759,8 +759,9 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bypass_native", [False, True])
+@pytest.mark.parametrize("routing_tier", [None, "priority", "ultrafast"])
 async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass(
-    monkeypatch: pytest.MonkeyPatch, bypass_native: bool
+    monkeypatch: pytest.MonkeyPatch, bypass_native: bool, routing_tier: str | None
 ) -> None:
     route = ResolvedUpstreamRoute(
         mode="account_bound",
@@ -787,8 +788,15 @@ async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass
         ),
     )
     options = {"use_native_egress": False} if bypass_native else {}
+    expected_hint = "model=gpt-5.4" + (f";tier={routing_tier}" if routing_tier is not None else "")
     websocket = await connect_responses_websocket(
-        {}, "access-token", "account-123", route=route, codex_client=client, **options
+        {"X-Codex-Routing-Hint": "model=untrusted;tier=flex"},
+        "access-token",
+        "account-123",
+        route=route,
+        codex_client=client,
+        routing_hint=("gpt-5.4", routing_tier),
+        **options,
     )
     try:
         assert getattr(websocket, "upstream_proxy_endpoint_id") == "ep_1"
@@ -800,6 +808,9 @@ async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass
             assert kwargs["proxy"] == "http://proxy.test:8080"
             assert "native_interpret_responses" not in kwargs
             assert "use_native_egress" not in kwargs
+            assert "routing_hint" not in kwargs
+            assert kwargs["headers"]["x-codex-routing-hint"] == expected_hint
+            assert "X-Codex-Routing-Hint" not in kwargs["headers"]
         else:
             legacy_open.assert_not_awaited()
             native_open.assert_awaited_once()
@@ -807,6 +818,8 @@ async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass
             assert isinstance(request, NativeWebSocketRequest)
             assert request.interpret_responses is True
             assert request.proxy_url == "http://proxy.test:8080"
+            assert request.headers["x-codex-routing-hint"] == expected_hint
+            assert "X-Codex-Routing-Hint" not in request.headers
     finally:
         await websocket.close()
     assert legacy_websocket.closed is bypass_native

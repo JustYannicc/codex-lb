@@ -120,3 +120,12 @@ capacity policy is accepted by this performance change.
 This reconciliation changes no delivery-stall, replay-budget, or native
 acceptance policy. Exact target, candidate, and hosted evidence stay in the
 PR delivery record.
+
+## 13. Trusted routing and retry upstream composition
+
+- [x] 13.1 Preserve trusted routing hints together with native interpretation and explicit HTTP-bridge bypass
+- [x] 13.2 Prove combined routed-client dispatch and assess retry/backoff overlap with queue and completion ownership
+- [x] 13.3 Run isolated affected tests, strict specs, and independent reviews on the composed candidate
+
+The existing delivery-stall, aggregate replay-budget, native, and performance
+acceptance decisions remain open. This composition does not choose a policy.
