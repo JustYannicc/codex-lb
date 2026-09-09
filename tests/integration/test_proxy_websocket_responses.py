@@ -12133,6 +12133,23 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
         ]
     )
     selection_requirements: list[bool] = []
+    account = Account(
+        id="acct_ws_capability_session",
+        chatgpt_account_id="acct_ws_capability_session",
+        email="capability-session@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=proxy_module.utcnow(),
+        status=AccountStatus.ACTIVE,
+        security_work_authorized=True,
+    )
+
+    async def store_subscription_owner():
+        async with SessionLocal() as session:
+            session.add(account)
+            await session.commit()
 
     class _FakeSettingsCache:
         async def get(self):
@@ -12164,12 +12181,12 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
         require_security_work_authorized,
         **_kwargs,
     ):
-        del self, deadline, request_state, _kwargs
+        del self, deadline
         selection_requirements.append(require_security_work_authorized)
-        return SimpleNamespace(
-            id=f"acct_ws_capability_session_{len(selection_requirements)}",
-            security_work_authorized=require_security_work_authorized,
-        )
+        if len(selection_requirements) == 2 and echo_turn_state:
+            assert request_state.preferred_account_id == account.id
+            assert _kwargs["require_preferred_account"] is True
+        return account
 
     async def fake_try_open_websocket_connect_attempt(self, account, headers, **_kwargs):
         del self, _kwargs
@@ -12208,6 +12225,10 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
     marker_request["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
 
     with TestClient(app_instance) as client:
+        # The echoed marker has no durable alias in this capability fixture.
+        # Its sole-owner fallback must see the same account the selector uses.
+        assert client.portal is not None
+        client.portal.call(store_subscription_owner)
         with client.websocket_connect(
             "/backend-api/codex/responses",
             headers=session_headers,
@@ -12235,6 +12256,7 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
             reconnect_turn_state = accepted_headers["x-codex-turn-state"]
             reconnect_websocket.send_text(json.dumps(_websocket_response_create("continue session capability")))
             reconnect_created = json.loads(reconnect_websocket.receive_text())
+            assert reconnect_created["type"] == "response.created", reconnect_created
             reconnect_completed = json.loads(reconnect_websocket.receive_text())
 
     assert first_created["response"]["id"] == "resp_ws_capability_session_first"

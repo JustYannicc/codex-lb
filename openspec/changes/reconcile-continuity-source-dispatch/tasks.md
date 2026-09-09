@@ -13,3 +13,8 @@
 
 - [x] 3.1 Separate provider-portability marker recognition from subscription compatibility; prove both original strict cases and readable-marker compatibility without changing either contract.
 - [x] 3.2 Bound the WebSocket terminal receive wait and assert the selected owner in the unit connection double; run affected tests and independent reviews before republishing.
+
+## 4. Marker-only WebSocket review feedback
+
+- [x] 4.1 Prove marker-only direct WebSocket owner misses fail closed for zero or multiple assignment-scoped owners, then extend the existing source/candidate checks without changing first-turn or independently owned routing.
+- [x] 4.2 Verify both direct routes, sole scoped selection, source-confirmed and source-unavailable controls, registered/file ownership, and relevant reuse regressions; complete independent reviews before republishing.

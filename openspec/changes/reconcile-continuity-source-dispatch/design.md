@@ -33,6 +33,19 @@ deferred health and cancellation handling remain behind confirmed settlement.
 
 ## Risks / Trade-offs
 
+Direct WebSocket marker-only reconnects enter turn-state ownership lookup but
+previously skipped source classification and sole-owner counting because those
+checks required a previous-response identifier. A client-supplied unregistered
+`turn_example` with no anchor must follow the existing compatibility contract:
+resolve source ownership, then count assignment-scoped owners for subscription
+routing. This closes an implementation gap in the canonical Responses
+requirement; it does not change conversation ambiguity or marker portability.
+Proxy-generated first-turn placeholders remain ordinary first turns. Registered
+aliases and independent file/required owners remain authoritative. Confirmed
+source ownership keeps HTTP fallback, and an unavailable source lookup keeps
+the existing subscription fallback. Test both direct routes with zero, one, and
+multiple owners, assignment scoping, and these controls before republishing.
+
 Provider portability keeps its stricter generated-marker shape check separate
 from subscription marker compatibility. A readable `turn_example` marker can
 use the subscription sole-owner fallback, but that does not make its body safe

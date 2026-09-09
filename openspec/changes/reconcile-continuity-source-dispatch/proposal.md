@@ -14,6 +14,8 @@ upstream, so this follow-up records integration work without rewriting it.
 - Verify source dispatch is unreachable for bound subscription continuations
   and remains fully owned for source-routed requests.
 - Align one existing test with dashboard-only transport settings.
+- Complete the existing synthesized-marker compatibility rule for direct
+  WebSocket reconnects without a previous-response identifier.
 
 ## Capabilities
 

@@ -2065,8 +2065,19 @@ class _WebSocketMixin:
                             ("turn state", turn_state_owner_account_id),
                             ("previous response", previous_response_owner_account_id),
                         )
+                        # An echoed compatibility marker can outlive its alias
+                        # without carrying a previous-response ID. Only client
+                        # input qualifies; a fresh proxy placeholder is not a
+                        # continuation, and independent ownership stays binding.
+                        owner_miss_continuation = request_state.previous_response_id is not None or (
+                            client_turn_state_header is not None
+                            and turn_state == client_turn_state_header
+                            and _is_synthesized_turn_state(turn_state)
+                            and request_state.preferred_account_id is None
+                            and request_state.replay_required_account_id is None
+                        )
                         if (
-                            request_state.previous_response_id is not None
+                            owner_miss_continuation
                             and previous_response_owner_account_id is None
                             and turn_state_owner_account_id is None
                             and not request_state.source_route_excluded
@@ -2089,7 +2100,7 @@ class _WebSocketMixin:
                             and (turn_state is None or not _is_synthesized_turn_state(turn_state))
                         )
                         if (
-                            request_state.previous_response_id is not None
+                            owner_miss_continuation
                             and previous_response_owner_account_id is None
                             and turn_state_owner_account_id is None
                             and not owner_miss_requires_fail_closed
@@ -2134,7 +2145,7 @@ class _WebSocketMixin:
                                     ("sole owner-miss candidate", selection_candidates[0].id),
                                 )
                         if (
-                            request_state.previous_response_id is not None
+                            owner_miss_continuation
                             and previous_response_owner_account_id is None
                             and turn_state_owner_account_id is None
                             and owner_miss_requires_fail_closed
