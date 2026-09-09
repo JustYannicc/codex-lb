@@ -2548,11 +2548,15 @@ async def test_monthly_reset_history_fallback_supports_free_aliases(
         window_minutes=43_200,
     )
 
-    evidence = await refresh_scheduler_module._resolve_monthly_reset_evidence(
+    evidence = await refresh_scheduler_module._resolve_long_window_reset_evidence(
         accounts=[account],
-        usage_repo=cast("Any", StubUsageRepository(history={account.id: [before, after]})),
+        usage_repo=cast("Any", StubUsageRepository(history={"monthly": [before, after]})),
+        before_primary={},
+        before_secondary={},
+        after_primary={},
+        after_secondary={},
         before_monthly={},
-        after_monthly={},
+        after_monthly={account.id: after},
     )
 
     assert evidence[account.id] == _reset_evidence(before, after)

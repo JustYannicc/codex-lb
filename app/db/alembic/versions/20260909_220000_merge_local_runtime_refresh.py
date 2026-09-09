@@ -5,7 +5,7 @@ from __future__ import annotations
 revision = "20260909_220000_merge_local_runtime_refresh"
 down_revision = (
     "20260905_140000_merge_retry_claim_and_codex_context_heads",
-    "20260909_110000_model_context_window_overrides",
+    "20260909_120000_merge_usage_reset_recovery",
 )
 branch_labels = None
 depends_on = None
