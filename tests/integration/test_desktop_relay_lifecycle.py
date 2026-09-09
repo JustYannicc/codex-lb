@@ -185,11 +185,14 @@ async def test_normal_lifespan_owns_listener_and_closes_it_before_shared_clients
     from app.core.config.settings import get_settings
 
     monkeypatch.setenv("CODEX_LB_DESKTOP_RELAY_MODE", mode)
+    # db_setup owns the synthetic schema; migration is proved separately.
+    monkeypatch.setenv("CODEX_LB_DATABASE_MIGRATE_ON_STARTUP", "false")
     monkeypatch.setenv("HOST", "0.0.0.0")
     monkeypatch.setenv("PORT", "2455")
     monkeypatch.delenv("SSL_CERTFILE", raising=False)
     monkeypatch.delenv("SSL_KEYFILE", raising=False)
     get_settings.cache_clear()
+    monkeypatch.setattr(main, "init_db", AsyncMock())
     if mode == "off":
 
         def unexpected(_origin):
@@ -222,11 +225,14 @@ async def test_normal_lifespan_cleans_main_resources_when_relay_startup_fails(db
     from app.core.config.settings import get_settings
 
     monkeypatch.setenv("CODEX_LB_DESKTOP_RELAY_MODE", "container")
+    # db_setup owns the synthetic schema; migration is proved separately.
+    monkeypatch.setenv("CODEX_LB_DATABASE_MIGRATE_ON_STARTUP", "false")
     monkeypatch.setenv("HOST", "0.0.0.0")
     monkeypatch.setenv("PORT", "2455")
     monkeypatch.delenv("SSL_CERTFILE", raising=False)
     monkeypatch.delenv("SSL_KEYFILE", raising=False)
     get_settings.cache_clear()
+    monkeypatch.setattr(main, "init_db", AsyncMock())
 
     @asynccontextmanager
     async def failure(_mode, _origin):

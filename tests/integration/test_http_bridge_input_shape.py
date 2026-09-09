@@ -39,7 +39,7 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
     monkeypatch.setattr(bridge.proxy_module.ProxyService, "_select_account_with_budget", select_account)
     monkeypatch.setattr(bridge.proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(bridge.proxy_module, "connect_responses_websocket", connect)
-    headers = {"x-codex-session-id": "shape-session", "x-codex-turn-state": "shape-turn"}
+    headers = {"x-codex-session-id": "shape-session"}
     service = get_proxy_service_for_app(app_instance)
     try:
         first = await async_client.post(
@@ -47,6 +47,7 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
         )
         assert first.status_code == 200, first.text
         first_id = first.json()["id"]
+        headers["x-codex-turn-state"] = first.headers["x-codex-turn-state"]
         session = next(iter(service._http_bridge_sessions.values()))
         quarantine._quarantine_http_bridge_session(service, session, reason="wedged_reattach")
         continuation = (

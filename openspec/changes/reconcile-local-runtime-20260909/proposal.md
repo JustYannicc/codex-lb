@@ -17,6 +17,7 @@ None.
 
 ### Modified Capabilities
 
+- `responses-api-compat`: compose existing marker authentication and input-shape proof without breaking predecessor v2 verification.
 - `deployment-installation`: a local integration upgrade recognizes deployed revision ancestry and preserves persistent state and accepted client endpoints.
 
 ## Impact

@@ -125,6 +125,7 @@ def expand_history_input(
         return input_value
     session_id = context_session_id(metadata.get("session_id")) if isinstance(metadata, Mapping) else None
     items: list[JsonValue] = []
+    expanded_any = False
     for item in input_value:
         if (
             not isinstance(item, dict)
@@ -145,6 +146,7 @@ def expand_history_input(
                 and token.startswith(PREFIX)
             ):
                 expanded = _unpack_history(token, api_key, session_id)
+                expanded_any = True
                 if trusted is not None:
                     for content_part in expanded:
                         if isinstance(content_part, dict) and content_part.get("type") == "encrypted_content":
@@ -155,4 +157,5 @@ def expand_history_input(
             else:
                 parts.append(part)
         items.append({**item, "output": parts})
-    return items
+    # Preserve untouched input identity: it carries raw-wire shape provenance.
+    return items if expanded_any else input_value

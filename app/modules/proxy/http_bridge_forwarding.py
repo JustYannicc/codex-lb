@@ -91,6 +91,7 @@ _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # It is trusted only when the exact-body signature below authenticates the
 # same value; an absent or unauthenticated marker keeps the legacy fallback.
 HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER = "x-codex-bridge-input-shape-version"
+HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER = "x-codex-bridge-input-shape-signature"
 _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2 = "2"
 
 
@@ -459,8 +460,14 @@ def build_owner_forward_headers(
         payload=payload,
         context=context,
         signature_version=signature_version,
-        input_shape_version=input_shape_version,
     )
+    if input_shape_version is not None:
+        forwarded[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] = _bridge_forward_input_shape_signature(
+            payload=payload,
+            context=context,
+            signature_version=signature_version,
+            input_shape_version=input_shape_version,
+        )
     if context.synthesized_turn_state is not None:
         # Marker provenance is additive to the pre-marker-compatible v2
         # signature. Older owners ignore this header; updated owners require
@@ -540,15 +547,52 @@ def parse_forwarded_request(
     # value on an honestly primary-signed forward, so a present-but-invalid
     # header simply falls through to the primary verification.
     tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
-    tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
+    legacy_tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
         tools_bound_signature,
         _bridge_forward_tools_bound_signature(
             payload=payload,
             context=context,
             signature_version=signature_version,
-            input_shape_version=input_shape_version,
         ),
     )
+    # Accept the earlier classifier-aware v2 wire during a transition, while
+    # new origins keep the v2 field set usable by pre-classifier owners.
+    prior_shape_bound_valid = (
+        input_shape_version is not None
+        and tools_bound_signature is not None
+        and hmac.compare_digest(
+            tools_bound_signature,
+            _bridge_forward_tools_bound_signature(
+                payload=payload,
+                context=context,
+                signature_version=signature_version,
+                input_shape_version=input_shape_version,
+            ),
+        )
+    )
+    tools_bound_valid = legacy_tools_bound_valid or prior_shape_bound_valid
+    input_shape_signature = _optional_header(headers.get(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER))
+    input_shape_valid = (
+        tools_bound_valid
+        and input_shape_version is not None
+        and (
+            prior_shape_bound_valid
+            or (
+                input_shape_signature is not None
+                and hmac.compare_digest(
+                    input_shape_signature,
+                    _bridge_forward_input_shape_signature(
+                        payload=payload,
+                        context=context,
+                        signature_version=signature_version,
+                        input_shape_version=input_shape_version,
+                    ),
+                )
+            )
+        )
+    )
+    if context.expected_owner_process_epoch is not None and not input_shape_valid:
+        return None, _invalid_bridge_forward_signature_error()
     # The existing v2 signature deliberately keeps its pre-marker field shape
     # for rolling-upgrade compatibility. A synthesized marker therefore needs
     # its own additive proof; without it, an external caller could plant the
@@ -583,10 +627,8 @@ def parse_forwarded_request(
                     error_type="server_error",
                 ),
             )
-        payload._codex_lb_input_shape_wire_version = input_shape_version
-        payload._codex_lb_legacy_owner_forwarding_input_shape = (
-            input_shape_version != _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
-        )
+        payload._codex_lb_input_shape_wire_version = input_shape_version if input_shape_valid else None
+        payload._codex_lb_legacy_owner_forwarding_input_shape = not input_shape_valid
         return HTTPBridgeForwardedRequest(context=context), None
     if (
         context.expected_owner_process_epoch is not None
@@ -780,7 +822,7 @@ def _bridge_forward_tools_bound_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     signature_version: str | None = None,
-    input_shape_version: str | None = _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2,
+    input_shape_version: str | None = None,
 ) -> str:
     """Tamper-proofing signature bound to the exact posted forwarding body.
 
@@ -800,13 +842,36 @@ def _bridge_forward_tools_bound_signature(
     ``_bridge_forward_synthesized_turn_state_signature``. Always authenticates
     ``client_ip``.
     """
-    body_digest = _bridge_forward_body_digest(payload.model_dump_for_http_bridge_owner_forwarding())
+    body_digest = _bridge_forward_body_digest(
+        payload.model_dump_for_http_bridge_owner_forwarding()
+        if input_shape_version is not None
+        else payload.model_dump_for_forwarding()
+    )
     signing_payload = _structured_bridge_signing_payload(
         body_digest=body_digest,
         context=context,
         include_client_ip=True,
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
+        input_shape_version=input_shape_version,
+    )
+    return _sign_bridge_payload(signing_payload)
+
+
+def _bridge_forward_input_shape_signature(
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+    signature_version: str | None,
+    input_shape_version: str,
+) -> str:
+    """Bind raw input classification without changing the deployed v2 fields."""
+    signing_payload = _structured_bridge_signing_payload(
+        body_digest=_bridge_forward_body_digest(payload.model_dump_for_http_bridge_owner_forwarding()),
+        context=context,
+        include_client_ip=True,
+        signature_version=signature_version,
+        protocol="codex-lb-http-bridge-forward-input-shape",
         input_shape_version=input_shape_version,
     )
     return _sign_bridge_payload(signing_payload)

@@ -24,6 +24,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FILE_OWNER_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
+    HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER,
     HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
@@ -39,6 +40,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
     _bridge_forward_body_digest,
+    _bridge_forward_input_shape_signature,
     _bridge_forward_signature,
     _bridge_forward_tools_bound_signature,
     _iter_sse_event_blocks,
@@ -652,9 +654,10 @@ def test_parse_forwarded_request_authenticated_input_shape_v2_selects_current_mo
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
 
     assert headers[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] == "2"
-    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+    assert headers[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] == _bridge_forward_input_shape_signature(
         payload=payload,
         context=context,
+        signature_version=None,
         input_shape_version="2",
     )
 
@@ -713,6 +716,7 @@ def test_parse_forwarded_request_untrusted_input_shape_marker_stays_legacy(tampe
         downstream_turn_state=None,
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER)
     if tamper == "missing":
         headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
     else:
@@ -1872,9 +1876,11 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     assert forwarded is not None
     assert forwarded.context == context
     normalized_body = ResponsesRequest.model_validate(payload.model_dump_for_forwarding())
-    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] != _bridge_forward_tools_bound_signature(
+    assert headers[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] != _bridge_forward_input_shape_signature(
         payload=normalized_body,
         context=context,
+        signature_version=None,
+        input_shape_version="2",
     )
     assert isinstance(headers, dict)
     assert "Content-Type" not in headers
@@ -2264,3 +2270,28 @@ async def test_iter_sse_event_blocks_receive_timeout_is_scheduler_owned() -> Non
     await scheduler.cancel_owned_tasks()
     assert scheduler.owned_tasks == frozenset()
     assert scheduler.pending_timers == 0
+
+
+@pytest.mark.parametrize("tamper", ["strip", "corrupt"])
+def test_epoch_bound_forward_requires_valid_input_shape_proof(tamper: str) -> None:
+    from app.modules.proxy.http_bridge_forwarding import http_bridge_owner_process_epoch
+
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        expected_owner_process_epoch=http_bridge_owner_process_epoch(),
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "strip":
+        headers.pop(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER)
+    else:
+        headers[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] = "invalid"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
