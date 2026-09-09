@@ -408,8 +408,10 @@ async def test_known_subscription_model_owner_miss_uses_sole_candidate(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reuse", [False, True], ids=["initial-connect", "socket-reuse"])
 async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     monkeypatch: pytest.MonkeyPatch,
+    reuse: bool,
 ) -> None:
     """A compaction owner miss can use the one account in the subscription pool.
 
@@ -428,11 +430,14 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     account = _make_account("acc_ws_compaction_owner_miss")
     previous_response_id = "resp_ws_compaction_owner_miss"
     upstream = _TurnDrivenUpstream(
-        [_completed_turn("resp_ws_compaction_first"), _completed_turn("resp_ws_compaction_second")]
+        ([_completed_turn("resp_ws_compaction_first")] if reuse else [])
+        + [_completed_turn("resp_ws_compaction_second")]
     )
     list_continuity_owner_candidates = AsyncMock(return_value=(account,))
+    selection_scope: list[tuple[str | None, bool]] = []
 
     async def select_subscription_account(self, deadline, **kwargs):  # noqa: ANN001, ANN202
+        selection_scope.append((kwargs["preferred_account_id"], kwargs["fallback_on_preferred_account_unavailable"]))
         return proxy_service.AccountSelection(account=account, error_message=None)
 
     async def open_subscription_upstream(self, selected_account, headers, **kwargs):  # noqa: ANN001, ANN202
@@ -442,10 +447,7 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     second_payload = json.loads(_compaction_trigger_frame("qwen3.8-max"))
     second_payload["previous_response_id"] = previous_response_id
     downstream = _TurnSerializedDownstream(
-        [
-            _create_frame("gpt-5.6-sol"),
-            json.dumps(second_payload, separators=(",", ":")),
-        ]
+        ([_create_frame("gpt-5.6-sol")] if reuse else []) + [json.dumps(second_payload, separators=(",", ":"))]
     )
 
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
@@ -466,8 +468,9 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     )
 
     list_continuity_owner_candidates.assert_awaited_once()
-    assert len(upstream.sent_text) == 2, "the compaction continuation must reach the subscription account"
-    sent_payload = json.loads(upstream.sent_text[1])
+    assert selection_scope == ([(None, True)] if reuse else [(account.id, False)])
+    assert len(upstream.sent_text) == 1 + int(reuse), "the compaction continuation must reach the subscription account"
+    sent_payload = json.loads(upstream.sent_text[-1])
     assert sent_payload["previous_response_id"] == previous_response_id
     assert any("resp_ws_compaction_second" in text for text in downstream.sent_text)
     assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
