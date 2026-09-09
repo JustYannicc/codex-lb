@@ -15,28 +15,36 @@ def compose_desktop_usage(original: JsonObject, pooled: RateLimitStatusPayloadDa
         raise ValueError("Desktop usage requires pooled main quota")
     result = deepcopy(dict(original))
     result["rate_limit"] = RateLimitStatusDetails.from_data(pooled.rate_limit).model_dump(mode="json")
-    replacements: dict[str, JsonObject] = {
-        _limit_identity(bucket.limit_name): AdditionalRateLimitStatus.from_data(bucket).model_dump(mode="json")
+    replacements: dict[tuple[str, str], JsonObject] = {
+        (
+            _limit_identity(bucket.limit_name),
+            _limit_identity(bucket.metered_feature),
+        ): AdditionalRateLimitStatus.from_data(bucket).model_dump(mode="json")
         for bucket in pooled.additional_rate_limits
         if _limit_identity(bucket.limit_name) not in {"", "gpt-reserve"} and bucket.rate_limit is not None
     }
     additional = result.get("additional_rate_limits")
     merged: list[JsonValue] = []
-    matched: set[str] = set()
+    claimed_names: set[str] = set()
+    applied: dict[str, JsonObject] = {}
     if isinstance(additional, list):
         for bucket in additional:
             if isinstance(bucket, Mapping):
                 identity = _limit_identity(bucket.get("limit_name"))
-                replacement = replacements.get(identity)
+                claimed_names.add(identity)
+                replacement = replacements.get((identity, _limit_identity(bucket.get("metered_feature"))))
                 if replacement is not None:
                     bucket = {**bucket, "rate_limit": replacement["rate_limit"]}
-                    matched.add(identity)
+                    applied[identity] = replacement
             merged.append(bucket)
-    merged.extend(bucket for identity, bucket in replacements.items() if identity not in matched)
+    for (identity, _), bucket in replacements.items():
+        if identity not in claimed_names:
+            merged.append(bucket)
+            applied[identity] = bucket
     if merged or isinstance(additional, list):
         result["additional_rate_limits"] = merged
     if pooled.rate_limit.allowed and not pooled.rate_limit.limit_reached:
-        _remove_superseded_warnings(result, replacements)
+        _remove_superseded_warnings(result, applied)
     return result
 
 

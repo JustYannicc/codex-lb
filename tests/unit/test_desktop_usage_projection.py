@@ -192,9 +192,9 @@ def additional_entry(name, percent, *, recorded_at=NOW, window="primary"):
     )
 
 
-def test_additional_mixed_plans_use_observed_arithmetic_mean():
+def test_additional_same_plan_uses_observed_arithmetic_mean():
     payload = project(
-        [account("a"), account("b", "pro"), account("c")],
+        [account("a"), account("b"), account("c")],
         [row(name, 0) for name in "abc"],
         [row(name, 0, "secondary") for name in "abc"],
         {"model": {"primary": [additional_entry("a", 100), additional_entry("b", 0)]}},
@@ -203,6 +203,38 @@ def test_additional_mixed_plans_use_observed_arithmetic_mean():
     assert payload.additional_rate_limits[0].rate_limit.primary_window is not None
     assert payload.additional_rate_limits[0].rate_limit.primary_window.used_percent == 50
     assert payload.additional_rate_limits[0].rate_limit.allowed
+
+
+@pytest.mark.parametrize("same_usage", [False, True])
+def test_mixed_plan_model_percentage_requires_capacity_independent_result(same_usage):
+    def compute():
+        return project(
+            [account("a"), account("b", "pro")],
+            [row(name, 0) for name in "ab"],
+            [row(name, 0, "secondary") for name in "ab"],
+            {"model": {"primary": [additional_entry("a", 0 if same_usage else 100), additional_entry("b", 0)]}},
+        )
+
+    if same_usage:
+        payload = compute()
+        assert payload.additional_rate_limits[0].rate_limit is not None
+        assert payload.additional_rate_limits[0].rate_limit.primary_window is not None
+        assert payload.additional_rate_limits[0].rate_limit.primary_window.used_percent == 0
+    else:
+        with pytest.raises(PooledUsageUnavailable):
+            compute()
+
+
+def test_different_model_window_durations_are_not_averaged():
+    other = additional_entry("b", 0)
+    other.window_minutes = 10080
+    with pytest.raises(PooledUsageUnavailable):
+        project(
+            [account("a"), account("b")],
+            [row(name, 0) for name in "ab"],
+            [row(name, 0, "secondary") for name in "ab"],
+            {"model": {"primary": [additional_entry("a", 0), other]}},
+        )
 
 
 def test_additional_stale_contributor_is_unavailable():

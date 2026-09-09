@@ -46,7 +46,7 @@ The Desktop projection MUST use the existing capacity-weighted pool calculation 
 
 ### Requirement: Account-owned metadata survives quota composition
 
-The Desktop response MUST retain the original upstream caller envelope, including identity, plan, credits, spend controls, billing, reset credits and unknown account fields. It MUST replace only the canonical quota and additional quota for which equivalent fresh pooled evidence exists. Model-specific quota matching MUST respect the upstream limit identity; unmatched original limits and reserve-model metadata MUST remain conservative. If the pooled main quota is available, the response MUST remove a known superseded `rate_limit_reached` marker and quota-only exhausted/reserve banners. It MUST preserve unknown restriction markers and account-owned spending restrictions. The response MUST NOT substitute another account's plan, credits or identity.
+The Desktop response MUST retain the original upstream caller envelope, including identity, plan, credits, spend controls, billing, reset credits and unknown account fields. It MUST replace only the canonical quota and additional quota for which equivalent fresh pooled evidence exists. Model-specific quota matching MUST match both normalized limit name and metered feature. Additional percentages MUST use equal-plan contributors with equal window durations, or a capacity-independent equal percentage across plans; otherwise the projection MUST return `pooled_usage_unavailable`. Unmatched same-named buckets MUST NOT be duplicated with an available bucket; unmatched original limits and reserve-model metadata MUST remain conservative. If the pooled main quota is available, the response MUST remove a known superseded `rate_limit_reached` marker and quota-only exhausted/reserve banners. It MUST preserve unknown restriction markers and account-owned spending restrictions. The response MUST NOT substitute another account's plan, credits or identity.
 
 #### Scenario: Account plan and balances differ from the pool
 - **WHEN** a Plus caller uses a pool that also contains Pro accounts
@@ -75,6 +75,11 @@ The Desktop response MUST retain the original upstream caller envelope, includin
 #### Scenario: Original identity passthrough
 - **WHEN** Desktop requests a settings or reset-credit endpoint
 - **THEN** the relay forwards the request to ChatGPT with the original caller identity and unmodified body, and preserves the response status, cookies and integrity headers
+
+#### Scenario: Configured outbound proxy
+- **WHEN** standard outbound proxy environment variables configure ChatGPT HTTP or WebSocket egress
+- **THEN** the relay honors the existing HTTP, WebSocket and SOCKS proxy selection policy, including the explicit WebSocket direct-connect override
+- **AND** local LB usage requests remain direct loopback traffic
 
 #### Scenario: Unsafe destination or request
 - **WHEN** a nonloopback LB URL, unexpected Host, or path outside `/backend-api/` is supplied

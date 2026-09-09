@@ -57,7 +57,9 @@ def isolate_upstream(monkeypatch):
     monkeypatch.setattr(UsageUpdater, "refresh_accounts", refresh)
 
 
-async def seed_pool(*, second_used: float = 20, stale: bool = False, second_status=AccountStatus.ACTIVE):
+async def seed_pool(
+    *, second_used: float = 20, stale: bool = False, second_status=AccountStatus.ACTIVE, second_plan="pro"
+):
     encryptor = TokenEncryptor()
     now = utcnow()
     reset_at = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -66,7 +68,7 @@ async def seed_pool(*, second_used: float = 20, stale: bool = False, second_stat
         usage = UsageRepository(session)
         for account_id, plan, used, status in (
             ("primary", "plus", 100, AccountStatus.ACTIVE),
-            ("second", "pro", second_used, second_status),
+            ("second", second_plan, second_used, second_status),
         ):
             await accounts.upsert(
                 Account(
@@ -144,7 +146,7 @@ async def test_desktop_usage_accepts_reported_weekly_primary_with_secondary_plac
 
 
 async def test_desktop_model_quota_requires_main_capacity_on_same_account(async_client, db_setup):
-    await seed_pool()
+    await seed_pool(second_plan="plus")
     reset_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
     async with SessionLocal() as session:
         usage = AdditionalUsageRepository(session)
@@ -159,6 +161,43 @@ async def test_desktop_model_quota_requires_main_capacity_on_same_account(async_
         bucket for bucket in response.json()["additional_rate_limits"] if bucket["limit_name"] == "gpt-6-astra"
     )
     assert astra["rate_limit"]["allowed"] is False
+
+
+async def test_desktop_model_limit_with_different_metered_feature_is_not_replaced(async_client, db_setup, monkeypatch):
+    await seed_pool(second_plan="plus")
+    original: JsonObject = {
+        **ORIGINAL,
+        "additional_rate_limits": [
+            {"limit_name": "gpt-6-astra", "metered_feature": "original-bucket", "rate_limit": {"allowed": False}}
+        ],
+    }
+
+    async def fetch(**kwargs):
+        return UsagePayload.from_upstream(original)
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", fetch)
+    reset_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
+    async with SessionLocal() as session:
+        await AdditionalUsageRepository(session).add_entry(
+            "second", "gpt-6-astra", "different-bucket", "primary", 0, reset_at=reset_at, window_minutes=300
+        )
+    response = await async_client.get("/api/codex/desktop/usage", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert response.json()["additional_rate_limits"] == original["additional_rate_limits"]
+
+
+async def test_desktop_mixed_plan_model_capacity_is_not_invented(async_client, db_setup):
+    await seed_pool()
+    reset_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
+    async with SessionLocal() as session:
+        usage = AdditionalUsageRepository(session)
+        for account, percent in (("primary", 100), ("second", 0)):
+            await usage.add_entry(
+                account, "gpt-6-astra", "astra", "primary", percent, reset_at=reset_at, window_minutes=300
+            )
+    response = await async_client.get("/api/codex/desktop/usage", headers=HEADERS)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "pooled_usage_unavailable"
 
 
 async def test_desktop_usage_failed_refresh_cannot_advertise_stale_capacity(async_client, db_setup):

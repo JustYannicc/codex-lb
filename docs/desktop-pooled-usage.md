@@ -15,7 +15,7 @@ The response keeps the original account's identity, plan, credits, spend control
 ## Availability and limits
 
 - Main quota uses LB's existing plan-capacity weights. Percentages are not added together. Exhausted accounts remain in the totals; paused, deactivated and reauthentication-required accounts are excluded.
-- Additional model quota uses the existing mean across accounts reporting that bucket. Main plan weights do not establish model-specific credit capacity. Model availability requires main and additional capacity on the same eligible account.
+- Additional model quota averages accounts on the same plan with equal window durations. Mixed-plan buckets are accepted only when every reported percentage is equal, making the result independent of unknown weights. Otherwise the strict endpoint returns unavailable. Main plan weights do not establish model-specific credit capacity. Model availability requires main and additional capacity on the same eligible account.
 - A window's reset is the earliest reported reset among its contributors. It is not the time the entire pool resets.
 - Missing, stale, elapsed or malformed applicable evidence returns HTTP 503 with `pooled_usage_unavailable`. Current freshness is three minutes. An unsuccessful refresh cannot turn an elapsed window into new capacity. The conservative projection can also reject historical windows whose omission has not been established.
 - Reserves, account credits and spend restrictions remain owned by the original account. They can still restrict Desktop even when some pool quota is available.
@@ -43,7 +43,7 @@ It connects to `http://127.0.0.1:2455` by default. For a separate local LB port:
 codex-lb desktop-relay --lb-url http://127.0.0.1:2456
 ```
 
-The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. It always forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change this listener.
+The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. It always forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It honors configured HTTP/WebSocket/SOCKS outbound proxies for ChatGPT traffic, including the existing explicit WebSocket direct-connect override. Local LB requests always stay direct. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change this listener.
 
 A local unauthenticated check should reach LB and return 401:
 

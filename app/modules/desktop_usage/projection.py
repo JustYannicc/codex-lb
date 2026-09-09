@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from app.core import usage
 from app.core.exceptions import ProxyUpstreamError
+from app.core.plan_types import normalize_account_plan_type
 from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory
@@ -149,6 +150,11 @@ def _additional(
                 _validate(row, now)
                 if row.used_percent == 100:
                     available.discard(row.account_id)
+            if len({row.window_minutes for row in values}) != 1:
+                raise PooledUsageUnavailable("Additional quota windows have different durations")
+            plans = {normalize_account_plan_type(contributors[row.account_id].plan_type) for row in values}
+            if len(plans) > 1 and len({row.used_percent for row in values}) > 1:
+                raise PooledUsageUnavailable("Additional quota capacity is unknown across different plans")
             snapshots[window] = RateLimitWindowSnapshotData(
                 used_percent=int(sum(row.used_percent for row in values if row.used_percent is not None) / len(values)),
                 reset_at=min(row.reset_at for row in values if row.reset_at is not None),

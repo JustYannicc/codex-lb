@@ -18,7 +18,7 @@ The separate strict endpoint avoids changing the older `/api/codex/usage` contra
 
 Main window percentages reuse LB's existing plan-capacity weights. A Plus account at 100% weekly usage and a Pro account at 20% produce 30% used after truncation, using capacities 7,560 and 50,400. Those weights are LB estimates, not a measured token or currency entitlement.
 
-Additional limits use the existing arithmetic mean of observed contributors. There is no model-specific capacity table from which to derive different weights. A model is available only when the same eligible account has both main and model quota. The original caller's reserve bucket remains account-owned.
+Additional limits use the arithmetic mean for equal-plan contributors with equal window durations. Across different plans, only an equal percentage on every contributor is independent of unknown capacity weights. Other mixed-plan results and differing durations are unavailable. There is no model-specific capacity table from which to derive different weights. A model is available only when the same eligible account has both main and model quota. The original caller's reserve bucket remains account-owned.
 
 Freshness uses the shared horizon, currently 180 seconds. The projection refreshes without holding its initial database session, then reads sequentially. It does not infer resets from elapsed time or quietly discard missing accounts. Weekly primary/secondary selection reuses the [existing tiebreak](../usage-refresh-policy/spec.md), followed by strict validation of the selected effective row. Thus a real weekly-primary sample can beat a no-data secondary placeholder without treating the placeholder as unused quota.
 

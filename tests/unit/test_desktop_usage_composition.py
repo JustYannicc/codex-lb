@@ -68,7 +68,12 @@ def test_additional_aliases_keep_metadata_and_append_new_pool_buckets() -> None:
     unmatched: JsonObject = {"limit_name": "unknown", "rate_limit": {"allowed": False}}
     original: JsonObject = {
         "additional_rate_limits": [
-            {"limit_name": " GPT_6.ASTRA ", "normal_model_slug": "original-model", "metadata": {"x": 1}},
+            {
+                "limit_name": " GPT_6.ASTRA ",
+                "metered_feature": "codex",
+                "normal_model_slug": "original-model",
+                "metadata": {"x": 1},
+            },
             reserve,
             unmatched,
         ]
@@ -88,6 +93,7 @@ def test_additional_aliases_keep_metadata_and_append_new_pool_buckets() -> None:
     assert len(buckets) == 4
     assert buckets[0] == {
         "limit_name": " GPT_6.ASTRA ",
+        "metered_feature": "codex",
         "normal_model_slug": "original-model",
         "metadata": {"x": 1},
         "rate_limit": compose_desktop_usage({}, _pool(100))["rate_limit"],
@@ -172,3 +178,19 @@ def test_exhausted_main_keeps_reserve_and_exhaustion_state() -> None:
 def test_missing_main_pool_quota_is_not_available() -> None:
     with pytest.raises(ValueError, match="requires pooled main quota"):
         compose_desktop_usage({}, RateLimitStatusPayloadData("pro"))
+
+
+@pytest.mark.parametrize("feature", ["different_feature", None])
+def test_same_named_limit_with_unknown_feature_equivalence_stays_restricted(feature: str | None) -> None:
+    bucket: JsonObject = {
+        "limit_name": "gpt-6-astra",
+        "metered_feature": feature,
+        "rate_limit": {"allowed": False, "limit_reached": True},
+    }
+    warning: JsonObject = {"banner_type": "rate_limit", "model_slug": "gpt-6-astra", "rate_limit": {"allowed": False}}
+    result = compose_desktop_usage(
+        {"additional_rate_limits": [bucket], "rate_limit_warning": warning},
+        _pool(40, AdditionalRateLimitData("gpt-6-astra", "codex", rate_limit=_quota(0))),
+    )
+    assert result["additional_rate_limits"] == [bucket]
+    assert result["rate_limit_warning"] == warning
