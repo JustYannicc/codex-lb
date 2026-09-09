@@ -1061,6 +1061,45 @@ async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_model_context_window_overrides_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-context-window-overrides.sqlite'}"
+    revision = "20260909_110000_model_context_window_overrides"
+
+    def _table_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_context_window_overrides"):
+            return None
+        return {column["name"] for column in inspector.get_columns("model_context_window_overrides")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_table_state)
+        assert columns == {"slug", "context_window", "created_at", "updated_at"}
+        # The migration never seeds rows from the environment dict.
+        async with engine.connect() as conn:
+            count = (await conn.execute(text("SELECT COUNT(*) FROM model_context_window_overrides"))).scalar_one()
+        assert count == 0
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), f"{revision}-1"))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_account_refresh_claims_migration_upgrade_and_downgrade(tmp_path):
     """Upgrade creates the refresh-claim coordination table; downgrade drops it;
     a final walk to head proves the revision sits on a single-head graph."""
@@ -2037,7 +2076,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260909_080000_dashboard_stream_bridge_budgets"
+    parent_revision = "20260909_110000_model_context_window_overrides"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2068,6 +2107,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 }
                 for table in (
                     "dashboard_settings",
+                    "model_context_window_overrides",
                     "model_source_pins",
                     "account_usage_rollup_state",
                     "request_report_hourly_rollups",
@@ -2076,6 +2116,10 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 )
             },
             "settings": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM dashboard_settings ORDER BY id"))],
+            "context_overrides": [
+                tuple(row)
+                for row in sync_conn.execute(text("SELECT * FROM model_context_window_overrides ORDER BY slug"))
+            ],
             "pins": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM model_source_pins ORDER BY pin_key"))],
             "fold_state": [
                 tuple(row) for row in sync_conn.execute(text("SELECT * FROM account_usage_rollup_state ORDER BY id"))
@@ -2188,6 +2232,13 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     )
                 )
             ).one() == (None, None, None)
+            assert (await conn.execute(text("SELECT COUNT(*) FROM model_context_window_overrides"))).scalar_one() == 0
+            await conn.execute(
+                text(
+                    "INSERT INTO model_context_window_overrides (slug, context_window) "
+                    "VALUES ('retained-model', 128000)"
+                )
+            )
             updated_settings = await conn.execute(
                 text(
                     "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "

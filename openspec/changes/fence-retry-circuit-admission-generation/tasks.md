@@ -107,3 +107,7 @@
 - [ ] 4.23 Choose and verify a mixed-version activation contract. Receipt-unaware
   replicas can advance a live receipt's generation during a rolling upgrade;
   staged activation or a non-rolling cutover has not been accepted.
+
+- [x] 4.24 Reconcile the model-context override migration without changing it;
+  preserve populated override rows through receipt marker upgrade, guarded
+  downgrade, and re-upgrade, and recheck settings/model responses.
