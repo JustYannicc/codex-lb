@@ -44,13 +44,18 @@ def _create_app(lb_origin: URL, backend_origin: URL, *, timeout: float = 60) -> 
         if not request.raw_path.startswith("/backend-api/") or not request.path.startswith("/backend-api/"):
             raise web.HTTPNotFound()
         usage = request.method == "GET" and request.path in {"/backend-api/wham/usage", "/backend-api/wham/usage/"}
+        local_path = "/api/codex/desktop/usage" if usage else None
+        path = request.path.removesuffix("/")
+        if request.method == "GET" and path == "/backend-api/wham/rate-limit-reset-credits":
+            local_path = "/api/codex/desktop/reset-credits"
+        elif request.method == "POST" and path == "/backend-api/wham/rate-limit-reset-credits/consume":
+            local_path = "/api/codex/desktop/reset-credits/consume"
         raw_path = request.raw_path
-        if usage:
-            raw_path = "/api/codex/desktop/usage" + (
-                "?" + request.rel_url.raw_query_string if request.rel_url.raw_query_string else ""
-            )
-        target = URL(str(lb_origin if usage else backend_origin).rstrip("/") + raw_path, encoded=True)
-        return await request.app[transport_key].forward(request, target, usage=usage)
+        if local_path is not None:
+            raw_path = local_path + ("?" + request.rel_url.raw_query_string if request.rel_url.raw_query_string else "")
+        local = local_path is not None
+        target = URL(str(lb_origin if local else backend_origin).rstrip("/") + raw_path, encoded=True)
+        return await request.app[transport_key].forward(request, target, usage=local)
 
     app.cleanup_ctx.append(lifespan)
     app.router.add_route("*", "/{path:.*}", relay)

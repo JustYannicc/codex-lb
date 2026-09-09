@@ -109,6 +109,7 @@ class ConsumeResetCreditResponseSchema(DashboardModel):
 @dataclass(frozen=True, slots=True)
 class _RedeemResetCreditOutcome:
     response: ConsumeResetCreditResponseSchema
+    upstream: ConsumeResetCreditResponse
     available_count_before: int
     available_count_after: int
 
@@ -220,6 +221,7 @@ async def _redeem_soonest_reset_credit(
     skip_if_redeem_request_pinned: bool = False,
     expected_credit_id: str | None = None,
     expected_credit_expires_at: datetime | None = None,
+    bound_credit_id: str | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -240,6 +242,7 @@ async def _redeem_soonest_reset_credit(
                 skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
                 expected_credit_id=expected_credit_id,
                 expected_credit_expires_at=expected_credit_expires_at,
+                bound_credit_id=bound_credit_id,
             )
     except RedeemClaimTimeoutError as exc:
         raise DashboardConflictError(
@@ -321,6 +324,7 @@ async def _redeem_soonest_reset_credit_locked(
     skip_if_redeem_request_pinned: bool,
     expected_credit_id: str | None,
     expected_credit_expires_at: datetime | None,
+    bound_credit_id: str | None = None,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
     if auth_manager is not None:
@@ -340,6 +344,12 @@ async def _redeem_soonest_reset_credit_locked(
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
     pending_credit_id = await get_pinned_redeem_credit_id(account.id, redeem_request_id) if client_supplied_id else None
+    # Desktop supplies its permanent owner/credit binding, including after a
+    # crash before this helper's short-lived ledger was written.
+    if bound_credit_id is not None:
+        if pending_credit_id is not None and pending_credit_id != bound_credit_id:
+            raise DashboardConflictError("Reset credit binding disagrees", code="reset_credit_request_conflict")
+        pending_credit_id = bound_credit_id
     if skip_if_redeem_request_pinned and pending_credit_id is not None:
         raise ResetCreditRedeemRequestAlreadyPinned(
             account_id=account.id,
@@ -429,6 +439,7 @@ async def _redeem_soonest_reset_credit_locked(
             )
 
     return _RedeemResetCreditOutcome(
+        upstream=result,
         response=ConsumeResetCreditResponseSchema(
             code=result.code,
             windows_reset=result.windows_reset,

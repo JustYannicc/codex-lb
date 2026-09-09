@@ -122,6 +122,7 @@ const SettingsPayloadSchema = z.looseObject({
   preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
   showResetCreditBadges: z.boolean().optional(),
   autoRedeemResetCreditsBeforeExpiry: z.boolean().optional(),
+  desktopResetPoolEnabled: z.boolean().optional(),
   showResetCreditExpiryBadge: z.boolean().optional(),
   routingStrategy: z
     .enum([

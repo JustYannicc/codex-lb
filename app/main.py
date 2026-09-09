@@ -92,6 +92,7 @@ from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.desktop_relay.lifecycle import serve_relay
+from app.modules.desktop_resets import api as desktop_resets_api
 from app.modules.desktop_usage import api as desktop_usage_api
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
@@ -994,6 +995,7 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.files_router)
     app.include_router(proxy_api.usage_router)
     app.include_router(desktop_usage_api.router)
+    app.include_router(desktop_resets_api.router)
     app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(rate_limit_reset_credits_api.router)

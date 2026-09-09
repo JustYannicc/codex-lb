@@ -26,6 +26,7 @@ from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     get_dashboard_session_store,
 )
+from app.modules.desktop_resets.service import DesktopResetService
 from app.modules.desktop_usage.service import DesktopUsageService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
@@ -91,6 +92,11 @@ class ProxyContext:
 @dataclass(slots=True)
 class DesktopUsageContext:
     service: DesktopUsageService
+
+
+@dataclass(slots=True)
+class DesktopResetContext:
+    service: DesktopResetService
 
 
 @dataclass(slots=True)
@@ -255,6 +261,10 @@ def get_proxy_context(request: Request) -> ProxyContext:
 
 def get_desktop_usage_context() -> DesktopUsageContext:
     return DesktopUsageContext(service=DesktopUsageService(_proxy_repo_context))
+
+
+def get_desktop_reset_context() -> DesktopResetContext:
+    return DesktopResetContext(service=DesktopResetService(_proxy_repo_context))
 
 
 def get_proxy_service_for_app(app: FastAPI) -> ProxyService:

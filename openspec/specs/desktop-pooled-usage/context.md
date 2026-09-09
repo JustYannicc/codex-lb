@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The intended outcome is to keep the original ChatGPT account and connected capabilities while inference uses codex-lb's imported account pool. Desktop's own usage poll follows a different base URL from inference. The optional relay joins those paths for usage and forwards the caller's credentials on other backend requests. The real trial below verified identity, account settings, native pooled quota and Astra execution on the inspected build.
+The intended outcome is to keep the original ChatGPT account and connected capabilities while inference uses codex-lb's imported account pool. Desktop's own usage poll follows a different base URL from inference. The optional relay joins those paths for usage and forwards the caller's credentials on other backend requests. The optional [reset pool](../desktop-pooled-reset-credits/context.md) adds native reset inventory and consumption with a separate default-off policy. The real trial below verified identity, account settings, native pooled quota and Astra execution on the inspected build.
 
 ## Routing decisions
 

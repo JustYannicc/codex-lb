@@ -326,3 +326,71 @@ async def test_usage_response_cookie_domain_is_not_translated():
             relay.make_url("/backend-api/wham/usage"), headers={"Host": "localhost:8000"}
         ) as response:
             assert response.headers["Set-Cookie"] == cookie
+
+
+@pytest.mark.parametrize("suffix", ["", "/"])
+@pytest.mark.parametrize(
+    "method,path,mapped",
+    [
+        ("GET", "/backend-api/wham/rate-limit-reset-credits", "/api/codex/desktop/reset-credits"),
+        ("POST", "/backend-api/wham/rate-limit-reset-credits/consume", "/api/codex/desktop/reset-credits/consume"),
+    ],
+)
+async def test_native_reset_routes_to_lb_with_original_request(method, path, mapped, suffix):
+    async def local(request):
+        assert request.raw_path == mapped + "?x=1&x=2"
+        assert request.method == method
+        assert request.headers["Authorization"] == "Bearer original"
+        assert request.headers["chatgpt-account-id"] == "original-account"
+        assert await request.read() == b'{"redeem_request_id":"native-request"}'
+        return web.json_response({"code": "reset"}, headers={"Cache-Control": "no-store"})
+
+    async def backend(request):
+        pytest.fail("Native reset request escaped to the original backend")
+
+    local_app = web.Application()
+    local_app.router.add_route("*", "/{path:.*}", local)
+    backend_app = web.Application()
+    backend_app.router.add_route("*", "/{path:.*}", backend)
+    async with TestServer(local_app) as lb, TestServer(backend_app) as original:
+        async with TestServer(_create_app(lb.make_url(""), original.make_url(""))) as relay:
+            async with ClientSession() as client:
+                async with client.request(
+                    method,
+                    relay.make_url(path + suffix + "?x=1&x=2"),
+                    headers={
+                        "Host": "localhost:8000",
+                        "Authorization": "Bearer original",
+                        "chatgpt-account-id": "original-account",
+                    },
+                    data=b'{"redeem_request_id":"native-request"}',
+                ) as response:
+                    assert response.status == 200
+                    assert await response.json() == {"code": "reset"}
+                    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/backend-api/wham/rate-limit-reset-credits"),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits/consume"),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits/other"),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits-extra"),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits//"),
+    ],
+)
+async def test_reset_lookalikes_remain_on_original_backend(method, path):
+    async def backend(request):
+        assert request.path == path
+        assert request.method == method
+        return web.Response(status=202)
+
+    # Any accidental local routing fails to connect to this unused origin.
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", backend)
+    async with TestServer(app) as original:
+        async with TestServer(_create_app(URL("http://127.0.0.1:1"), original.make_url(""))) as relay:
+            async with ClientSession() as client:
+                async with client.request(method, relay.make_url(path), headers={"Host": "localhost:8000"}) as response:
+                    assert response.status == 202

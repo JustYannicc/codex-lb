@@ -6,11 +6,11 @@ Source of truth: [Desktop pooled usage specification](https://github.com/Soju06/
 
 ## What changes
 
-Desktop has its own usage request. Setting the model provider URL routes inference through LB, but does not redirect that request. The optional relay routes Desktop's `/backend-api/wham/usage` to LB's strict `/api/codex/desktop/usage` endpoint. It forwards other Desktop backend requests to ChatGPT with the original caller's credentials.
+Desktop has its own usage request. Setting the model provider URL routes inference through LB, but does not redirect that request. The optional relay routes Desktop's `/backend-api/wham/usage` to LB's strict `/api/codex/desktop/usage` endpoint. The native reset list and consume paths use the [reset adapter](desktop-pooled-reset-credits.md). Other Desktop backend requests go to ChatGPT with the original caller's credentials.
 
 The original ChatGPT account must be imported into the LB instance. Its token and account header authorize the whole eligible pool, matching the existing ChatGPT-authenticated native usage contract. An LB API key is not accepted for this endpoint, and key-specific budgets or account assignments do not redefine this pool. Use this setup only when the whole imported pool is the pool you intend Desktop to show.
 
-The response keeps the original account's identity, plan, credits, spend controls, billing and saved reset credits. It replaces the quota windows and additional model limits supported by current pool evidence. It does not grant a subscription, fabricate credit balances or guarantee that a particular model or existing sticky thread can run.
+The response keeps the original account's identity, plan, credits, spend controls, billing and saved reset credits. Saved reset credits can use the separate default-off [reset pool](desktop-pooled-reset-credits.md). It replaces the quota windows and additional model limits supported by current pool evidence. It does not grant a subscription, fabricate credit balances or guarantee that a particular model or existing sticky thread can run.
 
 ## Availability and limits
 
@@ -61,7 +61,7 @@ It connects to `http://127.0.0.1:2455` by default. For a separate local LB port:
 codex-lb desktop-relay --lb-url http://127.0.0.1:2456
 ```
 
-The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. It always forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It honors configured HTTP/WebSocket/SOCKS outbound proxies for ChatGPT traffic, including the existing explicit WebSocket direct-connect override. Local LB requests always stay direct. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change the standalone listener. Do not enable embedded mode and the standalone command on the same host at the same time.
+The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. Except for the native reset adapter, it forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It honors configured HTTP/WebSocket/SOCKS outbound proxies for ChatGPT traffic, including the existing explicit WebSocket direct-connect override. Local LB requests always stay direct. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change the standalone listener. Do not enable embedded mode and the standalone command on the same host at the same time.
 
 A local unauthenticated check should reach LB and return 401:
 
