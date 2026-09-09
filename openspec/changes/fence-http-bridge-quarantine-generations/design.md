@@ -166,3 +166,7 @@ epoch; it does not change the existing transport-security policy.
   await. After expiry, cleanup compares the retained entry with the raw
   generation captured alongside poison provenance. Time passing does not
   itself count as new evidence or authorize a fresh fence capture.
+- Structured HTTP continuation promotion changes bridge admission, not
+  quarantine classification or recovery authority. Inferred history locality
+  remains soft, explicit ownership wins, and the original full client history
+  stays intact unless existing hard-continuity rules authorize trimming.

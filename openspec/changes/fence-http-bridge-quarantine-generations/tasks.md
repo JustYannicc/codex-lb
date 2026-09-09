@@ -89,3 +89,6 @@
 - [x] 1.36 Use the captured raw generation when poison expires during
   completion awaits, clearing unchanged weaker evidence and preserving
   post-capture arms and first strikes.
+- [x] 1.37 Reconcile structured HTTP continuation promotion with the existing
+  classifier, ownership, retry, queue and generation fences, preserving soft
+  inferred locality and explicit continuity precedence.
