@@ -2802,7 +2802,7 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.proxy_injected_anchor_had_full_resend_payload = True
                         retry_request_state.fresh_upstream_request_is_retry_safe = False
 
-                    async for event_block in self._stream_http_bridge_session_events(
+                    owner_recovery_events = self._stream_http_bridge_session_events(
                         session,
                         request_state=retry_request_state,
                         text_data=retry_text_data,
@@ -2810,8 +2810,12 @@ class _HTTPBridgeStreamingMixin:
                         propagate_http_errors=propagate_http_errors,
                         downstream_turn_state=downstream_turn_state,
                         request_deadline=request_deadline,
-                    ):
-                        yield event_block
+                    )
+                    try:
+                        async for event_block in owner_recovery_events:
+                            yield event_block
+                    finally:
+                        await owner_recovery_events.aclose()
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:
                         retry_lifecycle = (

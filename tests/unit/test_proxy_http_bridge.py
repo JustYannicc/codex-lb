@@ -9,7 +9,7 @@ import pickle
 import subprocess
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -722,6 +722,88 @@ async def test_http_bridge_completed_delivery_cleanup_releases_queue_after_racin
     assert event_queue.queued_bytes == 0
     assert budget.used_bytes == 0
     assert revoked.is_set()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_attached_stream_close_releases_full_completed_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="attached-completed-close")
+    budget = http_bridge_request_submit_module._HTTPBridgeLiveEventQueueByteBudget(max_bytes=4096)
+    queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(
+        maxsize=2, revoked=asyncio.Event(), byte_budget=budget
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="attached-completed-close",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=queue,
+        event_queue_revoked=queue.revoked,
+        transport="http",
+    )
+    first = 'data: {"type":"response.created","response":{"id":"resp-close"}}\n\n'
+
+    async def submit(target_session: Any, **_kwargs: Any) -> None:
+        target_session.pending_requests.append(state)
+        target_session.queued_request_count = 1
+        queue.put_nowait(first)
+
+    entered = asyncio.Event()
+
+    async def complete(
+        target_session: Any,
+        *,
+        completed_delivery_scope: Any,
+        claimed_terminal_request_states: list[Any],
+        **_kwargs: Any,
+    ) -> None:
+        async with target_session.pending_lock:
+            target_session.pending_requests.remove(state)
+            target_session.queued_request_count = 0
+            state.completed_delivery_scope = completed_delivery_scope
+            claimed_terminal_request_states.append(state)
+        queue.put_nowait("first-unread")
+        queue.put_nowait("second-unread")
+        entered.set()
+        await queue.put("blocked-completion")
+        assert queue.revoked.is_set()
+        completed_delivery_scope.terminal_enqueued = True
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(service, "_process_parsed_http_bridge_upstream_event", complete)
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    assert await anext(stream) == first
+    assert state.event_queue_consumer_started
+    completion = asyncio.create_task(
+        service._process_http_bridge_upstream_text(
+            session, '{"type":"response.completed","response":{"id":"resp-close"}}'
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert not completion.done()
+        await asyncio.wait_for(stream.aclose(), 1)
+        await asyncio.wait_for(completion, 1)
+        assert state.event_queue is None
+        assert queue.empty()
+        assert queue.queued_bytes == 0
+        assert budget.used_bytes == 0
+    finally:
+        completion.cancel()
+        await asyncio.gather(completion, return_exceptions=True)
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -21544,6 +21626,7 @@ async def _run_owner_forward_recovery_with_session(
     input_items: list[dict[str, Any]],
     capacity_error_on_first_submit: bool = False,
     submit_attempts: list[str] | None = None,
+    close_after_first: bool = False,
 ) -> list[Any]:
     """Drive owner-forward failure -> local recovery; return prepared inputs.
 
@@ -21620,6 +21703,10 @@ async def _run_owner_forward_recovery_with_session(
             )
         event_queue = request_state.event_queue
         assert event_queue is not None
+        if close_after_first:
+            request_state.completed_delivery_scope = proxy_support_module._HTTPBridgeCompletedDeliveryScope(
+                active=True, terminal_enqueued=True
+            )
         await event_queue.put('data: {"type":"response.completed"}\n\n')
         await event_queue.put(None)
 
@@ -21652,23 +21739,49 @@ async def _run_owner_forward_recovery_with_session(
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-session-id": "sid-recover"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=900.0,
-            max_sessions=8,
-            queue_limit=4,
-        )
-    ]
+    held_children: list[Any] = []
+    detach_revocations: list[bool] = []
+    if close_after_first:
+        real_events = service._stream_http_bridge_session_events
+
+        def capture_events(*args: Any, **kwargs: Any) -> Any:
+            events = real_events(*args, **kwargs)
+            held_children.append(events)
+            return events
+
+        async def record_detach(_session: Any, *, request_state: Any) -> None:
+            detach_revocations.append(request_state.event_queue_revoked.is_set())
+
+        monkeypatch.setattr(service, "_stream_http_bridge_session_events", capture_events)
+        monkeypatch.setattr(service, "_detach_http_bridge_request", record_detach)
+
+    stream = service._stream_via_http_bridge(
+        payload,
+        headers={"x-codex-session-id": "sid-recover"},
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=900.0,
+        max_sessions=8,
+        queue_limit=4,
+    )
+    assert inspect.isasyncgen(stream)
+    stream = cast(AsyncGenerator[str, None], stream)
+    try:
+        if close_after_first:
+            chunks = [await anext(stream)]
+            await stream.aclose()
+            assert detach_revocations and all(detach_revocations), detach_revocations
+        else:
+            chunks = [chunk async for chunk in stream]
+    finally:
+        await stream.aclose()
+        for child in held_children:
+            await child.aclose()
     if capacity_error_on_first_submit:
         keepalive = proxy_service.parse_sse_data_json(chunks[0])
         assert keepalive is not None
@@ -21699,6 +21812,18 @@ def _make_owner_forward_recovery_session() -> "proxy_service._HTTPBridgeSession"
         queued_request_count=0,
         last_used_at=2.0,
         idle_ttl_seconds=120.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_recovery_closes_child_before_detaching_completed_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _run_owner_forward_recovery_with_session(
+        monkeypatch,
+        recovery_session=_make_owner_forward_recovery_session(),
+        input_items=[{"role": "user", "content": "recover"}],
+        close_after_first=True,
     )
 
 
