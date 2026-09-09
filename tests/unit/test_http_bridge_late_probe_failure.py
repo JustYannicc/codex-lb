@@ -87,8 +87,9 @@ async def test_late_failed_probe_preserves_replacement_and_terminal_cleanup(
     response: dict[str, Any] = {"id": "resp-old-failure", "status": event_type.removeprefix("response.")}
     if event_type == "response.incomplete":
         response["incomplete_details"] = {"reason": "stream_incomplete"}
-    else:
-        response["error"] = {"code": "stream_incomplete", "type": "server_error", "message": "Stream failed"}
+    # Both terminal forms use main's existing explicit-error classification.
+    # Reason-only classification belongs to the independent #2273 change.
+    response["error"] = {"code": "stream_incomplete", "type": "server_error", "message": "Stream failed"}
 
     async def receive() -> UpstreamWebSocketMessage:
         nonlocal calls

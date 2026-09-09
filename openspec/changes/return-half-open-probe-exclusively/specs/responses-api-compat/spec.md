@@ -265,11 +265,10 @@ existing contracts.
 - **AND** current-generation probe failures and ordinary non-probe failures
   MUST retain their existing eligible attempt-scoped accounting
 
-#### Scenario: An explicit incomplete reason retains genuine failure accounting
+#### Scenario: Existing circuit eligibility and continuity provenance remain enforced
 
 - **GIVEN** an otherwise eligible eventless upstream attempt
-- **WHEN** its `response.incomplete` terminal has no response error and
-  explicitly reports `incomplete_details.reason` as `stream_incomplete`
+- **WHEN** its terminal carries an explicit `stream_incomplete` response error
 - **THEN** the proxy MUST record that detail through the existing attempt-scoped
   retry-circuit failure path
 - **AND** accounting MUST require a hard-affinity bridge key, a pending request,
@@ -283,8 +282,6 @@ existing contracts.
 - **AND** a rejected anchor MAY return the active local probe as continuity-
   neutral only when the request state explicitly proves that the proxy injected
   that anchor
-- **AND** a missing, unknown, or `max_output_tokens` reason MUST NOT be converted
-  to `stream_incomplete`
 - **AND** downstream terminal payload and account-health treatment MUST remain
   unchanged
 

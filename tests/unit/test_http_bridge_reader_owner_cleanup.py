@@ -13,11 +13,11 @@ import pytest
 
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
 from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
 from tests.unit.test_http_bridge_accepted_retirement import _configure
 from tests.unit.test_proxy_http_bridge import (
     _activate_half_open_probe,
-    _make_app_settings,
     _make_bridge_session,
     _make_eventless_http_bridge_owner,
 )
@@ -58,11 +58,7 @@ async def test_reader_owner_loss_finishes_typed_cleanup_without_cancelling_reade
         monkeypatch.setattr(service, "_write_request_log", AsyncMock())
         request.started_at -= 2.0
         request.response_create_sent_at = request.started_at
-        monkeypatch.setattr(
-            proxy_service,
-            "get_settings",
-            lambda: _make_app_settings(http_responses_session_bridge_stuck_gate_retire_after_seconds=1.0),
-        )
+        monkeypatch.setattr(http_bridge_helpers, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 1.0)
         upstream.receive = AsyncMock(side_effect=asyncio.Event().wait)
     select = AsyncMock(
         return_value=proxy_service.AccountSelection(
