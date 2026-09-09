@@ -5,5 +5,7 @@
 
 ## 2. Independent integration
 
-- [ ] 2.1 Verify the delta has no unmerged receipt schema/helper dependency and demonstrate compatibility with the receipt candidate in both application orders without editing its original branch.
-- [ ] 2.2 Run lint, type and strict OpenSpec validation; sync the new requirement and record the tested candidate and boundaries.
+- [x] 2.1 Verify the delta has no unmerged receipt schema/helper dependency and demonstrate compatibility with the receipt candidate in both application orders without editing its original branch.
+- [x] 2.2 Run lint, type and strict OpenSpec validation; sync the new requirement and record the tested candidate and boundaries.
+
+- [ ] 2.3 Verify the new PostgreSQL race tests on current-head hosted CI before calling the draft ready.
