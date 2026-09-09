@@ -74,3 +74,16 @@ Source-qualified markers leave the legacy timestamp NULL, so an older binary
 safely restores conservative hard ownership during rollback. Dropping the scope
 column loses only restart-recovery state; it does not make the retained owner
 mobile.
+
+## Draining owner recovery
+
+The owner-forward client reports non-200 rejection before settlement ownership
+transfers. Local drain recovery uses that transport outcome together with the
+error code. An ambiguous or acknowledged request remains ineligible even if
+its payload says `bridge_drain_active`.
+
+For example, an origin receives HTTP 503 from a draining owner while holding an
+API-key reservation. It releases that reservation before local admission and
+replacement reservation. A release failure prevents the replacement attempt;
+a file-owned request keeps its account constraint. The same code on an
+ordinary local continuation error does not establish owner rejection.

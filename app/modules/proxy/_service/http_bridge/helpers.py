@@ -4122,7 +4122,9 @@ def _http_bridge_reconnect_connect_failure(
     raise exc
 
 
-def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
+def _http_bridge_should_attempt_local_previous_response_recovery(
+    exc: ProxyResponseError, *, owner_pre_dispatch: bool = False
+) -> bool:
     if exc.failure_phase == "owner_forward" and exc.failure_detail == "owner_input_shape_upgrade_required":
         return True
     payload = exc.payload
@@ -4143,6 +4145,8 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # param on the terse previous-response rejection), and a raw read would
     # misclassify them into the ambiguous transport class below (issue #1830).
     code = _normalize_error_code(raw_code, error_type)
+    if code == "bridge_drain_active":
+        return owner_pre_dispatch
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -4265,15 +4269,14 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
     key: _HTTPBridgeSessionKey,
     headers: Mapping[str, str],
     previous_response_id: str | None,
+    owner_pre_dispatch: bool = False,
 ) -> bool:
-    if key.affinity_kind not in {"session_header", "thread_header"}:
+    if key.affinity_kind not in {"session_header", "thread_header", "turn_state_header"}:
         return False
     if previous_response_id is not None:
         return False
-    if _sticky_key_from_turn_state_header(headers) is not None:
-        return False
     if exc.failure_phase == "owner_forward" and exc.failure_detail == "owner_input_shape_upgrade_required":
-        return True
+        return _sticky_key_from_turn_state_header(headers) is None
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
@@ -4281,6 +4284,10 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
     if not isinstance(error, dict):
         return False
     code = error.get("code")
+    if code == "bridge_drain_active":
+        return owner_pre_dispatch
+    if key.affinity_kind == "turn_state_header" or _sticky_key_from_turn_state_header(headers) is not None:
+        return False
     return code in {
         "bridge_owner_unreachable",
         "bridge_instance_mismatch",

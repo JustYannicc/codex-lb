@@ -128,6 +128,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
+    _owner_forward_failure_was_pre_dispatch,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_clear_fence_details,
@@ -2633,7 +2634,9 @@ class _HTTPBridgeStreamingMixin:
                     recovery_previous_response_id = None
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
                     recovery_previous_response_id is not None
-                    and _http_bridge_should_attempt_local_previous_response_recovery(exc)
+                    and _http_bridge_should_attempt_local_previous_response_recovery(
+                        exc, owner_pre_dispatch=_owner_forward_failure_was_pre_dispatch(exc)
+                    )
                 )
                 should_attempt_bootstrap_rebind = (
                     not owner_forward_fresh_replay
@@ -2642,6 +2645,7 @@ class _HTTPBridgeStreamingMixin:
                         key=bridge_session_key,
                         headers=headers,
                         previous_response_id=recovery_previous_response_id,
+                        owner_pre_dispatch=_owner_forward_failure_was_pre_dispatch(exc),
                     )
                 )
                 should_attempt_turn_state_takeover = False
@@ -2730,6 +2734,12 @@ class _HTTPBridgeStreamingMixin:
                     and not should_attempt_turn_state_takeover
                 ):
                     raise
+                # A rejected owner never accepted settlement ownership. Release
+                # its reservation before admitting or reserving the replacement.
+                await release_unowned_bridge_lifecycle(
+                    request_state.deferred_account_backoff_lifecycle,
+                    request_state,
+                )
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     if owner_forward_fresh_replay:
                         recover_path = "owner_forward_fresh_replay"
