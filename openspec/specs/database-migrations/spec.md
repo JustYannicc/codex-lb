@@ -344,16 +344,16 @@ The migration graph MUST join `20260908_000000_add_subscription_overflow` and
 `20260908_000000_replace_upstream_stream_transport_default_sentinel` through a
 new merge revision. Both existing revisions MUST remain unchanged. The merge
 revision's upgrade and downgrade MUST NOT execute application schema or data
-operations.
+operations. Later revisions MAY descend from this merge.
 
-#### Scenario: An existing parent upgrades to the merged head
+#### Scenario: An existing parent upgrades to the current head
 
 - **GIVEN** a populated database at either parent, or at both parents
 - **WHEN** the normal migration runner upgrades to `head`
 - **THEN** it MUST apply any missing parent according to that parent's existing
-  behavior and finish at the single merge head
+  behavior, traverse the merge, and finish at the sole current graph head
 - **AND** it MUST preserve existing application rows except for data changes
-  already required by a missing parent's migration
+  already required by an applied migration
 - **AND** the resulting schema MUST match the current ORM metadata
 
 #### Scenario: Downgrading only the merge preserves both parents
@@ -363,8 +363,8 @@ operations.
 - **THEN** it MUST undo only the merge revision and retain both parent revision
   stamps and both parent schemas
 - **AND** application data MUST remain unchanged
-- **AND** upgrading to `head` again MUST restore the single merge stamp without
-  repeating either parent's schema or data operations
+- **AND** upgrading back to the merge revision MUST restore its single stamp
+  without repeating either parent's schema or data operations
 
 ### Requirement: Chunk transcript schema expands without rewriting history
 
@@ -510,4 +510,3 @@ remain for operator recovery.
 - **WHEN** recovery is invoked in either replace or non-replace mode
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
-

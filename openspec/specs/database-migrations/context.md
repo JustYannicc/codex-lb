@@ -67,7 +67,11 @@ the quota-warmup revision. A forward merge joins them without changing their
 operations. An upgrade from one parent applies the other parent normally;
 downgrading only the merge restores both parent stamps while preserving both
 schemas and their data. This is not a rollback to a build that knows only one
-branch. See the [repair context](../../changes/merge-overflow-transport-migration-heads/context.md).
+branch. See the [repair context](../../changes/archive/2026-09-09-merge-overflow-transport-migration-heads/context.md).
+
+Later revisions can follow this merge. Its regression tests target the historical
+merge explicitly for no-op upgrade/downgrade checks. Separate populated upgrades
+to the current head verify later descendants against current ORM metadata.
 
 ## Example
 

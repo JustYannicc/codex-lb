@@ -67,6 +67,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _abort_http_bridge_inflight_creation_by_future_locked,
     _abort_http_bridge_inflight_creation_locked,
+    _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _alias_fallback_key,
     _durable_bridge_lookup_active_owner,
@@ -265,34 +266,6 @@ class _HTTPBridgeMixin(
                 action="http_bridge_session_close",
                 request_id=_hash_identifier(session.key.affinity_key),
             )
-
-    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> bool:
-        tasks = [
-            task
-            for task in self._background_cleanup_tasks
-            if (
-                task.get_name().startswith("proxy-http_bridge_session_close-")
-                or task.get_name().startswith("http-bridge-close-")
-                or task.get_name().startswith("cancelled-task-cleanup-")
-            )
-        ]
-        if not tasks:
-            return not self._http_bridge_background_cleanup_failed
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
-                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                reason,
-                len(tasks),
-                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-            return False
-        self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
-        return not self._http_bridge_background_cleanup_failed
 
     async def _fail_http_bridge_inflight_session_creation(
         self,

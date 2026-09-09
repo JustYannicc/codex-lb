@@ -3,6 +3,7 @@ POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_retry_circuit_scheduled_purge.py \
+	tests/integration/test_retry_circuit_receipt_purge.py \
 	tests/integration/test_report_rollup.py \
 	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_codex_context_pool.py \
