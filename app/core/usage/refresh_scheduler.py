@@ -11,7 +11,6 @@ from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core import usage as usage_core
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
-from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type, normalize_capacity_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -515,7 +514,7 @@ async def _restore_recoverable_account_status(
     recovery_plan_type: str | None,
     recovery_refresh_token_encrypted: bytes,
 ) -> None:
-    restored = await accounts_repo.update_status_if_current(
+    await accounts_repo.update_status_if_current(
         account_id,
         previous_status,
         previous_deactivation_reason,
@@ -525,28 +524,6 @@ async def _restore_recoverable_account_status(
         expected_deactivation_reason=recovery_deactivation_reason,
         expected_reset_at=recovery_reset_at,
         expected_blocked_at=recovery_blocked_at,
-        expected_refresh_token_encrypted=recovery_refresh_token_encrypted,
-        expected_plan_type=recovery_plan_type,
-    )
-    if restored:
-        return
-
-    current = await accounts_repo.get_by_id_fresh(account_id)
-    if current is None or current.delete_requested_at is not None or current.status != AccountStatus.ACTIVE:
-        return
-    if current.plan_type != recovery_plan_type or current.refresh_token_encrypted != recovery_refresh_token_encrypted:
-        return
-
-    await accounts_repo.update_status_if_current(
-        account_id,
-        previous_status,
-        previous_deactivation_reason,
-        previous_reset_at,
-        blocked_at=previous_blocked_at,
-        expected_status=current.status,
-        expected_deactivation_reason=current.deactivation_reason,
-        expected_reset_at=current.reset_at,
-        expected_blocked_at=current.blocked_at,
         expected_refresh_token_encrypted=recovery_refresh_token_encrypted,
         expected_plan_type=recovery_plan_type,
     )
@@ -775,7 +752,7 @@ def _matches_recovery_long_window(expected_window: str, entry: UsageHistory) -> 
     if entry.window_minutes is None:
         return (entry.window or "primary") == expected_window
     if expected_window == "monthly":
-        return usage_core.is_monthly_window_minutes(entry.window_minutes)
+        return entry.window_minutes == usage_core.DEFAULT_WINDOW_MINUTES_MONTHLY
     if expected_window == "secondary":
         return usage_core.is_weekly_window_minutes(entry.window_minutes)
     return False

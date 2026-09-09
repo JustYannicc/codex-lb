@@ -25,4 +25,5 @@ None.
 
 - Affected code: background usage refresh scheduling, recoverable-status reconciliation, limit warm-up candidate construction, and the compare-and-set account-status repository path.
 - Affected tests: focused scheduler, status-recovery, warm-up, and repository-backed integration coverage.
-- No API, schema, migration, setting, dependency, dashboard, or deployment contract changes.
+- Schema impact: Alembic adds `idx_usage_window_account_reset_time` on usage history. PostgreSQL creates this covering index concurrently; SQLite creates the lookup index during migration. Deployments must upgrade the schema.
+- No API, setting, dependency, or dashboard contract changes.

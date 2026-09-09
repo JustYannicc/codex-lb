@@ -647,3 +647,74 @@ async def test_scheduler_restart_uses_anchored_persisted_evidence(
         expected_attempt_reset_at,
         "succeeded",
     )
+
+
+@pytest.mark.asyncio
+async def test_recovery_rollback_preserves_concurrent_operator_reactivation(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del db_setup
+    now = int(time.time())
+    account = _account(
+        "acc_operator_reactivation",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=now - 10,
+        blocked_at=now - 100,
+    )
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account.id,
+            0.0,
+            window="primary",
+            recorded_at=utcnow(),
+            reset_at=now + 3600,
+            window_minutes=300,
+        )
+
+    checks = 0
+    original_watermark_check = refresh_scheduler_module._recovery_usage_watermark_is_current
+
+    async def change_account_after_recovery(**kwargs) -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            async with SessionLocal() as operator_session:
+                operator_repo = AccountsRepository(operator_session)
+                await operator_repo.update_status(
+                    account.id,
+                    AccountStatus.ACTIVE,
+                    blocked_at=now - 1,
+                )
+                await UsageRepository(operator_session).add_entry(
+                    account.id,
+                    100.0,
+                    window="primary",
+                    recorded_at=utcnow(),
+                    reset_at=now + 3600,
+                    window_minutes=300,
+                )
+        return await original_watermark_check(**kwargs)
+
+    monkeypatch.setattr(
+        refresh_scheduler_module,
+        "_recovery_usage_watermark_is_current",
+        change_account_after_recovery,
+    )
+    async with SessionLocal() as session:
+        recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+            accounts_repo=AccountsRepository(session),
+            usage_repo=UsageRepository(session),
+            accounts=[account],
+        )
+    assert recovered == 0
+    assert checks == 2
+    async with SessionLocal() as session:
+        persisted = await AccountsRepository(session).get_by_id_fresh(account.id)
+        assert persisted is not None
+        assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (
+            AccountStatus.ACTIVE,
+            None,
+            now - 1,
+        )

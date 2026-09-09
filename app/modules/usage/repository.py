@@ -327,27 +327,31 @@ def _window_clause(window: str | None, history_model=UsageHistory):
     return history_model.window == window
 
 
-def _recorded_at_epoch_expr(recorded_at, dialect_name: str):
-    if dialect_name == "sqlite":
-        return sqlalchemy_cast(func.strftime("%s", recorded_at), Integer)
-    return func.extract("epoch", recorded_at)
-
-
 def _usage_reset_confirmed_clause(before, after, *, dialect_name: str, min_reset_jump_seconds: int):
-    before_observed_at = _recorded_at_epoch_expr(before.recorded_at, dialect_name)
-    observed_at = _recorded_at_epoch_expr(after.recorded_at, dialect_name)
     window_seconds = func.coalesce(after.window_minutes * 60, _FALLBACK_ROLLING_WINDOW_SECONDS)
     window_started_at = after.reset_at - window_seconds
+    if dialect_name == "sqlite":
+        # Compare canonical SQLite DATETIME text without rounding observations.
+        before_observed_at = before.recorded_at
+        observed_at = after.recorded_at
+        previous_reset_at = func.strftime("%Y-%m-%d %H:%M:%S.000000", before.reset_at, "unixepoch")
+        next_reset_at = func.strftime("%Y-%m-%d %H:%M:%S.000000", after.reset_at, "unixepoch")
+        window_started_at = func.strftime("%Y-%m-%d %H:%M:%S.000000", window_started_at, "unixepoch")
+    else:
+        before_observed_at = func.extract("epoch", before.recorded_at)
+        observed_at = func.extract("epoch", after.recorded_at)
+        previous_reset_at = before.reset_at
+        next_reset_at = after.reset_at
     crossed_previous_reset = and_(
-        before_observed_at <= before.reset_at,
-        before.reset_at <= observed_at,
-        observed_at < after.reset_at,
+        before_observed_at <= previous_reset_at,
+        previous_reset_at <= observed_at,
+        observed_at < next_reset_at,
     )
     reanchored_between_samples = and_(
         after.used_percent < before.used_percent,
         before_observed_at <= window_started_at,
         window_started_at <= observed_at,
-        observed_at < after.reset_at,
+        observed_at < next_reset_at,
     )
     return and_(
         before.reset_at.is_not(None),
@@ -970,7 +974,7 @@ class UsageRepository:
         min_reset_jump_seconds: int,
         expected_window_minutes: int | None = None,
     ) -> list[UsageHistory]:
-        """Return a reset marker and the adjacent pair that first proves a reset after it.
+        """Return a reset marker and the newest adjacent pair that proves a reset after it.
 
         The ``after`` row must both show available quota and carry a reset
         deadline at least ``min_reset_jump_seconds`` past the marker's, so an
@@ -1067,7 +1071,7 @@ class UsageRepository:
                     min_reset_jump_seconds=min_reset_jump_seconds,
                 ),
             )
-            .order_by(candidate_after.recorded_at.asc(), candidate_after.id.asc())
+            .order_by(candidate_after.recorded_at.desc(), candidate_after.id.desc())
             .limit(1)
         )
         row = (await self._session.execute(pair_stmt)).one_or_none()

@@ -18,7 +18,7 @@ The scheduler already captures usage immediately before and after a selected-acc
 
 - Probe or warm a still-blocked account as a way to infer whether a throttle ended.
 - Generalize early recovery to Plus/Pro primary-window exhaustion, `quota_exceeded`, auth failures, paused/deactivated accounts, model-scoped throttles, or generic Retry-After cooldowns.
-- Add configuration, schema, migration, dashboard, API, or new background-worker behavior.
+- Add configuration, dashboard, API, or new background-worker behavior.
 - Change the existing recovery rules after a persisted cooldown has naturally elapsed.
 
 ## Decisions
@@ -72,7 +72,7 @@ Alternative considered: add a recovery-specific sender or dedupe key. That would
 
 ## Migration Plan
 
-No data or configuration migration is required. Deploy the scheduler and warm-up changes together, then verify that qualifying Free and paid accounts transition to `active`, clear both block markers, and create at most one long-window warm-up attempt while accounts whose current applicable window is genuinely exhausted remain blocked. Rollback restores the prior conservative behavior; already recovered account rows remain valid active state and require no data repair.
+Apply the Alembic usage-history reset-transition index migration before deploying the scheduler and warm-up changes together. PostgreSQL builds the covering index concurrently and repairs an invalid leftover index on retry; SQLite creates a normal lookup index. No data backfill or configuration migration is required. After deployment, then verify that qualifying Free and paid accounts transition to `active`, clear both block markers, and create at most one long-window warm-up attempt while accounts whose current applicable window is genuinely exhausted remain blocked. Rollback restores the prior conservative behavior; already recovered account rows remain valid active state and require no data repair.
 
 ## Open Questions
 
