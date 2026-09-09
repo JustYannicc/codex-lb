@@ -183,6 +183,7 @@ def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) 
         (HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, context.origin_instance),
         (HTTP_BRIDGE_TARGET_INSTANCE_HEADER, context.target_instance),
         ("x-codex-turn-state", context.downstream_turn_state),
+        (HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER, context.synthesized_turn_state),
         (HTTP_BRIDGE_AFFINITY_KIND_HEADER, context.original_affinity_kind),
         (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
         (HTTP_BRIDGE_FILE_OWNER_HEADER, context.file_owner_account_id),

@@ -94,3 +94,9 @@ unchanged; test their reclaim and migration cases without accessing live data.
 No migration or deployment is part of this reconciliation. Publish the reviewed
 composition with an exact expected-head lease. Preserve the previous commit and
 its evidence as the recovery point. Inherited upstream migrations are unchanged.
+
+## Current-main and header-validation reconciliation
+
+The c0beaaadd composition retains upstream constantized core and session-bridge tunables. It must not resurrect removed settings while retaining the candidate ownership checks. The unfinished correction tasks previously appended to the archived ownership change are tracked here until their verification and delivery are complete.
+
+Validate the added synthesized-turn-state context field with the existing bridge metadata control-character rule before constructing signed headers. This closes a gap in the established safe-header contract, without changing marker recognition or ownership. Both legacy-forward alias lookups must retain their expected arguments.

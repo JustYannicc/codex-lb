@@ -28,3 +28,48 @@
 
 - [x] 6.1 Reproduce unregistered marker-only HTTP owner misses on both raw and bridge routes with zero, one, and multiple assignment-scoped owners before changing production code.
 - [x] 6.2 Apply the existing compatibility rule without changing registered/file/source ownership, first-turn behavior, or replay policy; verify controls and independent reviews before republishing.
+
+## 7. Current-head review corrections
+
+- [x] 7.1 Resolve registered synthetic-shaped HTTP turn-state owners before caching a lookup miss, including disabled-source probes without a previous response.
+- [x] 7.2 Apply shape-based owner-miss compatibility in the HTTP bridge while preserving blank, non-synthetic, file, and durable-owner constraints.
+- [x] 7.3 Enforce API-key-scoped sole-candidate selection for marker-only compact owner misses, including zero and multiple candidates.
+- [x] 7.4 Render disabled-source owner-lookup failures through both HTTP routes' sanitized 502 error envelopes.
+- [ ] 7.5 Prove all four corrections at the affected routes, run isolated-database regressions and required checks, and obtain current-head review and hosted results.
+
+## 8. Direct WebSocket registered-owner correction
+
+- [x] 8.1 Reproduce registered marker ownership with source-overlapping models through initial and reused direct WebSocket routes.
+- [x] 8.2 Preserve resolved turn-state ownership before both source guards and synchronize the explicit contract without relaxing independent owner constraints.
+- [ ] 8.3 Verify affected routes and safeguards, obtain independent reviews, and deliver the corrected head with hosted and CodeRabbit evidence.
+
+## 9. WebSocket capability and owner-cardinality separation
+
+- [x] 9.1 Reproduce the scoped unknown-owner continuation with mixed security authorization through both direct WebSocket routes.
+- [x] 9.2 Count possible owners before security-capability filtering while preserving subsequent authorization and synchronize the contract.
+- [ ] 9.3 Verify scoped regressions and current-upstream composition, obtain independent reviews, and deliver current-head CI, CodeRabbit, and hosted Codex clearance.
+
+## 10. HTTP bridge authorized-pool exhaustion advisory
+
+- [x] 10.1 Reproduce the missing advisory through HTTP bridge requests when the last authorized replacement is excluded after refresh or authentication failure.
+- [x] 10.2 Map authorized-pool exhaustion to the existing missing-pool warning while preserving the original security denial and replay guards.
+- [ ] 10.3 Verify affected routes and cleanup, obtain independent reviews, and deliver current-head hosted CI and review clearance.
+
+## 11. Separate owner-miss cardinality from routing eligibility
+
+- [x] 11.1 Reproduce model-catalog narrowing through affected external routes and compare the ownership contract with the separate conversation-scoping contract.
+- [x] 11.2 Give all previous-response and marker owner-miss callers one account-assignment-scoped enumeration interface without routing-filter inputs; retain normal selection and conversation semantics.
+- [ ] 11.3 Verify catalog, service-tier, scope, unavailable-account, and replay controls; obtain independent review and current-head hosted clearance.
+
+## 12. Reconcile current-main public event filtering
+
+- [x] 12.1 Adopt the current-main event-family filter at the HTTP boundary while preserving internal/native security advisory generation.
+- [ ] 12.2 Verify native backend, public `/v1`, and OpenAI-shaped backend denial delivery, then review the integrated candidate and deliver current-head hosted clearance.
+
+## 13. Current-main reconciliation and review corrections
+
+- [x] 13.1 Preserve current-main constantized tunables in the ownership composition and verify affected route and bridge regressions.
+- [x] 13.2 Validate synthesized marker metadata before header construction and prove rejection of illegal control characters.
+- [x] 13.3 Assert both owner-alias lookup calls in the legacy-forward regression.
+- [x] 13.4 Move unfinished correction verification out of the archived ownership tasks into this active change.
+- [ ] 13.5 Publish the verified normal merge commit after rechecking remote head and target; obtain current-head hosted results and review disposition.

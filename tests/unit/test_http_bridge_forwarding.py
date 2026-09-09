@@ -11,6 +11,7 @@ import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyUsageReservationData
@@ -131,6 +132,24 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert forwarded.context == context
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+@pytest.mark.parametrize("control", ["\r", "\n", "\x00", "\x1f", "\x7f"])
+def test_owner_forward_rejects_unsafe_synthesized_turn_state(control: str) -> None:
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state=f"http_turn_generated{control}injected",
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        build_owner_forward_headers(headers={}, payload=_payload(), context=context)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "bridge_forward_invalid"
+    assert "injected" not in exc_info.value.payload["error"]["message"]
 
 
 def test_parse_forwarded_request_round_trips_authenticated_synthesized_turn_state() -> None:
