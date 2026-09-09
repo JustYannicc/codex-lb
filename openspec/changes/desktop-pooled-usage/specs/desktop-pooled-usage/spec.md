@@ -72,7 +72,15 @@ The Desktop response MUST retain the original upstream caller envelope, includin
 
 #### Scenario: Original identity passthrough
 - **WHEN** Desktop requests a settings or reset-credit endpoint
-- **THEN** the relay forwards the request to ChatGPT with the original caller identity and unmodified body, and preserves the response status, cookies and integrity headers
+- **THEN** the relay forwards the request to ChatGPT with the original caller identity and unmodified body, and preserves the response status, cookie values and integrity headers
+
+The relay MUST remove only an official-host Domain attribute from non-usage response cookies as described below. It MUST NOT change cookie values or other attributes, or make invalid `__Host-` cookies acceptable by removing their Domain.
+
+#### Scenario: Upstream cookie scoped to the official host
+- **WHEN** a non-usage ChatGPT response sets a cookie with Domain equal to `chatgpt.com` or `.chatgpt.com`
+- **THEN** the relay removes only that Domain attribute so the browser stores a host-only cookie for the loopback relay
+- **AND** it preserves the cookie value, Path, Secure, HttpOnly, SameSite, expiration and every other attribute
+- **AND** it leaves host-only cookies and cookies for other domains unchanged and does not retain cookies in a shared server jar
 
 #### Scenario: Configured outbound proxy
 - **WHEN** standard outbound proxy environment variables configure ChatGPT HTTP or WebSocket egress

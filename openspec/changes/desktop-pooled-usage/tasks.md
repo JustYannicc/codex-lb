@@ -11,7 +11,9 @@
 
 ## 3. Acceptance and delivery
 
-- [ ] 3.1 Complete applicable isolated repository checks and review the exact candidate against the pinned base.
+- [x] 3.1 Complete applicable isolated repository checks and review the exact candidate against the pinned base.
 - [ ] 3.2 Present the exact temporary LB/relay/Desktop trial and rollback for approval, then verify retained displayed identity, genuine native pooled quota and an actual Astra request through LB.
 - [ ] 3.3 After real acceptance, sync and verify specs, archive verified work, commit, push and open the focused upstream PR with exact evidence.
 - [ ] 3.4 Inspect current-head hosted checks and review feedback, address in-scope findings, and hand off readiness and maintainer blockers without merging or permanent deployment.
+
+Task 3.1 code evidence is bound to candidate `1aa75e14f2cdcc6f5223a64b68c573f7b207a630` and base `c0beaaadd96a89f0240582b5449bf4dd50647c7d`. Task 3.2 remains incomplete after the approved 2026-09-09 trial and rollback: the authenticated quota route ran and name/usage became visible, but settings failed and numerical quota/model execution acceptance was not completed. See [observed trial](../../specs/desktop-pooled-usage/context.md#observed-desktop-trial). Delivery stays pending.

@@ -28,3 +28,7 @@ Application patching, certificate interception, account switching, automatic dep
 ## Migration Plan
 
 Existing clients require no changes. Desktop users opt in after importing their original account into their authorized LB pool. Start the candidate LB, then the relay, then set the launch environment and fully restart Desktop. Record identity, native quota and actual model success separately. To roll back, restore the previous launch environment, restart Desktop, stop the relay and restore the previous LB candidate if it was temporarily changed.
+
+## Cookie scope correction after the first trial
+
+The first live trial exposed the difference between preserving cookie bytes and preserving cookie behavior. Chromium rejects a Domain=chatgpt.com cookie received from localhost. The relay now removes only an explicit official-host Domain attribute on non-usage responses, preserving cookie values and all other attributes. Host-only, foreign-domain and invalid __Host-prefixed cookies remain unchanged. The original app's cookie-manager code passed an isolated Electron 42.3.0 test with this adaptation. No cookie values are imported from the installed app, no server cookie jar is shared, and no signed challenge or verification result is modified. This fixes the proven domain mismatch; any registration 403 before cookie issuance still needs separate live diagnosis.

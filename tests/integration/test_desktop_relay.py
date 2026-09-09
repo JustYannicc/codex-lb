@@ -278,3 +278,51 @@ async def test_compressed_request_body_retains_encoding():
             headers={"Host": "localhost:8000", "Content-Encoding": "gzip"},
         ) as response:
             assert response.status == 204
+
+
+@pytest.mark.parametrize(
+    "cookie,expected",
+    [
+        (
+            "_devicecheck=value; Domain=.chatgpt.com; Path=/; Secure; HttpOnly; SameSite=None",
+            "_devicecheck=value; Path=/; Secure; HttpOnly; SameSite=None",
+        ),
+        ("__cf_bm=value; domain=chatgpt.com; Max-Age=30; Secure", "__cf_bm=value; Max-Age=30; Secure"),
+        ("a=value; DOMAIN = ChatGPT.COM ; Path=/backend-api", "a=value; Path=/backend-api"),
+        ("a=value; Path=/; Secure", "a=value; Path=/; Secure"),
+        ("a=value; Domain=evil.example; Secure", "a=value; Domain=evil.example; Secure"),
+        ("a=value; Domain=chatgpt.com.evil.example", "a=value; Domain=chatgpt.com.evil.example"),
+        ("a=value; Domain=..chatgpt.com", "a=value; Domain=..chatgpt.com"),
+        ("__Host-a=value; Domain=chatgpt.com; Secure", "__Host-a=value; Domain=chatgpt.com; Secure"),
+        (
+            "a=; Domain=.chatgpt.com; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Partitioned; Secure",
+            "a=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Partitioned; Secure",
+        ),
+        (
+            'a="value; Domain=chatgpt.com; still-value"; Domain=.chatgpt.com; Secure',
+            'a="value; Domain=chatgpt.com; still-value"; Secure',
+        ),
+    ],
+)
+async def test_official_cookie_domain_becomes_loopback_host_only(cookie, expected):
+    async def upstream(request):
+        return web.Response(headers=[("Set-Cookie", cookie), ("Set-Cookie", "other=unchanged; Secure")])
+
+    async with servers(upstream) as (client, relay):
+        async with client.get(
+            relay.make_url("/backend-api/devicecheck"), headers={"Host": "localhost:8000"}
+        ) as response:
+            assert response.headers.getall("Set-Cookie") == [expected, "other=unchanged; Secure"]
+
+
+async def test_usage_response_cookie_domain_is_not_translated():
+    cookie = "a=value; Domain=chatgpt.com; Secure"
+
+    async def upstream(request):
+        return web.Response(headers={"Set-Cookie": cookie})
+
+    async with servers(upstream) as (client, relay):
+        async with client.get(
+            relay.make_url("/backend-api/wham/usage"), headers={"Host": "localhost:8000"}
+        ) as response:
+            assert response.headers["Set-Cookie"] == cookie

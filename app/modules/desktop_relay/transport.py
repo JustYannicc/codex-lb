@@ -23,6 +23,7 @@ from yarl import URL
 from app.core.clients.http import _build_pooled_connector, _shared_ssl_context, _socks_proxy_config, _SocksProxyConfig
 from app.core.config.settings import get_settings
 from app.core.utils.proxy_env import resolve_http_proxy_from_env, resolve_websocket_proxy_from_env
+from app.modules.desktop_relay.cookies import loopback_cookie
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,15 @@ def _headers(raw: tuple[tuple[bytes, bytes], ...], *, websocket: bool = False) -
     if websocket:
         excluded |= _WS_HEADERS
     return CIMultiDict((key, value) for key, value in headers.items() if key.lower() not in excluded)
+
+
+def _response_headers(
+    raw: tuple[tuple[bytes, bytes], ...], *, local_cookies: bool, websocket: bool = False
+) -> CIMultiDict[str]:
+    return CIMultiDict(
+        (key, loopback_cookie(value) if local_cookies and key.lower() == "set-cookie" else value)
+        for key, value in _headers(raw, websocket=websocket).items()
+    )
 
 
 class _HandshakeResponse(Exception):
@@ -114,7 +124,7 @@ async def _websocket(request: web.Request, route: _Route, target: URL) -> web.We
             max_msg_size=16 * 1024 * 1024,
         )
         # aiohttp owns the handshake fields; retain other end-to-end metadata.
-        for key, value in _headers(upstream._response.raw_headers, websocket=True).items():
+        for key, value in _response_headers(upstream._response.raw_headers, local_cookies=True, websocket=True).items():
             if key.lower() != "sec-websocket-accept":
                 downstream.headers.add(key, value)
         await downstream.prepare(request)
@@ -158,7 +168,10 @@ class RelayTransport:
                     allow_redirects=False,
                 )
             async with pending_response as upstream:
-                response = web.StreamResponse(status=upstream.status, headers=_headers(upstream.raw_headers))
+                response = web.StreamResponse(
+                    status=upstream.status,
+                    headers=_response_headers(upstream.raw_headers, local_cookies=not usage),
+                )
                 await response.prepare(request)
                 async for chunk in upstream.content.iter_chunked(65536):
                     await response.write(chunk)

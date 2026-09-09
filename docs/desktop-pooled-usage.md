@@ -1,6 +1,6 @@
 # Codex Desktop pooled usage
 
-Keep your original ChatGPT login while showing the codex-lb pool in Desktop's native usage display. This is an optional integration. The ordinary [client setup](client-setup.md) still routes inference without it.
+This experimental integration aims to keep the original ChatGPT login while showing the codex-lb pool in Desktop's native usage display. It has not passed real Desktop acceptance. The ordinary [client setup](client-setup.md) still routes inference without it.
 
 Source of truth: [Desktop pooled usage specification](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/desktop-pooled-usage).
 
@@ -25,9 +25,11 @@ The response keeps the original account's identity, plan, credits, spend control
 
 Static routing and schema checks were made against Codex Desktop `26.903.61454` with bundled CLI `0.153.4` on macOS. The inspected build's existing authentication allowlist accepts literal `localhost:8000`; substituting `127.0.0.1:2455` or another port does not establish the same authenticated path.
 
-Deterministic relay and quota tests pass. A real Desktop trial is pending. This document does not yet claim a verified native display or completed model request on that build.
+Deterministic relay and quota tests pass. A real trial on 2026-09-09 reached the authenticated pooled endpoint and displayed the user's name and a usage control. Account settings still failed with DeviceCheck registration errors and upstream challenges; restoring direct backend access restored normal settings behavior. The exact displayed pool percentage and a successful intended-model request were not verified. The trial was rolled back. This setup is not ready for normal use.
 
-`CODEX_API_BASE_URL` is a Desktop launch-environment override, not a TOML setting or a documented stable OpenAI API. Other Desktop backend requests use it too. Signed remote-control enrollment and refresh compare challenge origins, and cookie registration can depend on the destination domain. The relay preserves those messages and cookies, but does not rewrite signed challenges or change cookie domains. These features require separate compatibility observation. A correct account name alone does not prove every connected feature works.
+The inspected Desktop uses its direct `/wham/usage` response for the Luna reserve model restriction as well as quota display. Changing Rust `account/rateLimits/read` routing alone does not redirect that Desktop query. No quota-only Desktop URL override was found in the inspected build. See the [compatibility findings](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/desktop-pooled-usage/context.md#observed-desktop-trial) before considering another trial.
+
+`CODEX_API_BASE_URL` is a Desktop launch-environment override, not a TOML setting or a documented stable OpenAI API. Other Desktop backend requests use it too. Signed remote-control enrollment and refresh compare challenge origins, and cookie registration can depend on the destination domain. The relay preserves signed messages and cookie values. It removes only an explicit chatgpt.com Domain attribute from non-usage response cookies, retaining Secure, HttpOnly, SameSite, Path and expiry so Chromium can use them through localhost. It does not rewrite signed challenges. These features require separate compatibility observation. A correct account name alone does not prove every connected feature works.
 
 ## Start the optional relay
 
