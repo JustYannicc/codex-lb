@@ -9,6 +9,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, C
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
@@ -75,6 +76,7 @@ from app.core.clients.usage import (
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -169,6 +171,10 @@ from app.core.utils.shared_future import (
 from app.core.utils.shared_future import (
     _await_result_deferring_cancellation as _shared_await_result_deferring_cancellation,
 )
+from app.core.utils.shared_future import (
+    _await_task_deferring_cancellation as _shared_await_task_deferring_cancellation,
+)
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -205,10 +211,14 @@ from app.modules.model_sources.catalog import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceResponsesCompletion,
     SourceTimings,
     SourceUsage,
     SourceUsageHolder,
     forward_chat_completion,
+)
+from app.modules.model_sources.forwarding import (
+    empty_stream_error as source_empty_stream_error,
 )
 from app.modules.model_sources.forwarding import (
     forward_audio_transcription as forward_source_audio_transcription,
@@ -225,6 +235,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
+from app.modules.model_sources.projection import strip_source_telemetry
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
@@ -308,6 +319,20 @@ from app.modules.proxy.schemas import (
     WarmupSubmittedAccount,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
+from app.modules.proxy.source_dispatch import (
+    ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
+    ABANDON_CLIENT_DISCONNECTED_DURING_OPEN,
+    ABANDON_DISPATCH_INTERRUPTED,
+    ABANDON_SOURCE_STALL,
+    CANCELLED_CLIENT_DISCONNECTED,
+    ClientDisconnectedDuringOpen,
+    SourceChatStreamOwner,
+    SourceDispatch,
+    SourceStreamingResponse,
+    open_with_disconnect_watch,
+    settlement_stream,
+)
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -343,6 +368,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "reasoning",
         "web_search_call",
         "file_search_call",
+        "tool_search_output",
         "computer_call",
         "code_interpreter_call",
         "mcp_approval_request",
@@ -1197,6 +1223,7 @@ async def responses(
             pre_normalization_effort=pre_normalization_effort,
             enforce_openai_sdk_contract=openai_sdk_request,
             native_codex_heartbeat=native_codex_heartbeat,
+            context=context,
         )
 
     apply_enforced_service_tier_model_fallback(
@@ -1401,6 +1428,7 @@ async def v1_responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            context=context,
         )
     apply_enforced_service_tier_model_fallback(
         responses_payload,
@@ -4457,7 +4485,7 @@ async def v1_chat_completions(
         return StreamingResponse(
             inject_sse_keepalives(
                 chat_stream,
-                get_settings().sse_keepalive_interval_seconds,
+                with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
                 on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
@@ -4770,7 +4798,9 @@ async def _source_embeddings_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
     if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
         error = openai_error(
@@ -4874,7 +4904,9 @@ async def _source_audio_transcription_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
 
     # ASR billing prefers audio duration: when the source model has a
     # per-minute rate and the response carries a duration, settle cost from
@@ -4961,7 +4993,18 @@ async def _source_responses_response(
     pre_normalization_effort: str | None,
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
+    context: ProxyContext | None = None,
 ) -> Response:
+    """Serve a Responses request from an OpenAI-compatible model source.
+
+    Every dispatched attempt is owned by one ``SourceDispatch`` (design v3 §6):
+    the bulkhead claim is taken before the API-key reservation so a saturated
+    source answers ``503 model_source_busy`` with nothing owned, the source open
+    is raced against the client disconnecting, and the settlement generator is
+    the outermost body layer for limited and unlimited keys alike (live
+    streaming; limited keys settle at an estimate when usage is missing).
+    """
+
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place
@@ -4971,13 +5014,109 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
-    reservation = await _enforce_request_limits(
-        api_key,
-        request_model=payload.model,
-        request_service_tier=payload.service_tier,
-        request_usage_budget=estimate_api_key_request_usage(payload),
+    claims = try_claim_source_admission(source)
+    if claims is None:
+        return _logged_error_json_response(
+            request,
+            503,
+            _model_source_busy_error(),
+            headers={**rate_limit_headers, "Retry-After": "1"},
+        )
+    try:
+        # Inside the route-helper latch (I13): the budget serializer can raise
+        # (a lone surrogate in the body) and a claimed slot must never outlive
+        # the request that claimed it.
+        admission_budget = estimate_api_key_request_usage(payload)
+        reservation = await _enforce_request_limits(
+            api_key,
+            request_model=payload.model,
+            request_service_tier=payload.service_tier,
+            request_usage_budget=admission_budget,
+        )
+        owner = SourceDispatch(
+            request=request,
+            source=source,
+            model=payload.model,
+            api_key=api_key,
+            reservation=reservation,
+            claims=claims,
+            admission_budget=admission_budget,
+            requested_service_tier=payload.service_tier,
+            cleanup_scheduler=_responses_cleanup_scheduler(context.service) if context is not None else None,
+            scheduler=scheduler_for(context.service) if context is not None else REAL_SCHEDULER,
+            clock=clock_for(context.service) if context is not None else REAL_CLOCK,
+            settle_reservation=_settle_source_reservation,
+            release_reservation=_release_reservation,
+        )
+        claims.transfer_to(owner)
+    except BaseException:
+        claims.release_if_unowned()
+        raise
+    try:
+        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        if payload.stream:
+            await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
+            stream = owner.stream
+            if stream is None:
+                raise RuntimeError("model source open completed without assigning the stream")
+            body = settlement_stream(
+                owner,
+                _wrap_source_responses_public_stream(
+                    stream.body,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    native_codex_heartbeat=native_codex_heartbeat,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                ),
+            )
+            return SourceStreamingResponse(
+                body,
+                owner=owner,
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    **rate_limit_headers,
+                },
+            )
+        result = await open_with_disconnect_watch(request, owner, forward_source_responses(source, source_payload))
+        return await _finish_non_stream_source_dispatch(request, owner, result, rate_limit_headers=rate_limit_headers)
+    except ModelSourceForwardingError as exc:
+        await owner.finish_with_forwarding_error(exc)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=_source_error_response_headers(rate_limit_headers, exc),
+        )
+    except ClientDisconnectedDuringOpen as exc:
+        await owner.abandon(ABANDON_SOURCE_STALL if exc.stall else ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+        return Response()
+    except BaseException:
+        await owner.abandon(ABANDON_DISPATCH_INTERRUPTED)
+        raise
+
+
+async def _open_owned_source_stream(owner: SourceDispatch, source_payload: dict[str, JsonValue]) -> None:
+    """Open the source stream for ``owner``; assigning ``owner.stream`` is the coroutine's last statement."""
+
+    stream = await stream_source_responses(
+        owner.source,
+        source_payload,
+        on_first_content=owner.on_first_content if owner.pin_intent is not None else None,
+        scheduler=owner.scheduler,
+        clock=owner.clock,
     )
-    source_payload = payload.model_dump_for_forwarding()
+    owner.stream = stream
+
+
+def _shape_source_responses_payload(
+    payload: ResponsesRequest,
+    source: ModelSource,
+    *,
+    api_key: ApiKeyData | None,
+) -> dict[str, JsonValue]:
+    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved)."""
+
+    source_payload = strip_source_telemetry(payload.model_dump_for_forwarding())
     preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
     )
@@ -5016,139 +5155,76 @@ async def _source_responses_response(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
     )
+    return source_payload
 
-    if payload.stream:
-        try:
-            stream = await stream_source_responses(source, source_payload)
-        except ModelSourceForwardingError as exc:
-            await _release_reservation(reservation)
-            await _log_source_chat_completion(
-                request,
-                source=source,
-                api_key=api_key,
-                model=payload.model,
-                status="error",
-                error_code=_source_error_code(exc.payload),
-                error_message=_source_error_message(exc.payload),
-                upstream_status_code=exc.upstream_status_code,
-            )
-            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-        if _reservation_requires_usage(reservation):
-            response = await _buffered_limited_source_chat_stream_response(
-                request,
-                source=source,
-                api_key=api_key,
-                model=payload.model,
-                reservation=reservation,
-                stream=stream.body,
-                usage_holder=stream.usage_holder,
-                rate_limit_headers=rate_limit_headers,
-            )
-            # Limited keys stay fail-closed: usage must be present before any
-            # body bytes reach the client. Public normalize still applies to the
-            # replayed body; keepalives cannot precede upstream completion while
-            # that buffer gate remains.
-            if isinstance(response, StreamingResponse):
-                return StreamingResponse(
-                    _wrap_source_responses_public_stream(
-                        response.body_iterator,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                        native_codex_heartbeat=native_codex_heartbeat,
-                        preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-                    ),
-                    media_type=response.media_type,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                )
-            return response
-        body = _source_chat_stream_with_settlement(
-            _wrap_source_responses_public_stream(
-                stream.body,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                native_codex_heartbeat=native_codex_heartbeat,
-                preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-            ),
-            usage_holder=stream.usage_holder,
-            request=request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            reservation=reservation,
-        )
-        return StreamingResponse(
-            body,
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                **rate_limit_headers,
-            },
-        )
 
-    try:
-        result = await forward_source_responses(source, source_payload)
-    except ModelSourceForwardingError as exc:
-        await _release_reservation(reservation)
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            status="error",
-            error_code=_source_error_code(exc.payload),
-            error_message=_source_error_message(exc.payload),
-            upstream_status_code=exc.upstream_status_code,
-        )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-
-    if result.usage is None and _reservation_requires_usage(reservation):
-        await _release_reservation(reservation)
-        error = openai_error(
-            "usage_unavailable",
-            "OpenAI-compatible model source response did not include usage for a limited API key",
-            error_type="server_error",
-        )
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
+async def _finish_non_stream_source_dispatch(
+    request: Request,
+    owner: SourceDispatch,
+    result: SourceResponsesCompletion,
+    *,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    response_id = result.payload.get("id")
+    owner.source_response_id = response_id if isinstance(response_id, str) and response_id else None
+    if result.usage is None and _reservation_requires_usage(owner.reservation):
+        await owner.finish(
             status="error",
             error_code="usage_unavailable",
             error_message="source response missing usage",
             upstream_status_code=result.upstream_status_code,
         )
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source response did not include usage for a limited API key",
+            error_type="server_error",
+        )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
-
-    settled = await _settle_source_reservation(reservation, source=source, model=payload.model, usage=result.usage)
-    if not settled:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            status="error",
-            error_code="usage_settlement_failed",
-            error_message="source usage settlement failed",
+    if await request.is_disconnected():
+        await owner.finish(
+            status="cancelled",
+            error_code=CANCELLED_CLIENT_DISCONNECTED,
+            error_message="client disconnected before the model-source response was sent",
+            usage=result.usage,
+            timings=result.timings,
             upstream_status_code=result.upstream_status_code,
         )
+        return Response()
+    await owner.finish(
+        status="success",
+        usage=result.usage,
+        timings=result.timings,
+        upstream_status_code=result.upstream_status_code,
+        trial_result="success",
+    )
+    if owner.settlement_failed:
         return _logged_error_json_response(
             request,
             502,
             _source_usage_settlement_failed_error(),
             headers=rate_limit_headers,
         )
-    await _log_source_chat_completion(
-        request,
-        source=source,
-        api_key=api_key,
-        model=payload.model,
-        status="success",
-        usage=result.usage,
-        timings=result.timings,
-        upstream_status_code=result.upstream_status_code,
-    )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+def _source_error_response_headers(
+    rate_limit_headers: Mapping[str, str],
+    exc: ModelSourceForwardingError,
+) -> dict[str, str]:
+    """Merge the source's own ``Retry-After`` into the pre-open error headers (honest passthrough, I8)."""
+
+    headers = dict(rate_limit_headers)
+    if exc.retry_after:
+        headers["Retry-After"] = exc.retry_after
+    return headers
+
+
+def _model_source_busy_error() -> OpenAIErrorEnvelope:
+    return openai_error(
+        "model_source_busy",
+        "OpenAI-compatible model source is at its configured concurrency limit",
+        error_type="upstream_error",
+    )
 
 
 # Keys that source_request_overrides must never clobber: the routed model slug
@@ -5373,7 +5449,9 @@ async def _source_chat_completion_response(
                 error_message=_source_error_message(exc.payload),
                 upstream_status_code=exc.upstream_status_code,
             )
-            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+            return _logged_error_json_response(
+                request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+            )
         except asyncio.CancelledError:
             release_exc: BaseException | None = None
             if reservation is not None:
@@ -5413,20 +5491,39 @@ async def _source_chat_completion_response(
                 reservation=reservation,
                 stream=stream.body,
                 usage_holder=stream.usage_holder,
+                upstream_status_code=stream.upstream_status_code,
                 rate_limit_headers=rate_limit_headers,
             )
+        # The settlement generator owns the outcome once Starlette iterates the
+        # body; the transport owner covers the one await before that (the
+        # response start), where a departing client would otherwise leave the
+        # upstream response, the pooled lease and the reservation to garbage
+        # collection (``SourceChatStreamOwner``).
+        owner = SourceChatStreamOwner(
+            stream=stream,
+            on_abandoned_before_body=partial(
+                _abandon_source_chat_stream_before_body,
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                reservation=reservation,
+            ),
+        )
         body = _source_chat_stream_with_settlement(
             stream.body,
             usage_holder=stream.usage_holder,
+            upstream_status_code=stream.upstream_status_code,
             request=request,
             source=source,
             api_key=api_key,
             model=model,
             reservation=reservation,
+            owner=owner,
         )
-        return StreamingResponse(
+        return SourceStreamingResponse(
             body,
-            media_type="text/event-stream",
+            owner=owner,
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
 
@@ -5444,7 +5541,9 @@ async def _source_chat_completion_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
     except asyncio.CancelledError:
         release_exc: BaseException | None = None
         if reservation is not None:
@@ -5561,6 +5660,7 @@ async def _buffered_limited_source_chat_stream_response(
     reservation: ApiKeyUsageReservationData | None,
     stream: AsyncIterator[bytes],
     usage_holder: SourceUsageHolder,
+    upstream_status_code: int,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
     chunks: list[bytes] = []
@@ -5573,6 +5673,10 @@ async def _buffered_limited_source_chat_stream_response(
                 buffer_limit_exceeded = True
                 break
             chunks.append(chunk)
+        if not chunks and not buffer_limit_exceeded:
+            # The source closed before its first chunk and nothing reached
+            # the client: the open's own verdict, before any byte (decision 50).
+            raise source_empty_stream_error(upstream_status_code)
         if buffer_limit_exceeded:
             # Returning while the generator is suspended at a yield would keep
             # the leased upstream session/response open until GC finalizes the
@@ -5633,6 +5737,11 @@ async def _buffered_limited_source_chat_stream_response(
             raise close_exc
         raise cancel_exc
     except ModelSourceForwardingError as exc:
+        # Post-open failures only (idle timeout, transport loss, the
+        # empty-stream verdict above): a source ``Retry-After`` rides a
+        # pre-open 4xx/5xx, which the open site answers before this handler
+        # exists, so these errors never carry one and there is nothing to
+        # merge into the headers here (``test_body_phase_errors_carry_no_retry_after``).
         await _release_reservation(reservation)
         await _log_source_chat_completion(
             request,
@@ -5843,7 +5952,7 @@ async def _wrap_source_responses_public_stream(
     """
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     event_blocks = _iter_source_sse_event_blocks(
         stream,
         max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
@@ -5912,17 +6021,27 @@ async def _source_chat_stream_with_settlement(
     stream: AsyncIterator[_SourceStreamChunkT],
     *,
     usage_holder: SourceUsageHolder,
+    upstream_status_code: int,
     request: Request,
     source: ModelSource,
     api_key: ApiKeyData | None,
     model: str,
     reservation: ApiKeyUsageReservationData | None,
+    owner: SourceChatStreamOwner | None = None,
 ) -> AsyncIterator[_SourceStreamChunkT]:
+    if owner is not None:
+        # From here on this generator owns the outcome (reservation and row)
+        # through its own except/finally paths; the owner's transport finalizer
+        # only steps in for a body that never started.
+        owner.body_started = True
     status = "success"
     error_code: str | None = None
     error_message: str | None = None
+    row_upstream_status_code: int | None = None
+    chunk_relayed = False
     try:
         async for chunk in stream:
+            chunk_relayed = True
             yield chunk
     except (asyncio.CancelledError, GeneratorExit):
         # Client disconnect surfaces as CancelledError (task cancellation) or
@@ -5976,6 +6095,16 @@ async def _source_chat_stream_with_settlement(
                 api_key.id if api_key else None,
                 model,
             )
+        if not chunk_relayed:
+            # The source closed before its first chunk. The client already
+            # holds the ``200``, so the body ended as the clean empty stream
+            # ``main`` relayed (the reservation was released above with no
+            # usage); the row keeps the open's verdict (decision 50).
+            verdict = source_empty_stream_error(upstream_status_code)
+            status = "error"
+            error_code = _source_error_code(verdict.payload)
+            error_message = _source_error_message(verdict.payload)
+            row_upstream_status_code = verdict.upstream_status_code
     finally:
         await _await_cleanup_deferring_cancellation(
             _log_source_chat_completion(
@@ -5988,8 +6117,51 @@ async def _source_chat_stream_with_settlement(
                 timings=usage_holder.timings,
                 error_code=error_code,
                 error_message=error_message,
-                upstream_status_code=None,
+                upstream_status_code=row_upstream_status_code,
             )
+        )
+
+
+async def _abandon_source_chat_stream_before_body(
+    request: Request,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    reservation: ApiKeyUsageReservationData | None,
+) -> None:
+    """A chat stream body that never started: release the reservation and record the abandoned attempt.
+
+    Runs from ``SourceChatStreamOwner.finalize_transport`` (which already
+    defers cancellation and has closed the source transport) when the client
+    left between the route returning and the response start, so the
+    settlement generator that normally owns both steps never ran. The row is
+    the same ``cancelled`` classification the Responses owner writes for this
+    window (``client_disconnected_before_body``) and stays out of every
+    error-rate numerator (#1552).
+    """
+
+    release_exc: Exception | None = None
+    if reservation is not None:
+        try:
+            await _release_reservation(reservation)
+        except Exception as exc:
+            release_exc = exc
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="cancelled",
+        error_code=ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
+        error_message="client disconnected before the source stream body started",
+    )
+    if release_exc is not None:
+        logger.warning(
+            "Failed to release source stream reservation after client disconnect before body source_id=%s model=%s",
+            source.id,
+            model,
+            exc_info=release_exc,
         )
 
 
@@ -6476,7 +6648,7 @@ async def _stream_responses(
     if not preserve_native_failure_lifecycle:
         stream = inject_sse_keepalives(
             stream,
-            get_settings().sse_keepalive_interval_seconds,
+            with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
             on_keepalive=lambda: _record_stream_keepalive("responses"),
         )
@@ -7841,15 +8013,32 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        first = await first_task
+        # Not ``await first_task``: a level-cancelled Starlette scope re-cancels
+        # the consuming task on every loop iteration, and ``Task.cancel()``
+        # cascades down the ``_fut_waiter`` chain into the awaited task. The
+        # probe task defers cancellation while its bridge cleanup finishes, so
+        # a direct await turned every client disconnect into a busy spin that
+        # lasted as long as that cleanup (2026-09-07 production: ~1.4e9
+        # re-cancels across 15 wedged requests). The per-waiter proxy future
+        # absorbs the level cancellation here; the probe sees only the single
+        # explicit teardown ``cancel()`` below.
+        first = await wait_on_shared_future(first_task)
     except StopAsyncIteration:
         return
     finally:
         # If the wrapping stream is closed before the first item is consumed
         # (client disconnect, request teardown), cancel the still-running probe
-        # task so it does not hold the upstream connection open.
+        # task so it does not hold the upstream connection open, then wait for
+        # its deferred bridge cleanup to settle so the stream it drives is not
+        # closed underneath it. The canonical helper waits without cascading
+        # repeated level cancels into the probe; its exception, if any, is
+        # retrieved here (the probe's done-callback also settles it).
         if not first_task.done():
             first_task.cancel()
+            try:
+                await _shared_await_task_deferring_cancellation(first_task)
+            except BaseException:
+                pass
     yield first
     async for line in stream:
         yield line
@@ -8401,15 +8590,13 @@ async def _websocket_upstream_transport_denial() -> JSONResponse | None:
     # operator pin of the upstream transport to "http" — must deny the
     # handshake instead of accepting and erroring in-band.
     from app.modules.proxy._service.support import (
+        configured_upstream_stream_transport,
         upstream_websocket_transport_recently_failed,
     )
 
     if not upstream_websocket_transport_recently_failed():
         dashboard_settings = await get_settings_cache().get()
-        configured_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
-        if configured_transport == "default":
-            configured_transport = getattr(get_settings(), "upstream_stream_transport", "auto")
-        if configured_transport != "http":
+        if configured_upstream_stream_transport(dashboard_settings) != "http":
             return None
     return JSONResponse(
         status_code=426,
@@ -8868,12 +9055,12 @@ async def _normalize_public_responses_stream(
     Args:
         stream: the upstream SSE event blocks (post-error-conversion).
         enforce_openai_sdk_contract: when True (the default, used for /v1),
-            apply OpenAI Responses SSE contract enforcement: drop Codex
-            vendor events (codex.*), backfill terminal output from streamed
+            apply OpenAI Responses SSE contract enforcement: drop events
+            outside response.* and error, backfill terminal output from streamed
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
             response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including codex.* are
+            which feeds the Codex CLI), all events including vendor events are
             forwarded verbatim and no synthesis happens — the Codex CLI
             relies on the upstream's native event shape.
     """
@@ -9431,16 +9618,16 @@ def _normalize_public_stream_payload(
             normalized_payload = dict(payload)
             normalized_payload["part"] = normalized_part
             return normalized_payload, None
-    # Drop Codex-internal vendor events on the public /v1 surface only. The
-    # upstream Codex backend emits non-standard events (notably
-    # ``codex.rate_limits``, which is throttled per rate-limit window and so
-    # leaks intermittently before ``response.created``). The OpenAI Responses
-    # SSE contract does not define any ``codex.*`` event type, and the OpenAI
-    # SDK's stream parser raises ``RuntimeError`` if any other event arrives
-    # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
-    # consume these events and pass ``enforce_openai_sdk_contract=False`` so
-    # they continue to forward unchanged.
-    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
+    # Public Responses streams accept the response.* and error families.
+    # Upstream diagnostics such as codex.rate_limits and
+    # responsesapi.websocket_timing break strict event deserializers.
+    # Native Codex requests disable this contract and retain vendor events.
+    if (
+        enforce_openai_sdk_contract
+        and isinstance(event_type, str)
+        and event_type != "error"
+        and not event_type.startswith("response.")
+    ):
         return None, None
     if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
         if event_type == "error":

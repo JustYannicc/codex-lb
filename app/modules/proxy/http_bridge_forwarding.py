@@ -12,6 +12,7 @@ import aiohttp
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -208,7 +209,7 @@ class HTTPBridgeOwnerClient:
                 failure_phase="owner_forward",
                 failure_detail="owner_input_shape_upgrade_required",
             )
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         timeout = _owner_forward_timeout(
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
             idle_timeout_seconds=settings.stream_idle_timeout_seconds,

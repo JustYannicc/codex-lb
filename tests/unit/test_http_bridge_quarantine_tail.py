@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy._service.http_bridge import quarantine
+from app.modules.proxy._service.http_bridge import quarantine, upstream_events
 from tests.simulation.virtual_time import VirtualClock
 from tests.unit.test_proxy_http_bridge import _make_bridge_session, _make_eventless_http_bridge_owner
 
@@ -15,11 +16,13 @@ from tests.unit.test_proxy_http_bridge import _make_bridge_session, _make_eventl
 @pytest.mark.parametrize("completion_time", [1600.0, 1601.0], ids=["at-expiry", "after-expiry"])
 @pytest.mark.parametrize("race", [None, "weaker", "poison", "first-strike"])
 @pytest.mark.parametrize("durable_miss", [False, True], ids=["local", "overflow-durable-miss"])
+@pytest.mark.parametrize("native_interpreted", [False, True], ids=["python-event", "native-event"])
 async def test_healthy_completion_clears_observed_weaker_tail_but_preserves_new_evidence(
     monkeypatch: pytest.MonkeyPatch,
     completion_time: float,
     race: str | None,
     durable_miss: bool,
+    native_interpreted: bool,
 ) -> None:
     clock = VirtualClock(monotonic_value=1000.0)
     service = proxy_service.ProxyService(Mock(), clock=clock)
@@ -80,9 +83,29 @@ async def test_healthy_completion_clears_observed_weaker_tail_but_preserves_new_
     owner.awaiting_response_created = True
     session.pending_requests.append(owner)
     session.queued_request_count = 1
-    await service._process_http_bridge_upstream_text(
-        session, '{"type":"response.completed","response":{"id":"resp_late"}}'
+    text = '{"type":"response.completed","response":{"id":"resp_late"}}'
+    message = (
+        UpstreamWebSocketMessage(
+            kind="text",
+            text=text,
+            responses_interpreted=True,
+            event_type="response.completed",
+            payload={"type": "response.completed", "response": {"id": "resp_late"}},
+        )
+        if native_interpreted
+        else None
     )
+    if native_interpreted:
+        monkeypatch.setattr(
+            upstream_events,
+            "parse_sse_data_json_text",
+            Mock(side_effect=AssertionError("native event must use its interpreted payload")),
+        )
+    await service._process_http_bridge_upstream_text(session, text, message=message)
+    assert not session.pending_requests
+    assert session.queued_request_count == 0
+    assert owner.event_queue.get_nowait() == f"data: {text}\n\n"
+    assert owner.event_queue.get_nowait() is None
     service._register_http_bridge_previous_response_id.assert_awaited_once()
     if durable_miss:
         durable_lookup.assert_awaited_once()

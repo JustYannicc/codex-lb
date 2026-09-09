@@ -156,3 +156,9 @@ epoch; it does not change the existing transport-security policy.
   lease without that response alias. Any retained injected anchor keeps its
   original account constraint even when the fresh lookup identifies another
   account.
+- The upstream archive retains eventless poison opening, clean-close
+  non-poison behavior, and fail-closed planning after anchor abandonment.
+  These requirements compose with the current classifier and generation
+  fences. They do not restore older unconditional full-resend or same-key
+  completion promises. Owner forwarding applies dashboard timeout overrides
+  after the existing pre-dispatch classifier and process-epoch guard.

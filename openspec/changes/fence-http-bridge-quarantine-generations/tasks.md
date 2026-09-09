@@ -83,3 +83,6 @@
 - [x] 1.34 Define deterministic first-touch revocation of settled durable-only
   poison with existing stale-load and evidence fences, without changing other
   accepted revocation paths.
+- [x] 1.35 Reconcile archived quarantine requirements and dashboard timeout
+  overrides with the classifier/epoch guard, and verify the composed bridge
+  recovery and pre-await completion fences against the pinned upstream.
