@@ -1961,8 +1961,29 @@ class _HTTPBridgeStreamingMixin:
             and durable_model_transition_requires_owner
             and durable_model_transition_lookup.account_id is None
         )
+        owner_miss_continuation = request_state.previous_response_id is not None
+        if (
+            request_state.previous_response_id is None
+            and raw_incoming_turn_state_header is not None
+            and raw_incoming_turn_state_header != synthesized_turn_state
+            and _is_synthesized_turn_state(raw_incoming_turn_state_header)
+        ):
+            # The API may have resolved a live alias absent from durable lookup.
+            # Direct service callers must resolve that same registered owner.
+            turn_state_owner_account_id = payload._codex_lb_turn_state_owner_account_id
+            if not payload._codex_lb_turn_state_owner_lookup_completed and request_state.preferred_account_id is None:
+                turn_state_owner_account_id = await self._resolve_compact_turn_state_owner(
+                    turn_state=raw_incoming_turn_state_header,
+                    api_key=api_key,
+                    fail_on_missing=False,
+                )
+            request_state.preferred_account_id = resolve_required_account_id(
+                ("bridge", request_state.preferred_account_id),
+                ("registered turn state", turn_state_owner_account_id),
+            )
+            owner_miss_continuation = rewritten_file_account_id is None
         required_continuity_owner_missing = (
-            (request_state.previous_response_id is not None and request_state.preferred_account_id is None)
+            (owner_miss_continuation and request_state.preferred_account_id is None)
             or durable_owner_missing
             or model_transition_owner_missing
         )
@@ -1982,7 +2003,7 @@ class _HTTPBridgeStreamingMixin:
         owner_miss_fallback_account_id: str | None = None
         if (
             required_continuity_owner_missing
-            and request_state.previous_response_id is not None
+            and owner_miss_continuation
             and request_state.preferred_account_id is None
             and rewritten_file_account_id is None
             and not durable_owner_missing

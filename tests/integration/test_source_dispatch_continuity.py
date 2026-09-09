@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import web
@@ -15,6 +15,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account, RequestLog
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.source_admission import get_source_bulkhead
 from tests.integration.model_source_helpers import (
@@ -23,6 +24,7 @@ from tests.integration.model_source_helpers import (
     _enable_api_key_auth,
     stub_source_upstreams,
 )
+from tests.integration.test_http_responses_bridge import _install_bridge_settings
 from tests.integration.test_model_source_dispatch import (
     _USAGE,
     _completed,
@@ -49,7 +51,16 @@ async def source_upstream() -> AsyncIterator[_StartSource]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _PATHS)
-@pytest.mark.parametrize("previous_response_id", [None, "resp_0123456789abcdef0123456789abcdef"])
+@pytest.mark.parametrize("bridge_enabled", [False, True])
+@pytest.mark.parametrize(
+    ("previous_response_id", "turn_state"),
+    [
+        (None, None),
+        ("resp_0123456789abcdef0123456789abcdef", None),
+        (None, "turn_unregistered_source"),
+        (None, "http_turn_unregistered_source"),
+    ],
+)
 async def test_source_owned_request_constructs_one_dispatch_and_settles(
     async_client: AsyncClient,
     app_instance: FastAPI,
@@ -57,7 +68,10 @@ async def test_source_owned_request_constructs_one_dispatch_and_settles(
     source_upstream: _StartSource,
     path: str,
     previous_response_id: str | None,
+    turn_state: str | None,
+    bridge_enabled: bool,
 ) -> None:
+    _install_bridge_settings(monkeypatch, enabled=bridge_enabled)
     await _enable_api_key_auth(async_client)
     state = _StubState()
     base_url = await source_upstream(_sse_handler(state, before_hold=[_created(), _completed(_USAGE)]))
@@ -70,13 +84,25 @@ async def test_source_owned_request_constructs_one_dispatch_and_settles(
     claim_source = Mock(wraps=proxy_api.try_claim_source_admission)
     monkeypatch.setattr(proxy_api, "SourceDispatch", dispatch)
     monkeypatch.setattr(proxy_api, "try_claim_source_admission", claim_source)
+    settle = AsyncMock(wraps=proxy_api._settle_source_reservation)
+    monkeypatch.setattr(proxy_api, "_settle_source_reservation", settle)
+    service = get_proxy_service_for_app(app_instance)
+    candidates = AsyncMock(wraps=service._load_balancer.list_continuity_owner_candidates)
+    subscription = Mock(wraps=proxy_module.core_stream_responses)
+    websocket = AsyncMock(wraps=proxy_module.connect_responses_websocket)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", candidates)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", subscription)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", websocket)
     payload = {"model": model, "input": "continue", "stream": True}
     if previous_response_id is not None:
         payload["previous_response_id"] = previous_response_id
+    headers = {"authorization": f"Bearer {key}"}
+    if turn_state is not None:
+        headers["x-codex-turn-state"] = turn_state
     stream = _AsgiStream(
         app=app_instance,
         path=path,
-        headers={"authorization": f"Bearer {key}"},
+        headers=headers,
         body=json.dumps(payload).encode(),
     )
 
@@ -87,6 +113,10 @@ async def test_source_owned_request_constructs_one_dispatch_and_settles(
     assert b'"response.completed"' in stream.received()
     dispatch.assert_called_once()
     claim_source.assert_called_once()
+    settle.assert_awaited_once()
+    candidates.assert_not_called()
+    subscription.assert_not_called()
+    websocket.assert_not_called()
     assert len(state.requests) == 1
     assert state.requests[0].get("previous_response_id") == previous_response_id
     assert [reservation.status for reservation in await _reservations(key_id)] == ["finalized"]

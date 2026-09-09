@@ -16,6 +16,8 @@ upstream, so this follow-up records integration work without rewriting it.
 - Align one existing test with dashboard-only transport settings.
 - Complete the existing synthesized-marker compatibility rule for direct
   WebSocket reconnects without a previous-response identifier.
+- Complete that same rule for marker-only HTTP Responses requests on both
+  raw-stream and session-bridge paths, preserving independent owners and sources.
 
 ## Capabilities
 

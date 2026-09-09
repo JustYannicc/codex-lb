@@ -47,7 +47,7 @@ from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
-from app.db.models import AccountStatus, Base, HttpBridgeSessionState
+from app.db.models import Account, AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
@@ -17441,6 +17441,9 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     unknown_alias = AsyncMock(return_value=None)
     monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", unknown_alias)
+    # Reach the legacy-forward proof with an unambiguous subscription owner.
+    candidates = AsyncMock(return_value=(Account(id="legacy-owner"),))
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", candidates)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner_forward))
 
@@ -17479,7 +17482,10 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.payload["error"]["code"] == "bridge_forward_upgrade_required"
-    unknown_alias.assert_awaited_once_with(turn_state="http_turn_unknown", api_key_id=None)
+    # The marker preflight and the independent legacy-forward proof both miss.
+    assert unknown_alias.await_count == 2
+    unknown_alias.assert_awaited_with(turn_state="http_turn_unknown", api_key_id=None)
+    candidates.assert_awaited_once_with(account_ids=None)
     assert forward_called is False
 
 
@@ -20713,6 +20719,7 @@ async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_sessi
         idle_ttl_seconds=120.0,
     )
     service._http_bridge_sessions[key] = session
+    service._http_bridge_turn_state_index[("turn_hard_overflow", None)] = key
 
     async def fake_stream_http_bridge_session_events(
         _session: proxy_service._HTTPBridgeSession,
@@ -20757,6 +20764,7 @@ async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_sessi
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)

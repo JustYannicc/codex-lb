@@ -23,3 +23,8 @@
 
 - [x] 5.1 Reconcile the retry import conflict with `0da41b64e`, preserving structured HTTP continuation promotion and security-owner selection.
 - [x] 5.2 Verify promotion, source ownership, reservation handoff, queue/retry behavior, and inherited automation reclaim/migration checks; complete independent reviews before republishing.
+
+## 6. Marker-only HTTP review feedback
+
+- [x] 6.1 Reproduce unregistered marker-only HTTP owner misses on both raw and bridge routes with zero, one, and multiple assignment-scoped owners before changing production code.
+- [x] 6.2 Apply the existing compatibility rule without changing registered/file/source ownership, first-turn behavior, or replay policy; verify controls and independent reviews before republishing.

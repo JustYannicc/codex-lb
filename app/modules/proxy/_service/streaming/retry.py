@@ -1284,14 +1284,21 @@ class _StreamingRetryMixin:
             # settlement/release. Preflight failures before this boundary are
             # still owned by the originating API startup guard.
             _signal_propagated_responses_service_cleanup_ready()
-            if payload.previous_response_id is not None:
+            owner_miss_continuation = payload.previous_response_id is not None or (
+                turn_state_is_synthesized
+                and turn_state != synthesized_turn_state
+                and turn_state_owner_account_id is None
+                and rewritten_file_account_id is None
+            )
+            if owner_miss_continuation:
                 previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
-                preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
-                    previous_response_id=payload.previous_response_id,
-                    api_key=api_key,
-                    session_id=previous_response_lookup_session_id,
-                    surface="http_stream",
-                )
+                if payload.previous_response_id is not None:
+                    preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
+                        previous_response_id=payload.previous_response_id,
+                        api_key=api_key,
+                        session_id=previous_response_lookup_session_id,
+                        surface="http_stream",
+                    )
                 require_preferred_account = preferred_account_id is not None
                 # `previous_response_id` is a stored-object continuation, so it
                 # remains hard owner-bound even when the request also carries a

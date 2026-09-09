@@ -33,6 +33,22 @@ deferred health and cancellation handling remain behind confirmed settlement.
 
 ## Risks / Trade-offs
 
+The current-head review also exposed marker-only HTTP owner misses. The raw
+stream and session bridge required a previous-response identifier before their
+existing cardinality check. The route-level matrix reproduces the gap with
+zero and multiple assigned owners while sole-owner controls pass. Extend those
+same checks to a client-supplied unregistered marker, without treating a fresh
+proxy-injected placeholder as a continuation. Registered aliases and file pins
+still select their independent owner; confirmed model sources stay on source
+routing before subscription bridge admission. Keep the existing sanitized 502
+and assignment-only count. For example, an echoed `turn_example` without an
+anchor cannot choose between two assigned accounts merely because one is ready.
+Registered live aliases also remain independent owner proof when their durable
+alias is absent. The bridge reuses the API's resolved owner, or performs the
+same scoped lookup for a direct service caller, before deciding that the marker
+is ownerless. Real bootstrap-and-echo tests cover that local-only case; a guard
+based solely on the durable lookup would incorrectly reject a known owner.
+
 Direct WebSocket marker-only reconnects enter turn-state ownership lookup but
 previously skipped source classification and sole-owner counting because those
 checks required a previous-response identifier. A client-supplied unregistered
