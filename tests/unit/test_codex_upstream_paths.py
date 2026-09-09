@@ -1730,6 +1730,7 @@ async def test_stream_responses_python_http_prepares_only_consumed_json(
             "trace_channels": frozenset({"upstream_payload"}) if trace_payload else frozenset(),
         }
     )
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 2 * 1024 * 1024)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "discover_native_egress_client", lambda: None)
     # Observe only this owning module's JSON calls, leaving aiohttp's real

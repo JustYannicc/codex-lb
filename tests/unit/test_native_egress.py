@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 import stat
+import sys
 from pathlib import Path
 
 import anyio
@@ -61,7 +62,7 @@ def _write_helper(path: Path, source: str) -> None:
     if source.startswith("#!/usr/bin/env python3\n"):
         source = source.replace(
             "#!/usr/bin/env python3\n",
-            f"#!/usr/bin/env python3\n{_HELPER_PROTOCOL_PREAMBLE}\n",
+            f"#!{sys.executable}\n{_HELPER_PROTOCOL_PREAMBLE}\n",
             1,
         )
     path.write_text(source, encoding="utf-8")
@@ -192,7 +193,8 @@ print(json.dumps({
     "protocol_version": 1,
     "capabilities": [
         "failure_provenance_v1", "http", "http2_profile_v1",
-        "websocket", "websocket_send_ack",
+        "websocket", "websocket_send_ack", "websocket_responses_events_v1",
+        "http_responses_completion_v1",
         "http_sse_v1", "http_compact_sse_v1", "http_compact_collect_v1", "http_responses_events_v1",
     ],
 }), flush=True)
