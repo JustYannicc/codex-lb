@@ -179,24 +179,30 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
         purge_task = asyncio.create_task(
             repository.purge_retry_circuits_before(initial_updated_at_epoch + 1.0),
         )
-        await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
+        try:
+            await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
 
-        delayed = await coordinator.persist_retry_circuit(
-            session_key_kind="session_header",
-            session_key_value="sid-retry-circuit-batch-timestamp-race",
-            api_key_id="key-batch-timestamp-race",
-            consecutive_failures=3,
-            cooldown_until_epoch=1400.0,
-            last_detail="stream_idle_timeout",
-            updated_at_epoch=delayed_updated_at_epoch,
-            base_updated_at_epoch=initial_updated_at_epoch,
-        )
-        assert delayed is not None
-        assert delayed.updated_at_epoch == delayed_updated_at_epoch
-        assert delayed.admission_generation == 0
+            delayed = await coordinator.persist_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-circuit-batch-timestamp-race",
+                api_key_id="key-batch-timestamp-race",
+                consecutive_failures=3,
+                cooldown_until_epoch=1400.0,
+                last_detail="stream_idle_timeout",
+                updated_at_epoch=delayed_updated_at_epoch,
+                base_updated_at_epoch=initial_updated_at_epoch,
+            )
+            assert delayed is not None
+            assert delayed.updated_at_epoch == delayed_updated_at_epoch
+            assert delayed.admission_generation == 0
 
-        blocked_session.release_delete.set()
-        assert await asyncio.wait_for(purge_task, timeout=1.0) == 0
+            blocked_session.release_delete.set()
+            assert await asyncio.wait_for(purge_task, timeout=1.0) == 0
+        finally:
+            blocked_session.release_delete.set()
+            if not purge_task.done():
+                purge_task.cancel()
+            await asyncio.gather(purge_task, return_exceptions=True)
 
     remaining = await coordinator.lookup_retry_circuit(
         session_key_kind="session_header",
