@@ -207,4 +207,3 @@ async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
     assert remaining.updated_at_epoch == delayed_updated_at_epoch
     assert remaining.admission_generation == 0
     assert remaining.consecutive_failures == 3
-
