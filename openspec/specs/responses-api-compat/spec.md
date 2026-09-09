@@ -7267,9 +7267,9 @@ the application migration mutex.
 
 #### Scenario: Marker migration preserves its main-branch parent
 
-- **GIVEN** the merged dashboard timeout parent revision is applied with
+- **GIVEN** the merged dashboard routing/overload parent revision is applied with
   existing overflow settings, explicit transport choices, model-source pins,
-  resilience and timeout overrides, and retry-circuit generations
+  resilience, timeout, routing and overload overrides, and retry-circuit generations
 - **WHEN** the marker migration is upgraded, safely downgraded to that parent,
   and upgraded again
 - **THEN** the migration graph MUST retain one head

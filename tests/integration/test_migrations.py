@@ -2037,7 +2037,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260909_040000_dashboard_timeout_settings"
+    parent_revision = "20260909_050000_dashboard_routing_overload_settings"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2114,7 +2114,9 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     "upstream_connect_timeout_seconds = 9.0, proxy_request_budget_seconds = 300.0, "
                     "compact_request_budget_seconds = 120.0, transcription_request_budget_seconds = 60.0, "
                     "stream_idle_timeout_seconds = 30.0, proxy_downstream_websocket_idle_timeout_seconds = 90.0, "
-                    "sse_keepalive_interval_seconds = 5.0"
+                    "sse_keepalive_interval_seconds = 5.0, proxy_overload_isolation_seconds = 240, "
+                    "proxy_account_error_rate_weighting_enabled = 0, proxy_account_inflight_penalty_pct = 10.0, "
+                    "proxy_account_lease_token_weight = 2.0, proxy_account_lease_ttl_seconds = 900.0"
                 )
             )
             assert updated_settings.rowcount > 0

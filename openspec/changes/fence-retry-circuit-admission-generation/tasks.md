@@ -88,3 +88,6 @@
   preserve their nullable defaults and explicit overrides through marker
   lifecycle checks, and retain the historical merge boundary while reconciling
   independent upstream schema requirements.
+- [x] 4.18 Follow the merged routing/overload migration without changing it;
+  verify its nullable defaults and explicit values survive the marker lifecycle
+  and recheck receipt cleanup with the upstream routing-tunables integration.
