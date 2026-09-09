@@ -1,0 +1,3 @@
+Standalone extraction from PR #1953 at 46d1aadf, onto current main c0beaaadd. Fixes #2268. Source classifier/owner-forward changes are excluded. The immutable completion fence supersedes the former responses-api-compat recapture wording. Proof and execution records live in the delivery report.
+
+This is an unaccepted candidate, preserved from the source PR for independent review. Passing tests demonstrate its implemented behavior; they do not approve the bounded poison-overflow policy or the durable-only poison cleanup tradeoff. Those owner decisions remain pending from #1953. The change must remain active until acceptance and delivery gates are met.
