@@ -1010,6 +1010,66 @@ and durable circuit state.
 - **THEN** the settlement is ignored
 - **AND** the replacement probe remains active
 
+#### Scenario: late cooldown suppression retires the newly created session
+
+- **GIVEN** a hard-key request has created or selected an HTTP bridge session
+- **AND** the retry circuit is still in cooldown when late pre-created
+  admission runs
+- **WHEN** the request is suppressed before `response.create` is dispatched
+- **THEN** the proxy returns the existing HTTP 503 cooldown error
+- **AND** marks the session for reconnect and retirement after drain
+- **AND** invokes bounded retirement
+- **AND** does not send `response.create` upstream
+- **AND** the session is not reusable for a later request
+
+#### Scenario: startup cooldown terminal handling retires its session
+
+- **GIVEN** a hard continuity-bound request has an already-created bridge
+  session but no safe replay bypass
+- **AND** the retry circuit is in cooldown before the startup submit attempt
+- **WHEN** startup terminal handling returns the cooldown failure
+- **THEN** the existing 503 or synthetic `stream_idle_timeout` envelope is
+  preserved
+- **AND** the session is marked for reconnect and retirement after drain
+- **AND** bounded retirement is invoked
+- **AND** submit is not attempted
+
+#### Scenario: cooldown replay bypass does not retire the session
+
+- **GIVEN** a hard-key request is in cooldown
+- **AND** proof-gated or operation-fenced continuity replay is allowed
+- **WHEN** the retry decision runs
+- **THEN** the request remains eligible for that authorized replay
+- **AND** the generic cooldown suppression retirement is not triggered
+
+#### Scenario: a concurrently admitted probe keeps its session
+
+- **GIVEN** a hard-key retry circuit at cooldown expiry
+- **AND** request A passes admission as the half-open probe and has not yet
+  reached its dispatch registration
+- **WHEN** request B on the same session is suppressed by A's probe lease
+- **THEN** B returns the existing HTTP 503 cooldown error
+- **AND** the session is not marked for reconnect or retirement and is not
+  closed
+- **AND** A proceeds past the pre-dispatch retiring fence to dispatch
+
+#### Scenario: a session owned by other work is left to its owner
+
+- **GIVEN** cooldown suppression rejects a request on a session that owns
+  visible pending work, a registered admission waiter, or another request's
+  unanchored handoff
+- **WHEN** the suppression returns
+- **THEN** the session is not marked for retirement and is not closed
+- **AND** the owning work's own settlement path governs the session
+
+#### Scenario: a suppressed request releases only its own admission registration
+
+- **GIVEN** a submit counted itself as an admission waiter at entry
+- **WHEN** the retry circuit suppresses it or any other pre-dispatch exit fails it
+- **THEN** its registration is released without disturbing other waiters
+- **AND** a retirement that registration was deferring runs once the session
+  is unowned
+
 ### Requirement: Proxy continuity reset teardown is ordered and cancellation-safe
 
 When a proxy-owned continuity reset returns a half-open probe, the proxy MUST
@@ -1199,66 +1259,6 @@ existing contracts.
 - **WHEN** each failure is recorded
 - **THEN** the circuit reaches its configured threshold and suppresses later
   admissions with a real cooldown
-
-#### Scenario: late cooldown suppression retires the newly created session
-
-- **GIVEN** a hard-key request has created or selected an HTTP bridge session
-- **AND** the retry circuit is still in cooldown when late pre-created
-  admission runs
-- **WHEN** the request is suppressed before `response.create` is dispatched
-- **THEN** the proxy returns the existing HTTP 503 cooldown error
-- **AND** marks the session for reconnect and retirement after drain
-- **AND** invokes bounded retirement
-- **AND** does not send `response.create` upstream
-- **AND** the session is not reusable for a later request
-
-#### Scenario: startup cooldown terminal handling retires its session
-
-- **GIVEN** a hard continuity-bound request has an already-created bridge
-  session but no safe replay bypass
-- **AND** the retry circuit is in cooldown before the startup submit attempt
-- **WHEN** startup terminal handling returns the cooldown failure
-- **THEN** the existing 503 or synthetic `stream_idle_timeout` envelope is
-  preserved
-- **AND** the session is marked for reconnect and retirement after drain
-- **AND** bounded retirement is invoked
-- **AND** submit is not attempted
-
-#### Scenario: cooldown replay bypass does not retire the session
-
-- **GIVEN** a hard-key request is in cooldown
-- **AND** proof-gated or operation-fenced continuity replay is allowed
-- **WHEN** the retry decision runs
-- **THEN** the request remains eligible for that authorized replay
-- **AND** the generic cooldown suppression retirement is not triggered
-
-#### Scenario: a concurrently admitted probe keeps its session
-
-- **GIVEN** a hard-key retry circuit at cooldown expiry
-- **AND** request A passes admission as the half-open probe and has not yet
-  reached its dispatch registration
-- **WHEN** request B on the same session is suppressed by A's probe lease
-- **THEN** B returns the existing HTTP 503 cooldown error
-- **AND** the session is not marked for reconnect or retirement and is not
-  closed
-- **AND** A proceeds past the pre-dispatch retiring fence to dispatch
-
-#### Scenario: a session owned by other work is left to its owner
-
-- **GIVEN** cooldown suppression rejects a request on a session that owns
-  visible pending work, a registered admission waiter, or another request's
-  unanchored handoff
-- **WHEN** the suppression returns
-- **THEN** the session is not marked for retirement and is not closed
-- **AND** the owning work's own settlement path governs the session
-
-#### Scenario: a suppressed request releases only its own admission registration
-
-- **GIVEN** a submit counted itself as an admission waiter at entry
-- **WHEN** the retry circuit suppresses it or any other pre-dispatch exit fails it
-- **THEN** its registration is released without disturbing other waiters
-- **AND** a retirement that registration was deferring runs once the session
-  is unowned
 
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
