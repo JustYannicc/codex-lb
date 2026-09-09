@@ -100,3 +100,10 @@
 - [x] 4.21 Reconcile HTTP continuation promotion requirements with generation
   fencing; verify soft locality, hard ownership, Chat reservation handoff and
   affected retry/queue cleanup paths on the new composition.
+
+- [x] 4.22 Reconcile the dashboard prewarm and stream/bridge budget migrations;
+  preserve their NULL defaults and explicit overrides through receipt marker
+  upgrade, guarded downgrade, and re-upgrade, and verify combined bridge paths.
+- [ ] 4.23 Choose and verify a mixed-version activation contract. Receipt-unaware
+  replicas can advance a live receipt's generation during a rolling upgrade;
+  staged activation or a non-rolling cutover has not been accepted.

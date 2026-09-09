@@ -205,3 +205,18 @@ claim while the independent integer continues to fence a later claim.
 Issue #2270 owns the generic scheduled-purge snapshot race, using columns already on main. The receipt candidate retains active-receipt exclusion and matches the selected nullable receipt generation/start/expiry before deletion. It keeps main's per-row delete structure, with a small fixed bind count; no tuple batching is needed. A receipt mismatch ends the selected pass. Per-key generation fences remain unchanged.
 
 The generic lagging-clock and timestamp batch regressions move with #2270. The prior exact two-DELETE assertion described tuple batching and is replaced by the unchanged externally observable retention and bind-limit coverage. No accepted claim lifecycle behavior or held policy is removed. Both merge orders must preserve all existing-column and receipt predicates. Both candidates remain independently testable on current main.
+
+## Mixed-version activation remains unresolved
+
+An additive marker migration does not fence receipt-unaware replicas during a
+rolling update. Current upstream's claim implementation can load generation 1
+with a live receipt, advance it to 2, and admit another replay while the marker
+still belongs to generation 1. A dedicated SQLite diagnostic using the exact
+upstream `efe0f581a` repository method reproduces that transition against this
+candidate's schema. This is repository-level proof, not a two-replica traffic
+trial.
+
+The release needs an accepted activation contract, such as delaying activation
+until every serving replica understands receipts or requiring a non-rolling
+cutover. Neither has been selected. Schema compatibility and guarded downgrade
+proof do not establish mixed-version admission safety; task 4.23 remains open.
