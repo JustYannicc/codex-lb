@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Mapping, NoReturn, TypeVar, cast
 
@@ -12,11 +11,7 @@ from app.core.clients.proxy import (
     ProxyResponseError,
     _as_image_fetch_session,
     _inline_input_image_urls,
-    pop_stream_timeout_overrides,
-    push_stream_timeout_overrides,
 )
-from app.core.clients.proxy import stream_responses as core_stream_responses
-from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy_websocket import filter_inbound_websocket_headers
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -67,10 +62,6 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
-def _service_time() -> Any:
-    return _service_global_or("time", time)
-
-
 def _service_lease_http_session() -> Any:
     return _service_global_or("lease_http_session", lease_http_session)
 
@@ -107,22 +98,6 @@ def _http_bridge_startup_keepalive_grace_seconds() -> float:
             _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS,
         )
     )
-
-
-def _service_core_stream_responses() -> Any:
-    return _service_global_or("core_stream_responses", core_stream_responses)
-
-
-def _service_core_thread_goal_request() -> Any:
-    return _service_global_or("core_thread_goal_request", core_thread_goal_request)
-
-
-def _service_push_stream_timeout_overrides(**kwargs: float) -> object:
-    return _service_global_or("push_stream_timeout_overrides", push_stream_timeout_overrides)(**kwargs)
-
-
-def _service_pop_stream_timeout_overrides(token: object) -> None:
-    _service_global_or("pop_stream_timeout_overrides", pop_stream_timeout_overrides)(cast(Any, token))
 
 
 def _remaining_budget_seconds(deadline: float) -> float:
