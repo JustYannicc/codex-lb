@@ -64,7 +64,7 @@ The Desktop response MUST retain the original upstream caller envelope, includin
 
 ### Requirement: Optional Desktop relay preserves caller traffic
 
-`codex-lb desktop-relay` MUST run separately from the normal server and bind only loopback on port 8000. `GET /backend-api/wham/usage` and its trailing-slash alias MUST route to the configured local LB's strict Desktop quota endpoint. Other `/backend-api/` HTTP and WebSocket requests MUST use the fixed `https://chatgpt.com` destination with the original method, path, query, body, Authorization, account identity, cookies and end-to-end headers. The relay MUST remove hop-by-hop headers, preserve streaming and duplicate response headers, close owned upstream resources on disconnect or cancellation, validate upstream TLS, and neither retry state-changing requests nor follow redirects automatically. It MUST reject nonloopback LB destinations, unexpected request authorities and paths outside the backend prefix. It MUST NOT log credentials, query strings or payloads, store caller cookies between requests, or allow arbitrary upstream destinations.
+`codex-lb desktop-relay` MUST support a standalone loopback listener on port 8000. The normal LB server MUST leave the relay disabled by default and MAY own the same relay through `CODEX_LB_DESKTOP_RELAY_MODE=loopback|container`. Loopback mode MUST bind only IPv4 and IPv6 loopback. Container mode MUST bind container ingress on port 8000 and MUST be documented with host publication restricted to IPv4 and IPv6 loopback. Embedded mode MUST use the normal server's HTTP loopback origin and configured port, reject unsupported TLS, IPv6-only or nonloopback-reachable listeners and invalid or colliding ports, and fail startup if relay startup fails. Its lifecycle MUST close relay listeners, active requests, WebSocket pumps and upstream sessions before shared LB resources are disposed, including partial startup failure. `GET /backend-api/wham/usage` and its trailing-slash alias MUST route to the configured local LB's strict Desktop quota endpoint. Other `/backend-api/` HTTP and WebSocket requests MUST use the fixed `https://chatgpt.com` destination with the original method, path, query, body, Authorization, account identity, cookies and end-to-end headers. The relay MUST remove hop-by-hop headers, preserve streaming and duplicate response headers, close owned upstream resources on disconnect or cancellation, validate upstream TLS, and neither retry state-changing requests nor follow redirects automatically. It MUST reject nonloopback LB destinations, unexpected request authorities and paths outside the backend prefix. It MUST NOT log credentials, query strings or payloads, store caller cookies between requests, or allow arbitrary upstream destinations.
 
 #### Scenario: Usage routing
 - **WHEN** Desktop requests either supported usage path
@@ -106,3 +106,17 @@ The documented setup MUST retain ChatGPT login, `requires_openai_auth=true`, and
 #### Scenario: Synthetic proof only
 - **WHEN** deterministic tests pass but the real Desktop trial has not completed
 - **THEN** documentation and delivery status identify the real-app acceptance as pending
+
+### Requirement: Embedded relay lifecycle
+
+The normal server MUST own the enabled relay for its serving lifetime and MUST leave port 8000 unbound when relay mode is off.
+
+#### Scenario: Optional relay shares the normal server lifecycle
+
+- **WHEN** the normal LB starts with an explicitly enabled relay mode and a supported HTTP listener
+- **THEN** it starts both listeners in one process, routes quota to its configured local port, and closes relay resources on normal shutdown or failed startup
+
+#### Scenario: Default server leaves Desktop listener disabled
+
+- **WHEN** no relay mode is configured
+- **THEN** normal LB startup does not bind port 8000

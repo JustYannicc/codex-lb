@@ -9,11 +9,14 @@
 - [x] 2.1 Add the optional loopback relay command; verify HTTP/WebSocket forwarding, fixed destinations, header/body preservation, failures and cleanup against fake upstreams.
 - [x] 2.2 Write linked setup/context documentation with configuration, version limits, activation and rollback; verify docs and strict OpenSpec validation.
 
+- [x] 2.3 Run the relay inside the normal server lifecycle with default-off loopback/container modes; verify startup failures, active-request cleanup and listener configuration.
+- [ ] 2.4 Build and deploy one container atop the exact existing runtime revision, preserving its database graph, ports and settings; remove the temporary trial after cutover.
+
 ## 3. Acceptance and delivery
 
 - [x] 3.1 Complete applicable isolated repository checks and review the exact candidate against the pinned base.
-- [ ] 3.2 Present the exact temporary LB/relay/Desktop trial and rollback for approval, then verify retained displayed identity, genuine native pooled quota and an actual Astra request through LB.
+- [x] 3.2 Verify retained displayed identity, genuine native pooled quota and an actual Astra request through LB in the authorized real trial.
 - [ ] 3.3 After real acceptance, sync and verify specs, archive verified work, commit, push and open the focused upstream PR with exact evidence.
-- [ ] 3.4 Inspect current-head hosted checks and review feedback, address in-scope findings, and hand off readiness and maintainer blockers without merging or permanent deployment.
+- [ ] 3.4 Inspect current-head hosted checks and review feedback, address in-scope findings, and hand off readiness and maintainer blockers without merging.
 
-Task 3.1 code evidence is bound to candidate `1aa75e14f2cdcc6f5223a64b68c573f7b207a630` and base `c0beaaadd96a89f0240582b5449bf4dd50647c7d`. Task 3.2 remains incomplete after the approved 2026-09-09 trial and rollback: the authenticated quota route ran and name/usage became visible, but settings failed and numerical quota/model execution acceptance was not completed. See [observed trial](../../specs/desktop-pooled-usage/context.md#observed-desktop-trial). Delivery stays pending.
+Task 3.1 earlier code evidence is bound to `1aa75e14f2cdcc6f5223a64b68c573f7b207a630` and base `c0beaaadd96a89f0240582b5449bf4dd50647c7d`; cookie and embedded-lifecycle changes need their own affected checks. Task 3.2 passed with candidate `b1f1e234d7b5c1e6897f3c9127b77122398c7a7e` on 2026-09-09. The user confirmed their name, purple accent and 38% remaining, authenticated native usage reported 62% used with the reserve-only gate cleared, and the existing LB recorded successful `gpt-6-astra` WebSocket requests. See [observed trial](../../specs/desktop-pooled-usage/context.md#observed-desktop-trial). The user subsequently authorized one-container integration and issue/PR publication.

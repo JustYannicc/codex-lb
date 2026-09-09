@@ -6,16 +6,16 @@ Existing `/api/codex/usage` aggregates pool plan and credits and can expire rows
 
 ## Goals / Non-Goals
 
-Add a conservative quota projection and a separate local relay without replacing the established inference stack. Keep all account-owned authority with the original ChatGPT account. A pool summary is evidence of pool quota, not a guarantee that every model, sticky thread or account feature can run.
+Add a conservative quota projection and an optional local relay without replacing the established inference stack. Keep all account-owned authority with the original ChatGPT account. A pool summary is evidence of pool quota, not a guarantee that every model, sticky thread or account feature can run.
 
-Application patching, certificate interception, account switching, automatic deployment and permanent launch setup are outside this change. The real trial is a separate approval step after local proof.
+Application patching, certificate interception, account switching, automatic Desktop mutation are outside this change. Users explicitly opt in to the relay and launch environment.
 
 ## Decisions
 
 1. Add `/api/codex/desktop/usage` in a small module. Reuse ChatGPT identity validation and preserve the raw validated upstream JSON privately on the parsed usage object. Existing serialized schemas stay unchanged. This avoids a second caller usage fetch and prevents reconstruction from lossy parsed fields.
 2. Refresh using the current owned-session updater, then read fresh account and quota rows sequentially. Reuse capacity mappings and weighting. Reject incomplete, stale, expired or malformed evidence, including uncertain historical windows, instead of changing the existing usage endpoint's reset policy. Reuse the current 180-second freshness horizon rather than add a tuning setting.
 3. Compose the original envelope with strict main and model quota. Preserve account-owned and unknown fields. Clear only understood superseded quota-exhaustion markers; unknown restrictions remain effective.
-4. Ship the relay as an optional CLI subcommand using the established aiohttp transport. Fixed ChatGPT upstream, loopback LB origin, no cookie jar, no redirect following, no payload logging. Streaming connections and WebSocket pumps have explicit lifetime ownership. The ordinary LB command and port remain unchanged.
+4. Ship the relay as an optional CLI subcommand using the established aiohttp transport. Fixed ChatGPT upstream, loopback LB origin, no cookie jar, no redirect following, no payload logging. Streaming connections and WebSocket pumps have explicit lifetime ownership. The standalone command remains supported. The normal server can own the aiohttp listener in its lifespan through the default-off off/loopback/container mode. Container ingress binds internally on 8000, with host publication restricted to both loopback families. Startup failure must run cleanup; shutdown closes the relay before shared resources. Embedded mode derives the HTTP loopback quota origin from the normal listener and rejects TLS, invalid ports and unsupported bind hosts.
 5. Keep the Rust account base untouched. A broad Rust override changes hosted MCP auth classification before transport. The independent Desktop environment hook is sufficient for the proposed usage request path.
 
 ## Risks / Trade-offs
@@ -23,7 +23,7 @@ Application patching, certificate interception, account switching, automatic dep
 - Conservative freshness can temporarily return 503 when a historical window is no longer reported. A proven complete snapshot can justify a future relaxation; current timestamps alone do not establish omission.
 - Account-owned credit or spend restrictions can still prevent model selection despite available pool quota. The implementation keeps those restrictions truthful.
 - Remote enrollment/refresh compares signed challenge origins against the configured Desktop base. Cookie domain rules also differ at loopback. Passthrough preserves messages but cannot promise these client-side checks succeed. Report observed regressions; never rewrite signed challenges.
-- The new quota endpoint requires a candidate LB build. A real trial therefore needs a coordinated temporary service change or isolated real-account instance as well as the Desktop launch override. No such change is authorized until the exact trial and rollback are reviewed.
+- The new quota endpoint requires a candidate LB build. A real trial therefore needs a coordinated temporary service change or isolated real-account instance as well as the Desktop launch override. The user authorized integration into the existing LB container after the successful real trial. The local runtime candidate must retain the exact deployed parent and migration graph.
 
 ## Migration Plan
 

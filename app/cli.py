@@ -115,7 +115,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
     ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
-    os.environ["PORT"] = str(port)
+    from app.core.config.settings import record_http_listener
+
+    record_http_listener(host=args.host, port=port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
 
     _run_server(
         "app.main:app",

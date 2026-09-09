@@ -1,6 +1,6 @@
 # Codex Desktop pooled usage
 
-This experimental integration aims to keep the original ChatGPT login while showing the codex-lb pool in Desktop's native usage display. It has not passed real Desktop acceptance. The ordinary [client setup](client-setup.md) still routes inference without it.
+This opt-in integration keeps the original ChatGPT login while showing the codex-lb pool in Desktop's native usage display. The ordinary [client setup](client-setup.md) still routes inference without it.
 
 Source of truth: [Desktop pooled usage specification](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/desktop-pooled-usage).
 
@@ -25,13 +25,29 @@ The response keeps the original account's identity, plan, credits, spend control
 
 Static routing and schema checks were made against Codex Desktop `26.903.61454` with bundled CLI `0.153.4` on macOS. The inspected build's existing authentication allowlist accepts literal `localhost:8000`; substituting `127.0.0.1:2455` or another port does not establish the same authenticated path.
 
-Deterministic relay and quota tests pass. A real trial on 2026-09-09 reached the authenticated pooled endpoint and displayed the user's name and a usage control. Account settings still failed with DeviceCheck registration errors and upstream challenges; restoring direct backend access restored normal settings behavior. The exact displayed pool percentage and a successful intended-model request were not verified. The trial was rolled back. This setup is not ready for normal use.
+Deterministic relay and quota tests pass. The accepted 2026-09-09 trial preserved the original account name and purple accent, completed real account/settings requests, displayed 38% pool quota remaining and completed `gpt-6-astra` requests through LB. An earlier trial failed because process lifetime and cookie scope were not sufficient. The accepted candidate uses an independent service lifetime and adapts official response-cookie domains for localhost. This evidence applies to the inspected build; repeat compatibility checks after Desktop updates.
 
-The inspected Desktop uses its direct `/wham/usage` response for the Luna reserve model restriction as well as quota display. Changing Rust `account/rateLimits/read` routing alone does not redirect that Desktop query. No quota-only Desktop URL override was found in the inspected build. See the [compatibility findings](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/desktop-pooled-usage/context.md#observed-desktop-trial) before considering another trial.
+The inspected Desktop uses its direct `/wham/usage` response for the Luna reserve model restriction as well as quota display. Changing Rust `account/rateLimits/read` routing alone does not redirect that Desktop query. No quota-only Desktop URL override was found in the inspected build. See the [compatibility findings](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/desktop-pooled-usage/context.md#observed-desktop-trial) for the observed failures and successful follow-up.
 
 `CODEX_API_BASE_URL` is a Desktop launch-environment override, not a TOML setting or a documented stable OpenAI API. Other Desktop backend requests use it too. Signed remote-control enrollment and refresh compare challenge origins, and cookie registration can depend on the destination domain. The relay preserves signed messages and cookie values. It removes only an explicit chatgpt.com Domain attribute from non-usage response cookies, retaining Secure, HttpOnly, SameSite, Path and expiry so Chromium can use them through localhost. It does not rewrite signed challenges. These features require separate compatibility observation. A correct account name alone does not prove every connected feature works.
 
-## Start the optional relay
+## Run in the existing LB container
+
+Set `CODEX_LB_DESKTOP_RELAY_MODE=container` on the existing LB service and add these port publications alongside its normal ports:
+
+```yaml
+environment:
+  CODEX_LB_DESKTOP_RELAY_MODE: container
+ports:
+  - "127.0.0.1:8000:8000"
+  - "[::1]:8000:8000"
+```
+
+The normal LB process owns the relay, including startup and shutdown. The relay listens on the container interface and sends quota requests to the same LB's configured HTTP port. Publish 8000 only on host loopback. A bare `8000:8000` exposes authenticated Desktop backend forwarding to the network.
+
+For a native LB process, `CODEX_LB_DESKTOP_RELAY_MODE=loopback codex-lb` starts both listeners on the same machine. The default is `off`. Embedded mode requires an HTTP listener reachable over loopback with a nonzero port other than 8000. Unsupported hosts and TLS settings fail startup. Use the standalone command for an HTTPS LB.
+
+## Start the standalone relay
 
 Use a candidate or release containing `/api/codex/desktop/usage`. An older server that only has `/api/codex/usage` cannot provide the strict projection. Start LB normally, then run the relay on the same machine as Desktop:
 
@@ -45,7 +61,7 @@ It connects to `http://127.0.0.1:2455` by default. For a separate local LB port:
 codex-lb desktop-relay --lb-url http://127.0.0.1:2456
 ```
 
-The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. It always forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It honors configured HTTP/WebSocket/SOCKS outbound proxies for ChatGPT traffic, including the existing explicit WebSocket direct-connect override. Local LB requests always stay direct. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change this listener.
+The relay binds IPv4 and IPv6 loopback on port 8000. Its local LB destination must be an HTTP(S) loopback origin without credentials, a path, query or fragment. It always forwards non-usage backend traffic to `https://chatgpt.com`, validates upstream TLS, and does not follow redirects. It honors configured HTTP/WebSocket/SOCKS outbound proxies for ChatGPT traffic, including the existing explicit WebSocket direct-connect override. Local LB requests always stay direct. It has no shared cookie jar and emits no access or payload logs. The normal server's `--host`, `--port`, `HOST` and `PORT` settings do not change the standalone listener. Do not enable embedded mode and the standalone command on the same host at the same time.
 
 A local unauthenticated check should reach LB and return 401:
 
@@ -93,6 +109,6 @@ If login, quota, dictation or another backend feature regresses, restore the pre
 launchctl unsetenv CODEX_API_BASE_URL
 ```
 
-If there was a previous value, restore it with `launchctl setenv` instead. After Desktop restarts, stop the relay with Ctrl-C. Stop and remove the temporary candidate separately if one was used. Keep the original LB service and its volume intact. This rollback does not require changing ChatGPT login or inference configuration.
+If there was a previous value, restore it with `launchctl setenv` instead. After Desktop restarts, stop a standalone relay with Ctrl-C, or disable the embedded mode and recreate the LB service. Stop and remove the temporary candidate separately if one was used. Keep the original LB service and its volume intact. This rollback does not require changing ChatGPT login or inference configuration.
 
-The `launchctl` setting lasts for the current login session, and the relay command runs only while its process remains alive. It is not a permanent deployment. For persistent use, arrange explicit user-managed startup after local acceptance, with LB starting first, the relay second and Desktop last. Repeat compatibility checks after Desktop updates.
+The `launchctl` setting lasts for the current login session. An embedded relay follows the existing container restart policy; a standalone relay follows its process lifetime. For use after login, arrange user-managed startup that sets the Desktop environment and starts LB before Desktop. Repeat compatibility checks after Desktop updates.
