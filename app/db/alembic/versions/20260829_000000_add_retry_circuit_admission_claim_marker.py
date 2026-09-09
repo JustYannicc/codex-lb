@@ -1,7 +1,7 @@
 """add retry-circuit admission claim lease
 
 Revision ID: 20260829_000000_add_retry_circuit_admission_claim_marker
-Revises: 20260909_050000_dashboard_routing_overload_settings
+Revises: 20260909_060000_add_report_rollup
 Create Date: 2026-08-29
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
-down_revision = "20260909_050000_dashboard_routing_overload_settings"
+down_revision = "20260909_060000_add_report_rollup"
 branch_labels = None
 depends_on = None
 

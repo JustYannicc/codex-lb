@@ -91,3 +91,6 @@
 - [x] 4.18 Follow the merged routing/overload migration without changing it;
   verify its nullable defaults and explicit values survive the marker lifecycle
   and recheck receipt cleanup with the upstream routing-tunables integration.
+- [x] 4.19 Follow the merged report-rollup migration without changing it;
+  preserve populated report history and fold watermarks through the marker
+  lifecycle, and recheck report, retention and request-log integration.

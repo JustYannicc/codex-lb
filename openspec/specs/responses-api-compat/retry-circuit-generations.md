@@ -17,15 +17,16 @@ claim-start epoch, provided the database still considers it live. A competing,
 expired, or unconfirmed receipt does not authorize dispatch.
 
 The unmerged claim-marker migration follows main's
-`20260909_050000_dashboard_routing_overload_settings` revision, after resilience
-and timeout migrations and the overflow/transport repair from #2198. It adds
+`20260909_060000_add_report_rollup` revision, after dashboard-settings
+migrations and the overflow/transport repair from #2198. It adds
 or removes only the nullable retry-circuit marker columns, preserving both
 parents' schemas, overflow settings, explicit transport choices, model-source
-pins, dashboard resilience, timeout, routing and overload overrides, and retry
-generations.
+pins, dashboard resilience, timeout, routing and overload overrides, populated
+report history, fold watermarks, and retry generations. Marker rollback does
+not drop the report aggregates even when raw history has already been pruned.
 A live receipt still blocks rollback
 before schema or version changes. Neither original parent nor their merge
-revision or any dashboard-settings migration is rewritten.
+revision, dashboard-settings migration or report-rollup migration is rewritten.
 
 An ambiguous send or unconfirmed release can retain a receipt until expiry.
 The stranded-receipt policy remains an explicit maintainer decision in the

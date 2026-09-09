@@ -2037,7 +2037,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260909_050000_dashboard_routing_overload_settings"
+    parent_revision = "20260909_060000_add_report_rollup"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2056,7 +2056,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     def _preexisting_state(sync_conn):
         inspector = sa_inspect(sync_conn)
         return {
-            "overflow_schema": {
+            "upstream_schema": {
                 table: {
                     "columns": [
                         (column["name"], str(column["type"]), column["nullable"], column["default"])
@@ -2066,10 +2066,22 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                     "foreign_keys": inspector.get_foreign_keys(table),
                     "indexes": inspector.get_indexes(table),
                 }
-                for table in ("dashboard_settings", "model_source_pins")
+                for table in (
+                    "dashboard_settings",
+                    "model_source_pins",
+                    "account_usage_rollup_state",
+                    "request_report_hourly_rollups",
+                )
             },
             "settings": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM dashboard_settings ORDER BY id"))],
             "pins": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM model_source_pins ORDER BY pin_key"))],
+            "fold_state": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM account_usage_rollup_state ORDER BY id"))
+            ],
+            "reports": [
+                tuple(row)
+                for row in sync_conn.execute(text("SELECT * FROM request_report_hourly_rollups ORDER BY bucket_epoch"))
+            ],
             "legacy_retry": tuple(
                 sync_conn.execute(
                     text(
@@ -2103,8 +2115,33 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_until_epoch" not in before_columns
 
         # Seed at the new parent, before the receipt columns exist. Marker
-        # migration must preserve both upstream branches and generation 4.
+        # migration must preserve upstream state and generation 4, including
+        # report history whose raw source is no longer retained.
         async with engine.begin() as conn:
+            assert (
+                await conn.execute(text("SELECT reports_folded_through FROM account_usage_rollup_state WHERE id = 1"))
+            ).scalar_one() == "1970-01-01 00:00:00"
+            await conn.execute(
+                text(
+                    "UPDATE account_usage_rollup_state SET reports_folded_through = '2026-09-09 06:00:00' WHERE id = 1"
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO request_report_hourly_rollups (
+                        bucket_epoch, account_id, api_key_id, model, useragent_group,
+                        conversation_id, first_requested_at, request_count, error_count,
+                        cancelled_count, input_tokens, output_tokens, reasoning_tokens,
+                        reasoning_usage_known_requests, cached_input_tokens, cost_usd
+                    ) VALUES (
+                        1772323200, 'retained-account', 'retained-key', 'retained-model',
+                        'retained-client', 'retained-conversation', '2026-03-01 00:15:00',
+                        9, 2, 1, 100, 50, 7, 4, 20, 0.125
+                    )
+                    """
+                )
+            )
             updated_settings = await conn.execute(
                 text(
                     "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "

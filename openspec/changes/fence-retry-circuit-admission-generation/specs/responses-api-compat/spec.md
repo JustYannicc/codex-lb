@@ -99,15 +99,16 @@ the application migration mutex.
 
 #### Scenario: Marker migration preserves its main-branch parent
 
-- **GIVEN** the merged dashboard routing/overload parent revision is applied with
+- **GIVEN** the merged report-rollup parent revision is applied with
   existing overflow settings, explicit transport choices, model-source pins,
-  resilience, timeout, routing and overload overrides, and retry-circuit generations
+  resilience, timeout, routing and overload overrides, populated report history,
+  fold watermarks, and retry-circuit generations
 - **WHEN** the marker migration is upgraded, safely downgraded to that parent,
   and upgraded again
 - **THEN** the migration graph MUST retain one head
-- **AND** all upstream schemas, settings, transport choices, pins, and retry
-  generations MUST remain intact while only the nullable claim-marker columns
-  are added or removed
+- **AND** all upstream schemas, settings, transport choices, pins, report history,
+  fold watermarks, and retry generations MUST remain intact while only the
+  nullable claim-marker columns are added or removed
 
 #### Scenario: An active receipt blocks migration rollback
 
