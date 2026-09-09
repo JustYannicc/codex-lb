@@ -8,7 +8,7 @@ Prove the scheduled cleanup repository output with real database writes between 
 
 ## Decisions
 
-Capture the three existing fence values alongside row identity, then compare them in each delete. Keep deletion per row, avoiding new batching machinery and keeping bind count independent of selected batch size. After any miss, finish the selected batch and return the actual deletion count. Immediately selecting again would adopt the changed fence and undo the protection.
+Capture the observation timestamp, admission generation, failure count and null-safe failure detail alongside row identity, then compare them in each delete. Keep deletion per row, avoiding new batching machinery and keeping bind count independent of selected batch size. After any miss, finish the selected batch and return the actual deletion count. Immediately selecting again would adopt the changed fence and undo the protection.
 
 For example, a selected row at generation 3 and timestamp 100 stays alive if a replay advances generation to 4, even when timestamp 100 is still old enough to purge. Other unchanged rows in that batch may be removed.
 

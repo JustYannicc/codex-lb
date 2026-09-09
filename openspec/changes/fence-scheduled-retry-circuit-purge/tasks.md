@@ -9,3 +9,5 @@
 - [x] 2.2 Run lint, type and strict OpenSpec validation; sync the new requirement and record the tested candidate and boundaries.
 
 - [ ] 2.3 Verify the new PostgreSQL race tests on current-head hosted CI before calling the draft ready.
+
+- [x] 2.4 Fence detail-only settlement transitions, including unresolved anchor registration, and verify null detail deletion.

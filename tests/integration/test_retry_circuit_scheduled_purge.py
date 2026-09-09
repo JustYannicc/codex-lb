@@ -126,3 +126,66 @@ async def test_scheduled_purge_drains_unchanged_rows_across_batches() -> None:
     assert deleted == 5
     async with SessionLocal() as observer:
         assert (await observer.execute(select(HttpBridgeRetryCircuit))).scalars().all() == []
+
+
+@pytest.mark.parametrize("prior_detail", [None, "stream_incomplete", "anchor_abandoned"])
+async def test_scheduled_purge_preserves_detail_only_partial_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    prior_detail: str | None,
+) -> None:
+    # Registration has not committed a session/alias yet; only the detail
+    # protects the abandoned anchor while settlement is suspended.
+    async with SessionLocal() as seed:
+        for key in ("settling", "unchanged"):
+            seed.add(
+                HttpBridgeRetryCircuit(
+                    session_key_kind="session_header",
+                    session_key_hash=durable_bridge_hash(key),
+                    api_key_scope="key-1",
+                    consecutive_failures=2,
+                    cooldown_until_epoch=0.0,
+                    last_detail=prior_detail,
+                    updated_at_epoch=1000.0,
+                    admission_generation=0,
+                )
+            )
+        await seed.commit()
+    changed = False
+    new_detail = None if prior_detail == "anchor_abandoned" else "anchor_abandoned"
+    async with SessionLocal() as cleanup:
+        execute = cleanup.execute
+
+        async def settle_after_selection(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal changed
+            result = await execute(statement, *args, **kwargs)
+            if not changed and isinstance(statement, Select):
+                changed = True
+                async with SessionLocal() as writer:
+                    assert await DurableBridgeRepository(writer).supersede_retry_circuit_detail(
+                        session_key_kind="session_header",
+                        session_key_value="settling",
+                        api_key_scope="key-1",
+                        expected_updated_at_epoch=1000.0,
+                        expected_consecutive_failures=2,
+                        expected_last_detail=prior_detail,
+                        last_detail=new_detail,
+                    )
+            return result
+
+        monkeypatch.setattr(cleanup, "execute", settle_after_selection)
+        deleted = await DurableBridgeRepository(cleanup).purge_retry_circuits_before(
+            100000.0,
+            tombstone_cutoff_epoch=100000.0,
+            batch_size=2,
+        )
+    assert changed
+    assert deleted == 1
+    async with SessionLocal() as observer:
+        rows = (await observer.execute(select(HttpBridgeRetryCircuit))).scalars().all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.session_key_hash == durable_bridge_hash("settling")
+        assert row.last_detail == new_detail
+        assert row.updated_at_epoch == 1000.0
+        assert row.admission_generation == 0
+        assert row.consecutive_failures == 2
