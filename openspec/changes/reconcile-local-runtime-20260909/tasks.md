@@ -6,7 +6,7 @@
 
 ## 2. Candidate verification
 
-- [ ] 2.1 Verify Desktop relay, pooled usage, context and ownership behavior with isolated targeted regression suites.
+- [x] 2.1 Verify Desktop relay, pooled usage, context and ownership behavior with isolated targeted regression suites.
 - [ ] 2.2 Run required current-source checks and independent Standards/Input reviews tied to the exact candidate; record failures without claiming success.
 - [ ] 2.3 Deliver an immutable candidate/source manifest and complete-image build inputs to the deployment owner.
 

@@ -261,4 +261,3 @@ Read-only live GitHub body/file scope audit on 2026-09-09. Exact PR heads below.
 - **#1621 5d8eff51ad072192640328f9cead8ffefb8a5e71** — test(spec): model ownership and timeout invariants with TLC controls. Exclude: self-contained formal-spec/TLC tests, no production changes.
 
 - **#1528 21fc1fdd046cdf936f176e55a6a0cda83310cc70** — feat(accounts): add per-account usage limits. Exclude: optional per-account usage-limit admission policy; broad routing/schema changes and depends on2193. Not pooled quota reporting; select2193 independently if needed.
-

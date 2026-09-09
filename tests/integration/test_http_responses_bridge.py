@@ -16881,10 +16881,10 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
             await pause_first_consumer()
         return await original_cooldown(session)
 
-    async def gated_register(session, turn_state) -> None:
+    async def gated_register(session, turn_state, *, synthesized=False) -> None:
         if pause_at == "registration" and asyncio.current_task() is first_owner_task:
             await pause_first_consumer()
-        await original_register(session, turn_state)
+        await original_register(session, turn_state, synthesized=synthesized)
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", gated_cooldown)
     monkeypatch.setattr(service, "_register_http_bridge_turn_state", gated_register)
@@ -16912,7 +16912,7 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
 
     second_task: asyncio.Task[Any] | None = None
     first_events: list[dict[str, Any]] = []
-    request_headers = {"x-codex-turn-state": "liveness-queue-regression"}
+    request_headers = {"x-codex-turn-state": "turn_liveness_queue_regression"}
 
     async def collect_first_response() -> list[dict[str, Any]]:
         body = {
@@ -16956,6 +16956,11 @@ async def test_v1_responses_http_bridge_liveness_failure_preserves_revoked_delay
         release_terminal_finalize.set()
         await asyncio.wait_for(terminal_finalize_finished.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
         assert first_task.done() is False
+        assert first_state is not None
+        queue = first_state.event_queue
+        assert queue is not None
+        assert first_state.event_queue_revoked.is_set()
+        assert queue.terminal_pending
         first_consumer_release.set()
 
         second_response = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)

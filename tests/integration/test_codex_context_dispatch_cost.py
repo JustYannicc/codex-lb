@@ -112,7 +112,7 @@ async def test_http_bridge_prewarm_carries_context_identity_before_send(async_cl
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", AsyncMock(return_value=upstream))
     response = await async_client.post(
         "/backend-api/codex/responses",
-        headers={**headers, "x-codex-turn-state": "context-prewarm"},
+        headers={**headers, "session_id": "context-prewarm"},
         json=envelope(),
     )
     assert response.status_code == 200 and "response.completed" in response.text

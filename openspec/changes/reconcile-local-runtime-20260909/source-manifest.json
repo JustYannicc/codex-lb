@@ -688,7 +688,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "In progress. Read verification.md and deployment receipt; inclusion is not a pass claim.",
+  "verification_status": "Local automated verification complete, including repaired-case retests. Aggregate review and deployment acceptance pending; see verification.md.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -729,6 +729,20 @@
     {
       "commit": "9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f",
       "contract": "Prove branch-specific migration downgrade without removing current upstream siblings; prove real WebSocket denied-anchor retirement on the subsequent complete request."
+    }
+  ],
+  "supplementary_pr_dispositions": [
+    {
+      "pr": 2287,
+      "reviewed_head": "c64bf11fd760deeb533c4b70f805a7864eb32d82",
+      "disposition": "not_selected_test_only",
+      "reason": "Post-snapshot OAuth deadline fixture stabilization; no production delta. The aggregate full integration run passed the OAuth cases without this change. Retain the independently authored PR as a future test stabilization input if this race occurs."
+    },
+    {
+      "pr": 2289,
+      "reviewed_head": "5c5a0aa638e0b21a207a81dfe92e1739daecd8d4",
+      "disposition": "deferred_to_separate_owner",
+      "reason": "Post-snapshot pooled reset-credit policy and redemption schema. Separate task owns this new feature; live pooled reset acceptance is explicitly outstanding. This refresh preserves accepted pooled usage2286 and does not silently enable or import reset redemption authority."
     }
   ]
 }
