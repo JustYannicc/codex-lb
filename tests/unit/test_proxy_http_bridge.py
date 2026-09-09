@@ -22253,6 +22253,7 @@ async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capab
     context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
     assert context.expected_owner_process_epoch == "owner-process-b"
 
+
 @pytest.mark.asyncio
 async def test_recovery_forward_replaces_incoming_affinity_with_recovered_turn_state(
     monkeypatch: pytest.MonkeyPatch,

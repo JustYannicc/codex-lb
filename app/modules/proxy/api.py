@@ -6511,7 +6511,6 @@ async def _stream_responses(
         headers=effective_headers,
     )
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
-    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(effective_headers)
     downstream_turn_state = (
         forwarded_downstream_turn_state
         if bridge_active and forwarded_downstream_turn_state is not None
