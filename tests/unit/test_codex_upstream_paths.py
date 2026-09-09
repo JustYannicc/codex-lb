@@ -1677,6 +1677,7 @@ async def test_stream_responses_python_http_prepares_only_consumed_json(
                 "access",
                 None,
                 session=session,
+                upstream_stream_transport_override=transport,
                 base_url=str(server.make_url("/")),
             )
         ]
