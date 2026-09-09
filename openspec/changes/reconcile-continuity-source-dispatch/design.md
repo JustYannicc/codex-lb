@@ -100,3 +100,7 @@ its evidence as the recovery point. Inherited upstream migrations are unchanged.
 The c0beaaadd composition retains upstream constantized core and session-bridge tunables. It must not resurrect removed settings while retaining the candidate ownership checks. The unfinished correction tasks previously appended to the archived ownership change are tracked here until their verification and delivery are complete.
 
 Validate the added synthesized-turn-state context field with the existing bridge metadata control-character rule before constructing signed headers. This closes a gap in the established safe-header contract, without changing marker recognition or ownership. Both legacy-forward alias lookups must retain their expected arguments.
+
+### Compact cleanup after persistence failure
+
+The api-keys requirement "Compact 경로 예외 무관 reservation cleanup" already requires reservation cleanup for compact exceptions. Both immediate settlement and fail-safe release can fail before the service signals cleanup readiness. Transfer that unresolved release to the existing tracked, concurrency-bounded persistence retry before signaling readiness. Keep `reservation_released=False` and the established `usage_settlement_failed` error until release is confirmed; an enqueued retry is not proof of released quota. Preserve owner errors after confirmed release and keep health writes behind confirmed settlement.

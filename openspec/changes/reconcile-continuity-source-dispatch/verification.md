@@ -27,3 +27,10 @@ An initial settings-tier check imported the reused virtualenv's editable checkou
 ## Delivery boundary
 
 The intended publication is a normal merge commit retaining both the previous PR head and the pinned current main as parents. Recheck the remote head and main before pushing. Local success does not clear hosted review threads or prove CI for the new commit; those checks remain delivery work in the active change. Related issue: #2274. No security-exhaustion split was made because current main already handles that condition and the candidate's new classification must preserve its existing consumers.
+
+## Compact release retry correction
+
+- On composition `21cbb6424`, both external compact routes reproduced the leak with two and three injected release failures. Four cases timed out waiting for quota release; zero and one failure controls passed.
+- After transferring failed cleanup to the existing tracked release retry, all 176 compact cases in the integration and proxy-utils suites passed. The expanded cleanup-ready test then passed in both ordinary and already-cancelled AnyIO scopes; all four focused settlement cases passed. Both routes confirm the persisted reservation is released and reserved quota returns to zero after retry.
+- The retry is scheduled before cleanup readiness, remains owned by the service scheduler, and uses the existing concurrency limit and backoff. Unconfirmed settlement still reports `usage_settlement_failed` and does not flush health writes. Confirmed-release owner errors and forwarded receiver settlement controls remain unchanged.
+- Ruff lint, formatting, diff whitespace, and strict active-change validation passed. All test imports and resets used matching foreground, background, and test SQLite engine URLs under a dedicated absolute temporary database path.

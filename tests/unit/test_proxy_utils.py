@@ -42310,7 +42310,8 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
         finalize_usage_reservation=AsyncMock(),
         release_usage_reservation=AsyncMock(side_effect=OSError("compact fail-safe release failed")),
     )
-    service_factory = MagicMock(side_effect=[primary_service, fail_safe_service])
+    retry_service = SimpleNamespace(release_usage_reservation=AsyncMock())
+    service_factory = MagicMock(side_effect=[primary_service, fail_safe_service, retry_service])
     monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -42342,6 +42343,11 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     primary_service.release_usage_reservation.assert_not_awaited()
     fail_safe_service.finalize_usage_reservation.assert_not_awaited()
     fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
+    retry_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
 
 
 @pytest.mark.asyncio
@@ -42392,8 +42398,10 @@ async def test_compact_usage_settlement_marks_released_when_fail_safe_succeeds(m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
 async def test_compact_usage_settlement_signals_cleanup_ready_when_both_writes_fail(
     monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
 ) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     api_key = _make_api_key_data("key_compact_double_settlement_handoff")
@@ -42410,6 +42418,7 @@ async def test_compact_usage_settlement_signals_cleanup_ready_when_both_writes_f
             "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
         }
     )
+    retry_service = SimpleNamespace(release_usage_reservation=AsyncMock())
     service_factory = MagicMock(
         side_effect=[
             SimpleNamespace(
@@ -42420,24 +42429,33 @@ async def test_compact_usage_settlement_signals_cleanup_ready_when_both_writes_f
                 finalize_usage_reservation=AsyncMock(),
                 release_usage_reservation=AsyncMock(side_effect=OSError("compact fail-safe release failed")),
             ),
+            retry_service,
         ]
     )
     monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
     cleanup_ready = asyncio.Event()
     token = proxy_support._bind_propagated_responses_service_cleanup_ready(cleanup_ready)
     try:
-        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-            await service._settle_compact_api_key_usage(
-                api_key=api_key,
-                api_key_reservation=reservation,
-                response=response,
-                request_service_tier=None,
-            )
+        with anyio.CancelScope() as scope:
+            if cancelled:
+                scope.cancel()
+            with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+                await service._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    response=response,
+                    request_service_tier=None,
+                )
     finally:
         proxy_support._reset_propagated_responses_service_cleanup_ready(token)
 
     assert _proxy_error_code(exc_info.value) == "usage_settlement_failed"
     assert cleanup_ready.is_set()
+
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    await asyncio.gather(*cleanup_tasks)
+    retry_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
 
 
 @pytest.mark.asyncio

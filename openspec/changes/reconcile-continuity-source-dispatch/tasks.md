@@ -73,3 +73,9 @@
 - [x] 13.3 Assert both owner-alias lookup calls in the legacy-forward regression.
 - [x] 13.4 Move unfinished correction verification out of the archived ownership tasks into this active change.
 - [ ] 13.5 Publish the verified normal merge commit after rechecking remote head and target; obtain current-head hosted results and review disposition.
+
+## 14. Compact failed-settlement cleanup
+
+- [x] 14.1 Reproduce reservation leakage after compact owner lookup and both immediate release attempts fail through both HTTP compact routes.
+- [x] 14.2 Transfer failed compact cleanup to the tracked cancellation-safe release retry before signaling cleanup readiness, preserving unconfirmed-settlement errors and deferring health writes.
+- [x] 14.3 Verify retry recovery, confirmed-release controls, and compact settlement regressions before delivery.
