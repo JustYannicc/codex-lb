@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -179,7 +180,9 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_client, monkeypatch):
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+@pytest.mark.parametrize("release_failures", [0, 1, 2, 3])
+async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_client, monkeypatch, path, release_failures):
     """An external compact owner miss settles the real API-key reservation."""
     for raw_account_id, email in (
         ("acc_compact_owner_miss_a", "compact-owner-miss-a@example.com"),
@@ -223,8 +226,22 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
 
     monkeypatch.setattr(proxy_module.LoadBalancer, "list_continuity_owner_candidates", fail_selection_candidates)
 
+    release = ApiKeysService.release_usage_reservation
+    release_attempts = 0
+    released = asyncio.Event()
+
+    async def fail_then_release(self, reservation_id):
+        nonlocal release_attempts
+        release_attempts += 1
+        if release_attempts <= release_failures:
+            raise OSError("reservation database temporarily unavailable")
+        await release(self, reservation_id)
+        released.set()
+
+    monkeypatch.setattr(ApiKeysService, "release_usage_reservation", fail_then_release)
+
     response = await async_client.post(
-        "/backend-api/codex/responses/compact",
+        path,
         headers={"Authorization": f"Bearer {key}"},
         json={
             "model": "gpt-5.1",
@@ -236,8 +253,14 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
 
     assert response.status_code == 502, response.text
     error = response.json()["error"]
-    assert error["code"] == "previous_response_owner_unavailable"
-    assert error["message"] == "Previous response owner account is unavailable; retry later."
+    if release_failures >= 2:
+        assert error["code"] == "usage_settlement_failed"
+        assert error["message"] == "Compact API key usage could not be settled"
+    else:
+        assert error["code"] == "previous_response_owner_unavailable"
+        assert error["message"] == "Previous response owner account is unavailable; retry later."
+    await asyncio.wait_for(released.wait(), timeout=2)
+    assert release_attempts == release_failures + 1
     owner_lookup.assert_awaited_once()
 
     async with SessionLocal() as session:
