@@ -1,9 +1,4 @@
-# codex-context-management Specification
-
-## Purpose
-Support experimental native Codex history and notes across an authenticated account pool with durable ownership, complete history partitions and private transport.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Context request logs remain readable in the dashboard
 The dashboard request-log response schema SHALL accept `requestKind: "codex_context"` for successful and failed context operations without rejecting other rows or pagination metadata in the same response.

@@ -8,11 +8,13 @@ This compatibility path supports native Codex notes and history with an account 
 
 Use the same valid proxy API key for Responses and context tools, and enable the existing global API-key authentication setting. Unscoped keys and keys assigned to one or several accounts work. Each account still needs access to the model and experimental backend feature.
 
-A task's first observed inference dispatch, or first context operation, fixes its notes owner. Inference may rotate to another eligible account while notes stay on their owner. Quota exhaustion alone does not prevent trying a notes operation, and successful notes access does not reset the account's inference quota. If the notes owner is deleted, paused or unavailable, notes fail explicitly until that owner is usable again.
+A task's first context-marked inference dispatch, or first context operation, fixes its notes owner. Inference may rotate to another eligible account while notes stay on their owner. Quota exhaustion alone does not prevent trying a notes operation, and successful notes access does not reset the account's inference quota. If the notes owner is deleted, paused or unavailable, notes fail explicitly until that owner is usable again.
 
 History queries contact all recorded participants, with a maximum of 32 accounts and four concurrent calls. One failed participant fails the entire query. Results remain encrypted; the model combines the partitions. Exact global ordering, deduplication and pagination are therefore not guaranteed by the proxy.
 
 The client sends one encrypted tool-result string. codex-lb wraps native results in its own authenticated container, then restores native ciphertext and images before the next inference request. Only verified context tool outputs are eligible for cross-account replay; arbitrary encrypted reasoning, stored references and incomplete tool exchanges retain existing restrictions.
+
+Context tracking is activated by `reasoning.context=all_turns`. A bounded process-local cache avoids repeated writes and recognizes cached sessions even if a later turn omits the marker. An unmarked session absent from that cache follows ordinary inference without a context lookup. After cache eviction, restart or a move to another replica, clients must keep sending the marker for inference participation and durable identity checks. Explicit notes/history operations always validate their stored binding and current key scope.
 
 ## Isolated evaluation
 

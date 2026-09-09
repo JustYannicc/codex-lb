@@ -36,6 +36,10 @@ class ContextRepository:
 
     async def record(self, session_id: str, api_key_id: str, account_id: str) -> None:
         await self.bind(session_id, api_key_id, account_id)
+        await self.add_participant(session_id, account_id)
+
+    async def add_participant(self, session_id: str, account_id: str) -> None:
+        """Record participation after the caller has verified immutable ownership."""
         insert = sqlite_insert if self._session.get_bind().dialect.name == "sqlite" else pg_insert
         await self._session.execute(
             insert(CodexContextParticipant)

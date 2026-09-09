@@ -102,6 +102,7 @@ class ModelSourcePin(Base):
 
     __table_args__ = (Index("ix_model_source_pins_purge_at", "purge_at"),)
 
+
 class CodexContextSession(Base):
     __tablename__ = "codex_context_sessions"
 

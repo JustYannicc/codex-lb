@@ -1995,7 +1995,7 @@ async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
 
     from app.db.migrate import _build_alembic_config
 
-    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    parent = "20260908_020000_merge_overflow_transport_heads"
     tables = {"codex_context_sessions", "codex_context_participants"}
     await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
     async with SessionLocal() as session:
@@ -2610,7 +2610,7 @@ async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replica
 async def test_codex_context_migration_rejects_unowned_tables_without_changes(db_setup, existing_tables):
     from sqlalchemy import inspect as sa_inspect
 
-    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    parent = "20260908_020000_merge_overflow_transport_heads"
     await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, parent, bootstrap_legacy=False))
     async with SessionLocal() as session:
         for table in existing_tables:

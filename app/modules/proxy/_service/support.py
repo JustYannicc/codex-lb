@@ -41,6 +41,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.context_dispatch import ContextDispatchIdentity
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -1178,6 +1179,7 @@ class _WebSocketRequestState:
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     context_ciphertexts: set[str] = field(default_factory=set)
+    context_dispatch: ContextDispatchIdentity | None = None
     # Once an account-bound body has been dispatched, retries remain pinned to
     # that owner even when stale-anchor recovery removes previous_response_id.
     replay_required_account_id: str | None = None

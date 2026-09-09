@@ -402,6 +402,7 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
         return result
 
     async def persist_context(*args, **kwargs):
+        assert isinstance(args[0], dict)  # Reuse the parsed frame, not serialized text.
         state = dispatch_states[-1]
         assert state.response_create_sent_at is None
         await asyncio.sleep(0)

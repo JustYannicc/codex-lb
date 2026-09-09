@@ -3,6 +3,7 @@ POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_codex_context_pool.py \
+	tests/integration/test_codex_context_dispatch_cost.py \
 	tests/integration/test_migrations.py::test_codex_context_migration_preserves_rows_and_round_trips \
 	tests/integration/test_migrations.py::test_codex_context_migration_rejects_unowned_tables_without_changes \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \

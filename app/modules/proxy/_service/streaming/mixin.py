@@ -576,7 +576,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
-            await record_context_dispatch(payload.to_payload(), api_key, account.id, record_participant=False)
+            await record_context_dispatch(payload, api_key, account.id, record_participant=False)
             stream = _facade()._call_stream_with_supported_optional_kwargs(
                 _facade().core_stream_responses,
                 payload,
@@ -630,7 +630,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             event_type = classify_event_type(first_payload)
             context_participant_recorded = event_type is not None
             if context_participant_recorded:
-                await record_context_dispatch(payload.to_payload(), api_key, account.id)
+                await record_context_dispatch(payload, api_key, account.id)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
@@ -793,7 +793,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
                 if not context_participant_recorded and event_type is not None:
-                    await record_context_dispatch(payload.to_payload(), api_key, account.id)
+                    await record_context_dispatch(payload, api_key, account.id)
                     context_participant_recorded = True
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"

@@ -2749,8 +2749,8 @@ class _WebSocketMixin:
                                     ),
                                 )
                         with _websocket_archive_request_context(archive_request_id):
-                            if account is not None:
-                                await record_context_dispatch(text_data, api_key, account.id)
+                            if account is not None and payload is not None and _is_websocket_response_create(payload):
+                                await record_context_dispatch(payload, api_key, account.id)
                             if (
                                 request_state is not None
                                 and payload is not None

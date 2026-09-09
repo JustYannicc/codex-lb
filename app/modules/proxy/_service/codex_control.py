@@ -26,12 +26,14 @@ from app.core.clients.proxy import (
     filter_inbound_headers,
 )
 from app.core.clients.proxy import codex_control_request as core_codex_control_request
+from app.core.clock import clock_for, scheduler_for
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, sqlite_writer_section
 from app.modules.api_keys.service import ApiKeyData
@@ -45,6 +47,7 @@ from app.modules.proxy.context_codec import (
     context_session_id,
     pack_history,
 )
+from app.modules.proxy.context_dispatch import get_context_dispatch_cache
 from app.modules.proxy.context_repository import ContextRepository
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
@@ -225,7 +228,8 @@ class _ContextManagementMixin:
         api_key: ApiKeyData,
     ) -> CodexControlResponse:
         proxy = cast("ProxyService", self)
-        started = time.monotonic()
+        clock = clock_for(proxy)
+        started = clock.monotonic()
         status = "error"
         try:
             response = await self._codex_context_request(
@@ -243,7 +247,7 @@ class _ContextManagementMixin:
                 api_key=api_key,
                 request_id=get_request_id() or ensure_request_id(None),
                 model=None,
-                latency_ms=int((time.monotonic() - started) * 1000),
+                latency_ms=int((clock.monotonic() - started) * 1000),
                 status=status,
                 transport="http",
                 request_kind="codex_context",
@@ -277,7 +281,8 @@ class _ContextManagementMixin:
             raise context_error("context_identity_invalid", 400)
         if not (await get_settings_cache().get()).api_key_auth_enabled:
             raise context_error("context_proxy_auth_required", 409)
-        deadline = time.monotonic() + 30
+        clock, scheduler = clock_for(proxy), scheduler_for(proxy)
+        deadline = clock.monotonic() + 30
         async with SessionLocal() as session:
             row = await ContextRepository(session).get(sid, api_key.id)
             owner_id = row.owner_account_id if row else None
@@ -297,6 +302,7 @@ class _ContextManagementMixin:
                 row = await ContextRepository(session).bind(sid, api_key.id, account.id)
                 owner_id = row.owner_account_id
                 await session.commit()
+        get_context_dispatch_cache().remember(sid, api_key.id)
         async with SessionLocal() as session:
             account_ids = (
                 await ContextRepository(session).participants(sid) if path.startswith("alpha/history/") else []
@@ -316,7 +322,7 @@ class _ContextManagementMixin:
                 account = _detached_account_copy(stored)
             account = await proxy._ensure_fresh_with_budget_or_auth_error(
                 account,
-                timeout_seconds=max(0.01, deadline - time.monotonic()),
+                timeout_seconds=max(0.01, deadline - clock.monotonic()),
                 privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
             )
             route = await proxy._resolve_upstream_route_for_account(account, operation="codex_context")
@@ -330,7 +336,7 @@ class _ContextManagementMixin:
                     headers=filter_inbound_headers(headers),
                     access_token=proxy._encryptor.decrypt(account.access_token_encrypted),
                     account_id=_header_account_id(account.chatgpt_account_id),
-                    timeout_seconds=max(0.01, deadline - time.monotonic()),
+                    timeout_seconds=max(0.01, deadline - clock.monotonic()),
                     route=route,
                     allow_direct_egress=route is None,
                     privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
@@ -346,7 +352,7 @@ class _ContextManagementMixin:
                 account = await proxy._ensure_fresh_with_budget(
                     account,
                     force=True,
-                    timeout_seconds=max(0.01, deadline - time.monotonic()),
+                    timeout_seconds=max(0.01, deadline - clock.monotonic()),
                     privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
                 )
                 response = await send()
@@ -355,7 +361,7 @@ class _ContextManagementMixin:
             # Successful notes access says nothing about the model's quota.
             return response
 
-        async with asyncio.timeout(max(0.01, deadline - time.monotonic())):
+        with scheduler.fail_after(max(0.01, deadline - clock.monotonic())):
             if len(account_ids) == 1:
                 response = await call(account_ids[0])
                 if path == "alpha/notes/v2/thread_hint":
@@ -387,15 +393,26 @@ class _ContextManagementMixin:
                     raise context_error("context_result_invalid", 502)
                 return HistoryPartition(account_id=account_id, result=result)
 
+            tasks: list[asyncio.Task[HistoryPartition]] = []
+
+            async def drain_partitions() -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
             try:
-                async with asyncio.TaskGroup() as group:
-                    tasks = [group.create_task(partition(account_id)) for account_id in account_ids]
-            except ExceptionGroup as exc:
-                # TaskGroup has already cancelled and awaited the other partitions.
-                for error in exc.exceptions:
-                    if isinstance(error, ProxyResponseError):
-                        raise error from None
-                raise
+                for account_id in account_ids:
+                    tasks.append(scheduler.create_task(partition(account_id)))
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    # Finish sibling cleanup even inside a cancelled request scope.
+                    _, cancellation = await _await_task_deferring_cancellation(
+                        scheduler.create_task(drain_partitions())
+                    )
+                    if cancellation is not None:
+                        raise cancellation
             return CodexControlResponse(
                 status_code=200,
                 body=pack_history(api_key.id, sid, [task.result() for task in tasks]),
