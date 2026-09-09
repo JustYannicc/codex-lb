@@ -3,3 +3,5 @@ The runtime refresh is local composition, with upstream change specs retaining o
 The active pooled Desktop task owns its source. Integration uses a frozen accepted implementation and verifies existing identity, quota, relay and Astra behavior. The older managed deployment manifest is stale and its held updater must not replace this runtime.
 
 Tests use disposable SQLite state only. A failed merge, test, build or rehearsal leaves the accepted live runtime intact. Cutover and cleanup belong to the deployment owner after exact candidate verification.
+
+The refresh also composes bounded defect corrections: drain upgrades return retryable HTTP 503; a proxy-injected direct WebSocket anchor rejected by upstream is retired before a later full-context request. Existing Responses retirement requirements govern the latter; client-supplied anchor authority remains unchanged.

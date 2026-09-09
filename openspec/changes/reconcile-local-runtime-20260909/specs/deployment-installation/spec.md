@@ -17,3 +17,12 @@ A local integration upgrade SHALL recognize the deployed migration revision and 
 #### Scenario: Candidate cannot pass migration rehearsal
 - **WHEN** a disposable copy of the deployed schema cannot migrate and serve accepted client endpoints
 - **THEN** the candidate is not eligible to replace the accepted live runtime
+
+### Requirement: Draining local instances reject WebSocket upgrades as retryable
+
+When an instance is draining and the server supports HTTP WebSocket denial responses, it SHALL reject new WebSocket upgrades with HTTP 503 and Retry-After without invoking the route or increasing in-flight work. Servers without that extension SHALL retain the documented pre-handshake close fallback.
+
+#### Scenario: Upgrade arrives during drain
+- **WHEN** a new WebSocket upgrade arrives after drain begins on a server supporting HTTP denial responses
+- **THEN** the client receives HTTP 503 and Retry-After
+- **AND** no application WebSocket handler runs and the in-flight count does not increase
