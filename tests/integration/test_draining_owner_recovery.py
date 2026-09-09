@@ -38,7 +38,7 @@ async def test_draining_owner_releases_admission_before_local_retry(
     """A real non-200 owner response must return the single reservation slot."""
     monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(tmp_path / "bridge.key"))
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    turn_state = "http_turn_drain_reservation"
+    turn_state = "upstream-turn-drain-reservation"
     async with SessionLocal() as session:
         key_service = ApiKeysService(ApiKeysRepository(session))
         api_key = await key_service.create_key(
