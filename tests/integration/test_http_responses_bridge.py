@@ -13823,14 +13823,15 @@ async def test_v1_responses_http_bridge_ambiguous_send_failure_does_not_restart_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect_delay_seconds", [0.0, 0.25])
 async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacement(
     async_client,
     app_instance,
     monkeypatch,
+    reconnect_delay_seconds: float,
 ):
     app_settings = _make_app_settings(enabled=True)
     app_settings.sse_keepalive_interval_seconds = 0.01
-    app_settings.stream_idle_timeout_seconds = 0.1
     _install_proxy_settings(
         monkeypatch,
         app_settings=app_settings,
@@ -13900,6 +13901,8 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
     ):
         del headers, access_token, account_id_header, base_url, session
         nonlocal connect_count
+        if connect_count == 1:
+            await asyncio.sleep(reconnect_delay_seconds)
         upstream = upstreams[connect_count]
         connect_count += 1
         return upstream
@@ -13908,6 +13911,24 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
     service = get_proxy_service_for_app(app_instance)
+    next_receive_timeout = service._next_websocket_receive_timeout
+
+    async def short_reader_timeout(
+        pending_requests: deque[proxy_module._WebSocketRequestState],
+        *,
+        pending_lock: anyio.Lock,
+        proxy_request_budget_seconds: float,
+        stream_idle_timeout_seconds: float,
+    ) -> proxy_module._WebSocketReceiveTimeout | None:
+        # Trigger the silent reader without shrinking the downstream retry budget.
+        return await next_receive_timeout(
+            pending_requests,
+            pending_lock=pending_lock,
+            proxy_request_budget_seconds=proxy_request_budget_seconds,
+            stream_idle_timeout_seconds=0.1,
+        )
+
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", short_reader_timeout)
     record_retry_circuit_failure = AsyncMock(wraps=service._record_http_bridge_retry_circuit_failure)
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_retry_circuit_failure)
 
