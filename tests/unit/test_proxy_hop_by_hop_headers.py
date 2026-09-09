@@ -22,6 +22,9 @@ def test_http_builder_strips_hop_by_hop_and_connection_nominated_headers():
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Transfer-Encoding": "chunked",
+        "TE": "trailers",
+        "Trailer": "x-checksum",
+        "Upgrade": "websocket",
         "Connection": "keep-alive, x-client-hop, authorization, chatgpt-account-id, accept, content-type",
         "Keep-Alive": "timeout=5",
         "Proxy-Connection": "keep-alive",
@@ -36,6 +39,9 @@ def test_http_builder_strips_hop_by_hop_and_connection_nominated_headers():
         "keep-alive",
         "proxy-connection",
         "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
         "x-client-hop",
     ):
         assert name not in lowered
