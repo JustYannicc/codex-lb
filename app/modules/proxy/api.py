@@ -703,6 +703,7 @@ _IMAGE_ERROR_TYPE_STATUS: Final[dict[str, int]] = {
 # override before the type-based mapping above.
 _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "content_policy_violation": 400,
+    "token_revoked": 401,
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }

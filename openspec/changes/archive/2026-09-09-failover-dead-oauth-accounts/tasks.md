@@ -14,3 +14,9 @@
 
 - [x] 3.1 Run focused unit and integration regressions.
 - [x] 3.2 Run lint, type checks, and strict OpenSpec validation.
+
+## 4. Images review follow-up
+
+- [x] 4.1 Map terminal `token_revoked` Images errors to HTTP 401 independently of the upstream error type.
+- [x] 4.2 Cover generation and edit HTTP envelopes on canonical and Codex-base routes for `response.failed` and `error` events without an authentication type.
+- [x] 4.3 Verify the updated branch after merging current main and sync the requirements.

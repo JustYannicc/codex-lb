@@ -12,6 +12,8 @@ token classification and verifies it against those existing recovery contracts.
 
 - Recognize `token_revoked` as a permanent reauthentication failure.
 - Preserve HTTP 401 mapping even when upstream omits the authentication error type.
+- Apply the same HTTP 401 mapping to non-streaming Images requests and their
+  Codex-base aliases after failover is exhausted.
 - Use the shared WebSocket authentication-failure code set for `token_revoked`.
 - Make the existing HTTP bridge file-affinity ordering test hermetic without
   changing its fail-closed assertion.
@@ -22,6 +24,7 @@ token classification and verifies it against those existing recovery contracts.
 
 - `account-routing`: Classify the upstream revoked-token spelling as requiring
   reauthentication.
+- `images-api-compat`: Preserve HTTP 401 for revoked-token terminal errors.
 
 ## Impact
 
