@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from yarl import URL
 
 from app.core.config.settings import get_settings
@@ -176,8 +182,51 @@ async def socks_proxy(upstream_port: int):
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+def verified_test_tls(tmp_path):
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "backend.invalid")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("backend.invalid")]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server.load_cert_chain(cert_path, key_path)
+    client = ssl.create_default_context(cafile=str(cert_path))
+    assert client.check_hostname and client.verify_mode == ssl.CERT_REQUIRED
+    return server, client
+
+
+@asynccontextmanager
+async def running_server(app: web.Application, context: ssl.SSLContext | None):
+    server = TestServer(app)
+    await server.start_server(ssl=context)
+    try:
+        yield server
+    finally:
+        await server.close()
+
+
 @pytest.mark.parametrize("websocket", [False, True])
-async def test_socks_proxy_tunnels_http_and_websocket_with_remote_dns(monkeypatch, websocket):
+@pytest.mark.parametrize(
+    "scheme,proxy_name", [("http", "SOCKS_PROXY"), ("https", "HTTP_PROXY"), ("https", "ALL_PROXY")]
+)
+async def test_socks_proxy_tunnels_http_and_websocket_with_remote_dns(
+    monkeypatch, tmp_path, websocket, scheme, proxy_name
+):
     async def upstream(request):
         assert request.headers["Authorization"] == "Bearer original"
         if websocket:
@@ -190,14 +239,20 @@ async def test_socks_proxy_tunnels_http_and_websocket_with_remote_dns(monkeypatc
 
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", upstream)
-    async with TestServer(app) as upstream_server:
+    server_tls = None
+    if scheme == "https":
+        server_tls, client_tls = verified_test_tls(tmp_path)
+        monkeypatch.setattr("app.modules.desktop_relay.transport._shared_ssl_context", lambda: client_tls)
+    async with running_server(app, server_tls) as upstream_server:
         port = upstream_server.port
         assert isinstance(port, int)
         async with socks_proxy(port) as (proxy, destinations):
-            monkeypatch.setenv("SOCKS_PROXY", proxy)
+            monkeypatch.setenv(proxy_name, proxy)
+            if proxy_name == "ALL_PROXY":
+                monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
             monkeypatch.setenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", "true")
             get_settings.cache_clear()
-            origin = URL(f"http://backend.invalid:{upstream_server.port}")
+            origin = URL(f"{scheme}://backend.invalid:{upstream_server.port}")
             async with TestServer(_create_app(URL("http://127.0.0.1:1"), origin)) as relay:
                 async with ClientSession() as client:
                     headers = {"Host": "localhost:8000", "Authorization": "Bearer original"}

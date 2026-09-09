@@ -20,7 +20,7 @@ from aiohttp.client_middlewares import ClientHandlerType
 from multidict import CIMultiDict
 from yarl import URL
 
-from app.core.clients.http import _build_pooled_connector, _shared_ssl_context, _socks_proxy_config
+from app.core.clients.http import _build_pooled_connector, _shared_ssl_context, _socks_proxy_config, _SocksProxyConfig
 from app.core.config.settings import get_settings
 from app.core.utils.proxy_env import resolve_http_proxy_from_env, resolve_websocket_proxy_from_env
 
@@ -173,8 +173,11 @@ class RelayTransport:
 
 
 @asynccontextmanager
-async def _open_route(proxy: str | None, timeout: float) -> AsyncIterator[_Route]:
-    socks = _socks_proxy_config({"ALL_PROXY": proxy}) if proxy else None
+async def _open_route(
+    proxy: str | None, timeout: float, *, socks: _SocksProxyConfig | None = None
+) -> AsyncIterator[_Route]:
+    if socks is None and proxy:
+        socks = _socks_proxy_config({"ALL_PROXY": proxy})
     connector = _build_pooled_connector(get_settings(), _shared_ssl_context(), socks)
     async with ClientSession(
         connector=connector,
@@ -195,6 +198,8 @@ async def _open_route(proxy: str | None, timeout: float) -> AsyncIterator[_Route
 async def open_transport(backend_origin: URL, timeout: float) -> AsyncIterator[RelayTransport]:
     settings = get_settings()
     environ = settings.upstream_websocket_proxy_env()
+    # Shared policy gives any configured SOCKS route precedence over HTTP proxies.
+    socks = _socks_proxy_config(environ)
     http_proxy = resolve_http_proxy_from_env(str(backend_origin), environ)
     websocket_origin = backend_origin.with_scheme("wss" if backend_origin.scheme == "https" else "ws")
     websocket_proxy = (
@@ -204,6 +209,8 @@ async def open_transport(backend_origin: URL, timeout: float) -> AsyncIterator[R
     )
     async with AsyncExitStack() as stack:
         local = await stack.enter_async_context(_open_route(None, timeout))
-        http = await stack.enter_async_context(_open_route(http_proxy, timeout))
-        websocket = await stack.enter_async_context(_open_route(websocket_proxy, timeout))
+        http = await stack.enter_async_context(_open_route(http_proxy, timeout, socks=socks))
+        websocket = await stack.enter_async_context(
+            _open_route(websocket_proxy, timeout, socks=socks if settings.upstream_websocket_trust_env else None)
+        )
         yield RelayTransport(local, http, websocket)
