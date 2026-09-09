@@ -162,3 +162,7 @@ epoch; it does not change the existing transport-security policy.
   fences. They do not restore older unconditional full-resend or same-key
   completion promises. Owner forwarding applies dashboard timeout overrides
   after the existing pre-dispatch classifier and process-epoch guard.
+- A completion can capture active poison and cross its deadline during an
+  await. After expiry, cleanup compares the retained entry with the raw
+  generation captured alongside poison provenance. Time passing does not
+  itself count as new evidence or authorize a fresh fence capture.

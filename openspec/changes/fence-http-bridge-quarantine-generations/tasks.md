@@ -86,3 +86,6 @@
 - [x] 1.35 Reconcile archived quarantine requirements and dashboard timeout
   overrides with the classifier/epoch guard, and verify the composed bridge
   recovery and pre-await completion fences against the pinned upstream.
+- [x] 1.36 Use the captured raw generation when poison expires during
+  completion awaits, clearing unchanged weaker evidence and preserving
+  post-capture arms and first strikes.

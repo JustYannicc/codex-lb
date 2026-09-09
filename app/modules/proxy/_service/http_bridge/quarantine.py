@@ -731,7 +731,9 @@ def _clear_http_bridge_quarantine(
                 return False
         active_poison = _http_bridge_quarantine_has_active_poison(entry, now)
         fence_generation = entry.poison_generation if active_poison else entry.generation
-        if captured_generation is None or fence_generation != captured_generation:
+        captured_raw = captured_raw_generation if captured_raw_generation is not None else captured_generation
+        expected_generation = captured_generation if active_poison else captured_raw
+        if captured_generation is None or fence_generation != expected_generation:
             return False
         if entry.quarantined_until <= now:
             # An inactive entry still carries the eventless strike counter;
@@ -742,7 +744,6 @@ def _clear_http_bridge_quarantine(
         if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until <= now:
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
-        captured_raw = captured_raw_generation if captured_raw_generation is not None else captured_generation
         if (
             active_poison
             and entry.generation != captured_raw

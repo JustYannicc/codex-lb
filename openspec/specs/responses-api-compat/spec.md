@@ -6492,6 +6492,10 @@ same observation. Poison provenance MUST fence capture and cleanup only while
 the poison-specific deadline is active. A completion during a surviving
 weaker-only window MUST capture and clear the observed raw generation; newer
 weak or poison evidence armed after capture MUST survive that completion.
+If poison expires between capture and cleanup, cleanup MUST compare the
+entry's raw generation with the raw generation from that same capture,
+without recapturing. An unchanged observed weaker tail MUST clear; weak,
+poison, or first-strike evidence recorded after capture MUST remain fenced.
 Poison-arm fence capture for durable revocation MUST return absence after the
 entry's poison deadline expires, even while service-level overflow remains
 active. A durable-load miss MUST NOT replace an observed weaker-only tail's
