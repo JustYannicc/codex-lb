@@ -2307,7 +2307,11 @@ def _state_from_account(
         primary_entry,
         effective_secondary_entry,
         secondary_entry,
-        recorded_after=effective_blocked_at if account.status == AccountStatus.QUOTA_EXCEEDED else None,
+        recorded_after=(
+            effective_blocked_at
+            if account.status in {AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED}
+            else None
+        ),
     )
     # If the usage window has reset (reset_at is in the past), the last
     # recorded sample describes an expired window at ANY used percentage:
@@ -2348,7 +2352,12 @@ def _state_from_account(
         effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at, now=now)
         and effective_secondary_entry.used_percent is not None
-        and (effective_secondary_entry.reset_at is None or float(effective_secondary_entry.reset_at) > now)
+        and (
+            secondary_used is not None
+            and secondary_used < 100.0
+            or effective_secondary_entry.reset_at is None
+            or float(effective_secondary_entry.reset_at) > now
+        )
         and quota_available
     )
     # An account marked RATE_LIMITED by an actual 429 always carries a
@@ -2789,6 +2798,7 @@ def background_recovery_state_from_account(
             primary_entry,
             normalized_usage.effective_secondary_entry,
             secondary_entry,
+            recorded_after=blocked_at,
         )
         quota_available = usage_windows_allow_recovery(
             recovery_primary_used(

@@ -3765,6 +3765,85 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch, 
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_state_from_account_rate_limited_ignores_pre_block_credit_snapshot(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    stale_primary_with_credits = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now - 1),
+        recorded_at=_epoch_to_naive_utc(now - 300),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=25.0,
+    )
+    fresh_exhausted_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=stale_primary_with_credits,
+        secondary_entry=fresh_exhausted_secondary,
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == future_reset
+
+
+@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
+def test_state_from_account_free_plan_recovers_after_expired_long_window(monkeypatch, plan_type):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now - 1),
+        blocked_at=int(blocked),
+        plan_type=plan_type,
+    )
+    synthetic_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=43200,
+    )
+    expired_monthly = _make_test_usage(
+        window="monthly",
+        used_percent=100.0,
+        reset_at=int(now - 1),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=synthetic_primary,
+        secondary_entry=expired_monthly,
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+
+
 @pytest.mark.parametrize("primary_used", [10.0, 100.0])
 def test_state_from_account_rate_limited_requires_available_primary(monkeypatch, primary_used):
     now = 1_700_000_000.0
@@ -4410,6 +4489,44 @@ def test_background_recovery_state_allows_alias_credit_recovery_after_reset_elap
     assert state.status == AccountStatus.ACTIVE
     assert state.reset_at is None
     assert state.blocked_at is None
+
+
+def test_background_recovery_state_ignores_pre_block_credit_snapshot(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    stale_primary_with_credits = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=25.0,
+    )
+    fresh_exhausted_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary_with_credits,
+        secondary_entry=fresh_exhausted_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
 
 
 def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadata_missing(monkeypatch):

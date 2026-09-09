@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
 import aiohttp
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
-from app.core.balancer import PERMANENT_FAILURE_CODES, failover_decision
+from app.core.balancer import failover_decision
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -777,21 +777,6 @@ class _StreamingRetryMixin:
             return required_account_id is None and not responses_payload_is_account_neutral_fresh_replay(
                 payload.to_replay_safety_payload()
             )
-
-        def _clear_previsible_dispatch_owner(account_id: str) -> None:
-            """Drop a provisional owner after upstream rejects an unanchored request."""
-            nonlocal payload_replay_required_account_id
-            if (
-                payload_replay_required_account_id != account_id
-                or require_preferred_account
-                or preferred_account_id is not None
-                or file_preferred_account_id is not None
-                or turn_state_owner_account_id is not None
-                or routing_strategy == "single_account"
-                or payload.previous_response_id is not None
-            ):
-                return
-            payload_replay_required_account_id = None
 
         def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
             # Only a proxy-injected owner anchor with locally verified full
@@ -2484,11 +2469,6 @@ class _StreamingRetryMixin:
                                     transient_failed_account_id = account.id
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
-                                    if (
-                                        classified["failure_class"] in {"rate_limit", "quota"}
-                                        or code in PERMANENT_FAILURE_CODES
-                                    ):
-                                        _clear_previsible_dispatch_owner(account.id)
                                     excluded_account_ids.add(account.id)
                                     _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
@@ -2639,8 +2619,6 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                        if exc.code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
-                            _clear_previsible_dispatch_owner(account.id)
                     _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
@@ -3138,12 +3116,6 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                if (
-                                    retry_exc.status_code == 401
-                                    or classified["failure_class"] in {"rate_limit", "quota"}
-                                    or current_error_code in PERMANENT_FAILURE_CODES
-                                ):
-                                    _clear_previsible_dispatch_owner(account.id)
                                 _move_verified_fresh_replay_from_owner(
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",

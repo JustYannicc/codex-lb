@@ -758,7 +758,7 @@ async def test_stream_previsible_quota_failover_does_not_pin_replay_to_failed_ac
     monkeypatch,
     failure_delivery,
 ):
-    """A previsible quota failure must not turn a soft prompt-cache request into hard account ownership."""
+    """A dispatched nonportable body must not cross accounts after quota failure."""
     await _import_account(async_client, "acc_stream_previsible_quota_a", "stream_previsible_quota_a@example.com")
     await _import_account(async_client, "acc_stream_previsible_quota_b", "stream_previsible_quota_b@example.com")
 
@@ -807,9 +807,9 @@ async def test_stream_previsible_quota_failover_does_not_pin_replay_to_failed_ac
         },
     )
 
-    assert response.status_code == 200
-    assert "response.completed" in response.text
-    assert seen_account_ids[:2] == ["acc_stream_previsible_quota_a", "acc_stream_previsible_quota_b"]
+    assert response.status_code == (429 if failure_delivery == "http_status" else 200)
+    assert "response.completed" not in response.text
+    assert seen_account_ids == ["acc_stream_previsible_quota_a"]
 
 
 @pytest.mark.asyncio
