@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import Mock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,6 +11,7 @@ import app.modules.proxy.service as proxy_module
 from app.db.models import Account
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy import api as proxy_api
 from app.modules.request_logs.repository import RequestLogsRepository
 from tests.integration.test_model_source_routing import _create_model_source, _set_source_enabled
 from tests.integration.test_proxy_responses import _disable_http_bridge, _make_auth_json  # noqa: F401
@@ -39,12 +41,24 @@ async def _create_disabled_source(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _RESPONSE_PATHS)
 @pytest.mark.parametrize("turn_state", ["turn_registered_owner", "http_turn_registered_owner"])
-@pytest.mark.parametrize("source_disabled", [False, True], ids=["source-missing", "source-disabled"])
+@pytest.mark.parametrize("source_state", ["missing", "disabled", "enabled"])
 async def test_registered_synthetic_turn_keeps_subscription_owner_without_previous_response(
-    async_client, app_instance, monkeypatch, path, turn_state, source_disabled
+    async_client, app_instance, monkeypatch, path, turn_state, source_state
 ):
-    if source_disabled:
+    if source_state == "disabled":
         await _create_disabled_source(async_client)
+    elif source_state == "enabled":
+        await _create_model_source(
+            async_client,
+            name="continuity-enabled-source",
+            model=_MODEL,
+            base_url="http://127.0.0.1:1/v1",
+            supports_responses=True,
+        )
+    dispatch = Mock(wraps=proxy_api.SourceDispatch)
+    claim_source = Mock(wraps=proxy_api.try_claim_source_admission)
+    monkeypatch.setattr(proxy_api, "SourceDispatch", dispatch)
+    monkeypatch.setattr(proxy_api, "try_claim_source_admission", claim_source)
     for raw_id in ("acc_continuity_owner", "acc_continuity_other"):
         auth = _make_auth_json(raw_id, f"{raw_id}@example.com")
         imported = await async_client.post(
@@ -111,14 +125,29 @@ async def test_registered_synthetic_turn_keeps_subscription_owner_without_previo
     assert response.status_code == 200
     assert '"response.completed"' in response.text
     assert sent_accounts == ["acc_continuity_owner"]
+    dispatch.assert_not_called()
+    claim_source.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _RESPONSE_PATHS)
-async def test_disabled_source_owner_lookup_failure_preserves_sanitized_http_error(
-    async_client, app_instance, monkeypatch, path
+@pytest.mark.parametrize("source_disabled", [False, True], ids=["enabled", "disabled"])
+async def test_source_owner_lookup_failure_preserves_sanitized_http_error(
+    async_client, app_instance, monkeypatch, path, source_disabled
 ):
-    await _create_disabled_source(async_client)
+    source_id = await _create_model_source(
+        async_client,
+        name="lookup-failure-source",
+        model=_MODEL,
+        base_url="http://127.0.0.1:1/v1",
+        supports_responses=True,
+    )
+    if source_disabled:
+        await _set_source_enabled(async_client, source_id, False)
+    dispatch = Mock(wraps=proxy_api.SourceDispatch)
+    claim_source = Mock(wraps=proxy_api.try_claim_source_admission)
+    monkeypatch.setattr(proxy_api, "SourceDispatch", dispatch)
+    monkeypatch.setattr(proxy_api, "try_claim_source_admission", claim_source)
     lookups: list[str] = []
 
     async def fail_owner_lookup(self, *, response_id, api_key_id, session_id=None):
@@ -148,3 +177,5 @@ async def test_disabled_source_owner_lookup_failure_preserves_sanitized_http_err
     assert response.json()["error"]["type"] == "server_error"
     assert response.json()["error"]["message"] == "Previous response owner lookup failed; retry later."
     assert "private database connection detail" not in response.text
+    dispatch.assert_not_called()
+    claim_source.assert_not_called()

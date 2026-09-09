@@ -29,7 +29,6 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
-    TypeVar,
     cast,
 )
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -58,10 +57,12 @@ from app.core.clients.native_egress import (
     NativeEgressResponse,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeResponsesEvent,
     NativeSseOptions,
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -99,6 +100,7 @@ from app.core.resilience.network_recovery import (
     is_proxy_endpoint_failure,
     process_network_error_code,
 )
+from app.core.resilience.toggles import current_resilience_toggles
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.usage.live_hub import publish_live_usage
@@ -331,8 +333,6 @@ _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = conte
     default=None,
 )
 
-R = TypeVar("R")
-
 
 @dataclass(slots=True)
 class UpstreamProxyRouteTrace:
@@ -367,19 +367,17 @@ def _codex_route_transport_error_message(
     return codex_transport_error_message(operation, endpoint_id, exc)
 
 
-async def _call_with_service_circuit_breaker(
-    request: Awaitable[R],
-    *,
-    settings: Settings | None = None,
-    account_id: str | None = None,
-) -> R:
-    if not account_id:
-        return await request
-    effective_settings = settings or get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, effective_settings)
-    if circuit_breaker is None:
-        return await request
-    return await circuit_breaker.call(request)
+def _account_circuit_breaker(account_id: str | None, settings: Settings) -> CircuitBreaker | None:
+    """Return the account's breaker when the dashboard toggle is on, else ``None``.
+
+    C2-3 resilience toggles: breakers are constructed unconditionally; *use* is
+    gated per request by ``circuit_breaker_enabled`` from the dashboard
+    snapshot the request path bound (``settings`` is only the env fallback for
+    an unbound task).
+    """
+    if not account_id or not current_resilience_toggles(startup_settings=settings).circuit_breaker_enabled:
+        return None
+    return get_circuit_breaker_for_account(account_id)
 
 
 @asynccontextmanager
@@ -391,7 +389,7 @@ async def _service_circuit_breaker_context(
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
-    cb = get_circuit_breaker_for_account(account_id, effective_settings) if account_id else None
+    cb = _account_circuit_breaker(account_id, effective_settings)
     is_probe = False
     if cb is not None:
         try:
@@ -1854,12 +1852,6 @@ async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str 
         return None, await resp.text()
 
 
-def _error_archive_payload(data: object | None, text: str | None) -> object:
-    if data is not None:
-        return data
-    return {"text": text or ""}
-
-
 def _error_event_from_response_body(
     resp: ErrorResponse,
     *,
@@ -2058,6 +2050,8 @@ def _normalize_multi_data_sse_block(
 
 
 def _normalize_sse_event_block(event_block: str) -> str:
+    if isinstance(event_block, NativeResponsesEvent) and not event_block.python_normalization:
+        return event_block
     if not event_block:
         return event_block
 
@@ -2158,6 +2152,8 @@ def _normalize_stream_payload_for_http_block(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[str, str | None]:
+    if isinstance(event_block, NativeResponsesEvent) and not event_block.python_normalization:
+        return event_block, event_block.event_type
     # Cheap path for the dominant delta traffic: a canonically framed block
     # exposes its event type on the `event:` line, so no JSON parse is needed.
     # Full parsing remains for `error` frames and any block carrying an
@@ -2225,6 +2221,12 @@ def _to_websocket_upstream_url(url: str) -> str:
     else:
         scheme = parsed.scheme
     return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+# The upstream stream transport is dashboard-owned; the proxy service resolves
+# the operator's choice and passes it as ``transport_override``. Callers that
+# do not pass one (warmup probes, bridge owner forwarding) get "auto".
+_DEFAULT_UPSTREAM_STREAM_TRANSPORT = "auto"
 
 
 def _configured_stream_transport(
@@ -2516,7 +2518,7 @@ async def _open_upstream_websocket(
     hold_half_open_probe: bool = False,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     settings = get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
     is_probe = False
     if circuit_breaker is not None:
         is_probe = await circuit_breaker.pre_call_check()
@@ -2825,8 +2827,7 @@ async def _stream_responses_via_websocket(
     lifecycle_recorded = False
     seen_terminal = False
     settings = get_settings()
-    if account_id is not None:
-        circuit_breaker = get_circuit_breaker_for_account(account_id, settings)
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
 
     async def _record_lifecycle_success() -> None:
         nonlocal lifecycle_recorded
@@ -3500,13 +3501,6 @@ def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
         return None
 
 
-def _is_blocked_ip_literal(host: str) -> bool:
-    ip = _parse_ip_literal(host)
-    if ip is None:
-        return False
-    return _is_disallowed_ip(ip)
-
-
 async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str] | None:
     loop = asyncio.get_running_loop()
     try:
@@ -3539,11 +3533,6 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
         seen.add(normalized_ip)
         resolved_ips.append(normalized_ip)
     return resolved_ips or None
-
-
-async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
-    resolved_ips = await _resolve_global_ips(host, timeout_seconds=timeout_seconds)
-    return resolved_ips is None
 
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -3653,7 +3642,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
 ) -> AsyncGenerator[str, None]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
         headers,
         codex_installation_id,
@@ -3727,7 +3716,7 @@ async def _stream_responses_with_session(
         "http"
         if non_streaming_http
         else _configured_stream_transport(
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
         )
     )
@@ -3736,7 +3725,7 @@ async def _stream_responses_with_session(
         if non_streaming_http
         else _resolve_stream_transport(
             settings=settings,
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
             model=payload.model,
             headers=headers,
@@ -3827,7 +3816,7 @@ async def _stream_responses_with_session(
                 }
                 if not non_streaming_http:
                     request_kwargs["native_sse"] = NativeSseOptions(
-                        effective_idle_timeout, settings.max_sse_event_bytes
+                        effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
                     )
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):
@@ -3977,7 +3966,9 @@ async def _stream_responses_with_session(
                             response_head_timeout_seconds=current_timeout.sock_read,
                             proxy_url=resolve_http_proxy_from_env(url),
                             sse=(
-                                NativeSseOptions(effective_idle_timeout, settings.max_sse_event_bytes)
+                                NativeSseOptions(
+                                    effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
+                                )
                                 if not non_streaming_http
                                 else None
                             ),
@@ -4742,7 +4733,7 @@ class _CompactCommandTransport:
     allow_direct_egress: bool = False
 
     async def execute(self) -> CompactResponsePayload:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         native_header_order = _native_responses_header_order(self.headers)
         upstream_base = settings.upstream_base_url.rstrip("/")
         url = f"{upstream_base}/codex/responses"
@@ -5288,7 +5279,7 @@ async def thread_goal_request(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/thread/goal/{operation}"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept="application/json")
@@ -5498,7 +5489,7 @@ async def codex_control_request(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
     effective_privacy_policy = (
@@ -5743,7 +5734,7 @@ async def _transcribe_audio_with_session(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = False,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/transcribe"
     upstream_headers = _build_upstream_transcribe_headers(

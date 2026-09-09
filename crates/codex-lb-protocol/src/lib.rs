@@ -13,7 +13,9 @@ pub const CAPABILITIES: &[&str] = &[
     "http_compact_collect_v1",
     "http_compact_sse_v1",
     "http_sse_v1",
+    "http_responses_events_v1",
     "websocket",
+    "websocket_responses_events_v1",
     "websocket_send_ack",
 ];
 
@@ -69,6 +71,8 @@ pub struct NativeSseOptions {
     pub content_type_aware: bool,
     #[serde(default)]
     pub collect_compact: bool,
+    #[serde(default)]
+    pub interpret_responses: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -81,6 +85,12 @@ pub struct NativeWebSocketRequest {
     pub ping_interval_ms: Option<u64>,
     pub ping_timeout_ms: Option<u64>,
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interpret_responses: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -105,6 +115,13 @@ pub enum NativeEvent {
         text: String,
         more: bool,
     },
+    ResponsesEvent {
+        request_id: String,
+        text: String,
+        more: bool,
+        event_type: Option<String>,
+        python_normalization: bool,
+    },
     SseEventTooLarge {
         request_id: String,
         size_bytes: usize,
@@ -126,6 +143,12 @@ pub enum NativeEvent {
     WebsocketText {
         request_id: String,
         text: String,
+    },
+    WebsocketResponsesText {
+        request_id: String,
+        text: String,
+        event_type: Option<String>,
+        payload: Box<serde_json::value::RawValue>,
     },
     WebsocketBinary {
         request_id: String,

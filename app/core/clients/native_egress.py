@@ -17,6 +17,7 @@ from typing import Protocol, cast
 from multidict import CIMultiDict
 
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.types import JsonValue
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_compact_collect_v1",
         "http_compact_sse_v1",
         "http_sse_v1",
+        "http_responses_events_v1",
         "websocket",
+        "websocket_responses_events_v1",
         "websocket_send_ack",
     }
 )
@@ -55,7 +58,7 @@ _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
 def _event_payload_size(item: object) -> int:
     """Queued payload bytes of one helper event: its base64 ``data`` (ASCII, so
-    the string length is the byte length) or its UTF-8 encoded SSE ``text``."""
+    the string length is the byte length) or UTF-8 SSE text and type metadata."""
     if not isinstance(item, dict):
         return 0
     data = item.get("data")
@@ -63,7 +66,12 @@ def _event_payload_size(item: object) -> int:
         return len(data)
     text = item.get("text")
     if isinstance(text, str):
-        return len(text.encode("utf-8"))
+        kind = item.get("event_type")
+        metadata_size = len(kind.encode("utf-8")) if isinstance(kind, str) else 0
+        # Responses WebSocket IPC embeds the original JSON a second time as
+        # payload. Charge both copies without reserializing the decoded object.
+        copies = 2 if item.get("type") == "websocket_responses_text" else 1
+        return copies * len(text.encode("utf-8")) + metadata_size
     return 0
 
 
@@ -148,6 +156,7 @@ class NativeSseOptions:
     max_event_bytes: int
     content_type_aware: bool = False
     collect_compact: bool = False
+    interpret_responses: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +181,7 @@ class NativeWebSocketRequest:
     ping_interval_seconds: float | None = 20.0
     ping_timeout_seconds: float | None = None
     proxy_url: str | None = None
+    interpret_responses: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,12 +191,28 @@ class NativeWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    payload: dict[str, JsonValue] | None = None
 
 
 class NativeEgressClient(Protocol):
     async def request(self, request: NativeEgressRequest) -> NativeEgressResponse: ...
 
     async def websocket(self, request: NativeWebSocketRequest) -> NativeEgressWebSocket: ...
+
+
+class NativeResponsesEvent(str):
+    """A complete SSE block with interpretation metadata from the Rust owner."""
+
+    event_type: str | None
+    python_normalization: bool
+
+    def __new__(cls, text: str, event_type: str | None, python_normalization: bool) -> NativeResponsesEvent:
+        block = super().__new__(cls, text)
+        block.event_type = event_type
+        block.python_normalization = python_normalization
+        return block
 
 
 class NativeEgressResponse:
@@ -206,6 +232,7 @@ class NativeEgressResponse:
         events: asyncio.Queue[dict[str, object] | BaseException],
         sse_framed: bool = False,
         compact_collected: bool = False,
+        responses_interpreted: bool = False,
     ) -> None:
         self.status = status
         self.http_version = http_version
@@ -214,6 +241,7 @@ class NativeEgressResponse:
         self.content = _NativeEgressContent(self)
         self.sse_framed = sse_framed
         self.compact_collected = compact_collected
+        self.responses_interpreted = responses_interpreted
         self._client = client
         self._request_id = request_id
         self._generation = generation
@@ -238,7 +266,8 @@ class NativeEgressResponse:
     async def iter_sse_events(self) -> AsyncGenerator[str, None]:
         if not self.sse_framed or self.compact_collected:
             raise NativeEgressProtocolError("native response did not request SSE framing")
-        async with contextlib.aclosing(self._iter_text_results("sse")) as results:
+        event_kind = "responses_event" if self.responses_interpreted else "sse"
+        async with contextlib.aclosing(self._iter_text_results(event_kind)) as results:
             async for text in results:
                 yield text
 
@@ -268,8 +297,24 @@ class NativeEgressResponse:
                 more = event.get("more")
                 if not isinstance(text, str) or type(more) is not bool:
                     raise NativeEgressProtocolError(f"native {event_type} fragment has an invalid shape")
-                if event_type == "compact" and len(text.encode("utf-8")) > 16 * 1024:
-                    raise NativeEgressProtocolError("native compact fragment exceeds the text limit")
+                if event_type in {"compact", "responses_event"} and len(text.encode("utf-8")) > 16 * 1024:
+                    raise NativeEgressProtocolError(f"native {event_type} fragment exceeds the text limit")
+                if event_type == "responses_event":
+                    kind = event.get("event_type")
+                    python_normalization = event.get("python_normalization")
+                    if (
+                        "event_type" not in event
+                        or (kind is not None and not isinstance(kind, str))
+                        or (isinstance(kind, str) and len(kind.encode("utf-8")) > 16 * 1024)
+                        or type(python_normalization) is not bool
+                        or (more and (kind is not None or python_normalization))
+                    ):
+                        raise NativeEgressProtocolError("native Responses event has invalid metadata")
+                    if not more:
+                        text = "".join(fragments) + text
+                        fragments.clear()
+                        yield NativeResponsesEvent(text, kind, python_normalization)
+                        continue
                 if more:
                     fragments.append(text)
                 elif fragments:
@@ -523,6 +568,27 @@ class NativeEgressWebSocket:
                         raise NativeEgressProtocolError("native websocket text event is invalid")
                     self._queue_message(NativeWebSocketMessage(kind="text", text=text))
                     continue
+                if event_type == "websocket_responses_text":
+                    text = item.get("text")
+                    kind = item.get("event_type")
+                    payload = item.get("payload")
+                    if (
+                        not isinstance(text, str)
+                        or "event_type" not in item
+                        or (kind is not None and not isinstance(kind, str))
+                        or not isinstance(payload, dict)
+                    ):
+                        raise NativeEgressProtocolError("native Responses websocket event is invalid")
+                    self._queue_message(
+                        NativeWebSocketMessage(
+                            kind="text",
+                            text=text,
+                            responses_interpreted=True,
+                            event_type=kind,
+                            payload=cast(dict[str, JsonValue], payload),
+                        )
+                    )
+                    continue
                 if event_type == "websocket_binary":
                     encoded = item.get("data")
                     if not isinstance(encoded, str):
@@ -664,6 +730,8 @@ class SubprocessNativeEgressClient:
         if request.response_head_timeout_seconds is not None and request.response_head_timeout_seconds <= 0:
             raise ValueError("native egress response_head_timeout_seconds must be positive")
         if request.sse is not None:
+            if request.sse.collect_compact and request.sse.interpret_responses:
+                raise ValueError("native compact collection cannot interpret streaming Responses")
             if request.sse.collect_compact and not request.sse.content_type_aware:
                 raise ValueError("native compact collection requires content-type-aware framing")
             if not math.isfinite(request.sse.idle_timeout_seconds) or request.sse.idle_timeout_seconds <= 0:
@@ -698,6 +766,7 @@ class SubprocessNativeEgressClient:
                     "max_event_bytes": request.sse.max_event_bytes,
                     "content_type_aware": request.sse.content_type_aware,
                     "collect_compact": request.sse.collect_compact,
+                    "interpret_responses": request.sse.interpret_responses,
                 }
                 if request.sse is not None
                 else None
@@ -762,6 +831,7 @@ class SubprocessNativeEgressClient:
             events=events,
             sse_framed=sse_framed,
             compact_collected=sse_framed and request.sse is not None and request.sse.collect_compact,
+            responses_interpreted=sse_framed and request.sse is not None and request.sse.interpret_responses,
         )
 
     async def websocket(self, request: NativeWebSocketRequest) -> NativeEgressWebSocket:
@@ -803,6 +873,7 @@ class SubprocessNativeEgressClient:
                         else None
                     ),
                     "proxy_url": request.proxy_url,
+                    "interpret_responses": request.interpret_responses,
                 },
             )
             item = await asyncio.wait_for(events.get(), timeout=request.connect_timeout_seconds)
