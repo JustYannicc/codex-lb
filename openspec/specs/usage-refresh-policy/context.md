@@ -126,3 +126,7 @@ does not count as evidence that the account is healthy.
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+
+### Confirmed reset recovery
+
+Recovery resolves the newest valid adjacent transition after the matching block baseline. SQLite compares canonical observation timestamps directly to reset boundaries to retain microseconds. A rollback uses only the values written by its recovery attempt; a failed compare-and-set preserves the intervening writer. The reset-transition lookup requires the Alembic usage-history index migration, joined to the upstream schema through a merge revision.
