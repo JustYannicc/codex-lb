@@ -6,4 +6,4 @@
 ## 2. Verify and deliver
 
 - [x] 2.1 Run the existing options-endpoint suite, relevant repository tests, lint/type checks, and strict OpenSpec validation with both database URLs pinned to a dedicated temporary file.
-- [ ] 2.2 Review the exact diff and record the benchmark and live-evidence limits for spec sync and archival.
+- [x] 2.2 Review the exact diff and record the benchmark and live-evidence limits for spec sync and archival.
