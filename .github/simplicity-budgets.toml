@@ -52,7 +52,8 @@ max_items = 5
 # into fixed constants (#1340 precedent, slop-removal 0908 K1); 103 -> 96
 # K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
 # HTTP session bridge tunables.
-max = 96
+# 96 -> 97: opt-in Desktop relay topology, off/loopback/container.
+max = 97
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and
