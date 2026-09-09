@@ -78,3 +78,11 @@
   cleanup and replacement completion, and verify current/non-probe controls.
 - [x] Preserve captured probe generation for continuity returns and the one-shot
   positive elapsed durable transition when reconciling a persisted row.
+
+
+## Remaining delivery and policy gates
+
+- [x] Reconcile current upstream constants and extract reason-only incomplete classification into an independently based change, with reduced-only and both-order composition proof.
+- [ ] Resolve the sibling-failure and later owner-success settlement contract with the maintainer, then implement and verify the accepted rule.
+- [ ] Resolve the abandoned-probe expiry investigation or accepted ownership policy without releasing genuinely owned cleanup prematurely.
+- [ ] Complete current-head hosted checks and maintainer review before merge; archive only after final verification.

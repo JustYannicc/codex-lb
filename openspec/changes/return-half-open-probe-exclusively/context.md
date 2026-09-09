@@ -208,3 +208,12 @@ with the actor that accepted it. Automation run claims use their upstream
 captured-budget contract, independently of the unresolved bridge-expiry
 policy. This reconciliation preserves those contracts without changing the
 sibling-success or probe-expiry decisions.
+
+
+## Independent classifier extraction on current main
+
+The 2026-09-09 reconciliation includes upstream `c0beaaadd96a89f0240582b5449bf4dd50647c7d`, including its fixed bridge constants. It preserves the original contribution history and Lucas Klein's HTTP half-open regression and Tests credit.
+
+Reason-only `response.incomplete` classification now belongs to the independent `count-http-bridge-incomplete-reason` change and issue #2273. This probe change uses the existing explicit-error classification for its delayed terminal ownership regression, so its tests do not require the other branch. Its circuit eligibility and continuity-provenance requirements remain intact. The stuck-gate reader-cleanup test uses upstream's current constant rather than the removed setting.
+
+Both branches start from the same current main. The reduced probe branch passes 103 focused cases on its own; the classifier passes 19 cases on its own. Applying them in either order produces the same tree, and the combined 122-case set passes. These local results do not resolve the sibling-success settlement or abandoned-probe expiry questions tracked in #2272, and do not establish hosted approval or merge readiness.
