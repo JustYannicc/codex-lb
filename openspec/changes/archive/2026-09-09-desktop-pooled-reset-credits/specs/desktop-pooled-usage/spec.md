@@ -5,8 +5,8 @@
 The Desktop response MUST retain the original upstream caller envelope, including identity, plan, credits, spend controls, billing, reset credits and unknown account fields. The reset-credit field MAY instead use the explicitly enabled Desktop reset pool governed by `desktop-pooled-reset-credits`; when pooling is disabled it MUST remain original-account owned. It MUST replace only the canonical quota and additional quota for which equivalent fresh pooled evidence exists. Model-specific quota matching MUST match both normalized limit name and metered feature. Additional percentages MUST use equal-plan contributors with equal window durations, or a capacity-independent equal percentage across plans; otherwise the projection MUST return `pooled_usage_unavailable`. Unmatched same-named buckets MUST NOT be duplicated with an available bucket; unmatched original limits and reserve-model metadata MUST remain conservative. If the pooled main quota is available, the response MUST remove a known superseded `rate_limit_reached` marker and quota-only exhausted/reserve banners. It MUST preserve unknown restriction markers and account-owned spending restrictions. The response MUST NOT substitute another account's plan, credits or identity.
 
 #### Scenario: Account plan and balances differ from the pool
-- **WHEN** a Plus caller uses a pool that also contains Pro accounts
-- **THEN** the response retains the caller's plan, identifiers, credit balance and reset credits while returning pooled quota windows and reset pooling is disabled
+- **WHEN** a Plus caller uses a pool that also contains Pro accounts and reset pooling is disabled
+- **THEN** the response retains the caller's plan, identifiers, credit balance and reset credits while returning pooled quota windows
 
 #### Scenario: Luna reserve is superseded by genuine pool quota
 - **WHEN** the original response contains known quota-exhaustion state and the main pool quota is available
