@@ -89,6 +89,7 @@ from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery,
     process_network_error_code,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -120,6 +121,9 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
+)
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _stage_websocket_request_state_for_replay,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
@@ -333,6 +337,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _MODEL_OUTPUT_EVENT_TYPES,
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -415,6 +420,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
+    _record_or_defer_websocket_accepted_replay_health,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
@@ -430,6 +436,8 @@ from app.modules.proxy._service.websocket.helpers import (
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
+    _websocket_accepted_replay_can_switch_account,
+    _websocket_accepted_replay_may_exclude_account,
     _websocket_auth_failure_requires_reauth,
     _websocket_capability_metadata_values,
     _websocket_client_previous_response_full_resend_is_retry_safe,
@@ -760,13 +768,34 @@ class _ParsedUpstreamWebSocketFrame:
     event: OpenAIEvent | None
 
 
-def _parse_upstream_websocket_text_frame(text: str) -> _ParsedUpstreamWebSocketFrame:
+def _parse_upstream_websocket_text_frame(
+    text: str,
+    *,
+    message: Any | None = None,
+) -> _ParsedUpstreamWebSocketFrame:
     """Decode an upstream websocket text frame exactly once.
 
     The payload is json-decoded a single time, the event type is classified
     from the parsed dict, and pydantic validation runs only for lifecycle
     frames (the only events whose validated model fields the proxy consumes).
+    Native Responses frames supply the already-decoded payload alongside their
+    trusted classification, so this path reuses that object and avoids a
+    second JSON decode. Public error conversion still runs in this policy layer.
     """
+    native_payload = getattr(message, "payload", None)
+    native_event_type = getattr(message, "event_type", None)
+    if (
+        getattr(message, "responses_interpreted", False)
+        and isinstance(native_payload, dict)
+        and (native_event_type is None or isinstance(native_event_type, str))
+    ):
+        event = parse_sse_event_payload(native_payload) if native_event_type in _LIFECYCLE_EVENT_TYPES else None
+        return _ParsedUpstreamWebSocketFrame(
+            payload=native_payload,
+            event_type=native_event_type,
+            event=event,
+        )
+
     try:
         raw_payload = json.loads(text)
     except json.JSONDecodeError:
@@ -792,7 +821,11 @@ async def _websocket_archive_request_id_for_message(
     # Archive attribution only needs the payload dict (response ids and error
     # fields are read from it directly), so reuse the caller's parsed frame
     # when provided and never re-validate non-lifecycle deltas.
-    frame = parsed_frame if parsed_frame is not None else _parse_upstream_websocket_text_frame(message.text)
+    frame = (
+        parsed_frame
+        if parsed_frame is not None
+        else _parse_upstream_websocket_text_frame(message.text, message=message)
+    )
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
@@ -1016,7 +1049,7 @@ async def _process_and_forward_upstream_websocket_text(
     codex_session_affinity: bool,
     clock: Clock | None = None,
 ) -> bool:
-    parsed_frame = _parse_upstream_websocket_text_frame(text)
+    parsed_frame = _parse_upstream_websocket_text_frame(text, message=message)
     archive_request_id = await _websocket_archive_request_id_for_message(
         message,
         pending_requests=pending_requests,
@@ -1261,6 +1294,18 @@ async def _process_upstream_websocket_transport_end(
             pending_lock=anyio.Lock(),
             replay_refusal_reasons=replay_refusal_reasons,
         )
+        if (
+            replay_request_state is not None
+            and replay_request_state.replay_downstream_response_id is not None
+            and _websocket_accepted_replay_may_exclude_account(replay_request_state)
+        ):
+            # An accepted turn was lost on this account; move the
+            # account-neutral replay to another one like the bridge does. A
+            # replay still pinned to this owner (bound replay owner, file,
+            # turn state) or whose Codex session may resolve to a hard sticky
+            # owner reconnects here instead of excluding itself.
+            replay_request_state.excluded_account_ids.add(account.id)
+            replay_request_state.affinity_policy = replace(replay_request_state.affinity_policy, reallocate_sticky=True)
     if replay_request_state is not None:
         upstream_control.replay_request_state = replay_request_state
         _facade().logger.info(
@@ -1412,6 +1457,9 @@ class _WebSocketMixin:
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        # C2-3 resilience toggles: bound for this connection's task; every
+        # upstream connect rebinds from a fresh snapshot.
+        bind_resilience_toggles(settings, startup_settings=runtime_settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
@@ -3546,6 +3594,12 @@ class _WebSocketMixin:
                 request_state.conversation_id,
             ) = _request_log_client_fields(headers)
         base_settings = _facade().get_settings()
+        # C2-3 resilience toggles: fresh dashboard snapshot per upstream connect
+        # (before any runtime lock), bound for the client's breaker gate.
+        resilience = bind_resilience_toggles(
+            await _facade().get_settings_cache().get(),
+            startup_settings=base_settings,
+        )
         deadline = _websocket_connect_deadline(
             request_state,
             _facade()._stream_request_budget_seconds(
@@ -3791,7 +3845,7 @@ class _WebSocketMixin:
                         request_state=request_state,
                         attempt=attempt + 1,
                         max_attempts=max_attempts,
-                        deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                        deterministic_failover_enabled=resilience.deterministic_failover_enabled,
                         require_preferred_account=require_preferred_account,
                     )
                 if action == "failover_next":
@@ -5498,8 +5552,19 @@ class _WebSocketMixin:
                     return text
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     request_state.downstream_visible = True
+                if event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    # Parity with the bridge relay: the first model-output
+                    # event ends the accepted output-free window, so a later
+                    # capacity terminal or transport close is never replayed
+                    # under the id the client already read -- also when
+                    # upstream skipped ``response.in_progress`` and the count
+                    # alone still looks like a bare lifecycle prelude.
+                    request_state.upstream_model_output_seen = True
                 if event_type == "response.created" and request_state.suppress_next_created_downstream:
                     request_state.suppress_next_created_downstream = False
+                    upstream_control.suppress_downstream_event = True
+                elif event_type == "response.in_progress" and request_state.suppress_next_in_progress_downstream:
+                    request_state.suppress_next_in_progress_downstream = False
                     upstream_control.suppress_downstream_event = True
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, request_state)
@@ -5730,6 +5795,28 @@ class _WebSocketMixin:
                 surface="websocket",
             )
 
+        if (
+            event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
+            and not has_other_pending_requests
+        ):
+            # ``has_other_pending_requests`` was snapshotted under the lock when
+            # the terminal popped this request, but the thread-affinity refresh
+            # above awaits a sticky-session write, and an accepted request no
+            # longer holds the session create gate (released at
+            # ``response.created``): the sender may have admitted and sent a
+            # younger ``response.create`` on this socket meanwhile. A replay
+            # decided on the stale snapshot would retire the shared socket under
+            # that turn with no terminal and wedge the gate behind it. Re-read
+            # the pending set under the lock right before the replay classifiers
+            # consume it; the accepted path sets the reconnect latch without
+            # awaiting after this point, and the sender re-checks that latch at
+            # its send boundary, so a turn admitted later is transferred instead.
+            async with pending_lock:
+                has_other_pending_requests = _websocket_owner_switch_has_other_pending_requests(
+                    request_state,
+                    pending_requests,
+                )
+
         retry_is_previous_response_not_found = is_previous_response_not_found_event
         retry_error_code = _websocket_precreated_retry_error_code(
             request_state,
@@ -5782,8 +5869,19 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        # An accepted lifecycle is classified only by the output-free capacity
+        # rule and never takes the pre-created anchored branches below: its
+        # anchor is handled where the replay is staged, so an anchored turn the
+        # owner-switch prep cannot move is re-sent to its owner instead of
+        # being failed closed as ``previous_response_owner_unavailable``.
+        accepted_lifecycle_replay = (
+            retry_error_code is not None
+            and request_state.response_id is not None
+            and not request_state.awaiting_response_created
+        )
         retry_safe_owner_replay = bool(
-            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            not accepted_lifecycle_replay
+            and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and request_state.proxy_injected_previous_response_id
@@ -5791,7 +5889,8 @@ class _WebSocketMixin:
             and request_state.fresh_upstream_request_text
         )
         if (
-            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            not accepted_lifecycle_replay
+            and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and not retry_safe_previous_response_not_found
@@ -5827,11 +5926,16 @@ class _WebSocketMixin:
                 # re-acquires the account-local slot only when this field is
                 # clear.
                 await proxy._release_request_state_account_response_create_lease(request_state)
-                request_state.excluded_account_ids.add(account.id)
-                request_state.affinity_policy = replace(
-                    request_state.affinity_policy,
-                    reallocate_sticky=True,
-                )
+                if _websocket_accepted_replay_can_switch_account(request_state):
+                    request_state.excluded_account_ids.add(account.id)
+                    request_state.affinity_policy = replace(
+                        request_state.affinity_policy,
+                        reallocate_sticky=True,
+                    )
+                # Otherwise the session still requires this owner (turn state):
+                # the loop re-resolves that owner and the connect hard-requires
+                # it, so the fresh body is re-sent to the same account on a
+                # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
         if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
             retry_text = None
@@ -5906,17 +6010,55 @@ class _WebSocketMixin:
                         upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
+                # The loop re-acquires the create gate and admission for a
+                # replay whose gate is not held, so no gate is claimed here.
+                await _stage_websocket_request_state_for_replay(
+                    request_state,
+                    create_gate=None,
+                    surface="websocket",
+                    trigger="capacity_error",
+                )
                 request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
                 _clear_websocket_request_error_overrides(request_state)
+                if accepted_lifecycle_replay and request_state.previous_response_id is not None:
+                    # The owner-switch prep swaps the retained fresh body in and
+                    # releases the anchor owner's pin only when the move is
+                    # proven safe (proxy-injected anchor, account-neutral fresh
+                    # body). A client-supplied anchor or a fresh body that still
+                    # names an account-scoped upload keeps the anchored body: the
+                    # terminal proved the accepted turn produced nothing, so it
+                    # is re-sent as-is to the owner that accepted it (parity with
+                    # the bridge's owner-bound anchored retry). The dispatch
+                    # binding already requires that owner on the reconnect.
+                    _prepare_websocket_request_state_for_account_switch(request_state)
+                if accepted_lifecycle_replay and _websocket_accepted_replay_may_exclude_account(request_state):
+                    # The accepted turn failed on this account; move the
+                    # account-neutral replay to another one like the bridge does.
+                    # A replay still pinned to its owner, or whose Codex session
+                    # may resolve to a hard sticky owner, reconnects there instead.
+                    request_state.excluded_account_ids.add(account.id)
+                    request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
-                await proxy._handle_stream_error(
-                    account,
-                    {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
-                    retry_error_code,
-                )
+                if accepted_lifecycle_replay:
+                    # The accepted request still holds its API-key reservation:
+                    # the health write waits for its settlement (bridge parity).
+                    # Pre-created replays keep the immediate write; they are not
+                    # excluded from the reconnect and rely on the penalty to
+                    # steer selection away from this account.
+                    await _record_or_defer_websocket_accepted_replay_health(
+                        proxy,
+                        request_state,
+                        account=account,
+                        error_message=_websocket_event_error_message(event_type, payload),
+                        error_code=retry_error_code,
+                    )
+                else:
+                    await proxy._handle_stream_error(
+                        account,
+                        {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                        retry_error_code,
+                    )
             if retry_error_code is not None:
                 return downstream_text
 
@@ -6111,11 +6253,21 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         async with pending_lock:
+            # Keepalives carry the id the client is reading. A replayed request
+            # keeps its captured ``replay_downstream_response_id`` while its
+            # upstream response runs under a new id, and a staged replay whose
+            # replacement ``response.created`` has not arrived yet still owns
+            # a response the client already saw: both stay ``response.in_progress``
+            # under the visible id, like the bridge relay's idle keepalive.
             keepalive_ids = [
-                request_state.response_id for request_state in pending_requests if request_state.response_id is not None
+                _websocket_downstream_response_id(request_state)
+                for request_state in pending_requests
+                if request_state.response_id is not None or request_state.replay_downstream_response_id is not None
             ]
             precreated_request_ids = [
-                request_state.request_id for request_state in pending_requests if request_state.response_id is None
+                request_state.request_id
+                for request_state in pending_requests
+                if request_state.response_id is None and request_state.replay_downstream_response_id is None
             ]
         emitted = False
         for response_id in keepalive_ids:

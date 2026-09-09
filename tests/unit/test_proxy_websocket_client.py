@@ -17,7 +17,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
-from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexClient, CodexTransportError, CodexWebSocketResult
 from app.core.clients.native_egress import (
     NativeEgressTransportError,
     NativeEgressUnavailable,
@@ -755,6 +755,62 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert "max_size" not in call
     assert "protocols" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bypass_native", [False, True])
+async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass(
+    monkeypatch: pytest.MonkeyPatch, bypass_native: bool
+) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    native_websocket = _FakeNativeWebSocket()
+    legacy_websocket = _FakeCodexWebSocket()
+    native_open = AsyncMock(return_value=native_websocket)
+    legacy_open = AsyncMock(return_value=legacy_websocket)
+    client = CodexClient(
+        SimpleNamespace(ws_connect=legacy_open),
+        native_egress_client=cast(Any, SimpleNamespace(websocket=native_open)),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+    options = {"use_native_egress": False} if bypass_native else {}
+    websocket = await connect_responses_websocket(
+        {}, "access-token", "account-123", route=route, codex_client=client, **options
+    )
+    try:
+        assert getattr(websocket, "upstream_proxy_endpoint_id") == "ep_1"
+        assert getattr(websocket, "upstream_proxy_fallback_used") is False
+        if bypass_native:
+            native_open.assert_not_awaited()
+            legacy_open.assert_awaited_once()
+            kwargs = legacy_open.call_args.kwargs
+            assert kwargs["proxy"] == "http://proxy.test:8080"
+            assert "native_interpret_responses" not in kwargs
+            assert "use_native_egress" not in kwargs
+        else:
+            legacy_open.assert_not_awaited()
+            native_open.assert_awaited_once()
+            request = native_open.call_args.args[0]
+            assert isinstance(request, NativeWebSocketRequest)
+            assert request.interpret_responses is True
+            assert request.proxy_url == "http://proxy.test:8080"
+    finally:
+        await websocket.close()
+    assert legacy_websocket.closed is bypass_native
+    assert native_websocket.closed == (None if bypass_native else (1000, ""))
 
 
 @pytest.mark.asyncio

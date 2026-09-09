@@ -110,3 +110,13 @@ the completed local implementation tasks.
 
 The native-egress exception remains an owner decision. No new timeout or queue
 capacity policy is accepted by this performance change.
+
+## 12. September 9 upstream composition
+
+- [x] 12.1 Preserve native Responses interpretation and the HTTP-bridge bypass in the routed opener; retain production message and liveness/timing imports
+- [x] 12.2 Prove routed Responses through the real CodexClient selects legacy on explicit bypass and interpreted native transport by default
+- [x] 12.3 Validate affected bridge lifecycle, upstream integrations, specs, and independent review on the composed candidate
+
+This reconciliation changes no delivery-stall, replay-budget, or native
+acceptance policy. Exact target, candidate, and hosted evidence stay in the
+PR delivery record.
