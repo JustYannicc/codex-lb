@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from app.db.session import detach_session_objects
@@ -10,6 +11,8 @@ from app.modules.proxy.types import RateLimitStatusPayloadData
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
+
+_REFRESH_TIMEOUT_SECONDS = 5.0
 
 
 class DesktopUsageService:
@@ -25,7 +28,13 @@ class DesktopUsageService:
         updater = UsageUpdater(
             BackgroundUsageRepository(), BackgroundAccountsRepository(), BackgroundAdditionalUsageRepository()
         )
-        await updater.refresh_accounts(accounts, latest, own_singleflight_sessions=True, join_existing=True)
+        try:
+            async with asyncio.timeout(_REFRESH_TIMEOUT_SECONDS):
+                await updater.refresh_accounts(accounts, latest, own_singleflight_sessions=True, join_existing=True)
+        except TimeoutError:
+            # Shared refreshes own their sessions; only stop waiting here.
+            # The projector still rejects incomplete or stale persisted rows.
+            pass
         async with self._repo_factory() as repos:
             accounts = eligible_accounts(await repos.accounts.list_accounts())
             windows = {}
