@@ -455,6 +455,22 @@ class _ApiKeyUsageMixin:
                         get_request_id(),
                         exc_info=True,
                     )
+
+                    async def retry_release() -> None:
+                        await self._release_unsettled_stream_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            request_id=get_request_id() or reservation_id,
+                            retry_persistence_failures=True,
+                        )
+
+                    # Transfer cleanup before signaling readiness below. A
+                    # queued retry does not confirm release or permit health writes.
+                    self._schedule_cancel_safe_cleanup(
+                        retry_release(),
+                        action="release_compact_api_key_reservation_after_failed_settlement",
+                        request_id=get_request_id() or reservation_id,
+                    )
                 raise ProxyResponseError(
                     502,
                     openai_error(

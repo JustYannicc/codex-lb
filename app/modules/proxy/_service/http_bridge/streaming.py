@@ -249,11 +249,13 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
     _extract_model_class,
+    _is_synthesized_turn_state,
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
@@ -946,7 +948,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
-        downstream_turn_state_synthesized: bool | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -960,13 +962,6 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
-        if (
-            downstream_turn_state_synthesized is None
-            and downstream_turn_state is not None
-            and not forwarded_request
-            and _sticky_key_from_turn_state_header(headers) is None
-        ):
-            downstream_turn_state_synthesized = True
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
         filtered = filter_inbound_headers(headers)
         return self._stream_http_bridge_or_retry(
@@ -979,7 +974,7 @@ class _HTTPBridgeStreamingMixin:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
-            downstream_turn_state_synthesized=downstream_turn_state_synthesized,
+            synthesized_turn_state=synthesized_turn_state,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             forwarded_legacy_signature=forwarded_legacy_signature,
@@ -1006,7 +1001,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
-        downstream_turn_state_synthesized: bool | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1102,6 +1097,7 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
+                synthesized_turn_state=synthesized_turn_state,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
@@ -1129,7 +1125,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=runtime_config.queue_limit,
                     prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
                     downstream_turn_state=downstream_turn_state,
-                    downstream_turn_state_synthesized=downstream_turn_state_synthesized,
+                    synthesized_turn_state=synthesized_turn_state,
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=forwarded_original_request_unanchored,
                     forwarded_legacy_signature=forwarded_legacy_signature,
@@ -1259,6 +1255,7 @@ class _HTTPBridgeStreamingMixin:
             rewritten_file_account_id=rewritten_file_account_id,
             file_account_resolution_complete=True,
             upstream_stream_transport_override="http",
+            synthesized_turn_state=synthesized_turn_state,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
@@ -1281,7 +1278,7 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
-        downstream_turn_state_synthesized: bool | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1395,23 +1392,23 @@ class _HTTPBridgeStreamingMixin:
             lifecycle.settlement_confirmed = True
             await self._drain_deferred_account_error_backoffs(lifecycle.pending_backoffs)
 
-        incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
+        raw_incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
+        incoming_turn_state_header = raw_incoming_turn_state_header if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
-        if downstream_turn_state_synthesized is None:
-            downstream_turn_state_synthesized = (
-                downstream_turn_state is not None and not forwarded_request and incoming_turn_state_header is None
-            )
-            if (
-                downstream_turn_state is not None
-                and not downstream_turn_state_synthesized
-                and incoming_turn_state_header == downstream_turn_state
-            ):
-                async with self._http_bridge_lock:
-                    downstream_turn_state_synthesized = _http_bridge_local_turn_state_alias_is_synthesized_locked(
-                        self,
-                        downstream_turn_state,
-                        api_key.id if api_key is not None else None,
-                    )
+        downstream_turn_state_synthesized = (
+            downstream_turn_state is not None and downstream_turn_state == synthesized_turn_state
+        )
+        if (
+            downstream_turn_state is not None
+            and not downstream_turn_state_synthesized
+            and incoming_turn_state_header == downstream_turn_state
+        ):
+            async with self._http_bridge_lock:
+                downstream_turn_state_synthesized = _http_bridge_local_turn_state_alias_is_synthesized_locked(
+                    self,
+                    downstream_turn_state,
+                    api_key.id if api_key is not None else None,
+                )
         explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
         had_prompt_cache_key = explicit_prompt_cache_key is not None
         affinity = _sticky_key_for_responses_request(
@@ -1422,6 +1419,7 @@ class _HTTPBridgeStreamingMixin:
             openai_cache_affinity_max_age_seconds=dashboard_settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
         if affinity.codex_session_source == "thread_header":
@@ -1451,7 +1449,7 @@ class _HTTPBridgeStreamingMixin:
             allow_forwarded_affinity_headers=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
-            synthesized_turn_state=downstream_turn_state if downstream_turn_state_synthesized else None,
+            synthesized_turn_state=synthesized_turn_state,
         )
         durable_lookup_turn_state = (
             downstream_turn_state
@@ -2037,8 +2035,29 @@ class _HTTPBridgeStreamingMixin:
             and durable_model_transition_requires_owner
             and durable_model_transition_lookup.account_id is None
         )
+        owner_miss_continuation = request_state.previous_response_id is not None
+        if (
+            request_state.previous_response_id is None
+            and raw_incoming_turn_state_header is not None
+            and raw_incoming_turn_state_header != synthesized_turn_state
+            and _is_synthesized_turn_state(raw_incoming_turn_state_header)
+        ):
+            # The API may have resolved a live alias absent from durable lookup.
+            # Direct service callers must resolve that same registered owner.
+            turn_state_owner_account_id = payload._codex_lb_turn_state_owner_account_id
+            if not payload._codex_lb_turn_state_owner_lookup_completed and request_state.preferred_account_id is None:
+                turn_state_owner_account_id = await self._resolve_compact_turn_state_owner(
+                    turn_state=raw_incoming_turn_state_header,
+                    api_key=api_key,
+                    fail_on_missing=False,
+                )
+            request_state.preferred_account_id = resolve_required_account_id(
+                ("bridge", request_state.preferred_account_id),
+                ("registered turn state", turn_state_owner_account_id),
+            )
+            owner_miss_continuation = rewritten_file_account_id is None
         required_continuity_owner_missing = (
-            (request_state.previous_response_id is not None and request_state.preferred_account_id is None)
+            (owner_miss_continuation and request_state.preferred_account_id is None)
             or durable_owner_missing
             or model_transition_owner_missing
         )
@@ -2055,6 +2074,41 @@ class _HTTPBridgeStreamingMixin:
             and request_state.preferred_account_id == continuity_preferred_account_id
         )
         file_required_preferred_account = rewritten_file_account_id is not None
+        owner_miss_fallback_account_id: str | None = None
+        if (
+            required_continuity_owner_missing
+            and owner_miss_continuation
+            and request_state.preferred_account_id is None
+            and rewritten_file_account_id is None
+            and not durable_owner_missing
+            and not model_transition_owner_missing
+            and (
+                not _turn_state_header_present(headers)
+                or (
+                    raw_incoming_turn_state_header is not None
+                    and _is_synthesized_turn_state(raw_incoming_turn_state_header)
+                )
+            )
+        ):
+            selection_account_ids = (
+                api_key.assigned_account_ids
+                if api_key is not None and api_key.account_assignment_scope_enabled
+                else None
+            )
+            try:
+                selection_candidates = await self._load_balancer.list_continuity_owner_candidates(
+                    account_ids=selection_account_ids,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to list HTTP bridge owner-miss candidates request_id=%s",
+                    request_id,
+                )
+                selection_candidates = ()
+            if len(selection_candidates) == 1:
+                owner_miss_fallback_account_id = selection_candidates[0].id
+                request_state.preferred_account_id = owner_miss_fallback_account_id
+                required_continuity_owner_missing = False
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
@@ -2389,11 +2443,18 @@ class _HTTPBridgeStreamingMixin:
                     # row owned by the previous process epoch. Once the old
                     # owner is proven dead, let the initial continuation
                     # rebind locally; clustered deployments still route or
-                    # fail closed through the normal owner path.
+                    # fail closed through the normal owner path. A verified
+                    # sole-candidate owner miss can also create its first
+                    # session, without dropping the incoming response anchor.
                     allow_previous_response_recovery_rebind=(
                         request_state.previous_response_id is not None
-                        and dead_owner_anchor
-                        and not _http_bridge_requires_cluster_registration(settings)
+                        and (
+                            (dead_owner_anchor and not _http_bridge_requires_cluster_registration(settings))
+                            or (
+                                owner_miss_fallback_account_id is not None
+                                and request_state.preferred_account_id == owner_miss_fallback_account_id
+                            )
+                        )
                     ),
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=original_request_unanchored,
@@ -2508,6 +2569,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
                     downstream_turn_state=downstream_turn_state,
+                    synthesized_turn_state=synthesized_turn_state,
                     file_owner_account_id=rewritten_file_account_id,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
