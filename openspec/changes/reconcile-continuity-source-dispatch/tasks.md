@@ -8,3 +8,8 @@
 
 - [x] 2.1 Verify bound subscription owners bypass source claims and construction, source-owned requests finalize once, sanitized lookup failures do not dispatch, and affected regressions and independent reviews pass on the exact composition.
 - [ ] 2.2 Publish with the expected-head lease and obtain current-head hosted CI, CodeRabbit, and Codex results; record exact delivery evidence.
+
+## 3. Current-head composition feedback
+
+- [x] 3.1 Separate provider-portability marker recognition from subscription compatibility; prove both original strict cases and readable-marker compatibility without changing either contract.
+- [x] 3.2 Bound the WebSocket terminal receive wait and assert the selected owner in the unit connection double; run affected tests and independent reviews before republishing.

@@ -432,9 +432,12 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     )
     list_continuity_owner_candidates = AsyncMock(return_value=(account,))
 
-    async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
-        del self, args, kwargs
-        return account, upstream
+    async def select_subscription_account(self, deadline, **kwargs):  # noqa: ANN001, ANN202
+        return proxy_service.AccountSelection(account=account, error_message=None)
+
+    async def open_subscription_upstream(self, selected_account, headers, **kwargs):  # noqa: ANN001, ANN202
+        assert selected_account.id == account.id
+        return selected_account, upstream
 
     second_payload = json.loads(_compaction_trigger_frame("qwen3.8-max"))
     second_payload["previous_response_id"] = previous_response_id
@@ -449,7 +452,10 @@ async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
-    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+    monkeypatch.setattr(
+        proxy_service.ProxyService, "_select_account_with_budget_compatible", select_subscription_account
+    )
+    monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
 
     await service.proxy_responses_websocket(
         _websocket(downstream),

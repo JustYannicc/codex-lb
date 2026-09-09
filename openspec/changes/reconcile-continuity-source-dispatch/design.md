@@ -33,6 +33,14 @@ deferred health and cancellation handling remain behind confirmed settlement.
 
 ## Risks / Trade-offs
 
+Provider portability keeps its stricter generated-marker shape check separate
+from subscription marker compatibility. A readable `turn_example` marker can
+use the subscription sole-owner fallback, but that does not make its body safe
+to move to another provider. The portability predicate retains upstream's
+32-lowercase-hex marker rule. Its closed decline reason remains
+`turn_state_bound`; overflow activation and subscription compatibility are
+unchanged. The two upstream assertions exposed this coupling in hosted CI.
+
 - Text composition can hide lifecycle regressions. Run route-level ownership
   cases plus existing source-dispatch and compact-settlement controls.
 - Removed environment settings can survive in older tests. Keep their values
