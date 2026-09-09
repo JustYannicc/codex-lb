@@ -1,0 +1,1 @@
+Standalone extraction from PR #1953 at 46d1aadf, onto current main c0beaaadd. Fixes #2268. Source classifier/owner-forward changes are excluded. The immutable completion fence supersedes the former responses-api-compat recapture wording. Proof and execution records live in the delivery report.
