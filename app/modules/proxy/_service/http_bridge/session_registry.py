@@ -8,7 +8,6 @@ from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import clock_for, scheduler_for
-from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -18,6 +17,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.utils.time import utcnow
 from app.db.models import StickySessionKind
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _await_task_deferring_cancellation,
@@ -331,7 +331,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 session.codex_session = True
                 session.idle_ttl_seconds = max(
                     session.idle_ttl_seconds,
-                    float(_service_get_settings().http_responses_session_bridge_codex_idle_ttl_seconds),
+                    float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
                 )
                 session.headers = without_http_bridge_session_affinity_headers(session.headers)
             registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
@@ -650,7 +650,6 @@ class _HTTPBridgeSessionRegistryMixin:
         session: _HTTPBridgeSession,
         *,
         turn_state: str,
-        settings: Settings,
     ) -> None:
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
@@ -658,7 +657,7 @@ class _HTTPBridgeSessionRegistryMixin:
         session.downstream_turn_state_aliases.add(turn_state)
         session.idle_ttl_seconds = max(
             session.idle_ttl_seconds,
-            float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
+            float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
         )
         session.headers = _headers_with_turn_state(session.headers, turn_state)
 
