@@ -153,7 +153,6 @@ from app.modules.proxy._load_balancer.usage_recovery import (
     _rate_limited_freshness_entry,
     _usage_entry_is_recent_enough,
     _usage_entry_recorded_after_block,
-    _usage_refresh_interval_seconds,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (

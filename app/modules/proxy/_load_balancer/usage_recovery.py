@@ -83,4 +83,3 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -
     interval_seconds = usage_freshness_horizon_seconds()
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-

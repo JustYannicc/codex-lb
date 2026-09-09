@@ -145,7 +145,7 @@ def usage_windows_allow_recovery(
     secondary_available = (
         secondary_used is None
         or secondary_used < 100.0
-        or _has_usable_credits(
+        or has_usable_credits(
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
