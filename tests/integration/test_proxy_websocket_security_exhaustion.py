@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketTestSession
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
@@ -24,6 +28,41 @@ SECURITY_MESSAGE = (
     "To get authorized for security work, join the Trusted Access for Cyber program. "
     "https://chatgpt.com/cyber"
 )
+
+
+def _receive_frames(
+    websocket: WebSocketTestSession, *, terminal_type: str, timeout_seconds: float = 5
+) -> list[dict[str, Any]]:
+    async def receive() -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
+        with anyio.fail_after(timeout_seconds):
+            for _ in range(8):
+                message = await websocket._send_rx.receive()
+                websocket._raise_on_close(message)
+                frame = json.loads(message["text"])
+                frames.append(frame)
+                if frame["type"] == terminal_type:
+                    return frames
+        raise AssertionError(f"No {terminal_type} frame in {frames!r}")
+
+    return websocket.portal.call(receive)
+
+
+@pytest.mark.parametrize("frame_count", [0, 8])
+def test_terminal_receive_fails_when_the_server_never_sends_a_terminal_frame(frame_count: int) -> None:
+    app = FastAPI()
+
+    @app.websocket("/silent")
+    async def silent_server(websocket: WebSocket) -> None:
+        await websocket.accept()
+        for _ in range(frame_count):
+            await websocket.send_json({"type": "codex_lb.warning"})
+        await websocket.receive()
+
+    with TestClient(app) as client, client.websocket_connect("/silent") as websocket:
+        expected = TimeoutError if frame_count == 0 else AssertionError
+        with pytest.raises(expected):
+            _receive_frames(websocket, terminal_type="error", timeout_seconds=0.05 if frame_count == 0 else 5)
 
 
 @pytest.mark.parametrize(
@@ -140,17 +179,14 @@ def test_websocket_security_retry_exhaustion_preserves_original_error(
     with TestClient(app_instance) as client:
         with client.websocket_connect(path) as websocket:
             websocket.send_text(json.dumps(request))
-            while True:
-                frame = json.loads(websocket.receive_text())
-                frames.append(frame)
-                if frame["type"] == "error":
-                    break
+            frames = _receive_frames(websocket, terminal_type="error")
             if replay_guard is None:
                 websocket.send_text(json.dumps(_websocket_response_create("An independent follow-up request")))
-                created = json.loads(websocket.receive_text())
+                followup_frames = _receive_frames(websocket, terminal_type="response.completed")
+                assert len(followup_frames) == 2
+                created, completed = followup_frames
                 assert created["type"] == "response.created"
                 assert created["response"]["id"] == "resp_after_security_exhaustion"
-                completed = json.loads(websocket.receive_text())
                 assert completed["type"] == "response.completed"
                 assert completed["response"]["id"] == "resp_after_security_exhaustion"
 
