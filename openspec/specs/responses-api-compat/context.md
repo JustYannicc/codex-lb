@@ -448,3 +448,11 @@ advance the stream from different tasks.
 Scheduled cleanup compares the selected observation timestamp, admission generation, failure count and null-safe failure detail before deletion. For example, an old row at generation 3 survives if a replay claims generation 4 after cleanup selected it, even when the timestamp still meets the age cutoff. A conditional-delete miss ends that cleanup pass after its selected batch; the next scheduled pass applies the normal retention rules to the surviving state. See the scheduled cleanup requirement in [spec.md](spec.md).
 
 This uses existing columns and does not establish leased-receipt lifetime protection. The receipt lifecycle and stranded-owner and success-versus-claim policy decisions remain separate in #2271 and PR #1954.
+
+## Self-contained Codex experimental context replay
+
+Codex 0.153.1 sends inline context with `reasoning.context=all_turns`, local message/tool labels, transcript metadata, correlation IDs, and function/custom tool namespaces. The validator recognizes a closed set of fully supplied items in a temporary projection. The dispatched request keeps the native content and labels.
+
+Context containers authenticate which encrypted tool results came from this proxy for the current key and root session. HTTP and WebSocket replay classification can project those exact ciphertext parts while keeping encrypted reasoning and unknown stored state account bound. In-memory verification evidence is never accepted from client JSON and is not serialized across replicas or durable restoration.
+
+A complete request containing a notes read can therefore retry on eligible B after a pre-visible quota rejection on A. The source-integrated live CLI check did so, kept notes on their Pro owner and queried both Pro and Plus history. Automated tests also cover this behavior on native WebSocket and HTTP bridging. Appending unknown encrypted reasoning still blocks rotation. Sticky selection, API-key scope, retry limits, file ownership and settlement ordering continue to apply.

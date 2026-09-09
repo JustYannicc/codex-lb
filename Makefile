@@ -5,6 +5,10 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_retry_circuit_scheduled_purge.py \
 	tests/integration/test_report_rollup.py \
 	tests/integration/test_reports_performance_api.py \
+	tests/integration/test_codex_context_pool.py \
+	tests/integration/test_codex_context_dispatch_cost.py \
+	tests/integration/test_migrations.py::test_codex_context_migration_preserves_rows_and_round_trips \
+	tests/integration/test_migrations.py::test_codex_context_migration_rejects_unowned_tables_without_changes \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
