@@ -24,7 +24,10 @@ Completion and recovery MUST capture quarantine provenance, raw generation and f
 #### Scenario: Poison appears during durable loading
 - **GIVEN** completion observed no quarantine
 - **WHEN** durable loading arms poison during completion
-- **THEN** completion preserves that unobserved evidence until an authorized later cleanup or expiry
+- **THEN** completion preserves that unobserved evidence without recapturing its fence
+- **AND** after successful settlement and fresh-anchor registration, the next request's first-touch durable load MUST revoke the poison arm when it accepts a zero-failure row without an abandonment tombstone and the stale-load and newer-local-failure guards pass
+- **AND** reuse selection MUST clear the stale session quarantine flag once no independent quarantine evidence remains
+- **AND** failed settlement, unreadable durable state, an abandonment tombstone, or newer poison evidence MUST keep the relevant fence in force; independent weaker quarantine and later first-strike evidence MUST remain protected
 
 ### Requirement: Poison admission remains bounded and conservative
 The registry MUST admit at most 1024 entries. It MUST evict non-poison entries deterministically by age, generation and key before refusing admission; active poison provenance MUST NOT be evicted before its own deadline. If all slots hold active poison evidence, a rejected poison arm MUST establish a service-level fail-closed deadline covering its required lifetime and retained active poison deadlines. Unknown keys and subsequently admitted weaker entries MUST remain poison-classified during that window. Rejection MUST be logged without exposing raw keys and MUST NOT prevent existing request retirement or failure handling. Quarantine MUST NOT write account health.
