@@ -200,8 +200,8 @@ claim while the independent integer continues to fence a later claim.
   claim; no retry can spend an unbounded second claim timeout.
 
 
-## Proposed independent purge extraction
+## Independent purge extraction
 
-Issue #2270 owns the generic scheduled-purge snapshot race, using columns already on main. This reduced candidate retains active-receipt exclusion and matches the selected nullable receipt generation/start/expiry before deletion. It keeps main's per-row delete structure, with a small fixed bind count; no tuple batching is needed. A receipt mismatch ends the selected pass. Per-key generation fences remain unchanged.
+Issue #2270 owns the generic scheduled-purge snapshot race, using columns already on main. The receipt candidate retains active-receipt exclusion and matches the selected nullable receipt generation/start/expiry before deletion. It keeps main's per-row delete structure, with a small fixed bind count; no tuple batching is needed. A receipt mismatch ends the selected pass. Per-key generation fences remain unchanged.
 
-The generic lagging-clock and timestamp batch regressions move with #2270. The prior exact two-DELETE assertion described tuple batching and is replaced by the unchanged externally observable retention and bind-limit coverage. No accepted claim lifecycle behavior or held policy is removed. Both merge orders must preserve all existing-column and receipt predicates. This proposal has not changed the published #1954 branch.
+The generic lagging-clock and timestamp batch regressions move with #2270. The prior exact two-DELETE assertion described tuple batching and is replaced by the unchanged externally observable retention and bind-limit coverage. No accepted claim lifecycle behavior or held policy is removed. Both merge orders must preserve all existing-column and receipt predicates. Both candidates remain independently testable on current main.

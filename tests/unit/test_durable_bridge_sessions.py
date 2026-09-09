@@ -85,6 +85,12 @@ class _BlockedSelectSession:
         return result
 
 
+def test_durable_bridge_live_claim_requires_process_epoch() -> None:
+    parameter = inspect.signature(DurableBridgeSessionCoordinator.claim_live_session).parameters["owner_process_epoch"]
+
+    assert parameter.default is inspect.Parameter.empty
+
+
 @pytest.mark.asyncio
 async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_then_session_header(
     coordinator: DurableBridgeSessionCoordinator,

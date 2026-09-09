@@ -72,9 +72,9 @@
 - [x] 4.12 Document exact live-receipt adoption after settled reconciliation
   refusal in both normative specs, retaining one bounded lookup and fail-closed
   behavior for unconfirmed receipts.
-- [ ] 4.13 Generic scheduled-purge timestamp/generation/count fencing and its
-  regressions are proposed for independent extraction under #2270. Receipt
-  ownership checks remain here. Preserve both contracts when composing changes.
+- [x] 4.13 Extract generic scheduled-purge timestamp/generation/count fencing
+  and its regressions to the independent #2270 candidate. Retain receipt ownership
+  checks here; verify both application orders preserve both contracts.
 - [x] 4.14 Reparent the unmerged marker migration onto main's subscription
   overflow revision, preserve one Alembic head, and verify upgrade, guarded
   downgrade, and re-upgrade preserve upstream schema/data and retry generations.
