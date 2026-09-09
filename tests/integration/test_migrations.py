@@ -2211,10 +2211,12 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260909_080000_dashboard_stream_bridge_budgets"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    upstream_revision = "20260909_110000_model_context_window_overrides"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
-    assert script.get_heads() == [marker_revision]
+    assert script.get_heads() == [_HEAD_REVISION]
+    downgrade_target = f"{marker_revision}@-1"
     marker_script = script.get_revision(marker_revision)
     assert marker_script is not None and marker_script.down_revision == parent_revision
 
@@ -2278,7 +2280,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             ),
         }
 
-    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    await to_thread.run_sync(lambda: run_upgrade(db_url, upstream_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     claim_until_epoch = time.time() + 3600.0
     try:
@@ -2296,7 +2298,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_generation" not in before_columns
         assert "admission_claimed_until_epoch" not in before_columns
 
-        # Seed at the new parent, before the receipt columns exist. Marker
+        # Seed the upstream sibling before the receipt columns exist. Marker
         # migration must preserve upstream state and generation 4, including
         # report history whose raw source is no longer retained.
         async with engine.begin() as conn:
@@ -2449,7 +2451,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
             RuntimeError,
             match="cannot downgrade retry-circuit admission claim marker migration",
         ):
-            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), downgrade_target))
         async with engine.connect() as conn:
             after_downgrade = await conn.run_sync(_schema_state)
             assert await conn.run_sync(_preexisting_state) == preexisting_state
@@ -2466,15 +2468,15 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 )
             ).one()
             revision_after_refused_downgrade = (
-                await conn.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one()
+                (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
+            )
         assert {
             "admission_claimed_at_epoch",
             "admission_claimed_generation",
             "admission_claimed_until_epoch",
         }.issubset(after_downgrade["columns"])
         assert tuple(row) == (4, 1100.0, 4, claim_until_epoch)
-        assert revision_after_refused_downgrade == marker_revision
+        assert set(revision_after_refused_downgrade) == {marker_revision, upstream_revision}
 
         async with engine.begin() as conn:
             await conn.execute(
@@ -2535,7 +2537,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 claim_engine.dispose()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            downgrade_future = pool.submit(command.downgrade, _build_alembic_config(db_url), parent_revision)
+            downgrade_future = pool.submit(command.downgrade, _build_alembic_config(db_url), downgrade_target)
             try:
                 assert batch_entered.wait(timeout=5), "downgrade did not reach the guarded DDL"
                 claim_future = pool.submit(_attempt_claim_during_downgrade)
@@ -2553,15 +2555,16 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 }
             )
             revision_after_release_downgrade = (
-                await conn.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one()
+                (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
+            )
         assert "admission_claimed_at_epoch" not in after_release_downgrade
         assert "admission_claimed_generation" not in after_release_downgrade
         assert "admission_claimed_until_epoch" not in after_release_downgrade
-        assert revision_after_release_downgrade == parent_revision
+        assert set(revision_after_release_downgrade) == {upstream_revision}
 
-        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert reupgrade.current_revision == marker_revision
+        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        assert reupgrade.current_revision is not None
+        assert set(reupgrade.current_revision.split(",")) == {marker_revision, upstream_revision}
         async with engine.connect() as conn:
             state = await conn.run_sync(_schema_state)
             assert await conn.run_sync(_preexisting_state) == preexisting_state
@@ -3257,7 +3260,9 @@ async def test_codex_context_migration_rejects_unowned_tables_without_changes(db
             await session.execute(text(f"INSERT INTO {table} (marker) VALUES ('preserve-me')"))
         await session.commit()
     with pytest.raises(RuntimeError, match="Cannot create Codex context ownership tables"):
-        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=False))
+        await to_thread.run_sync(
+            lambda: run_upgrade(_DATABASE_URL, "20260905_120000_add_codex_context_ownership", bootstrap_legacy=False)
+        )
     async with SessionLocal() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == parent
         for table in existing_tables:

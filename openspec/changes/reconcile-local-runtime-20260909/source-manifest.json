@@ -1,0 +1,692 @@
+{
+  "schema_version": 4,
+  "purpose": "Persistent runtime composition on the user fork; never an upstream merge approval.",
+  "branch": "codex/integrated-runtime",
+  "base": {
+    "initial_main": "efe0f581a18a36f4d491b92a36ef79b0c432d252",
+    "included_main": "f1ff7c7c3309a478a998bd1c66159affd7aed961"
+  },
+  "candidate_binding": "The Git commit containing this manifest is the candidate identity. Deployment receipts MUST record its full SHA, tree and built image digest.",
+  "accepted_runtime": {
+    "revision": "1a58a0065010cae81bedd0351792d183761a74cc",
+    "pooled_source": "259376baf737fdee6a4c596beb0d25b683e05493",
+    "image": "sha256:f0c5167cee2e7a0e862056c839073d4d0615f35fbc99871a74978091f945a75f",
+    "image_note": "Read exact image from deployment receipt before cutover; original inventory is a point-in-time reference."
+  },
+  "selected_sources": [
+    {
+      "pr": 1903,
+      "source_commit": "67c7a2368bff9f9b69d82d20164bdadad342d7a2",
+      "source_tree": "9c2bf36b894ff66f4e736094e372bb09474443b7",
+      "title": "fix(proxy): bound memory used by paused bridge streams",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 1905,
+      "source_commit": "a3f3c7a12427be55153dd1893839656cb192f814",
+      "source_tree": "00e3bdc146d826f3f07791dcc98edb72d09d4e44",
+      "title": "fix(proxy): preserve continuation ownership across source routing",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 1952,
+      "source_commit": "124fbe2b17ab5510542fcb1a3a910bb7f717a7fb",
+      "source_tree": "b1bcbef201713b940584e4501f58de58787caf76",
+      "title": "fix(proxy): preserve tool search pairs through replay",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 1954,
+      "source_commit": "0471689e5b81587030778a86cdc6808e8a24bca6",
+      "source_tree": "71150efa09817c138940ac2b121be4f050dc54a3",
+      "title": "fix(proxy): track retry claims through cancellation and cleanup",
+      "integration_note": "Retain reviewed application source but preserve the byte-identical deployed receipt migration. Latest 8facce5bb only rebases the historical migration to current upstream; current upstream is independently included and the new aggregate merge revision joins the original ancestry."
+    },
+    {
+      "pr": 1962,
+      "source_commit": "1c4701fb7e14e3025805c6742fabdf51eb6098ff",
+      "source_tree": "20891dc4f4d4d9ce1af3291e8d56e453951a647e",
+      "title": "fix(proxy): preserve half-open probe ownership during cleanup",
+      "integration_note": "Includes final retained-lease documentation follow-up."
+    },
+    {
+      "pr": 1997,
+      "source_commit": "5c769fcc335c2e4782bc07a70b1918451811c207",
+      "source_tree": "96d45d747f743ef6185055117dc7101e0c931a12",
+      "title": "fix(http-bridge): bound terminal spool writes",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2048,
+      "source_commit": "86a1dda0e06dc3afddc20edbabc928d2367e5ec0",
+      "source_tree": "af4ff899c056556d0ee6d34ca68f50a7cdd09b3e",
+      "title": "fix(proxy): preserve exhausted sticky failover",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2070,
+      "source_commit": "dd2491f4eb2b4b0638543da653a66315ff346850",
+      "source_tree": "13d7d790d0b7d1128f3ad6c4319ae0f050ffd57e",
+      "title": "fix(accounts): recover paid accounts after long-window reset",
+      "integration_note": "Repair replaces unsafe reset recovery with precise timestamp, baseline, latest-evidence and CAS rollback contracts."
+    },
+    {
+      "pr": 2075,
+      "source_commit": "65629172d6138426accfda2858b60b5eceb6b4d1",
+      "source_tree": "2f211142a2afd9f7a0104630e9fa47492f292da3",
+      "title": "fix(proxy): keep frameless bridge drops account neutral",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2083,
+      "source_commit": "7ffbb8049f9459343de40fd9deb28951dc96c50d",
+      "source_tree": "7862a82a9640de9d02f67c0f968c76d4fcb785c2",
+      "title": "fix(proxy): fork model-transition owner conflicts",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2084,
+      "source_commit": "3b5815d213b76a05915bbd0addcb2a348b6f71f2",
+      "source_tree": "07aaa7332c27864a5c729bb6d11ae44bb36e55a7",
+      "title": "fix(http-bridge): wait for aborted bridge owner",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2085,
+      "source_commit": "bf30a57425e3974b27a560f8fccca80e24b75a88",
+      "source_tree": "1423b9c7e6d55fcc4552ec5c80bf4c1aa937fbb8",
+      "title": "feat(models): add gpt-6 astra catalog support",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2086,
+      "source_commit": "52d3b5bceaee8ffa8aafad57749c3dcc01e2393d",
+      "source_tree": "c767424b33a521e242276f6dba20b1925dd01079",
+      "title": "fix(proxy): allow prefix-settled replay outputs",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2088,
+      "source_commit": "696821da110ccc9df479b19a815177c7c1e5e528",
+      "source_tree": "3bc841c54697a355354640a460b6a10034f8ba6e",
+      "title": "fix(http-bridge): recover from draining owner rejection",
+      "integration_note": "Repair replaces current PR with explicit pre-dispatch classification and release-before-local-reserve sequencing."
+    },
+    {
+      "pr": 2093,
+      "source_commit": "2c039e5d02bc09b878c87cb18f6a6fb49fddbc80",
+      "source_tree": "74d2c9f1c64399389f1229d16bdf1a6ca59450d8",
+      "title": "fix(accounts): classify upstream token_revoked as reauth-required",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2096,
+      "source_commit": "279e49263fe336261b1ecc4334dae90105bdb7c2",
+      "source_tree": "0a60e97281eec358be7cee3480e44fe56fd48bf4",
+      "title": "fix(proxy): preserve anonymous output response ownership",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2102,
+      "source_commit": "cfecb70a02fbb566aed00775eb813aad6a282813",
+      "source_tree": "718f4536dd7bc632d57ac453e5ff67f17833474d",
+      "title": "feat(proxy): support Codex history and notes across account pools",
+      "integration_note": "Composition retains accepted unmarked cache-miss ownership validation and original deployed context migration bytes."
+    },
+    {
+      "pr": 2110,
+      "source_commit": "880861fcf2dd555636111cdcfd5efe6b81fc8ad6",
+      "source_tree": "5335e188a06f7997549f669d3f61678ef76206e3",
+      "title": "fix(clients): reuse system trust for Python WSS",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2113,
+      "source_commit": "6bdde31e7dcf838e8567acaa71ec2f77a5152198",
+      "source_tree": "c3fa63420612beeba4f3ca47813c915c2868a385",
+      "title": "refactor(proxy): skip unused HTTP preparation serialization",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2119,
+      "source_commit": "c5fe2d5792f4f3038269d90f20cb110066a2411a",
+      "source_tree": "703a4c7589c128e1229ba5624313280eb1565c5e",
+      "title": "fix(accounts): require spendable credits for quota override",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2193,
+      "source_commit": "cae31f0a928200b637425e72941b6a9110731948",
+      "source_tree": "7da5b139ee6390c44ea1024d26ea1a1334efa2b7",
+      "title": "fix(db): preserve rollback after SQLite invalidation",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2206,
+      "source_commit": "a1da9f27e5658587cbf2503acbaac40944cefe21",
+      "source_tree": "40860a30c9f9b1fdf89d009ec3b87ab5042b0fd8",
+      "title": "chore(deps): bump httpx2 from 2.10.0 to 2.12.0",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2234,
+      "source_commit": "c01c2be95003f4d079d3e3323e7f91e330df3f53",
+      "source_tree": "61896c28c38be90095afdc3b386cdf2840bf20fa",
+      "title": "fix(load-balancer): keep soft sticky owner when it is only request-locally unavailable",
+      "integration_note": "Correct fixed TTL wording to effective configured affinity TTL."
+    },
+    {
+      "pr": 2236,
+      "source_commit": "bed74e5b493f1b0408ed827852a2f8ee9aa4a77d",
+      "source_tree": "e99ce65c5fb6f4a35dba74b6974682e8f019d190",
+      "title": "perf(dashboard): memoize weekly demand delta aggregates with a short TTL",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2248,
+      "source_commit": "1cf22a8790e036382714edd63edbef50cbac6dee",
+      "source_tree": "50840e8624387500311494406cdde293b9a0b5df",
+      "title": "fix(proxy): retire a denied proxy-injected WebSocket anchor instead of re-injecting it",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2253,
+      "source_commit": "a50159fd65ac1b6f7317fa14d5b39af11ceaa27e",
+      "source_tree": "28274a0c4a9fd51079ba4d8b1c3361ce9d8f4e39",
+      "title": "perf(request-logs): speed up SQLite filter options",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2255,
+      "source_commit": "80a3c737521c0312ae98d4e09e8b58a0adf0d093",
+      "source_tree": "89a9b5a82a4cfc24352b0e4f009dd048a26b2551",
+      "title": "fix(shutdown): deny WebSocket upgrades during drain with 503 instead of a pre-handshake close",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2260,
+      "source_commit": "8244933c0c1d8d45aaceb0564776c2c603a9d3f1",
+      "source_tree": "8431e9a8fdab463bc9cce234cb45a806bbbad398",
+      "title": "fix(proxy): sanitize rebuilt HTTP hop-by-hop headers",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2276,
+      "source_commit": "2e419652e20f31eda223470484f27814a1a523af",
+      "source_tree": "1ef6644cd05735ef2cf848fced60ab4caaf476c0",
+      "title": "fix(proxy): preserve newer quarantine during response cleanup",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2277,
+      "source_commit": "44100a02e1b4e9279563ea03609e3b00f7fe5f21",
+      "source_tree": "9c4a2e0e53204892bf67607c519bc35001fe4bac",
+      "title": "fix(proxy): preserve continuation anchors during input normalization",
+      "integration_note": "Includes final deterministic idle retry-budget fixture; aggregate compatibility proof preserves legacy v2 while binding raw input through a separate shape signature."
+    },
+    {
+      "pr": 2278,
+      "source_commit": "b69abad0b389982fa071a28eb950cf0110a981f4",
+      "source_tree": "8436be64670ea40650196d9d881fad8e114d1255",
+      "title": "fix(proxy): count incomplete responses toward bridge retries",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2280,
+      "source_commit": "6bc6b6a9b494840f7de6c5849fb2950324b6f388",
+      "source_tree": "27d5d1bd1d0a6dce8e891621cbb0b5fa9bc756f1",
+      "title": "fix(proxy): preserve newer retry state during scheduled cleanup",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2283,
+      "source_commit": "560c609d21a5ebbc893dac83773e0b02f4ea3ce0",
+      "source_tree": "035cf23ab0a9e4494af2bd467561bd7d2d1ad9d2",
+      "title": "test(shutdown): wait for assertions before completing the response",
+      "integration_note": "Selected reviewed source concern; merge resolutions preserve the aggregate contracts."
+    },
+    {
+      "pr": 2286,
+      "source_commit": "d31ac538412b3ccd644db34e41557d1307994cd8",
+      "source_tree": "49b417378f3813b87610e5b2276b4acd15a1fe8b",
+      "title": "feat(desktop): show pooled quota while preserving ChatGPT login",
+      "integration_note": "Includes accepted pooled source 259376baf737fdee6a4c596beb0d25b683e05493 and later acceptance archive only."
+    }
+  ],
+  "open_pr_dispositions": [
+    {
+      "pr": 2281,
+      "reviewed_head": "cb563a9da4d15f0ee51fa1d1ae4e9c1f7a6b899c",
+      "title": "feat(settings): pause background schedulers from the dashboard",
+      "disposition": "not_selected",
+      "reason": "- **#2281 `cb563a9da4d15f0ee51fa1d1ae4e9c1f7a6b899c`**: feat(settings): pause background schedulers from the dashboard. Exclude: moves scheduler policy into DB/UI with migration; no required scheduler pause outcome."
+    },
+    {
+      "pr": 2275,
+      "reviewed_head": "47d771b73d771f6b5bb95ccf99adde4d9c1cd598",
+      "title": "feat(settings): conversation archive toggle in the dashboard",
+      "disposition": "not_selected",
+      "reason": "- **#2275 `47d771b73d771f6b5bb95ccf99adde4d9c1cd598`**: feat(settings): conversation archive toggle in the dashboard. Exclude: new recording-control UI/schema, not required for normal relay or pooled quota."
+    },
+    {
+      "pr": 2265,
+      "reviewed_head": "9833c23cfe7affbcd87e99f2e457d4c610412814",
+      "title": "feat(settings): per-model context window overrides in the dashboard",
+      "disposition": "included_in_upstream_base",
+      "reason": "Merged upstream as f1ff7c7c3309a478a998bd1c66159affd7aed961 after the initial audit; no longer a separate excluded input."
+    },
+    {
+      "pr": 2263,
+      "reviewed_head": "8d6f44f188d76bf2182c51ee041b13168e707626",
+      "title": "refactor(egress): route direct usage GETs through native helper",
+      "disposition": "not_selected",
+      "reason": "- **#2263 `8d6f44f188d76bf2182c51ee041b13168e707626`: Defer transport migration.** Native direct usage GET is a coherent, well-tested migration, with explicit-client and resolved-route precedence, direct-egress gate before helper discovery, bounded retries, and Python fallback only before first dispatch. All current-head checks succeed and no active threads. It changes the fetch dependency used by pooled freshness but supplies no measured operating benefit for this accepted runtime. Do not enlarge the transport transition only because a refactor exists. If root opts in, reconcile removed settings.usage_fetch_timeout_seconds with current USAGE_FETCH_TIMEOUT_SECONDS and prove pooled freshness, retry/body/cancellation and helper failure behavior with the built helper before cutover."
+    },
+    {
+      "pr": 2258,
+      "reviewed_head": "4cd9c6cfae958b3e5b095fe332553533928eb386",
+      "title": "feat(load-balancer): discount relatively slow accounts (first-token latency + per-model output throughput) in weighted selection",
+      "disposition": "not_selected",
+      "reason": "- **#2258 `4cd9c6cfae958b3e5b095fe332553533928eb386`**: feat(load-balancer): discount relatively slow accounts (first-token latency + per-model output throughput) in weighted selection. Exclude: deliberately changes account weighting by latency/throughput, an unrequested routing-policy choice."
+    },
+    {
+      "pr": 2257,
+      "reviewed_head": "55568acf8b36bd05ca5d0818a3face90f9af5d08",
+      "title": "feat(proxy): subscription-exhaustion overflow to a designated model source \u2014 decision, wiring, WebSocket evidence routing (ship-dark) (#2123 WP-C2+D)",
+      "disposition": "not_selected",
+      "reason": "- **#2257 `55568acf8b36bd05ca5d0818a3face90f9af5d08`**: feat(proxy): subscription-exhaustion overflow to a designated model source \u2014 decision, wiring, WebSocket evidence routing (ship-dark) (#2123 WP-C2+D). Exclude: subscription overflow to paid model sources and durable pinning is separate policy/cost feature."
+    },
+    {
+      "pr": 2251,
+      "reviewed_head": "9b16e3377e728ce50669162fa180c4cef61e8e49",
+      "title": "feat(frontend): fold the auth cards into one Access card that grows with the team",
+      "disposition": "not_selected",
+      "reason": "- **#2251 `9b16e3377e728ce50669162fa180c4cef61e8e49`**: feat(frontend): fold the auth cards into one Access card that grows with the team. Exclude: RBAC Access UI stacked on 2237; unnecessary account-management rollout."
+    },
+    {
+      "pr": 2249,
+      "reviewed_head": "c1cf8f184e39996783d79e1d1eda416d237f8070",
+      "title": "chore: release v1.25.0-beta.7",
+      "disposition": "not_selected",
+      "reason": "- **#2249 `82f3c52a409d2ebfa408961fad8f6f302ad84e51`**: chore: release v1.25.0-beta.7. Exclude: beta release version metadata only; does not add runtime fixes."
+    },
+    {
+      "pr": 2246,
+      "reviewed_head": "88920fd0c0e79d85e1b1735488efe1fc02dcd8b8",
+      "title": "perf(request-logs): add live-row partial indexes for facet option queries",
+      "disposition": "not_selected",
+      "reason": "- **#2246 `88920fd0c0e79d85e1b1735488efe1fc02dcd8b8`: Useful, repair before include.** Three live-row partial facet indexes complement selected2253, reducing scans through soft-deleted cohorts. Adds migration 20260909_080000 after 20260909_070000, which needs current-main graph reconciliation. Current-head checks succeed, DIRTY. Active CodeRabbit finding is supported: same-named valid wrong-column/nonpartial indexes are accepted by IF NOT EXISTS and manual drift checks validate names only. Fresh local SQLite may not hit that case, but do not silently call the general migration verified. Validate definitions or record and prove the exact local index preconditions, plus migration/downgrade and2253 composition."
+    },
+    {
+      "pr": 2244,
+      "reviewed_head": "666d48578a2066b72c4e79c9a75bd454a165bed9",
+      "title": "feat(proxy): trace terminal-frame delivery on Responses SSE streams",
+      "disposition": "not_selected",
+      "reason": "- **#2244 `666d48578a2066b72c4e79c9a75bd454a165bed9`: Useful, repair contract coverage before include.** Adds bounded terminal-delivery log/metric and disconnect stamps. It leaves bytes and usage settlement untouched, distinguishing a parsed terminal from a completed ASGI send. CI succeeds, CLEAN. Active CodeRabbit coverage finding is real: source-routed SourceStreamingResponse bypasses DeliveryTracedStreamingResponse. Either cover source streams while preserving their finalizer or narrow the observability contract explicitly. Also compose protocol stamps with current main and2260 and test active/queued httptools cycles. No reason to reorder settlement."
+    },
+    {
+      "pr": 2237,
+      "reviewed_head": "bf015bfca68e290d331ede00122059fec6e2fe17",
+      "title": "feat(frontend): tier the login form and header by account facts, add the invite route",
+      "disposition": "not_selected",
+      "reason": "- **#2237 `bf015bfca68e290d331ede00122059fec6e2fe17`**: feat(frontend): tier the login form and header by account facts, add the invite route. Exclude: RBAC login/invite UI depends on 2226."
+    },
+    {
+      "pr": 2235,
+      "reviewed_head": "11ab09ba3572fb496f5270467a503f8b6bd5af8d",
+      "title": "perf(dashboard): bound the raw tail of the conversation presence union to constant index ranges",
+      "disposition": "not_selected",
+      "reason": "- **#2235 `11ab09ba3572fb496f5270467a503f8b6bd5af8d`: Useful, repair verification before include.** Rewrites conversation watermark joins as scalar subqueries and clamps the raw complement to constant requested_at ranges. Single-statement snapshot semantics, missing watermark fallback and folded/raw union are retained. Removes an unused labeled helper; no app callers remain on current main. CI succeeds, CLEAN, two active test findings: required requested_at index absent from create_all test schema, and plan assertions assume no PostgreSQL parallel scan. Inspecting the test confirms no local index creation or max_parallel_workers_per_gather setting. Reconcile these assertions with test setup before treating PostgreSQL plan proof as sufficient. SQLite semantic regression and current-base query-plan proof remain required."
+    },
+    {
+      "pr": 2226,
+      "reviewed_head": "3429e1ab222c56aac0e3a93e68808a9c579ea19c",
+      "title": "feat(users): add account management, invite links and the roles read API",
+      "disposition": "not_selected",
+      "reason": "- **#2226 `3429e1ab222c56aac0e3a93e68808a9c579ea19c`**: feat(users): add account management, invite links and the roles read API. Exclude: user/invite management depends on 2225, adds schema and authority lifecycle."
+    },
+    {
+      "pr": 2225,
+      "reviewed_head": "79ab0dca12b9fd39d1950e2b0eda9d0bea52092a",
+      "title": "feat(audit): record the acting account, target and severity on audit rows",
+      "disposition": "not_selected",
+      "reason": "- **#2225 `79ab0dca12b9fd39d1950e2b0eda9d0bea52092a`**: feat(audit): record the acting account, target and severity on audit rows. Exclude: audit attribution depends on 2223 user-session rollout."
+    },
+    {
+      "pr": 2223,
+      "reviewed_head": "9ceb523fa35c0cc8be3c519c6cdf220e3afbfcce",
+      "title": "feat(auth): make dashboard users the source of truth for login and sessions",
+      "disposition": "not_selected",
+      "reason": "- **#2223 `9ceb523fa35c0cc8be3c519c6cdf220e3afbfcce`**: feat(auth): make dashboard users the source of truth for login and sessions. Exclude: changes authentication authority and session cookie format, depends on 2218."
+    },
+    {
+      "pr": 2218,
+      "reviewed_head": "989ed604cfdb00480dda15a817740bc11cbc2cba",
+      "title": "feat(auth): add dashboard user tables and migrate the shared admin into a user",
+      "disposition": "not_selected",
+      "reason": "- **#2218 `989ed604cfdb00480dda15a817740bc11cbc2cba`**: feat(auth): add dashboard user tables and migrate the shared admin into a user. Exclude: per-user schema/legacy credential mirroring depends on 2217."
+    },
+    {
+      "pr": 2217,
+      "reviewed_head": "f9705f46f66946018e6ae55c145daff6988b71bd",
+      "title": "feat(auth): add dashboard role rows with code-defined preset grants",
+      "disposition": "not_selected",
+      "reason": "- **#2217 `f9705f46f66946018e6ae55c145daff6988b71bd`**: feat(auth): add dashboard role rows with code-defined preset grants. Exclude: unused role-registry schema depends on 2204."
+    },
+    {
+      "pr": 2207,
+      "reviewed_head": "ab6eb78b368ceec3d9e02383a05829ef0fba07cb",
+      "title": "feat(proxy): add automatic quota failover",
+      "disposition": "not_selected",
+      "reason": "- **#2207 `ab6eb78b368ceec3d9e02383a05829ef0fba07cb`**: feat(proxy): add automatic quota failover. Defer: useful quota-failover feature but adds enabled-by-default setting/schema, 5-second delay and three-attempt policy across raw HTTP/bridge/WS. Requires explicit root choice against preserving existing routing; not a prerequisite for pooled quota/history. Diff and review threads inspected (no active unresolved)."
+    },
+    {
+      "pr": 2205,
+      "reviewed_head": "89c77ac32c353e4cf2d4784edb4767e7eebf1479",
+      "title": "fix(warmup): warm unused Free quota once",
+      "disposition": "not_selected",
+      "reason": "- **#2205 `89c77ac32c353e4cf2d4784edb4767e7eebf1479`: Defer warm-up policy expansion.** One initial Free monthly warm-up after opt-in is reasonable but sends a new warm-up for accounts that current runtime leaves idle. No evidence this operator needs that behavior. Current-head source includes both account and legacy per-window advisory locks, so active review comment has an explicit fixed reply and is no longer a source defect. CI succeeds. Defer based on operating scope, not that resolved-in-code finding."
+    },
+    {
+      "pr": 2204,
+      "reviewed_head": "93516e0a23ac181d70ec08d91123dddd63cc4894",
+      "title": "feat(auth): reject cross-site dashboard mutations and start the client least-privilege",
+      "disposition": "not_selected",
+      "reason": "- **#2204 `93516e0a23ac181d70ec08d91123dddd63cc4894`**: feat(auth): reject cross-site dashboard mutations and start the client least-privilege. Exclude stack: CSRF/least-privilege hardening is potentially useful generally, but stacked on 2203/2201/2196 authorization-policy changes; no standalone runtime requirement established."
+    },
+    {
+      "pr": 2203,
+      "reviewed_head": "bcff468afc1c1e3d04e82f67b329ee04fcbbae04",
+      "title": "feat(dashboard): hide restricted surfaces from read-only guests",
+      "disposition": "not_selected",
+      "reason": "- **#2203 `bcff468afc1c1e3d04e82f67b329ee04fcbbae04`**: feat(dashboard): hide restricted surfaces from read-only guests. Exclude: guest UI aligns with changed 2201 permission policy."
+    },
+    {
+      "pr": 2201,
+      "reviewed_head": "b2d241c89aa76fe663d1f6841b6b90a533be62b1",
+      "title": "feat(auth): restrict guest-visible sensitive surfaces and make guest sessions revocable",
+      "disposition": "not_selected",
+      "reason": "- **#2201 `b2d241c89aa76fe663d1f6841b6b90a533be62b1`**: feat(auth): restrict guest-visible sensitive surfaces and make guest sessions revocable. Exclude: restricts guest surfaces, redacts identity, changes guest sessions; depends on 2196."
+    },
+    {
+      "pr": 2196,
+      "reviewed_head": "25e6f337025f7b45e40b130e9629915bfe04a3cb",
+      "title": "feat(auth)!: add resource-scoped dashboard permission vocabulary",
+      "disposition": "not_selected",
+      "reason": "- **#2196 `25e6f337025f7b45e40b130e9629915bfe04a3cb`**: feat(auth)!: add resource-scoped dashboard permission vocabulary. Exclude: breaking permission vocabulary/re-gating foundation for RBAC, not needed for runtime refresh."
+    },
+    {
+      "pr": 2172,
+      "reviewed_head": "9f7122bf39f8ba82e6e1a7772a8b07c4423988f7",
+      "title": "docs(companions): add Codex LB for Omarchy",
+      "disposition": "not_selected",
+      "reason": "- **#2172 `9f7122bf39f8ba82e6e1a7772a8b07c4423988f7`**: docs(companions): add Codex LB for Omarchy. Exclude: Linux companion docs only."
+    },
+    {
+      "pr": 2159,
+      "reviewed_head": "64604a4162c9a52c2dbc6cbff19713b23dab33af",
+      "title": "chore(deps): bump vitest from 4.1.11 to 5.0.0 in /frontend",
+      "disposition": "not_selected",
+      "reason": "- **#2159 `64604a4162c9a52c2dbc6cbff19713b23dab33af`**: chore(deps): bump vitest from 4.1.11 to 5.0.0 in /frontend. Exclude: Vitest major toolchain bump, no production runtime effect."
+    },
+    {
+      "pr": 2158,
+      "reviewed_head": "3153e26e08b027c49eea402caba372e94c484032",
+      "title": "chore(deps): bump @vitest/coverage-v8 from 4.1.11 to 5.0.0 in /frontend",
+      "disposition": "not_selected",
+      "reason": "- **#2158 `3153e26e08b027c49eea402caba372e94c484032`**: chore(deps): bump @vitest/coverage-v8 from 4.1.11 to 5.0.0 in /frontend. Exclude: Vitest coverage major toolchain bump, no production runtime effect."
+    },
+    {
+      "pr": 2147,
+      "reviewed_head": "f485b6258db99a144a1af5ced732f4a15e8f0850",
+      "title": "feat(accounts): add per-account usage caps",
+      "disposition": "not_selected",
+      "reason": "- **#2147 `f485b6258db99a144a1af5ced732f4a15e8f0850`**: feat(accounts): add per-account usage caps. Exclude: optional account quota caps, new admission policy/schema; not pooled usage reporting."
+    },
+    {
+      "pr": 2146,
+      "reviewed_head": "384f45d84a37bab5a72aeb57f17ec378076fd0dd",
+      "title": "feat(dashboard): add request heatmap on dashboard",
+      "disposition": "not_selected",
+      "reason": "- **#2146 `384f45d84a37bab5a72aeb57f17ec378076fd0dd`**: feat(dashboard): add request heatmap on dashboard. Exclude: optional dashboard request heatmap and daily endpoint, unrelated display feature."
+    },
+    {
+      "pr": 2133,
+      "reviewed_head": "e7eeb855c931773a10dc74976ce10e1c08d0bb85",
+      "title": "fix(proxy): isolate bridge heartbeat from maintenance",
+      "disposition": "not_selected",
+      "reason": "| [#2133](https://github.com/Soju06/codex-lb/pull/2133) `e7eeb855c931773a10dc74976ce10e1c08d0bb85` | blocked-review | Separates heartbeat scheduling/pool from maintenance so slow work does not make healthy replicas look dead. Missing upstream. | Green CI does not resolve live findings: fixed 2s cleanup + 3s stale marking ignore lifespan absolute shutdown deadline; bridge-disabled readiness contract remains vague; real lifespan/DB heartbeat regression under blocked maintenance absent. See child report. Lifecycle contract requires repair before inclusion. |"
+    },
+    {
+      "pr": 2132,
+      "reviewed_head": "47e255b052a08aa1aa3bd268363f8986998c34d4",
+      "title": "fix(proxy): recover rejected reauthentication stream accounts",
+      "disposition": "not_selected",
+      "reason": "| [#2132](https://github.com/Soju06/codex-lb/pull/2132) `47e255b052a08aa1aa3bd268363f8986998c34d4` | blocked-review, independent local concern | Adds recovery from rejected authentication using credential CAS, reason-aware routing, safe replay projection and rotation repair. Missing upstream. | Green CI/no active GitHub threads, but _recover_rejected_auth defers account_auth_invalidated health until keyed replacement settlement and excludes only request-local ID; immediate shared routing exclusion is not established. Prove/fix concurrent selection exclusion while preserving reservation-before-health ordering. Consolidate with #2117; their reason predicates differ. |"
+    },
+    {
+      "pr": 2131,
+      "reviewed_head": "ad3674b0a2551da3f3581863f4ca4cc76575346c",
+      "title": "fix(proxy): keep safety policy blocks account-neutral",
+      "disposition": "not_selected",
+      "reason": "| [#2131](https://github.com/Soju06/codex-lb/pull/2131) `ad3674b0a2551da3f3581863f4ca4cc76575346c` | blocked-review / failing checks | Treats narrowly identified misalignment_policy_violation request rejections as health-neutral while preserving the client failure. No safety bypass and absent upstream. | Exact-head Ruff/unit/CI Required fail. Status-propagation review fix is visible, so do not repeat it as still broken. Diagnose failures and verify neutral health plus preserved error before local inclusion. |"
+    },
+    {
+      "pr": 2122,
+      "reviewed_head": "925d683a815cee734146dfa6d7ae2f7d959c2d9e",
+      "title": "fix(warmup): restore reset usage threshold",
+      "disposition": "not_selected",
+      "reason": "- **#2122 `925d683a815cee734146dfa6d7ae2f7d959c2d9e`: Defer warm-up threshold contract transition.** Restores visible minimum usage gate and zero default but adds active/legacy columns, triggers, migration and changes which confirmed resets trigger billable warm-up. Current-head CI succeeds and no active threads. Existing local threshold provenance must decide migration semantics; no authorization to silently reinterpret warm-up settings during pooled runtime refresh."
+    },
+    {
+      "pr": 2121,
+      "reviewed_head": "f5e044d8c186428ae0816247e5b0f06e56e7441a",
+      "title": "fix(proxy): recover tool-complete goal followups from unavailable owners",
+      "disposition": "not_selected",
+      "reason": "| [#2121](https://github.com/Soju06/codex-lb/pull/2121) `f5e044d8c186428ae0816247e5b0f06e56e7441a` | blocked-review | Permits fresh user follow-up after an exactly completed durable tool manifest, allowing existing safe full-resend recovery from unavailable owner. Main helper still rejects the trailing user suffix. | Active current-head review flags suffix shape checks omitting strict item neutrality/unknown-field validation. Diff really removes trailing input before local self-contained proof, but callers also classify complete projected payload, so review concern is not proven exploit. Need explicit malformed-ID/metadata/unknown-field regression and disposition. Exact-head CI Required fails, one runtime aggregate failure accompanies cancelled jobs. Preserve #2086/#1952/#2102 tool/history restrictions. |"
+    },
+    {
+      "pr": 2120,
+      "reviewed_head": "e4718ddefcce93197ecfb67ae8c9f6c72dac0d32",
+      "title": "fix(auth): retain unexpired access on refresh preflight failure",
+      "disposition": "not_selected",
+      "reason": "| [#2120](https://github.com/Soju06/codex-lb/pull/2120) `e4718ddefcce93197ecfb67ae8c9f6c72dac0d32` | blocked-review / failing gate | Lets ordinary preflight keep explicitly unexpired access token after refresh-credential-only failure; forced/rejected-access path remains excluded. Absent upstream. | Runtime slices green but CI Required failure and contributor check cancellation, plus active ordinary-vs-forced normative wording mismatch. Routine spec/gate repair could unblock; do not conflate this with runtime test failure. Consolidate reason fences with #2132/#2117. |"
+    },
+    {
+      "pr": 2118,
+      "reviewed_head": "16dcf53039b85acac3e03ff4efb04a3c78b5a878",
+      "title": "feat(ui): add Japanese dashboard localization",
+      "disposition": "not_selected",
+      "reason": "- **#2118 `16dcf53039b85acac3e03ff4efb04a3c78b5a878`**: feat(ui): add Japanese dashboard localization. Exclude: Japanese localization, not required by runtime goal."
+    },
+    {
+      "pr": 2117,
+      "reviewed_head": "1dad6743801263fd351c247cc848e8bdef800752",
+      "title": "fix(proxy): retire revoked stream accounts",
+      "disposition": "not_selected",
+      "reason": "| [#2117](https://github.com/Soju06/codex-lb/pull/2117) `1dad6743801263fd351c247cc848e8bdef800752` | blocked-review / missing aggregate verification | Adds token_revoked/token_invalidated retirement, immediate token_revoked routing mark, correct no-replacement auth envelope, and AuthManager routing publication. Missing upstream. | Three active threads have fixed replies and visible corresponding fixes. Only label/CodeRabbit/security runs in current-head snapshot, no runtime suites. Missing CI alone is not a product defect: local composed verification can qualify it. Compose with #2132 and #2120 rather than importing overlapping auth policies unchanged. |"
+    },
+    {
+      "pr": 2116,
+      "reviewed_head": "8e1db6e0332f32fc5eed0e46c14b026a042a1f93",
+      "title": "docs: add codex-lb-status community companion",
+      "disposition": "not_selected",
+      "reason": "- **#2116 `8e1db6e0332f32fc5eed0e46c14b026a042a1f93`**: docs: add codex-lb-status community companion. Exclude: Ubuntu companion docs only."
+    },
+    {
+      "pr": 2115,
+      "reviewed_head": "dcc44154154750e96dd9a3e38afe9078d45e230a",
+      "title": "feat(proxy): support Astra steering with transport-owned dispatch",
+      "disposition": "not_selected",
+      "reason": "- **#2115 `dcc44154154750e96dd9a3e38afe9078d45e230a`**: feat(proxy): support Astra steering with transport-owned dispatch. Defer/block candidate: Astra steering directly relevant to desktop use, but actual current-head unresolved P2 says queued steers can bypass newly applicable API-key limits. Diff confirms _extend_websocket_api_key_usage returns success with no reservation. Earlier stale-ack P1 has explicit current-head fix reply. Broad 414KB diff changes transport interception/reservation lifecycle; requires fix and regression verification before inclusion."
+    },
+    {
+      "pr": 2112,
+      "reviewed_head": "34729b0b1b8a0adecf855d856d0a89ac31f961b8",
+      "title": "fix(observability): record HTTP upstream phase timings",
+      "disposition": "not_selected",
+      "reason": "- **#2112 `34729b0b1b8a0adecf855d856d0a89ac31f961b8`: Useful, repair gate before include.** Records first upstream activity/response-created latency separately from TTFT; marks locally generated events and IDs so they are excluded correctly. Diff carries2111 owner publication and related spec/test history, so integrate timing atop the independently selected2111 once. No active review threads. Current-head CI fails: streaming/mixin.py is1111 lines versus architecture limit 1100; unit gate repeats that same architecture assertion. Logs saved in other-prs/2112-job-*.txt. This is a concrete candidate failure, not a flaky runner. Extract a coherent responsibility or use current-main composition to bring it below the existing boundary; no gate inflation."
+    },
+    {
+      "pr": 2111,
+      "reviewed_head": "84cce0395f18941ce9272a8cea3e984a61752385",
+      "title": "fix(proxy): publish HTTP response owners before delivery",
+      "disposition": "not_selected",
+      "reason": "| [#2111](https://github.com/Soju06/codex-lb/pull/2111) `84cce0395f18941ce9272a8cea3e984a61752385` | blocked-review / failing checks | Publishes real queued/in-progress/created response owners before downstream delivery, closing immediate continuation race while detached request log is pending. Upstream lacks publisher. | Exact-head lint/unit/CI Required fail despite historical body claims. No active nonoutdated inline threads. SSE provenance/parser touches HTTP and WebSocket; synthetic IDs must remain excluded. Incidental exhausted-recovery artifacts require current-base scope review. Repair failures before inclusion. |"
+    },
+    {
+      "pr": 2101,
+      "reviewed_head": "bc9dfedf2d202bff5307e2ac77497e14af20d1c1",
+      "title": "fix(proxy): preserve native history and notes ownership",
+      "disposition": "not_selected",
+      "reason": "- **#2101 `bc9dfedf2d202bff5307e2ac77497e14af20d1c1`**: fix(proxy): preserve native history and notes ownership. Exclude: native history/notes hard account-owner affinity is alternative to accepted pooled-history2102; cannot combine blindly. Actual diff adds history_session selection and owner-required native control routing."
+    },
+    {
+      "pr": 2099,
+      "reviewed_head": "050992d34e506fcf1855150cc6a727ac8e44d38e",
+      "title": "feat(proxy): preserve async tool results across continuations",
+      "disposition": "not_selected",
+      "reason": "- **#2099 `050992d34e506fcf1855150cc6a727ac8e44d38e`**: feat(proxy): preserve async tool results across continuations. Defer: async-tool continuity is protocol-forward per body (sampled Codex clients do not emit async:true); no demonstrated runtime need. Diff changes pending-call state on bridge/WS and replay safety. No active unresolved threads."
+    },
+    {
+      "pr": 2098,
+      "reviewed_head": "571b6afede4a43625b9c2bdab221927f80e1031b",
+      "title": "fix(docker): isolate host OAuth callback port by default",
+      "disposition": "not_selected",
+      "reason": "- **#2098 `571b6afede4a43625b9c2bdab221927f80e1031b`: Exclude deployment-default change.** Diff removes1455 callback port from both default compose files and adds an optional OAuth override. The accepted local runtime already owns an explicit compose/port contract and rollback. No runtime code fix is supplied. Preserve the actual accepted port bindings; do not import a default-compose policy change into this refresh."
+    },
+    {
+      "pr": 2097,
+      "reviewed_head": "2ad7ff16e5722ca03449d350bd7d33b2278ebc91",
+      "title": "feat(proxy): enforce Astra configuration-update policy",
+      "disposition": "not_selected",
+      "reason": "- **#2097 `2ad7ff16e5722ca03449d350bd7d33b2278ebc91`**: feat(proxy): enforce Astra configuration-update policy. Candidate requiring root scope decision: supports Astra configuration_update API-key policy and Ultra serialization; actual diff adds strict update/logprob/compaction validation and continuation mutation. No active unresolved threads, but this is a protocol/policy change with rejected-request behavior, not a prerequisite for pooled reporting. Requires native Astra need and compatibility tests. This is a deferral rather than a request for another user permission gate; root can establish operating need from the already-authorized runtime task."
+    },
+    {
+      "pr": 2095,
+      "reviewed_head": "94fc99b6937b6d23a03cf2d91344cbff5ca133a8",
+      "title": "feat(cost): add GPT-6 Astra pricing",
+      "disposition": "not_selected",
+      "reason": "- **#2095 `94fc99b6937b6d23a03cf2d91344cbff5ca133a8`: Exclude duplicate pricing.** Selected2085 already contains Astra rates and wildcard aliases from2095 plus batch rates and gpt-6 alias. Verified selected2085 source. Importing2095 adds no independent runtime benefit; its active pricing/backfill/test findings do not justify a duplicate carrier."
+    },
+    {
+      "pr": 2069,
+      "reviewed_head": "085640b2a9624702d6e996742bd206da5c9b0d72",
+      "title": "fix(proxy): recover unanchored quota replay",
+      "disposition": "not_selected",
+      "reason": "- **#2069 `085640b2a9624702d6e996742bd206da5c9b0d72`: Useful, verify composition before include.** Repairs existing pre-visible raw-stream quota recovery for unanchored full resends whose response bookkeeping creates soft ownership. Projection retains completed assistant output and requires account-neutral replay; hard owners, files, conversation/previous-response anchors, single-account routing and post-visible cases remain excluded. Also recognizes exact host heartbeat envelopes. No active threads. Current-head CI Required fails solely observed test_otel lifespan SQLite database-is-locked error; logs saved as other-prs/2069-failure.txt. Requires isolated rerun plus composition with2001/2048/2086/2121 and settlement ordering proof; this is not broad new2207 automatic failover policy."
+    },
+    {
+      "pr": 2065,
+      "reviewed_head": "f7dcbad530b5dfe07c3a5c3a9b4173b18e453094",
+      "title": "Feature/multi file account import",
+      "disposition": "not_selected",
+      "reason": "- **#2065 `f7dcbad530b5dfe07c3a5c3a9b4173b18e453094`**: Feature/multi file account import. Exclude broad branch: title/body mismatched multi-file import + standalone search, but file list includes deployment skill, auth/key dashboard/native egress/routing changes. Use focused search fixes already on main/independent PRs, never this aggregate branch."
+    },
+    {
+      "pr": 2060,
+      "reviewed_head": "0d34254503ecdad3e6d65bda178d5845d66b26dd",
+      "title": "fix(ui): offer the reactivate action for deactivated accounts",
+      "disposition": "not_selected",
+      "reason": "- **#2060 `0d34254503ecdad3e6d65bda178d5845d66b26dd`: Useful, repair before include.** Exposes the already-supported reactivate endpoint for deactivated accounts while preserving reauth_required restrictions. Does not autonomously reactivate any account. Current-main list column remains 6.5rem, while added fourth action needs 7.75rem; card action row also lacks wrapping. Current-head active findings flag both responsive regressions and missing screenshots. Latest CI Required now fails with frontend test and Docker jobs cancelled. Add list/card coverage and screenshots, correct layout, then reverify current candidate."
+    },
+    {
+      "pr": 2059,
+      "reviewed_head": "b896b7febd5ff7e5fc04de2a3f74b1ae70b5a156",
+      "title": "fix(ui): constrain model source dialogs to viewport",
+      "disposition": "not_selected",
+      "reason": "- **#2059 `b896b7febd5ff7e5fc04de2a3f74b1ae70b5a156`: Useful, repair before include.** Viewport-bounded create/edit model-source dialogs fix inaccessible controls and keep title/footer visible. CI succeeds, CLEAN. Three active findings, with source confirmation: moving ModelSourceFormFields loses prior space-y-4 grouping in both scrollers; browser regression only exercises Create, not distinct Edit hierarchy. Restore field spacing and cover edit/save/Escape at compact and desktop sizes before selecting. Preserve current styling rather than redesign."
+    },
+    {
+      "pr": 2001,
+      "reviewed_head": "e2bed8be5140564501f5b5233af2af738fd4ea46",
+      "title": "fix(proxy): release payload owner after pre-visible quota rejection",
+      "disposition": "not_selected",
+      "reason": "| [#2001](https://github.com/Soju06/codex-lb/pull/2001) `e2bed8be5140564501f5b5233af2af738fd4ea46` | blocked-review / failing checks | Avoids creating transient payload owners for previsible HTTP 429 or first-event retryable quota/rate-limit rejection; main retry.py still registers them. Keeps existing hard owners and already-visible output pinned. | Current-head failed/cancelled CI, no active inline blockers. Narrow candidate preferable to broad #2069 owner-moving overlap once fixed/proven. Do not combine both unchanged; #2069 remains held. Product-path compacted-input regressions exist. |"
+    },
+    {
+      "pr": 1938,
+      "reviewed_head": "5934d0bf67ca32e6fc1a0d826210b1686f6e2a1b",
+      "title": "feat(accounts): add encrypted portable account bundles",
+      "disposition": "not_selected",
+      "reason": "- **#1938 `5934d0bf67ca32e6fc1a0d826210b1686f6e2a1b`**: feat(accounts): add encrypted portable account bundles. Exclude: encrypted account bundle import/export with migrations and broader resilience/account changes; no requested credential migration."
+    },
+    {
+      "pr": 1932,
+      "reviewed_head": "05b94da013fc55f3284a9a92309ce898742cd29d",
+      "title": "feat(db): add safe SQLite compaction",
+      "disposition": "not_selected",
+      "reason": "- **#1932 `05b94da013fc55f3284a9a92309ce898742cd29d`**: feat(db): add safe SQLite compaction. Exclude: stopped-instance SQLite compaction CLI; no observed compaction requirement for refreshing runtime."
+    },
+    {
+      "pr": 1922,
+      "reviewed_head": "138457eb7ad39f92494dd601c70255c604371b69",
+      "title": "chore(main): release 1.25.0",
+      "disposition": "not_selected",
+      "reason": "- **#1922 `18929128bf0c2c4bff6e8d6a305a95389303e6f1`**: chore(main): release 1.25.0. Exclude: release-please version/changelog metadata, not runtime feature source."
+    },
+    {
+      "pr": 1900,
+      "reviewed_head": "acea4c9af872aa319d8466ec05dbba7fa430ef90",
+      "title": "fix(proxy): persist complete HTTP bridge replay transcripts",
+      "disposition": "not_selected",
+      "reason": "| [#1900](https://github.com/Soju06/codex-lb/pull/1900) `acea4c9af872aa319d8466ec05dbba7fa430ef90` | out of scope as a whole / unresolved recovery policy | Novel transcript materialization is real, but entire branch adds durable transcript/snapshot/alias/rebind migrations, lifecycle fencing and ten settings with optional unsafe recovery semantics. | CONFLICTING and CI/CodeRabbit incomplete at snapshot. Defaults-off gives no immediate recovery benefit; enabling partial/new-response modes changes duplicate-work semantics. Strong overlap with selected #1903/#1905/#2083/#2084/#2086/#2088/#1952/#2102. Do not include bundle or enable policy. No constituent approved; extract/review persistence/materialization separately if required. |"
+    },
+    {
+      "pr": 1621,
+      "reviewed_head": "5d8eff51ad072192640328f9cead8ffefb8a5e71",
+      "title": "test(spec): model ownership and timeout invariants with TLC controls",
+      "disposition": "not_selected",
+      "reason": "- **#1621 `5d8eff51ad072192640328f9cead8ffefb8a5e71`**: test(spec): model ownership and timeout invariants with TLC controls. Exclude: self-contained formal-spec/TLC tests, no production changes."
+    },
+    {
+      "pr": 1528,
+      "reviewed_head": "21fc1fdd046cdf936f176e55a6a0cda83310cc70",
+      "title": "feat(accounts): add per-account usage limits",
+      "disposition": "not_selected",
+      "reason": "- **#1528 `21fc1fdd046cdf936f176e55a6a0cda83310cc70`**: feat(accounts): add per-account usage limits. Exclude: optional per-account usage-limit admission policy; broad routing/schema changes and depends on2193. Not pooled quota reporting; select2193 independently if needed."
+    }
+  ],
+  "superseded_old_sources": [
+    {
+      "pr": 1953,
+      "replaced_by": [
+        2276,
+        2277,
+        2283
+      ]
+    },
+    {
+      "pr": 2078,
+      "disposition": "upstream main includes accepted concern"
+    },
+    {
+      "pr": 2092,
+      "disposition": "upstream main includes accepted concern"
+    }
+  ],
+  "migration_contract": {
+    "accepted_old_head": "20260905_140000_merge_retry_claim_and_codex_context_heads",
+    "candidate_head": "20260909_220000_merge_local_runtime_refresh",
+    "deployed_local_files": [
+      {
+        "path": "app/db/alembic/versions/20260829_000000_add_retry_circuit_admission_claim_marker.py",
+        "sha256": "c9cb9b0446f7c8a1f8f55bf2b71a1b59c8f46f78763f580ee5a1aff9292d8ec1"
+      },
+      {
+        "path": "app/db/alembic/versions/20260904_000000_add_usage_reset_transition_index.py",
+        "sha256": "24521ed6d7b85117146e243ae497ebca451f4c1a7ef41c706669d7b15e6b3b8d"
+      },
+      {
+        "path": "app/db/alembic/versions/20260905_120000_add_codex_context_ownership.py",
+        "sha256": "23e413ca634d71dda7b75e4ca3204d72780c66e0280a1ce02c143367f01fd968"
+      },
+      {
+        "path": "app/db/alembic/versions/20260905_140000_merge_retry_claim_and_codex_context_heads.py",
+        "sha256": "2d663ad5460e39df3921121797baa15d98445673be64eb9e0bf295eb6af56c9e"
+      }
+    ],
+    "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
+  },
+  "verification_status": "In progress. Read verification.md and deployment receipt; inclusion is not a pass claim."
+}

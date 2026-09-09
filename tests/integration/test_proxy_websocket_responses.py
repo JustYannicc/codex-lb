@@ -11808,6 +11808,17 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
                     ),
                 )
             ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_after_denied_anchor", "status": "completed"},
+                        }
+                    ),
+                )
+            ],
         ],
     )
     connect_count = 0
@@ -11913,11 +11924,30 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
             while failed_event["type"] == "codex.keepalive":
                 failed_event = json.loads(websocket.receive_text())
 
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "instructions": "",
+                        "input": [historical_input, next_input],
+                        "stream": True,
+                    }
+                )
+            )
+            retry_event = json.loads(websocket.receive_text())
+            while retry_event["type"] == "codex.keepalive":
+                retry_event = json.loads(websocket.receive_text())
+
+    assert retry_event["type"] == "response.completed"
+    retry_payload = json.loads(upstream_socket.sent_text[2])
+    assert "previous_response_id" not in retry_payload
+    assert retry_payload["input"] == [historical_input, next_input]
     assert first_created["type"] == "response.created"
     assert first_completed["type"] == "response.completed"
     assert failed_event["type"] == "response.failed"
     _assert_previous_response_not_found_error(failed_event["response"]["error"])
-    assert connect_count == 1
+    assert connect_count == 2
     first_payload = json.loads(upstream_socket.sent_text[0])
     second_payload = json.loads(upstream_socket.sent_text[1])
     assert "previous_response_id" not in first_payload

@@ -68,9 +68,9 @@ HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
-# Additive tamper-proofing header (#1203): a second signature bound to the
-# exact forwarding body (``model_dump_for_http_bridge_owner_forwarding``) that is posted, so an
-# in-transit rewrite injecting ``"tools": []`` is detected even though the
+# Additive tamper-proofing header (#1203): a second signature preserves
+# omitted tools in the forwarding dump while retaining legacy normalized input.
+# An in-transit rewrite injecting ``"tools": []`` is detected even though the
 # primary signature hashes a plain ``model_dump`` that synthesizes the same
 # empty list. Orthogonal to ``x-codex-bridge-signature-version`` below (which
 # domain-separates the *primary* signature for unanchored parallel requests,
@@ -447,8 +447,8 @@ def build_owner_forward_headers(
             include_client_ip=False,
             signature_version=signature_version,
         )
-    # Additive tamper-proofing signature bound to the exact posted forwarding
-    # body; covers the full authenticated context (including the unanchored /
+    # The tools signature retains legacy normalized input; the separate shape
+    # proof binds the exact posted body. Both cover the full context (including the unanchored /
     # signature-version domain) so it cannot be replayed against a different
     # forward.
     input_shape_version = (
@@ -824,12 +824,13 @@ def _bridge_forward_tools_bound_signature(
     signature_version: str | None = None,
     input_shape_version: str | None = None,
 ) -> str:
-    """Tamper-proofing signature bound to the exact posted forwarding body.
+    """Authenticate omitted tools and the complete forwarding context.
 
-    Signs the same forwarding dump that is actually posted
-    (``model_dump_for_http_bridge_owner_forwarding``), not a plain
-    ``model_dump`` that
-    synthesizes ``"tools": []`` for clients that omitted the field. A plain
+    Default signing retains the legacy normalized-input forwarding dump.
+    The prior input-shape protocol passes ``input_shape_version`` to bind the
+    exact posted body; current origins use a separate input-shape signature.
+    Both forwarding dumps preserve omitted tools, unlike plain ``model_dump``
+    which synthesizes ``"tools": []`` for clients that omitted the field. A plain
     dump would make the omitted-tools and explicit-``tools: []`` bodies sign
     identically, so a body rewritten in transit to inject ``"tools": []``
     would still verify on the owner instance and re-mark ``tools`` as
