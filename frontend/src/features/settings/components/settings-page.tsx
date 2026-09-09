@@ -21,8 +21,10 @@ import { GuestAccessSettings } from "@/features/settings/components/guest-access
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
+import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
@@ -217,6 +219,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
@@ -240,6 +243,21 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
+              <UpstreamTimeoutSettings
+                key={[
+                  settings.version,
+                  settings.upstreamConnectTimeoutSeconds,
+                  settings.proxyRequestBudgetSeconds,
+                  settings.compactRequestBudgetSeconds,
+                  settings.transcriptionRequestBudgetSeconds,
+                  settings.streamIdleTimeoutSeconds,
+                  settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
+                  settings.sseKeepaliveIntervalSeconds,
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

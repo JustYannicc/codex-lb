@@ -17,12 +17,14 @@ claim-start epoch, provided the database still considers it live. A competing,
 expired, or unconfirmed receipt does not authorize dispatch.
 
 The unmerged claim-marker migration follows main's
-`20260908_020000_merge_overflow_transport_heads` revision from #2198. It adds
+`20260909_040000_dashboard_timeout_settings` revision, after the resilience
+toggle migration and the overflow/transport graph repair from #2198. It adds
 or removes only the nullable retry-circuit marker columns, preserving both
 parents' schemas, overflow settings, explicit transport choices, model-source
-pins, and existing retry generations. A live receipt still blocks rollback
+pins, dashboard resilience and timeout overrides, and existing retry generations.
+A live receipt still blocks rollback
 before schema or version changes. Neither original parent nor their merge
-revision is rewritten.
+revision or either dashboard-settings migration is rewritten.
 
 An ambiguous send or unconfirmed release can retain a receipt until expiry.
 The stranded-receipt policy remains an explicit maintainer decision in the

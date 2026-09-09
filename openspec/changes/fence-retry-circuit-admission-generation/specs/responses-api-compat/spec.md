@@ -99,13 +99,13 @@ the application migration mutex.
 
 #### Scenario: Marker migration preserves its main-branch parent
 
-- **GIVEN** the merged overflow/transport parent revision is applied with
-  existing settings, explicit transport choices, model-source pins, and
-  retry-circuit generations
+- **GIVEN** the merged dashboard timeout parent revision is applied with
+  existing overflow settings, explicit transport choices, model-source pins,
+  resilience and timeout overrides, and retry-circuit generations
 - **WHEN** the marker migration is upgraded, safely downgraded to that parent,
   and upgraded again
 - **THEN** the migration graph MUST retain one head
-- **AND** both parent schemas, settings, transport choices, pins, and retry
+- **AND** all upstream schemas, settings, transport choices, pins, and retry
   generations MUST remain intact while only the nullable claim-marker columns
   are added or removed
 

@@ -800,6 +800,31 @@ async def test_dashboard_settings_default_flip_migration_updates_fresh_seeded_ro
 
 
 @pytest.mark.asyncio
+async def test_fresh_database_bootstrap_ignores_removed_cache_affinity_env_var(tmp_path, monkeypatch):
+    # CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS was removed from Settings
+    # (remove-dead-env-settings); startup warns that it is ignored, so the
+    # migration chain that seeds the singleton row on a fresh database must not
+    # honour it either. The column default is 1800 (20260319_100937).
+    monkeypatch.setenv("CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS", "64")
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'removed-affinity-env.sqlite'}"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as connection:
+            affinity_ttl = (
+                await connection.execute(
+                    text("SELECT openai_cache_affinity_max_age_seconds FROM dashboard_settings WHERE id = 1")
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+
+    assert affinity_ttl == 1800
+
+
+@pytest.mark.asyncio
 async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_db_upgraded_in_steps(tmp_path):
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults-staged-fresh.sqlite'}"
 
@@ -2012,7 +2037,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
-    parent_revision = "20260908_020000_merge_overflow_transport_heads"
+    parent_revision = "20260909_040000_dashboard_timeout_settings"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
     assert script.get_heads() == [marker_revision]
@@ -2084,7 +2109,12 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
                 text(
                     "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "
                     "subscription_overflow_drain_until = '2026-09-09 12:00:00', "
-                    "upstream_stream_transport = 'websocket'"
+                    "upstream_stream_transport = 'websocket', "
+                    "soft_drain_enabled = 0, deterministic_failover_enabled = 1, circuit_breaker_enabled = 0, "
+                    "upstream_connect_timeout_seconds = 9.0, proxy_request_budget_seconds = 300.0, "
+                    "compact_request_budget_seconds = 120.0, transcription_request_budget_seconds = 60.0, "
+                    "stream_idle_timeout_seconds = 30.0, proxy_downstream_websocket_idle_timeout_seconds = 90.0, "
+                    "sse_keepalive_interval_seconds = 5.0"
                 )
             )
             assert updated_settings.rowcount > 0

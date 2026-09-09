@@ -62,6 +62,7 @@ from app.core.clients.native_egress import (
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -99,6 +100,7 @@ from app.core.resilience.network_recovery import (
     is_proxy_endpoint_failure,
     process_network_error_code,
 )
+from app.core.resilience.toggles import current_resilience_toggles
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.usage.live_hub import publish_live_usage
@@ -365,6 +367,19 @@ def _codex_route_transport_error_message(
     return codex_transport_error_message(operation, endpoint_id, exc)
 
 
+def _account_circuit_breaker(account_id: str | None, settings: Settings) -> CircuitBreaker | None:
+    """Return the account's breaker when the dashboard toggle is on, else ``None``.
+
+    C2-3 resilience toggles: breakers are constructed unconditionally; *use* is
+    gated per request by ``circuit_breaker_enabled`` from the dashboard
+    snapshot the request path bound (``settings`` is only the env fallback for
+    an unbound task).
+    """
+    if not account_id or not current_resilience_toggles(startup_settings=settings).circuit_breaker_enabled:
+        return None
+    return get_circuit_breaker_for_account(account_id)
+
+
 @asynccontextmanager
 async def _service_circuit_breaker_context(
     cm: AsyncContextManager[aiohttp.ClientResponse],
@@ -374,7 +389,7 @@ async def _service_circuit_breaker_context(
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
-    cb = get_circuit_breaker_for_account(account_id, effective_settings) if account_id else None
+    cb = _account_circuit_breaker(account_id, effective_settings)
     is_probe = False
     if cb is not None:
         try:
@@ -2503,7 +2518,7 @@ async def _open_upstream_websocket(
     hold_half_open_probe: bool = False,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     settings = get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
     is_probe = False
     if circuit_breaker is not None:
         is_probe = await circuit_breaker.pre_call_check()
@@ -2812,8 +2827,7 @@ async def _stream_responses_via_websocket(
     lifecycle_recorded = False
     seen_terminal = False
     settings = get_settings()
-    if account_id is not None:
-        circuit_breaker = get_circuit_breaker_for_account(account_id, settings)
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
 
     async def _record_lifecycle_success() -> None:
         nonlocal lifecycle_recorded
@@ -3628,7 +3642,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
 ) -> AsyncGenerator[str, None]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
         headers,
         codex_installation_id,
@@ -4719,7 +4733,7 @@ class _CompactCommandTransport:
     allow_direct_egress: bool = False
 
     async def execute(self) -> CompactResponsePayload:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         native_header_order = _native_responses_header_order(self.headers)
         upstream_base = settings.upstream_base_url.rstrip("/")
         url = f"{upstream_base}/codex/responses"
@@ -5265,7 +5279,7 @@ async def thread_goal_request(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/thread/goal/{operation}"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept="application/json")
@@ -5475,7 +5489,7 @@ async def codex_control_request(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
     effective_privacy_policy = (
@@ -5720,7 +5734,7 @@ async def _transcribe_audio_with_session(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = False,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/transcribe"
     upstream_headers = _build_upstream_transcribe_headers(

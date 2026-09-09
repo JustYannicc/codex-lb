@@ -84,3 +84,7 @@
 - [x] 4.16 Keep the upstream merge regression bound to its historical merge
   while proving that later descendants reach the sole current head without
   comparing a historical schema against a later ORM model.
+- [x] 4.17 Follow the merged dashboard resilience and timeout migrations,
+  preserve their nullable defaults and explicit overrides through marker
+  lifecycle checks, and retain the historical merge boundary while reconciling
+  independent upstream schema requirements.

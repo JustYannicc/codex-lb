@@ -889,6 +889,16 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-1 timeouts: dashboard-managed upstream timeouts and request budgets.
+    # NULL = inherit the ``Settings`` field (environment value or code default).
+    upstream_connect_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    compact_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    transcription_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stream_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-1 timeouts
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
@@ -1120,7 +1130,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     # Data retention windows in days; NULL = never set from the dashboard
-    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    # (treated as disabled), 0 = explicitly disabled.
     request_log_retention_days: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1129,6 +1139,11 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-3 resilience toggles: NULL inherits the deprecated ``CODEX_LB_*`` env
+    # alias (then the code default); a non-NULL value is dashboard-owned.
+    soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,

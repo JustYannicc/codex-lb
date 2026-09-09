@@ -29,12 +29,14 @@ rollback therefore cannot race a durable claim that does not use the broader
 migration lock.
 
 The unmerged marker migration follows
-`20260908_020000_merge_overflow_transport_heads`, the shared graph repair from
-#2198. That merge joins the subscription-overflow and transport-sentinel
-revisions without changing either. The marker's operations affect only the
-retry-circuit table; upgrading or rolling it back must preserve both parent
-schemas, overflow settings, explicit transport choices, model-source pins,
-and existing retry generations. All three merged revisions remain unchanged.
+`20260909_040000_dashboard_timeout_settings`, after the dashboard resilience
+toggle revision and the shared overflow/transport graph repair from #2198.
+That merge joins the subscription-overflow and transport-sentinel revisions
+without changing either. The marker's operations affect only the retry-circuit
+table; upgrading or rolling it back must preserve the upstream schemas,
+overflow settings, explicit transport choices, model-source pins, dashboard
+resilience and timeout overrides, and existing retry generations. All merged
+revisions remain unchanged.
 This graph correction does not choose the stranded-receipt policy or add
 late-receipt recovery.
 
@@ -42,6 +44,10 @@ The upstream merge regression tests the historical merge boundary explicitly.
 Separate populated upgrades go directly to the current head and compare against
 current ORM metadata. A later child revision must not make that historical
 no-op merge appear to add the child's columns or fail current-head assertions.
+The direct-to-head cases also verify that new nullable dashboard columns start
+NULL. The marker lifecycle seeds explicit resilience and timeout overrides at
+its latest parent and compares the complete preexisting schema and data through
+upgrade, rollback refusal, writer exclusion, safe rollback and re-upgrade.
 
 ## Claim path
 
