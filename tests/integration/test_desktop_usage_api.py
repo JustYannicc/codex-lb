@@ -281,3 +281,32 @@ async def test_desktop_usage_cancelled_refresh_propagates_and_releases_read_scop
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("suffix", ["", "/"])
+@pytest.mark.parametrize("stale,expected_status", [(False, 200), (True, 503)])
+async def test_desktop_refresh_deadline_uses_only_fresh_persisted_observations(
+    async_client, db_setup, monkeypatch, suffix, stale, expected_status
+):
+    from app.modules.desktop_usage import service
+
+    await seed_pool(stale=stale)
+    refresh_cancelled = asyncio.Event()
+
+    async def slow_refresh(self, accounts, latest_usage, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            refresh_cancelled.set()
+
+    monkeypatch.setattr(service, "_REFRESH_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(UsageUpdater, "refresh_accounts", slow_refresh)
+    response = await asyncio.wait_for(async_client.get(f"/api/codex/desktop/usage{suffix}", headers=HEADERS), timeout=5)
+    assert refresh_cancelled.is_set()
+    assert response.status_code == expected_status
+    if stale:
+        assert response.json()["error"]["code"] == "pooled_usage_unavailable"
+        assert "rate_limit" not in response.json()
+    else:
+        assert response.json()["rate_limit"]["secondary_window"]["used_percent"] == 30
+        assert response.json()["account_id"] == "original-account"

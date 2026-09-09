@@ -1,0 +1,3 @@
+- [ ] 1. Add the aggregate refresh deadline and route regression coverage for fresh/stale observations and caller cancellation.
+- [ ] 2. Validate the affected tests/specs, apply the same fix to the local runtime, and verify deployment.
+- [ ] 3. Address the current-head review finding, archive the verified change and update the PR.
