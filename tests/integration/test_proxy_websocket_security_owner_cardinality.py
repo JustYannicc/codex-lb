@@ -12,6 +12,7 @@ from sqlalchemy import select
 import app.modules.proxy.service as proxy_module
 from app.db.models import Account
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.capability_routing import REQUIRED_CAPABILITY_HEADER
@@ -79,6 +80,15 @@ def test_websocket_security_requirement_does_not_prove_unknown_owner(
     with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
         assert client.portal is not None
         key, accounts = client.portal.call(_scoped_accounts, app_instance, scope)
+        if reuse:
+            # Establish the socket through independent file ownership. An
+            # unregistered marker alone must not select from the mixed pool.
+            owner = accounts[1 if scope == "unauthorized" else 0]
+            client.portal.call(
+                get_proxy_service_for_app(app_instance)._pin_file_account,
+                "file_cardinality_bootstrap",
+                owner.id,
+            )
         headers = {"Authorization": f"Bearer {key}"}
         if not (reuse and scope == "unauthorized"):
             headers[REQUIRED_CAPABILITY_HEADER] = "trusted_cyber"
@@ -86,7 +96,18 @@ def test_websocket_security_requirement_does_not_prove_unknown_owner(
             headers["x-codex-turn-state"] = marker
         with client.websocket_connect(f"ws://localhost{path}", headers=headers) as websocket:
             if reuse:
-                websocket.send_json({"type": "response.create", "model": "gpt-5.4", "input": "bootstrap"})
+                websocket.send_json(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "input_file", "file_id": "file_cardinality_bootstrap"}],
+                            }
+                        ],
+                    }
+                )
                 assert websocket.receive_json()["type"] == "response.created"
                 assert websocket.receive_json()["type"] == "response.completed"
             request: dict[str, object] = {
