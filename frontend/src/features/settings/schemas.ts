@@ -194,6 +194,10 @@ export const DashboardSettingsSchema = z
     streamIdleTimeoutSeconds: z.number().optional().default(7200),
     proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().optional().default(120),
     sseKeepaliveIntervalSeconds: z.number().optional().default(10),
+    // M1 stream/bridge budgets: effective values, same contract as the C2-1
+    // timeouts above (optional with the code defaults, unbounded).
+    httpResponsesStreamRequestBudgetSeconds: z.number().optional().default(7200),
+    httpResponsesSessionBridgeRequestBudgetSeconds: z.number().optional().default(7200),
     // Optional so responses from backends that predate provenance still parse.
     provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
     // C2-3 resilience toggles: effective values; `provenance[<snake_name>]`
@@ -201,6 +205,9 @@ export const DashboardSettingsSchema = z
     softDrainEnabled: z.boolean().optional().default(true),
     deterministicFailoverEnabled: z.boolean().optional().default(true),
     circuitBreakerEnabled: z.boolean().optional().default(false),
+    // M3 codex prewarm: effective value; `provenance[<snake_name>]` says
+    // whether the dashboard, the environment or the default owns it.
+    httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().optional().default(false),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -292,6 +299,9 @@ export const SettingsUpdateRequestSchema = z
     softDrainEnabled: z.boolean().nullable().optional(),
     deterministicFailoverEnabled: z.boolean().nullable().optional(),
     circuitBreakerEnabled: z.boolean().nullable().optional(),
+    // M3 codex prewarm: tri-state (omitted = unchanged, null = reset to
+    // inherited, boolean = dashboard value).
+    httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().nullable().optional(),
     // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
     // (inherit environment / default), value = store. Cross-field invariants
     // are enforced by the backend against the effective values.
@@ -302,6 +312,9 @@ export const SettingsUpdateRequestSchema = z
     streamIdleTimeoutSeconds: z.number().positive().max(86400).nullable().optional(),
     proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().positive().max(86400).nullable().optional(),
     sseKeepaliveIntervalSeconds: z.number().min(0).max(86400).nullable().optional(),
+    // M1 stream/bridge budgets: tri-state like the C2-1 timeouts.
+    httpResponsesStreamRequestBudgetSeconds: z.number().positive().max(86400).nullable().optional(),
+    httpResponsesSessionBridgeRequestBudgetSeconds: z.number().positive().max(86400).nullable().optional(),
   })
   .superRefine((settings, ctx) => {
     if (

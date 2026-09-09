@@ -932,6 +932,11 @@ class DashboardSettings(Base):
     proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: dashboard-managed Responses stream and HTTP
+    # session bridge request budgets. NULL = inherit the ``Settings`` field.
+    http_responses_stream_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_responses_session_bridge_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end M1 stream/bridge budgets
     # C2-2 routing/overload: dashboard-managed routing weights and overload
     # isolation. NULL inherits the process environment value (or the code
     # default) at read time; a non-NULL value wins over the environment.
@@ -1059,6 +1064,11 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    # M3 codex prewarm: dashboard-managed Codex HTTP-bridge session prewarm.
+    # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
