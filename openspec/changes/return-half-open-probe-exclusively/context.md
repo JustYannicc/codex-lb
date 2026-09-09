@@ -197,3 +197,14 @@ single-flight probe admission remains independent of the dashboard-managed
 upstream account-breaker toggle. The sibling eventual-success settlement and
 expiry policy questions remain unresolved; this integration does not change
 their behavior.
+
+The later reconciliation with upstream
+`0da41b64e802331faae01077c89e8c8580b4bce0` passes strict validation for all
+64 main specs with the same pinned validator. Upstream has repaired the
+unrelated strict-validation failures recorded above. The accepted HTTP
+continuation promotion uses soft, API-key-scoped locality; it does not grant
+hard-continuity replay or probe ownership. Chat reservation settlement remains
+with the actor that accepted it. Automation run claims use their upstream
+captured-budget contract, independently of the unresolved bridge-expiry
+policy. This reconciliation preserves those contracts without changing the
+sibling-success or probe-expiry decisions.
