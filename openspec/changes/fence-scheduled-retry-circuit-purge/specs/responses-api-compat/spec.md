@@ -2,7 +2,7 @@
 
 ### Requirement: Scheduled retry cleanup preserves changes after selection
 
-Scheduled retry-circuit cleanup MUST delete only the observation timestamp, admission generation and consecutive-failure count selected for that key. A changed value MUST prevent deletion even when the row still satisfies retention eligibility. When any selected row fails its conditional deletion, the cleanup pass MUST stop after completing that selected batch and MUST NOT select the changed row again in the same pass. Existing retention grace, tombstone retention and live-continuity protection MUST remain in force.
+Scheduled retry-circuit cleanup MUST delete only the observation timestamp, admission generation, consecutive-failure count and failure detail selected for that key, including a null detail. A changed value MUST prevent deletion even when the row still satisfies retention eligibility. When any selected row fails its conditional deletion, the cleanup pass MUST stop after completing that selected batch and MUST NOT select the changed row again in the same pass. Existing retention grace, tombstone retention and live-continuity protection MUST remain in force.
 
 #### Scenario: Replay claims after stale selection
 - **GIVEN** cleanup selected an eligible stale retry-circuit row
@@ -18,6 +18,12 @@ Scheduled retry-circuit cleanup MUST delete only the observation timestamp, admi
 - **GIVEN** cleanup selected an eligible stale retry-circuit row
 - **WHEN** its observation timestamp changes but remains old enough for retention cleanup
 - **THEN** cleanup MUST preserve the updated observation in that pass
+
+#### Scenario: Anchor settlement changes only the selected detail
+- **GIVEN** cleanup selected an eligible stale row, including one with a null detail
+- **WHEN** settlement changes only its detail to an abandoned-anchor tombstone while anchor registration is unresolved
+- **THEN** cleanup MUST preserve the tombstone even if its unchanged timestamp satisfies tombstone retention and no registered continuity yet protects it
+- **AND** cleanup MUST NOT recapture that row in the same pass
 
 #### Scenario: Mixed batch with unchanged stale rows
 - **GIVEN** cleanup selected both an unchanged eligible row and a row subsequently changed by a replay or failure

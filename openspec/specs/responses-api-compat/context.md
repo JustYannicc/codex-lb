@@ -300,6 +300,6 @@ advance the stream from different tasks.
 
 ## Scheduled retry cleanup races
 
-Scheduled cleanup compares the selected observation timestamp, admission generation and failure count before deletion. For example, an old row at generation 3 survives if a replay claims generation 4 after cleanup selected it, even when the timestamp still meets the age cutoff. A conditional-delete miss ends that cleanup pass after its selected batch; the next scheduled pass applies the normal retention rules to the surviving state. See the scheduled cleanup requirement in [spec.md](spec.md).
+Scheduled cleanup compares the selected observation timestamp, admission generation, failure count and null-safe failure detail before deletion. For example, an old row at generation 3 survives if a replay claims generation 4 after cleanup selected it, even when the timestamp still meets the age cutoff. A conditional-delete miss ends that cleanup pass after its selected batch; the next scheduled pass applies the normal retention rules to the surviving state. See the scheduled cleanup requirement in [spec.md](spec.md).
 
 This uses existing columns and does not establish leased-receipt lifetime protection. The receipt lifecycle and stranded-owner and success-versus-claim policy decisions remain separate in #2271 and PR #1954.
