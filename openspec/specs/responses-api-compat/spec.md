@@ -7418,9 +7418,11 @@ MUST NOT be reused after transfer.
 
 ### Requirement: Retry-circuit stale purges are generation-fenced
 
-Expired retry-circuit purges MUST compare the captured `updated_at_epoch`,
+Per-key expired retry-circuit purges MUST compare the captured `updated_at_epoch`,
 `admission_generation`, and `consecutive_failures` in their delete predicate.
-They MUST exclude rows with an unexpired claim receipt.
+Per-key and scheduled purges MUST exclude rows with an unexpired claim receipt.
+Scheduled purges MUST compare the captured claim generation, start and expiry before
+deletion and MUST NOT recapture a changed receipt in the same cleanup pass.
 A purge that loses a generation or claim-receipt race
 MUST leave the newer row intact. An expired claim MAY be reclaimed only by a
 new generation-fenced claim. If a stale-row purge returns no match or raises
@@ -7434,14 +7436,6 @@ uncertainty, including when it finds a fresh below-threshold row.
 - **WHEN** a replay claim advances that row to generation `g + 1` before cleanup deletes it
 - **THEN** the cleanup delete MUST match no row
 - **AND** the claimed row MUST remain available for later generation-fenced settlement
-
-#### Scenario: A lagging-clock failure survives a batch purge
-
-- **GIVEN** a batch purge captured a retry row before a concurrent failure update
-- **WHEN** that update increases `consecutive_failures` while a lagging writer clock
-  leaves `updated_at_epoch` and `admission_generation` unchanged
-- **THEN** the stale delete MUST match no row
-- **AND** the same purge invocation MUST NOT reselect and delete the newer failure
 
 #### Scenario: Active and expired claim leases
 

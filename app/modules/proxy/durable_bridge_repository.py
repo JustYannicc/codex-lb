@@ -23,7 +23,6 @@ from sqlalchemy import (
     select,
     text,
     true,
-    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -80,9 +79,6 @@ _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS = 7260.0
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
-# Nine binds per key plus at most ten fixed binds must fit SQLite's 999 limit.
-# Keep a single writer transaction for each selected batch.
-_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 109
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -3740,73 +3736,58 @@ class DurableBridgeRepository:
                 & (HttpBridgeRetryCircuit.updated_at_epoch < tombstone_cutoff_epoch)
                 & ~live_continuity_exists
             )
+        dialect = self._session.get_bind().dialect.name
+        database_now_epoch = _retry_circuit_database_now_epoch(dialect)
+        no_live_claim = or_(
+            HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
+        )
         deleted_count = 0
         while True:
-            dialect = self._session.get_bind().dialect.name
-            database_now_epoch = _retry_circuit_database_now_epoch(dialect)
             result = await self._session.execute(
                 select(
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
-                    HttpBridgeRetryCircuit.updated_at_epoch,
-                    HttpBridgeRetryCircuit.admission_generation,
-                    HttpBridgeRetryCircuit.consecutive_failures,
-                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
-                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
-                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),
-                )
-                .where(
-                    HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch,
-                    or_(
-                        HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
-                        HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
-                        HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
-                    ),
+                    HttpBridgeRetryCircuit.admission_claimed_generation,
+                    HttpBridgeRetryCircuit.admission_claimed_at_epoch,
+                    HttpBridgeRetryCircuit.admission_claimed_until_epoch,
                 )
                 .where(stale_predicate)
+                .where(no_live_claim)
                 .limit(batch_size)
             )
             keys = [tuple(row) for row in result.fetchall()]
             if not keys:
                 return deleted_count
+            batch_deleted_count = 0
             async with sqlite_writer_section():
-                batch_deleted_count = 0
-                for offset in range(0, len(keys), _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE):
-                    key_chunk = keys[offset : offset + _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE]
+                for (
+                    session_key_kind,
+                    session_key_hash,
+                    api_key_scope,
+                    claimed_generation,
+                    claimed_at_epoch,
+                    claimed_until_epoch,
+                ) in keys:
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
-                        .where(
-                            tuple_(
-                                HttpBridgeRetryCircuit.session_key_kind,
-                                HttpBridgeRetryCircuit.session_key_hash,
-                                HttpBridgeRetryCircuit.api_key_scope,
-                                HttpBridgeRetryCircuit.updated_at_epoch,
-                                HttpBridgeRetryCircuit.admission_generation,
-                                HttpBridgeRetryCircuit.consecutive_failures,
-                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
-                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
-                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),
-                            ).in_(key_chunk)
-                        )
-                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
+                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
+                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.admission_claimed_generation == claimed_generation)
+                        .where(HttpBridgeRetryCircuit.admission_claimed_at_epoch == claimed_at_epoch)
+                        .where(HttpBridgeRetryCircuit.admission_claimed_until_epoch == claimed_until_epoch)
                         .where(stale_predicate)
-                        .where(
-                            or_(
-                                HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
-                                HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
-                                HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
-                            )
-                        )
+                        .where(no_live_claim)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
                     batch_deleted_count += len(deleted.scalars().all())
                 await self._session.commit()
             deleted_count += batch_deleted_count
             if batch_deleted_count != len(keys):
-                # A conditional delete miss means a concurrent claim or
-                # failure changed at least one selected row. Do not select it
-                # again with its new generation and delete that newer state.
+                # A changed receipt belongs to a later pass.
                 return deleted_count
 
     async def upsert_alias(

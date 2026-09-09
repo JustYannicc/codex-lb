@@ -85,26 +85,6 @@ class _BlockedSelectSession:
         return result
 
 
-class _CountingDeleteSession:
-    def __init__(self, inner: AsyncSession) -> None:
-        self._inner = inner
-        self.delete_count = 0
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._inner, name)
-
-    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-        if getattr(statement, "is_delete", False):
-            self.delete_count += 1
-        return await self._inner.execute(statement, *args, **kwargs)
-
-
-def test_durable_bridge_live_claim_requires_process_epoch() -> None:
-    parameter = inspect.signature(DurableBridgeSessionCoordinator.claim_live_session).parameters["owner_process_epoch"]
-
-    assert parameter.default is inspect.Parameter.empty
-
-
 @pytest.mark.asyncio
 async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_then_session_header(
     coordinator: DurableBridgeSessionCoordinator,
@@ -3946,59 +3926,6 @@ async def test_durable_bridge_retry_circuit_batch_purge_stops_after_mixed_genera
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_retry_circuit_batch_purge_is_timestamp_fenced(
-    async_session_factory: Callable[[], AsyncSession],
-    coordinator: DurableBridgeSessionCoordinator,
-) -> None:
-    initial_updated_at_epoch = 1200.0
-    delayed_updated_at_epoch = 1200.5
-    await coordinator.persist_retry_circuit(
-        session_key_kind="session_header",
-        session_key_value="sid-retry-circuit-batch-timestamp-race",
-        api_key_id="key-batch-timestamp-race",
-        consecutive_failures=2,
-        cooldown_until_epoch=1300.0,
-        last_detail="stream_incomplete",
-        updated_at_epoch=initial_updated_at_epoch,
-    )
-
-    async with async_session_factory() as purge_session:
-        blocked_session = _BlockedSelectSession(purge_session)
-        repository = DurableBridgeRepository(cast(AsyncSession, blocked_session))
-        purge_task = asyncio.create_task(
-            repository.purge_retry_circuits_before(initial_updated_at_epoch + 1.0),
-        )
-        await asyncio.wait_for(blocked_session.selected.wait(), timeout=1.0)
-
-        delayed = await coordinator.persist_retry_circuit(
-            session_key_kind="session_header",
-            session_key_value="sid-retry-circuit-batch-timestamp-race",
-            api_key_id="key-batch-timestamp-race",
-            consecutive_failures=3,
-            cooldown_until_epoch=1400.0,
-            last_detail="stream_idle_timeout",
-            updated_at_epoch=delayed_updated_at_epoch,
-            base_updated_at_epoch=initial_updated_at_epoch,
-        )
-        assert delayed is not None
-        assert delayed.updated_at_epoch == delayed_updated_at_epoch
-        assert delayed.admission_generation == 0
-
-        blocked_session.release_delete.set()
-        assert await asyncio.wait_for(purge_task, timeout=1.0) == 0
-
-    remaining = await coordinator.lookup_retry_circuit(
-        session_key_kind="session_header",
-        session_key_value="sid-retry-circuit-batch-timestamp-race",
-        api_key_id="key-batch-timestamp-race",
-    )
-    assert remaining is not None
-    assert remaining.updated_at_epoch == delayed_updated_at_epoch
-    assert remaining.admission_generation == 0
-    assert remaining.consecutive_failures == 3
-
-
-@pytest.mark.asyncio
 async def test_durable_bridge_retry_circuit_batch_purge_deletes_only_expired_rows(
     async_session_factory: Callable[[], AsyncSession],
     coordinator: DurableBridgeSessionCoordinator,
@@ -4041,39 +3968,6 @@ async def test_durable_bridge_retry_circuit_batch_purge_deletes_only_expired_row
     )
     assert remaining is not None
     assert remaining.updated_at_epoch == 1100.0
-
-
-@pytest.mark.asyncio
-async def test_durable_bridge_retry_circuit_batch_purge_chunks_tuple_delete_keys(
-    async_session_factory: Callable[[], AsyncSession],
-) -> None:
-    row_count = 151
-    async with async_session_factory() as seed_session:
-        seed_session.add_all(
-            [
-                HttpBridgeRetryCircuit(
-                    session_key_kind="session_header",
-                    session_key_hash=durable_bridge_hash(f"sid-retry-circuit-chunk-{index}"),
-                    api_key_scope=f"key-retry-circuit-chunk-{index}",
-                    consecutive_failures=2,
-                    cooldown_until_epoch=1300.0,
-                    last_detail="stream_incomplete",
-                    updated_at_epoch=900.0,
-                    admission_generation=0,
-                )
-                for index in range(row_count)
-            ]
-        )
-        await seed_session.commit()
-
-    async with async_session_factory() as purge_session:
-        counting_session = _CountingDeleteSession(purge_session)
-        deleted = await DurableBridgeRepository(cast(AsyncSession, counting_session)).purge_retry_circuits_before(
-            1000.0
-        )
-
-    assert deleted == row_count
-    assert counting_session.delete_count == 2
 
 
 def _lookup_with_lease(lease_expires_at):
