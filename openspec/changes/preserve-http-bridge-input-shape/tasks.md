@@ -4,4 +4,8 @@
 - [x] Preserve target quarantine implementation and main-native APIs.
 - [x] Verify independent route and forwarding behavior.
 - [x] Validate lint, typing and OpenSpec.
-- [ ] Verify both merge orders with independent quarantine slice.
+- [x] Verify both merge orders with independent quarantine slice.
+
+## Owner acceptance
+
+- [ ] Obtain whole-scope owner approval of forwarding compatibility and capability-gate behavior before merge or archival.
