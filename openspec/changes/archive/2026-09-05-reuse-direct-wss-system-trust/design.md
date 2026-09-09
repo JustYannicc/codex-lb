@@ -1,6 +1,6 @@
 ## Context
 
-`_connect_upstream_websocket` selects routed/native transport first, then calls Python `websocket_connect` without an explicit TLS context. For `wss://`, websockets17.1 asks the event loop to create a default system-trust context per connection. Phase-one real TLS probes observed10 builds for10 separate opens, versus1 for10 retained turns. Main's private aiohttp `_shared_ssl_context` adds certifi and is a different trust policy.
+`_connect_upstream_websocket` selects routed/native transport first, then calls Python `websocket_connect` without an explicit TLS context. For `wss://`, websockets 17.1 asks the event loop to create a default system-trust context per connection. Phase-one real TLS probes observed 10 builds for 10 separate opens, versus 1 for 10 retained turns. Main's private aiohttp `_shared_ssl_context` adds certifi and is a different trust policy.
 
 ## Goals / Non-Goals
 
