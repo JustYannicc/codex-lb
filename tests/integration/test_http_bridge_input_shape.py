@@ -48,7 +48,9 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
         assert first.status_code == 200, first.text
         first_id = first.json()["id"]
         session = next(iter(service._http_bridge_sessions.values()))
-        quarantine._quarantine_http_bridge_session(service, session, reason="wedged_reattach")
+        quarantine._quarantine_http_bridge_session(
+            service, session, reason=quarantine._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON
+        )
         continuation = (
             [
                 {"type": "function_call_output", "call_id": "call_a", "output": "a"},
