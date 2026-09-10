@@ -20,7 +20,7 @@ _MERGE = "20260910_160000_merge_retry_claim_spool_heads"
 _GUEST = "20260908_000000_add_guest_session_generation"
 _GUEST_MERGE = "20260910_170000_merge_guest_retry_claim_heads"
 _GUEST_PARENTS = (_MERGE, _GUEST)
-_USERS = "20260909_020000_reproject_compat_admin_credentials"
+_USERS = "20260909_030000_add_audit_actor_columns"
 _CURRENT_MERGE = "20260910_200000_merge_users_retry_claim_heads"
 _CURRENT_PARENTS = (_GUEST_MERGE, _USERS)
 _RETENTION = "http_responses_session_bridge_operation_spool_retention_seconds"
@@ -241,6 +241,17 @@ def test_public_users_head_upgrade_and_downgrade_preserve_populated_parents(tmp_
     else:
         with sqlite3.connect(path) as connection:
             connection.execute("UPDATE dashboard_settings SET password_hash = 'legacy-admin-hash' WHERE id = 1")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO audit_logs (id, timestamp, action, details) "
+            "VALUES (700, '2026-09-10 12:00:00', 'settings.updated', 'retained-audit')"
+        )
+        if parent == _USERS:
+            connection.execute(
+                "UPDATE audit_logs SET timestamp = '2026-09-10 12:00:00.000000', "
+                "actor_user_id = 'retained-user', actor_username = 'retained-user', "
+                "target_type = 'settings', target_id = 'dashboard', severity = 'warning' WHERE id = 700"
+            )
     before = _state(path)
 
     assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
@@ -248,7 +259,13 @@ def test_public_users_head_upgrade_and_downgrade_preserve_populated_parents(tmp_
     check = _cli(path, "check")
     assert "migration_policy=ok" in check and "schema_drift=none" in check
     merged = _state(path)
+    if parent == _GUEST_MERGE:
+        before["rows"]["audit_logs"][0]["timestamp"] += ".000000"
     _assert_parent_rows_preserved(before, merged)
+    audit = merged["rows"]["audit_logs"][0]
+    assert audit["actor_user_id"] == ("retained-user" if parent == _USERS else None)
+    assert audit["target_id"] == ("dashboard" if parent == _USERS else None)
+    assert audit["severity"] == ("warning" if parent == _USERS else "info")
     assert {row["slug"] for row in merged["rows"]["dashboard_roles"] if row["kind"] == "preset"} == {
         "admin",
         "operator",

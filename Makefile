@@ -2,6 +2,7 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_audit_actor_attribution.py::test_signed_in_admin_mutation_records_actor_and_target \
 	tests/integration/test_dashboard_roles_schema.py::test_custom_role_grants_round_trip_and_presets_resolve_from_code \
 	tests/integration/test_dashboard_roles_schema.py::test_seeding_is_idempotent_and_never_updates_existing_rows \
 	tests/integration/test_dashboard_users_schema.py::test_identity_uniqueness_and_api_key_ownership_columns \

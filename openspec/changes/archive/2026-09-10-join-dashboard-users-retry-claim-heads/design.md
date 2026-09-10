@@ -1,6 +1,6 @@
 ## Context and decision
 
-Join20260910_170000_merge_guest_retry_claim_heads with20260909_020000_reproject_compat_admin_credentials. The latter descends from roles000000 and users010000. Use a new explicit no-op revision; never reparent an applied migration. Alembic applies the missing branch before changing version stamps.
+Join20260910_170000_merge_guest_retry_claim_heads with20260909_030000_add_audit_actor_columns. The latter descends from roles000000 and users010000. Use a new explicit no-op revision; never reparent an applied migration. Alembic applies the missing branch before changing version stamps.
 
 ## Proof
 
