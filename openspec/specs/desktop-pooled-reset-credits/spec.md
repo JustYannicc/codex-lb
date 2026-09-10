@@ -129,7 +129,7 @@ The database MUST upgrade to one head from either the published reset/spool merg
 
 ### Requirement: Reset pooling composes with dashboard users without state loss
 
-The database MUST upgrade to one head from the published reset/guest merge and dashboard credential-reprojection revision. Existing roles, grants, users, identities, credentials, user and guest generations, reset bindings, reset policy and explicit retention settings MUST survive. Missing user schema MUST receive main's existing credential backfill and preset roles. Merge-only downgrade and re-upgrade MUST retain both parent schemas and their data. Existing authorization and CSRF rules MUST remain unchanged.
+The database MUST upgrade to one head from the published reset/guest merge and dashboard audit-attribution revision. Existing audit rows, roles, grants, users, identities, credentials, user and guest generations, reset bindings, reset policy and explicit retention settings MUST survive. Missing user schema MUST receive main's existing credential backfill and preset roles. Merge-only downgrade and re-upgrade MUST retain both parent schemas and their data. Existing authorization and CSRF rules MUST remain unchanged.
 
 #### Scenario: Populated reset database adopts dashboard users
 

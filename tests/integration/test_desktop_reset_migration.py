@@ -265,16 +265,22 @@ async def test_guest_generation_composition_preserves_authentication_and_reset_s
 
 @pytest.mark.parametrize(
     "starting_revision",
-    ["20260910_030000_merge_reset_guest_heads", "20260909_020000_reproject_compat_admin_credentials"],
+    ["20260910_030000_merge_reset_guest_heads", "20260909_030000_add_audit_actor_columns"],
 )
 async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bindings(migration_url, starting_revision):
     url = migration_url
     await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
     has_reset = starting_revision == "20260910_030000_merge_reset_guest_heads"
     engine = create_async_engine(url)
-    tables = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
+    tables = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities", "audit_logs")
     try:
         async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO audit_logs (timestamp,action,actor_ip,details,request_id) "
+                    "VALUES ('2026-09-10 12:34:56.000000','settings.updated','127.0.0.1','retained','request')"
+                )
+            )
             await connection.execute(
                 text(
                     "UPDATE dashboard_settings SET password_hash='legacy-password', "
@@ -287,6 +293,7 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
             )
             settings_before = (await connection.execute(text("SELECT * FROM dashboard_settings"))).mappings().one()
             if has_reset:
+                original_audit = (await connection.execute(text("SELECT * FROM audit_logs"))).mappings().one()
                 await connection.execute(
                     text("UPDATE dashboard_settings SET desktop_reset_pool_enabled=true WHERE id=1")
                 )
@@ -300,6 +307,13 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
                     await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))
                 ).all()
             else:
+                await connection.execute(
+                    text(
+                        "UPDATE audit_logs SET actor_user_id='existing-user',actor_username='existing-user', "
+                        "actor_role_slug='custom',auth_method='password',target_type='settings', "
+                        "target_id='dashboard',severity='warning'"
+                    )
+                )
                 await connection.execute(
                     text("INSERT INTO dashboard_roles (id,slug,name,kind) VALUES ('custom','custom','Custom','custom')")
                 )
@@ -351,6 +365,30 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
                     "guest",
                     "member",
                 }
+                migrated_audit = (await connection.execute(text("SELECT * FROM audit_logs"))).mappings().one()
+                for key, value in original_audit.items():
+                    assert migrated_audit[key] == value
+                audit = (
+                    await connection.execute(
+                        text(
+                            "SELECT action,actor_ip,details,request_id,actor_user_id,actor_username,actor_role_slug, "
+                            "auth_method,target_type,target_id,severity FROM audit_logs"
+                        )
+                    )
+                ).one()
+                assert tuple(audit) == (
+                    "settings.updated",
+                    "127.0.0.1",
+                    "retained",
+                    "request",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "info",
+                )
             snapshot = {
                 table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all() for table in tables
             }
@@ -360,7 +398,7 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
         async with engine.connect() as connection:
             assert set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars()) == {
                 "20260910_030000_merge_reset_guest_heads",
-                "20260909_020000_reproject_compat_admin_credentials",
+                "20260909_030000_add_audit_actor_columns",
             }
             assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == bindings
             assert (
