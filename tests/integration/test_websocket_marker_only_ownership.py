@@ -119,7 +119,14 @@ def test_marker_only_reconnect_counts_assignment_owners(
             headers["Authorization"] = authorization
         allowed = (count == 1 or scoped) and not lookup_failure
         with client.websocket_connect(f"ws://localhost{path}", headers=headers) as websocket:
-            websocket.send_json({"type": "response.create", "model": "gpt-5.4", "input": "continue"})
+            # Opaque state exercises continuation ownership; plain text is stateless.
+            websocket.send_json(
+                {
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "input": [{"type": "reasoning", "encrypted_content": "opaque-test-state", "summary": []}],
+                }
+            )
             frame = _receive_frame(websocket)
             if allowed:
                 assert frame["type"] == "response.created", frame
@@ -241,7 +248,14 @@ def test_file_owner_does_not_authorize_a_later_unowned_marker_only_turn(app_inst
             )
             assert _receive_frame(websocket)["type"] == "response.created"
             candidates.assert_not_awaited()
-            websocket.send_json({"type": "response.create", "model": "gpt-5.4", "input": "no independent owner"})
+            # The second turn needs its own owner because it carries opaque state.
+            websocket.send_json(
+                {
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "input": [{"type": "reasoning", "encrypted_content": "opaque-test-state", "summary": []}],
+                }
+            )
             frame = _receive_frame(websocket)
             assert frame["type"] == "response.failed", frame
             assert frame["response"]["error"]["code"] == "previous_response_owner_unavailable"

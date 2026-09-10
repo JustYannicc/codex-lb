@@ -85,7 +85,13 @@ async def test_marker_only_http_requires_sole_scoped_owner(
     response = await async_client.post(
         route,
         headers={"Authorization": f"Bearer {key}", "x-codex-turn-state": marker},
-        json={"model": "gpt-5.1", "instructions": "continue", "input": "next", "stream": True},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            # Opaque state exercises sole-owner fallback; plain text is stateless.
+            "input": [{"type": "reasoning", "encrypted_content": "opaque-test-state", "summary": []}],
+            "stream": True,
+        },
     )
 
     if candidate_count == 1:
