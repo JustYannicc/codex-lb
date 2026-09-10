@@ -66,3 +66,5 @@ replacing the working file, but an external in-place writer can still change the
 backup inode. Failure reports retained backups without promising automatic
 rollback across files and databases. Targeted repair remains a separate command
 proposal in PR #2323.
+
+If a progress reader exits early, retag disables progress output and finishes the confirmed operation. For example, a supervisor can stop reading stderr without interrupting file writes. The CLI replaces the closed stderr stream to prevent Python from failing a second flush at shutdown. Stdout still reports the verified result.
