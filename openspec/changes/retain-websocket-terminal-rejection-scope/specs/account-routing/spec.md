@@ -44,3 +44,8 @@ Recovery MUST preserve routing policy, model eligibility, file ownership, regist
 - **WHEN** terminal cleanup selects one request for a persisted rejection
 - **THEN** the rejection MUST retain that selected request's model and service tier
 - **AND** reservation settlement and terminal logging MUST precede the health write
+
+#### Scenario: Matching probe recovers a rejected WebSocket handshake
+- **GIVEN** a WebSocket handshake rejects a known requested model and service tier with an account rate-limit or quota error
+- **WHEN** an operator probe completes for that unchanged scope and generation
+- **THEN** the persisted handshake rejection SHALL be eligible for completed-probe recovery

@@ -2065,7 +2065,7 @@ def test_backend_responses_websocket_genuine_transport_error_penalizes_and_fails
         del self
         permanent_failures.append((account.id, error_code))
 
-    async def spy_handle_connect_error(self, account, exc):
+    async def spy_handle_connect_error(self, account, exc, **_scope):
         # The connect-error penalty path (which records the account-health
         # penalty). Claim contention NEVER reaches here; a genuine transport
         # error MUST. Return a retryable classification so the loop fails over.

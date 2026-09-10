@@ -13,3 +13,5 @@ Store scalar scope values at selection, before cleanup awaits. Reuse the existin
 ## Risks / Trade-offs
 
 Capturing the final loop item would misidentify the rejection in multi-request batches. Verify that a different later request cannot replace the selected scope, and retain all cancellation and release-failure controls.
+
+The handshake decision already owns the request state. Forward its model and tier through the existing connect-error classifier to the same health writer. An end-to-end test imports an account, rejects the WebSocket handshake with 429, and then requires the completed HTTP probe to recover that hold.

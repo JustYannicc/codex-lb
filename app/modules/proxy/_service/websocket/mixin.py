@@ -4653,7 +4653,12 @@ class _WebSocketMixin:
             # ownership fails closed on the original sanitized failure.
             failure_class = "retryable_transient"
         else:
-            classified = await proxy._handle_websocket_connect_error(account, exc)
+            classified = await proxy._handle_websocket_connect_error(
+                account,
+                exc,
+                rejected_model=request_state.model,
+                rejected_service_tier=request_state.service_tier,
+            )
             failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
         candidates_remaining = max_attempts - attempt
         if confirmed_pre_dispatch:
@@ -5077,7 +5082,14 @@ class _WebSocketMixin:
         )
         return owner_record.account_id
 
-    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
+    async def _handle_websocket_connect_error(
+        self,
+        account: Account,
+        exc: ProxyResponseError,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
+    ) -> ClassifiedFailure:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         error = _parse_openai_error(exc.payload)
@@ -5087,6 +5099,8 @@ class _WebSocketMixin:
             _upstream_error_from_openai(error),
             error_code,
             http_status=exc.status_code,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
         )
 
     async def _relay_upstream_websocket_messages(
