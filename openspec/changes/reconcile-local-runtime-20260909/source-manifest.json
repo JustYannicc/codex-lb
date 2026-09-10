@@ -307,6 +307,20 @@
       "source_tree": "4cb966a88aad189446d1f65c3e4e1d4bdd10028f",
       "title": "test: stub ambient account deletion scheduler",
       "integration_note": "Bounded delta from 3b4222a08561f2e948e212535680cf3f1773252d; preserve aggregate migration drift/progress and existing fixture/cache/real-builder semantics. No metadata-refresh builder or unrelated main import."
+    },
+    {
+      "pr": 2303,
+      "source_commit": "7f6d26341231d5480e287e00d4480f797b54e82d",
+      "source_tree": "d5bd888c60908b8602c63fa62ca8d80ef06b2def",
+      "title": "perf(http-bridge): drain queued transcript batches without interval waits",
+      "integration_note": "Bounded delta from0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0. Preserve aggregate scheduler/terminal/ERR fences and Desktop documentation."
+    },
+    {
+      "pr": 2312,
+      "source_commit": "403aaa396794ba6bae2356ecb21a2484b1dc3f96",
+      "source_tree": "b23e9b6e13e6415592596ddfd5a355bd00fbbe9c",
+      "title": "docs: use GPT-6 Astra in current client examples",
+      "integration_note": "Bounded delta from0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0. Preserve aggregate scheduler/terminal/ERR fences and Desktop documentation."
     }
   ],
   "open_pr_dispositions": [
@@ -744,7 +758,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "Diagnostic/harness successor proof is in composition-2322-2342.md and immutable operations receipt. Earlier candidates remain frozen; publication/build/live remain deployment-owned.",
+  "verification_status": "Spool/docs successor proof in composition-2303-2312-2278.md and immutable operations receipt; publication/build/live remain separate.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -861,6 +875,27 @@
       ],
       "proof_note": "composition-2322-2342.md",
       "publication": "Pending deployment owner; diagnostic and harness proof is not live recovery or production scheduler acceptance."
+    },
+    {
+      "predecessor": "8c4da8683cc0b496eccb30217625704246d308bd",
+      "added_prs": [
+        2303,
+        2312
+      ],
+      "provenance_only": [
+        2278
+      ],
+      "proof_note": "composition-2303-2312-2278.md",
+      "publication": "Deployment owner only; no aggregate throughput or live acceptance claim."
+    }
+  ],
+  "source_equivalence_observations": [
+    {
+      "pr": 2278,
+      "retained_applied_source": "b69abad0b389982fa071a28eb950cf0110a981f4",
+      "reviewed_head": "2655d0897c99615608a7266e29a978119fd58629",
+      "reviewed_tree": "fd8abd37a8b461b6bd88d30ebfdd5120cc70921c",
+      "disposition": "Already behaviorally included. Existing service_stubs, reader tests and five change artifacts exactly match refreshed head; existing helper import/export/error precedence retained. No code reapplied."
     }
   ]
 }
