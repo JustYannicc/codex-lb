@@ -1,4 +1,4 @@
-"""Merge populated CPA and spool-retention branches without changing their data."""
+"""Merge populated CPA and guest-generation branches without changing their data."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ from app.db.migration_url import to_sync_database_url
 
 pytestmark = pytest.mark.integration
 
-_COMMON = "20260910_000000_request_logs_missing_cost_index"
-_CPA = "20260910_000000_add_cpa_catalog_discovery"
-_SPOOL = "20260910_010000_dashboard_spool_retention"
-_PARENTS = (_CPA, _SPOOL)
-_MERGE = "20260910_020000_merge_cpa_spool_retention"
+_COMMON = "20260910_010000_dashboard_spool_retention"
+_CPA = "20260910_020000_merge_cpa_spool_retention"
+_GUEST = "20260908_000000_add_guest_session_generation"
+_PARENTS = (_CPA, _GUEST)
+_MERGE = "20260910_030000_merge_cpa_guest_heads"
 _RETENTION = "http_responses_session_bridge_operation_spool_retention_seconds"
 _KEY = b"\x00retained-encrypted-key\xff"
 
@@ -71,14 +71,14 @@ def _seed_branch(engine: Engine, revision: str) -> None:
                 )
             )
         else:
-            connection.execute(text(f"UPDATE dashboard_settings SET {_RETENTION} = 86400.5 WHERE id = 1"))
+            connection.execute(text("UPDATE dashboard_settings SET guest_session_generation = 7 WHERE id = 1"))
 
 
-@pytest.fixture(params=[(_CPA,), (_SPOOL,), _PARENTS], ids=["cpa-parent", "spool-parent", "both-parents"])
+@pytest.fixture(params=[(_CPA,), (_GUEST,), _PARENTS], ids=["cpa-parent", "guest-parent", "both-parents"])
 def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) -> Iterator[_BranchDatabase]:
     configured_url = get_settings().database_url
     postgres = configured_url.startswith("postgresql+")
-    url = configured_url if postgres else f"sqlite+aiosqlite:///{tmp_path / 'cpa-spool.sqlite'}"
+    url = configured_url if postgres else f"sqlite+aiosqlite:///{tmp_path / 'cpa-guest.sqlite'}"
     engine = create_engine(to_sync_database_url(url))
     try:
         if postgres:
@@ -99,6 +99,8 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) ->
             connection.execute(
                 text("INSERT INTO model_source_models (source_id, model) VALUES ('retained', 'kept-model')")
             )
+        with engine.begin() as connection:
+            connection.execute(text(f"UPDATE dashboard_settings SET {_RETENTION} = 86400.5 WHERE id = 1"))
         parents = request.param
         for revision in parents:
             run_upgrade(url, revision, bootstrap_legacy=False)
@@ -109,22 +111,21 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) ->
         engine.dispose()
 
 
-def test_cpa_spool_merge_is_on_single_head_graph_and_keeps_original_parents(tmp_path: Path) -> None:
+def test_cpa_guest_merge_is_only_head_and_keeps_both_original_parents(tmp_path: Path) -> None:
     script = ScriptDirectory.from_config(_build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}"))
-    heads = script.get_heads()
-    assert len(heads) == 1
-    assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    assert script.get_heads() == [_MERGE]
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
-    for revision in _PARENTS:
-        parent = script.get_revision(revision)
-        assert parent is not None and parent.down_revision == _COMMON
+    cpa = script.get_revision(_CPA)
+    guest = script.get_revision(_GUEST)
+    assert cpa is not None and cpa.down_revision == ("20260910_000000_add_cpa_catalog_discovery", _COMMON)
+    assert guest is not None and guest.down_revision == _COMMON
 
 
 def test_populated_branches_merge_and_downgrade_without_data_loss(branch_database: _BranchDatabase) -> None:
     database = branch_database
     before = _state(database.engine)
-    result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
+    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
     assert result.current_revision == _MERGE
     assert _revisions(database.engine) == (_MERGE,)
     merged = _state(database.engine)
@@ -135,18 +136,17 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
     assert source["catalog_refresh_token"] == ("owned-refresh" if _CPA in database.parents else None)
     if _CPA not in database.parents:
         assert source["catalog_next_refresh_at"] is None
-    assert merged["dashboard_settings"]["rows"][0][_RETENTION] == (86400.5 if _SPOOL in database.parents else None)
+    assert merged["dashboard_settings"]["rows"][0][_RETENTION] == 86400.5
+    assert merged["dashboard_settings"]["rows"][0]["guest_session_generation"] == (
+        7 if _GUEST in database.parents else 0
+    )
     assert merged["model_source_models"] == before["model_source_models"]
     for table in ("model_sources", "dashboard_settings"):
         # Existing fields retain their exact values; the missing branch only
         # adds its own columns, whose defaults are checked above.
         for old, new in zip(before[table]["rows"], merged[table]["rows"], strict=True):
             assert {column: new[column] for column in old} == old
-    historical_drift = check_schema_drift(database.url)
-    assert len(historical_drift) == 1
-    assert historical_drift[0].startswith(
-        "('add_column', None, 'dashboard_settings', Column('guest_session_generation', Integer()"
-    )
+    assert check_schema_drift(database.url) == ()
 
     for parent in _PARENTS:
         if parent not in database.parents:
@@ -156,22 +156,9 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
         command.downgrade(_build_alembic_config(database.url), parent)
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == historical_drift
-        result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
+        assert check_schema_drift(database.url) == ()
+        result = run_upgrade(database.url, "head", bootstrap_legacy=False)
         assert result.current_revision == _MERGE
         assert _revisions(database.engine) == (_MERGE,)
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == historical_drift
-
-    # Later migrations have their own schema. Upgrade only after the historical
-    # merge's unchanged parent-stamp and data contract has been checked.
-    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-    script = ScriptDirectory.from_config(_build_alembic_config(database.url))
-    assert result.current_revision == script.get_heads()[0]
-    current = _state(database.engine)
-    assert current["model_sources"] == populated["model_sources"]
-    assert current["model_source_models"] == populated["model_source_models"]
-    for old, new in zip(populated["dashboard_settings"]["rows"], current["dashboard_settings"]["rows"], strict=True):
-        assert {column: new[column] for column in old} == old
-        assert new["guest_session_generation"] == 0
-    assert check_schema_drift(database.url) == ()
+        assert check_schema_drift(database.url) == ()
