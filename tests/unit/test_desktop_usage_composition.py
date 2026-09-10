@@ -96,7 +96,18 @@ def test_additional_aliases_keep_metadata_and_append_new_pool_buckets() -> None:
         "metered_feature": "codex",
         "normal_model_slug": "original-model",
         "metadata": {"x": 1},
-        "rate_limit": compose_desktop_usage({}, _pool(100))["rate_limit"],
+        "rate_limit": {
+            "allowed": False,
+            "limit_reached": True,
+            "primary_window": {
+                "used_percent": 100,
+                "limit_window_seconds": 18000,
+                "reset_after_seconds": 1200,
+                "reset_at": 2000000000,
+            },
+            "secondary_window": None,
+            "monthly_window": None,
+        },
     }
     assert buckets[1:3] == [reserve, unmatched]
     assert buckets[3] == {
@@ -104,7 +115,18 @@ def test_additional_aliases_keep_metadata_and_append_new_pool_buckets() -> None:
         "limit_name": "gpt-new",
         "display_label": "New",
         "metered_feature": "new",
-        "rate_limit": compose_desktop_usage({}, _pool(20))["rate_limit"],
+        "rate_limit": {
+            "allowed": True,
+            "limit_reached": False,
+            "primary_window": {
+                "used_percent": 20,
+                "limit_window_seconds": 18000,
+                "reset_after_seconds": 1200,
+                "reset_at": 2000000000,
+            },
+            "secondary_window": None,
+            "monthly_window": None,
+        },
     }
     assert original == before
 

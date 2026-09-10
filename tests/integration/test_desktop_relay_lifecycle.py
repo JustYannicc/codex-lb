@@ -16,6 +16,14 @@ from app.modules.desktop_relay.transport import RelayTransport
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def clear_settings_after_test():
+    from app.core.config.settings import get_settings
+
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def relay_port(monkeypatch, unused_tcp_port):
     # Production always asks for 8000; tests own an isolated ephemeral port.
