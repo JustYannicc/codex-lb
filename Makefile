@@ -4,6 +4,7 @@ INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_desktop_reset_safety.py::test_redemption_ledger_first_writer_wins_across_sessions \
 	tests/integration/test_desktop_reset_migration.py \
+	tests/integration/test_desktop_reset_invite_migration.py \
 	tests/integration/test_cost_backfill.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
 	tests/integration/test_report_rollup.py \

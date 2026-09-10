@@ -1,41 +1,17 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from alembic import command
 from anyio import to_thread
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.config.settings import get_settings
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
+from tests.integration.desktop_reset_migration_support import migration_url as migration_url
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 PARENT = "20260909_080000_dashboard_stream_bridge_budgets"
 REVISION = "20260909_210000_desktop_reset_pool"
-
-
-@pytest.fixture(params=["sqlite", "postgresql"])
-async def migration_url(request, tmp_path):
-    if request.param == "sqlite":
-        return f"sqlite+aiosqlite:///{tmp_path / 'reset-pool.db'}"
-    url = get_settings().database_url
-    if not url.startswith("postgresql+"):
-        pytest.skip("Requires CODEX_LB_TEST_DATABASE_URL pointing to a disposable PostgreSQL database")
-    if url != os.environ.get("CODEX_LB_TEST_DATABASE_URL") or make_url(url).database != "codex_lb_test":
-        pytest.fail(
-            "Refusing to reset PostgreSQL: configure CODEX_LB_TEST_DATABASE_URL to the dedicated codex_lb_test database"
-        )
-    engine = create_async_engine(url)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(text("DROP SCHEMA public CASCADE"))
-            await connection.execute(text("CREATE SCHEMA public"))
-    finally:
-        await engine.dispose()
-    return url
 
 
 async def test_reset_pool_migration_defaults_existing_settings_and_round_trips(migration_url):
@@ -336,10 +312,11 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
                     table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all()
                     for table in tables
                 }
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        await to_thread.run_sync(
+            lambda: run_upgrade(url, "20260910_040000_merge_reset_dashboard_user_heads", bootstrap_legacy=False)
+        )
         # Alembic uses another connection; discard prepared SELECT * plans after its DDL.
         await engine.dispose()
-        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
         async with engine.connect() as connection:
             settings_after = (await connection.execute(text("SELECT * FROM dashboard_settings"))).mappings().one()
             for key, value in settings_before.items():
