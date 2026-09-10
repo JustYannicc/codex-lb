@@ -85,7 +85,9 @@ that reused the same instance id.
 Capability-gated forwards MUST carry `x-codex-bridge-owner-process-epoch`
 with the proven process epoch, authenticated by the exact-body signature.
 The receiving owner MUST reject a signed epoch unequal to its local process
-epoch before continuity selection. These forwards MUST carry only
+epoch before continuity selection. A nonempty process epoch MUST NOT be
+authorized by either the legacy primary proof or the public pre-input-shape V2
+proof, because neither codec authenticates that field. These forwards MUST carry only
 `x-codex-bridge-input-shape-signature-v2` as their body proof and MUST NOT
 include either the legacy primary signature or the public
 `x-codex-bridge-signature-v2` proof. A predecessor process that ignores the

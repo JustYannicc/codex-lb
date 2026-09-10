@@ -5339,6 +5339,7 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
         original_affinity_key=canonical_key.affinity_key,
     )
     owner_request = build_owner_forward_request(
+        body=priority_payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={"x-request-id": "forwarded-priority-request"},
         payload=priority_payload,
         context=forward_context,
@@ -5500,6 +5501,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
         original_affinity_key=recovery_key,
     )
     owner_request = build_owner_forward_request(
+        body=payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={
             "session_id": "stale-session",
             "session-id": "stale-session-dash",

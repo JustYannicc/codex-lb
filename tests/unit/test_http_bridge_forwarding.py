@@ -240,6 +240,48 @@ def test_upstream_v1_codec_replays_both_directions(with_file: bool) -> None:
     assert payload._codex_lb_legacy_owner_forwarding_input_shape is True
 
 
+def test_public_v2_proof_does_not_authorize_injected_owner_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER)
+
+    # An ordinary predecessor proof remains a valid positive control when no
+    # process epoch is claimed.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # The public V2 codec intentionally does not authenticate owner epoch. An
+    # injected epoch must therefore require the independent exact-shape proof,
+    # even when its value happens to name the current process.
+    monkeypatch.setattr(
+        "app.modules.proxy.http_bridge_forwarding.http_bridge_owner_process_epoch",
+        lambda: "unproven-process",
+    )
+    headers[HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER] = "unproven-process"
+    forged_payload = _payload()
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=forged_payload,
+        current_instance="instance-b",
+    )
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
 @pytest.mark.parametrize("with_epoch", [False, True])
 def test_deployed_shape_v2_origin_is_accepted_after_header_split(
     monkeypatch: pytest.MonkeyPatch,
@@ -824,7 +866,12 @@ def test_owner_forward_request_builds_one_authenticated_body_header_pair() -> No
         downstream_turn_state=None,
     )
 
-    owner_request = build_owner_forward_request(headers={}, payload=payload, context=context)
+    owner_request = build_owner_forward_request(
+        body=payload.model_dump_for_http_bridge_owner_forwarding(),
+        headers={},
+        payload=payload,
+        context=context,
+    )
 
     assert owner_request.body == payload.model_dump_for_http_bridge_owner_forwarding()
     assert owner_request.headers[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] == _bridge_forward_input_shape_signature(

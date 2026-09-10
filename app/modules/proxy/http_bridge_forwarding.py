@@ -72,6 +72,8 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # is forbidden. Exact input shape and owner epoch use the independent proof
 # below.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
+HTTP_BRIDGE_TURN_STATE_SYNTHESIZED_HEADER = "x-codex-bridge-turn-state-synthesized"
+HTTP_BRIDGE_TURN_STATE_PROVENANCE_SIGNATURE_HEADER = "x-codex-bridge-turn-state-provenance-signature"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # Additive input-shape capability marker. Unlike the primary signature
 # version, this header describes the classifier used for the request body.
@@ -88,6 +90,7 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    downstream_turn_state_synthesized: bool = False
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
@@ -107,6 +110,21 @@ class HTTPBridgeForwardedRequest:
 class HTTPBridgeOwnerForwardRequest:
     body: JsonObject
     headers: dict[str, str]
+
+
+def build_owner_forward_request(
+    *,
+    body: JsonObject,
+    headers: Mapping[str, str],
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+) -> HTTPBridgeOwnerForwardRequest:
+    """Build the one body/header pair authenticated on the owner wire."""
+
+    return HTTPBridgeOwnerForwardRequest(
+        body=body,
+        headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,10 +237,17 @@ class HTTPBridgeOwnerClient:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
-            owner_request = build_owner_forward_request(headers=headers, payload=payload, context=context)
+            request_payload = payload.model_dump_for_http_bridge_owner_forwarding()
             request_context = session.post(
                 request_url,
-                json=owner_request.body,
+                json=(
+                    owner_request := build_owner_forward_request(
+                        body=request_payload,
+                        headers=headers,
+                        payload=payload,
+                        context=context,
+                    )
+                ).body,
                 headers=owner_request.headers,
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             )
@@ -313,20 +338,6 @@ def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest)
     return current_full_resend != legacy_full_resend
 
 
-def build_owner_forward_request(
-    *,
-    headers: Mapping[str, str],
-    payload: ResponsesRequest,
-    context: HTTPBridgeForwardContext,
-) -> HTTPBridgeOwnerForwardRequest:
-    """Build the one body/header pair authenticated on the owner wire."""
-
-    return HTTPBridgeOwnerForwardRequest(
-        body=payload.model_dump_for_http_bridge_owner_forwarding(),
-        headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
-    )
-
-
 def build_owner_forward_headers(
     *,
     headers: Mapping[str, str],
@@ -380,6 +391,19 @@ def build_owner_forward_headers(
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
         forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
+    # Bind the exact posted body, shape marker, and optional owner epoch before
+    # additive consumers select the strongest emitted body proof.
+    input_shape_version = (
+        None if payload._codex_lb_legacy_owner_forwarding_input_shape else _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
+    )
+    if input_shape_version is not None:
+        forwarded[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] = input_shape_version
+    forwarded[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] = _bridge_forward_input_shape_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+        input_shape_version=input_shape_version,
+    )
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
@@ -429,22 +453,7 @@ def build_owner_forward_headers(
             context=context,
             signature_version=signature_version,
         )
-    # Bind the exact posted body, shape marker, and optional owner epoch in an
-    # independent proof. Its bytes match the shape-v2 codec deployed before
-    # this header split, which lets the decoder accept an old origin that sent
-    # those bytes in HTTP_BRIDGE_SIGNATURE_V2_HEADER.
-    input_shape_version = (
-        None if payload._codex_lb_legacy_owner_forwarding_input_shape else _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
-    )
-    if input_shape_version is not None:
-        forwarded[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] = input_shape_version
-    forwarded[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] = _bridge_forward_input_shape_signature(
-        payload=payload,
-        context=context,
-        signature_version=signature_version,
-        input_shape_version=input_shape_version,
-    )
-    return forwarded
+    return _with_bridge_turn_state_provenance(forwarded, context=context)
 
 
 def parse_forwarded_request(
@@ -478,6 +487,9 @@ def parse_forwarded_request(
     if input_shape_version not in {None, _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2}:
         return None, _invalid_bridge_forward_signature_error()
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    turn_state_synthesized_value = _optional_header(headers.get(HTTP_BRIDGE_TURN_STATE_SYNTHESIZED_HEADER))
+    if turn_state_synthesized_value not in {None, "0", "1"}:
+        return None, _invalid_bridge_forward_signature_error()
     if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
         if original_unanchored_value not in {"0", "1"}:
             return None, _invalid_bridge_forward_signature_error()
@@ -491,6 +503,7 @@ def parse_forwarded_request(
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        downstream_turn_state_synthesized=turn_state_synthesized_value == "1",
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
@@ -511,6 +524,16 @@ def parse_forwarded_request(
     # value on an honestly primary-signed forward, so a present-but-invalid
     # header simply falls through to the primary verification.
     tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
+    authenticated_body_signatures: list[str] = []
+    forward_authenticated = False
+    tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature,
+        _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            signature_version=signature_version,
+        ),
+    )
     input_shape_signature = _optional_header(headers.get(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER))
     expected_input_shape_signature = _bridge_forward_input_shape_signature(
         payload=payload,
@@ -527,6 +550,10 @@ def parse_forwarded_request(
         tools_bound_signature, expected_input_shape_signature
     )
     if input_shape_valid or deployed_shape_v2_valid:
+        authenticated_body_signature = input_shape_signature if input_shape_valid else tools_bound_signature
+        assert authenticated_body_signature is not None
+        authenticated_body_signatures.append(authenticated_body_signature)
+        forward_authenticated = True
         if (
             context.expected_owner_process_epoch is not None
             and context.expected_owner_process_epoch != http_bridge_owner_process_epoch()
@@ -543,24 +570,24 @@ def parse_forwarded_request(
         payload._codex_lb_legacy_owner_forwarding_input_shape = (
             input_shape_version != _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
         )
-        return HTTPBridgeForwardedRequest(context=context), None
-    tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
-        tools_bound_signature,
-        _bridge_forward_tools_bound_signature(
-            payload=payload,
-            context=context,
-            signature_version=signature_version,
-        ),
-    )
-    if tools_bound_valid:
+    # Neither predecessor codec authenticates process epoch. Refuse the claim
+    # before considering their proofs unless the exact-shape proof validated.
+    if context.expected_owner_process_epoch is not None and not forward_authenticated:
+        return None, _invalid_bridge_forward_signature_error()
+    if tools_bound_valid and not input_shape_valid and not deployed_shape_v2_valid:
         payload._codex_lb_input_shape_wire_version = None
         payload._codex_lb_legacy_owner_forwarding_input_shape = True
-        return HTTPBridgeForwardedRequest(context=context), None
-    if (
-        context.expected_owner_process_epoch is not None
-        or context.file_owner_account_id is not None
-        or extract_input_file_ids(payload.input)
-    ):
+    if tools_bound_valid:
+        assert tools_bound_signature is not None
+        authenticated_body_signatures.append(tools_bound_signature)
+        forward_authenticated = True
+    if forward_authenticated or context.downstream_turn_state_synthesized:
+        return _authenticated_bridge_forward_result(
+            headers=headers,
+            context=context,
+            authenticated_body_signatures=authenticated_body_signatures,
+        )
+    if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
         # The rolling-upgrade primary signature does not bind the additive
         # file-owner proof. Never allow a stripped/forged proof to downgrade to
         # it, and never allow payloads with file references to fall back after a
@@ -791,6 +818,82 @@ def _bridge_forward_input_shape_signature(
 def _bridge_forward_body_digest(payload_dump: JsonObject) -> str:
     payload_json = json.dumps(payload_dump, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def _with_bridge_turn_state_provenance(
+    forwarded: dict[str, str],
+    *,
+    context: HTTPBridgeForwardContext,
+) -> dict[str, str]:
+    """Bind synthesized-state privilege to the strongest emitted body proof."""
+
+    if not context.downstream_turn_state_synthesized:
+        return forwarded
+    authenticated_body_signature = _bridge_forward_provenance_body_signature(forwarded)
+    assert authenticated_body_signature is not None
+    forwarded[HTTP_BRIDGE_TURN_STATE_SYNTHESIZED_HEADER] = "1"
+    forwarded[HTTP_BRIDGE_TURN_STATE_PROVENANCE_SIGNATURE_HEADER] = _bridge_forward_turn_state_provenance_signature(
+        context=context,
+        authenticated_body_signature=authenticated_body_signature,
+    )
+    return forwarded
+
+
+def _authenticated_bridge_forward_result(
+    *,
+    headers: Mapping[str, str],
+    context: HTTPBridgeForwardContext,
+    authenticated_body_signatures: list[str],
+) -> tuple[HTTPBridgeForwardedRequest | None, ProxyResponseError | None]:
+    """Grant synthesized-state privilege only for the authenticated body proof."""
+
+    if context.downstream_turn_state_synthesized:
+        provenance_signature = _optional_header(headers.get(HTTP_BRIDGE_TURN_STATE_PROVENANCE_SIGNATURE_HEADER))
+        provenance_valid = provenance_signature is not None and any(
+            hmac.compare_digest(
+                provenance_signature,
+                _bridge_forward_turn_state_provenance_signature(
+                    context=context,
+                    authenticated_body_signature=authenticated_body_signature,
+                ),
+            )
+            for authenticated_body_signature in authenticated_body_signatures
+        )
+        if not provenance_valid:
+            return None, _invalid_bridge_forward_signature_error()
+    return HTTPBridgeForwardedRequest(context=context), None
+
+
+def _bridge_forward_turn_state_provenance_signature(
+    *,
+    context: HTTPBridgeForwardContext,
+    authenticated_body_signature: str,
+) -> str:
+    """Bind generated-state privilege to body-proof bytes that already validate."""
+
+    signing_payload = json.dumps(
+        {
+            "downstream_turn_state_synthesized": context.downstream_turn_state_synthesized,
+            "protocol": "codex-lb-http-bridge-turn-state-provenance-v1",
+            # Keep the field name and wire bytes stable for the pre-shape V2
+            # proof. The value may also be the independently validated exact-
+            # shape proof when that additive contract is present.
+            "tools_bound_signature": authenticated_body_signature,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _sign_bridge_payload(signing_payload)
+
+
+def _bridge_forward_provenance_body_signature(headers: Mapping[str, str]) -> str | None:
+    """Select the strongest emitted body proof for synthesized provenance."""
+
+    exact_shape_signature = _optional_header(headers.get("x-codex-bridge-input-shape-signature-v2"))
+    if exact_shape_signature is not None:
+        return exact_shape_signature
+    return _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
 
 
 def _structured_bridge_signing_payload(
