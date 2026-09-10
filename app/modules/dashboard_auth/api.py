@@ -5,11 +5,13 @@ import logging
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
+from app.core.audit.service import AuditService
 from app.core.auth.dashboard_access import (
     ADMIN_PERMISSIONS,
     GUEST_PERMISSIONS,
     DashboardPrincipal,
     DashboardRole,
+    Permission,
 )
 from app.core.auth.dashboard_mode import (
     DashboardAuthMode,
@@ -17,7 +19,7 @@ from app.core.auth.dashboard_mode import (
     password_management_enabled,
 )
 from app.core.auth.dashboard_session_ttl import resolve_dashboard_session_ttl_seconds
-from app.core.auth.dependencies import require_dashboard_write_access, set_dashboard_error_format
+from app.core.auth.dependencies import require_dashboard_permission, set_dashboard_error_format
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
     get_bootstrap_validation_status,
@@ -84,15 +86,19 @@ async def _create_dashboard_session(
     totp_verified: bool,
     role: DashboardRole = DashboardRole.ADMIN,
     guest_verified: bool = False,
+    guest_session_generation: int | None = None,
 ) -> tuple[str, int]:
     settings = await get_settings_cache().get()
     ttl_seconds = resolve_dashboard_session_ttl_seconds(request, settings.dashboard_session_ttl_seconds)
+    if role == DashboardRole.GUEST and guest_session_generation is None:
+        guest_session_generation = settings.guest_session_generation
     session_id = get_dashboard_session_store().create(
         password_verified=password_verified,
         totp_verified=totp_verified,
         ttl_seconds=ttl_seconds,
         role=role,
         guest_verified=guest_verified,
+        guest_session_generation=guest_session_generation if role == DashboardRole.GUEST else None,
     )
     return session_id, ttl_seconds
 
@@ -241,7 +247,11 @@ async def get_dashboard_auth_session(
             return _public_guest_response(decorated)
         if decorated.authenticated and decorated.role == DashboardRole.GUEST:
             session_state = get_dashboard_session_store().get(session_id)
-            if session_state is not None and session_state.guest_verified:
+            if (
+                session_state is not None
+                and session_state.guest_verified
+                and session_state.guest_session_generation == current_settings.guest_session_generation
+            ):
                 return decorated
         return _guest_login_required_response(decorated)
     bootstrap_token_configured = await has_active_bootstrap_token()
@@ -356,6 +366,10 @@ async def login_guest(
         totp_verified=False,
         role=DashboardRole.GUEST,
         guest_verified=guest_verified,
+        # Stamp the generation from the same DB row the credential check used, not
+        # the 5 s settings cache, so a bump committed on a peer replica cannot
+        # mint an already-stale cookie.
+        guest_session_generation=(await context.repository.get_settings()).guest_session_generation,
     )
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),
@@ -445,7 +459,7 @@ async def change_password(
 async def set_guest_password(
     payload: GuestPasswordSetRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-    _principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
 ) -> JSONResponse:
     password = payload.password.strip()
     _validate_password_length(password)
@@ -457,10 +471,27 @@ async def set_guest_password(
 @router.delete("/guest/password")
 async def remove_guest_password(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-    _principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
 ) -> JSONResponse:
     await context.service.clear_guest_password()
     await get_settings_cache().invalidate()
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
+@router.post("/guest/logout-all")
+async def revoke_guest_sessions(
+    request: Request,
+    context: DashboardAuthContext = Depends(get_dashboard_auth_context),
+    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
+) -> JSONResponse:
+    """Invalidate every outstanding guest session without touching guest settings."""
+
+    await context.service.revoke_guest_sessions()
+    await get_settings_cache().invalidate()
+    AuditService.log_async(
+        "guest_sessions_revoked",
+        actor_ip=request.client.host if request.client else None,
+    )
     return JSONResponse(status_code=200, content={"status": "ok"})
 
 
