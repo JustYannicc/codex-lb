@@ -6982,6 +6982,8 @@ class _WebSocketMixin:
 
         penalty_code: str | None = None
         penalty_message: str | None = None
+        penalty_model: str | None = None
+        penalty_service_tier: str | None = None
         if penalize_account:
             for request_state in remaining:
                 request_error_code = request_state.error_code_override or error_code
@@ -6997,6 +6999,8 @@ class _WebSocketMixin:
                 ):
                     penalty_code = request_error_code
                     penalty_message = request_error_message
+                    penalty_model = request_state.model
+                    penalty_service_tier = request_state.service_tier
                     break
 
         reservation_release_succeeded = True
@@ -7212,6 +7216,8 @@ class _WebSocketMixin:
                         account,
                         {"message": penalty_message or error_message},
                         penalty_code,
+                        rejected_model=penalty_model,
+                        rejected_service_tier=penalty_service_tier,
                     )
                 except Exception:
                     _facade().logger.warning(

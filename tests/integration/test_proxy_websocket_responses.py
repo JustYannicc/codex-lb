@@ -10756,6 +10756,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
         upstream_created_then_eof("resp_ws_eof_retry", sequence_number=1),
     ]
     log_calls: list[dict[str, object]] = []
+    rejection_scopes: list[dict[str, str | None]] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -10800,7 +10801,10 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), upstreams.pop(0)
+        return Account(id="acct_ws_proxy"), upstreams.pop(0)
+
+    async def capture_rejection_scope(self, account, error, code, **scope):
+        rejection_scopes.append(scope)
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -10811,10 +10815,12 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", capture_rejection_scope)
 
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
+        "service_tier": "priority",
         "instructions": "",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
@@ -10835,6 +10841,8 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"
+
+    assert rejection_scopes == [{"rejected_model": "gpt-5.4", "rejected_service_tier": "priority"}]
 
 
 def test_backend_responses_websocket_closes_before_replaying_exposed_sequence(

@@ -28738,6 +28738,8 @@ async def test_fail_pending_websocket_requests_penalizes_upstream_stream_drop(mo
         account,
         {"message": "Upstream websocket closed before response.completed"},
         "stream_incomplete",
+        rejected_model="gpt-5.5",
+        rejected_service_tier="auto",
     )
     assert order == ["release", "health"]
     assert list(pending_requests) == []
