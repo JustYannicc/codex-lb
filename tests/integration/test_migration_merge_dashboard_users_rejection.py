@@ -12,7 +12,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
 
-from app.db.migrate import _build_alembic_config, run_upgrade
+from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
 from tests.integration.test_migration_merge_rejection_spool import (
     _REJECTION,
     _SPOOL,
@@ -161,7 +161,8 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
 
 def test_dashboard_users_and_rejection_have_one_head(tmp_path: Path) -> None:
     script = ScriptDirectory.from_config(_build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}"))
-    assert script.get_heads() == [_MERGE]
+    (head,) = script.get_heads()
+    assert _MERGE in {revision.revision for revision in script.iterate_revisions(head, "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
 
@@ -181,7 +182,8 @@ def test_populated_cli_upgrade_preserves_dashboard_users_and_rejection(branch_da
             )
 
     _cli(database.url, "upgrade", "head")
-    assert _revisions(database.engine) == (_MERGE,)
+    (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
+    assert _revisions(database.engine) == (head,)
     assert _state(database.engine)["rows"] == expected_rows
     auth = _auth_state(database.engine)
     if _USERS in database.starting_revisions:
@@ -213,18 +215,28 @@ def test_populated_cli_upgrade_preserves_dashboard_users_and_rejection(branch_da
     output = _cli(database.url, "check")
     assert "migration_policy=ok" in output and "schema_drift=none" in output
 
+
+def test_isolated_dashboard_users_rejection_merge_roundtrip(branch_database: _MigrationDatabase) -> None:
+    database = branch_database
+    _cli(database.url, "upgrade", _MERGE)
     with database.engine.begin() as connection:
         if _USERS not in database.starting_revisions:
             _seed_users(connection)
         if _REJECTION_MERGE not in database.starting_revisions:
             _seed_parent(connection, _REJECTION)
     populated = (_state(database.engine), _auth_state(database.engine))
+    merge_drift = check_schema_drift(database.url)
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert (_state(database.engine), _auth_state(database.engine)) == populated
-        assert "schema_drift=none" in _cli(database.url, "check")
-        _cli(database.url, "upgrade", "head")
+        assert check_schema_drift(database.url) == merge_drift
+        _cli(database.url, "upgrade", _MERGE)
         assert _revisions(database.engine) == (_MERGE,)
         assert (_state(database.engine), _auth_state(database.engine)) == populated
-        assert "schema_drift=none" in _cli(database.url, "check")
+        assert check_schema_drift(database.url) == merge_drift
+    _cli(database.url, "upgrade", "head")
+    (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
+    assert _revisions(database.engine) == (head,)
+    assert (_state(database.engine), _auth_state(database.engine)) == populated
+    assert "schema_drift=none" in _cli(database.url, "check")
