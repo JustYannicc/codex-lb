@@ -66,7 +66,7 @@ def test_guest_rejection_histories_converge_at_one_head(tmp_path: Path) -> None:
     assert rejection is not None and rejection.down_revision == (_REJECTION, _SPOOL)
 
 
-def test_populated_cli_upgrade_and_merge_only_downgrades_preserve_guest_and_rejection(
+def test_populated_cli_upgrade_preserves_guest_and_rejection(
     branch_database: _MigrationDatabase,
 ) -> None:
     database = branch_database
@@ -91,6 +91,13 @@ def test_populated_cli_upgrade_and_merge_only_downgrades_preserve_guest_and_reje
     output = _cli(database.url, "check")
     assert "migration_policy=ok" in output and "schema_drift=none" in output
 
+
+def test_isolated_guest_rejection_merge_only_downgrades_preserve_both_branches(
+    branch_database: _MigrationDatabase,
+) -> None:
+    database = branch_database
+    # Keep the historical roundtrip below the later dashboard-user join.
+    _cli(database.url, "upgrade", _MERGE)
     with database.engine.begin() as connection:
         if _REJECTION_MERGE not in database.starting_revisions:
             _seed_parent(connection, _REJECTION)
@@ -98,14 +105,18 @@ def test_populated_cli_upgrade_and_merge_only_downgrades_preserve_guest_and_reje
             connection.execute(text("UPDATE dashboard_settings SET guest_session_generation = 9 WHERE id = 1"))
     populated = _state(database.engine)
     for parent in _PARENTS:
-        command.downgrade(_build_alembic_config(database.url), _MERGE)
         at_merge = _state(database.engine)
         merge_drift = check_schema_drift(database.url)
         command.downgrade(_build_alembic_config(database.url), parent)
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
-        _cli(database.url, "upgrade", "head")
-        assert _revisions(database.engine) == (head,)
+        _cli(database.url, "upgrade", _MERGE)
+        assert _revisions(database.engine) == (_MERGE,)
         assert _state(database.engine) == populated
-        assert "schema_drift=none" in _cli(database.url, "check")
+        assert check_schema_drift(database.url) == merge_drift
+    _cli(database.url, "upgrade", "head")
+    (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
+    assert _revisions(database.engine) == (head,)
+    assert _state(database.engine) == populated
+    assert "schema_drift=none" in _cli(database.url, "check")
