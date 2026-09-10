@@ -82,3 +82,9 @@ An unversioned or legacy-stamped database can already contain rejection-generati
 Parallel rejection-generation and spool-retention histories meet at `20260910_160000_merge_rejection_spool_heads`. Without the join, the normal `upgrade head` CLI reports multiple heads. Both parent files remain unchanged. The join only updates Alembic stamps; account recovery and spool-retention policies stay with their existing implementations.
 
 A database with saved spool retention gains rejection fields using the original migration defaults. A database with rejection evidence retains its generation, scope and probe claim while gaining nullable retention. Downgrading only the merge retains both parent stamps and schemas. See the convergence requirement in [spec.md](spec.md).
+
+## Guest and rejection history join
+
+Guest-session revocation later branched from spool retention, creating a second head beside the published rejection/spool join. `20260910_180000_merge_guest_rejection_heads` joins those histories without changing any existing migration. The normal upgrade CLI applies whichever history is missing.
+
+For example, saved guest generation 9 survives while rejection fields receive their original defaults. Existing rejection scope, probe claims, credentials and spool retention survive while guest generation starts at zero. Downgrading only this join retains both parent stamps and schemas. The earlier join's downgrade is tested from its own parent states, where the later guest sibling is absent. Guest-access and account-recovery policy remain unchanged by the join. See the convergence requirement in [spec.md](spec.md).

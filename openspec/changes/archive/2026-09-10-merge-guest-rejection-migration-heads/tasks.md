@@ -8,6 +8,6 @@
 
 - [x] 2.1 Prove SQLite/PostgreSQL upgrades, both merge-only downgrade targets, retained data, roundtrip and drift.
 - [x] 2.2 Verify guest/probe behavior after main reconciliation and required local checks.
-- [ ] 2.3 Complete independent Medium review and sync verified specs.
+- [x] 2.3 Complete independent Medium review and sync verified specs.
 
 Hosted publication, CI/review and acknowledged watcher handoff remain delivery work tracked in the operations report directory `reports/pr2330-migration-20260910/guest-followup/`.
