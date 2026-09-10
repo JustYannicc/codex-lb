@@ -10,10 +10,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    existing_columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("model_sources")}
+    columns = (
+        sa.Column("catalog_mode", sa.String(), server_default="manual", nullable=False),
+        sa.Column("catalog_refresh_token", sa.String(), nullable=True),
+        sa.Column("catalog_next_refresh_at", sa.DateTime(), nullable=True),
+    )
     with op.batch_alter_table("model_sources") as batch:
-        batch.add_column(sa.Column("catalog_mode", sa.String(), server_default="manual", nullable=False))
-        batch.add_column(sa.Column("catalog_refresh_token", sa.String(), nullable=True))
-        batch.add_column(sa.Column("catalog_next_refresh_at", sa.DateTime(), nullable=True))
+        for column in columns:
+            if column.name not in existing_columns:
+                batch.add_column(column)
 
 
 def downgrade() -> None:

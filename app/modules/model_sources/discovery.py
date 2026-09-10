@@ -26,21 +26,38 @@ _MAX_CATALOG_BYTES = 2 * 1024 * 1024
 
 
 async def refresh_cpa_catalogs() -> None:
-    async with get_background_session() as session:
-        result = await session.execute(
-            select(ModelSource.id).where(ModelSource.catalog_mode == "cli_proxy_api", ModelSource.is_enabled.is_(True))
-        )
-        source_ids = list(result.scalars())
-    # One budget covers every source. TaskGroup drains cancelled acquisitions
-    # before returning the stored catalog, including on client disconnect.
+    # Include enumeration in the budget; the subsequent catalog read owns an
+    # independent session and can still succeed after refresh storage fails.
     try:
         async with asyncio.timeout(_TIMEOUT_SECONDS):
-            for offset in range(0, len(source_ids), 4):
-                async with asyncio.TaskGroup() as group:
-                    for source_id in source_ids[offset : offset + 4]:
-                        group.create_task(_refresh_source(source_id))
+            async with get_background_session() as session:
+                result = await session.execute(
+                    select(ModelSource.id).where(
+                        ModelSource.catalog_mode == "cli_proxy_api", ModelSource.is_enabled.is_(True)
+                    )
+                )
+                source_ids = list(result.scalars())
+            pending = iter(source_ids)
+
+            async def refresh_worker() -> None:
+                for source_id in pending:
+                    await _refresh_source_safely(source_id)
+
+            async with asyncio.TaskGroup() as group:
+                for _ in range(min(4, len(source_ids))):
+                    group.create_task(refresh_worker())
     except TimeoutError:
         logger.warning("CPA catalog refresh budget exhausted; serving stored catalog")
+    except Exception:
+        logger.warning("CPA catalog refresh failed; serving stored catalog")
+
+
+async def _refresh_source_safely(source_id: str) -> None:
+    try:
+        await _refresh_source(source_id)
+    except Exception:
+        # Cancellation still propagates so the request owns all acquisition work.
+        logger.warning("CPA catalog refresh failed source=%s", source_id)
 
 
 async def _refresh_source(source_id: str) -> None:

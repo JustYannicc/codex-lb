@@ -236,3 +236,37 @@ async def test_cpa_catalog_cannot_be_replaced_by_manual_model_update(async_clien
     assert response.status_code == 400
     listed = await async_client.get("/v1/models")
     assert any(item["id"] == "fixture-owned" for item in listed.json()["data"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [{"effort": "high"}, {"effort": "high", "description": None}])
+async def test_cpa_reasoning_effort_without_description_reaches_codex(async_client, cpa_upstream, level):
+    async def catalog(request):
+        return web.json_response(
+            {
+                "models": [
+                    {
+                        "slug": "fixture-reasoning",
+                        "context_window": 8192,
+                        "supported_reasoning_levels": [level],
+                        "default_reasoning_level": "high",
+                    }
+                ]
+            }
+        )
+
+    created = await async_client.post(
+        "/api/model-sources/",
+        json={
+            "name": "CPA",
+            "baseUrl": await cpa_upstream(catalog),
+            "catalogMode": "cli_proxy_api",
+            "supportsResponses": True,
+        },
+    )
+    assert created.status_code == 200
+    response = await async_client.get("/backend-api/codex/models")
+    assert response.status_code == 200
+    entries = [item for item in response.json()["models"] if item["slug"] == "fixture-reasoning"]
+    assert len(entries) == 1
+    assert entries[0]["supported_reasoning_levels"] == [{"effort": "high", "description": "high"}]

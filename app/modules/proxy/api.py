@@ -5443,7 +5443,9 @@ def _shape_source_responses_payload(
         strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
-    if source.catalog_mode != "cli_proxy_api":
+    if source.catalog_mode == "cli_proxy_api":
+        _normalize_source_allowed_tool_choice_aliases(source_payload)
+    else:
         _drop_unsupported_source_response_tools(
             source_payload,
             supported_tool_types=source_model_supported_tool_types(source, payload.model),

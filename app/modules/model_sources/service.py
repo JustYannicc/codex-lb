@@ -80,6 +80,7 @@ class ModelSourcesService:
         mode = payload.catalog_mode or row.catalog_mode
         responses = payload.supports_responses if payload.supports_responses is not None else row.supports_responses
         _validate_catalog_configuration(mode, responses, payload.models is not None)
+        mode_changed = mode != row.catalog_mode
         row.catalog_mode = mode
         # Invalidate in-flight acquisitions on every operator edit.
         row.catalog_refresh_token = uuid.uuid4().hex
@@ -105,21 +106,22 @@ class ModelSourcesService:
         if "max_concurrency" in fields:
             row.max_concurrency = payload.max_concurrency
 
-        models_replaced = False
+        models_changed = False
         try:
             if "models" in fields and payload.models is not None:
                 await self._repository.replace_models(row, _model_inputs_to_rows(payload.models), commit=False)
-                models_replaced = True
+                models_changed = True
+            elif mode_changed:
+                await self._repository.disable_models(row)
+                models_changed = True
             await self._repository.commit()
         except Exception:
             await self._repository.rollback()
             raise
 
-        if models_replaced:
-            # ``replace_models`` bulk-deletes and re-inserts child rows without
-            # touching the identity-mapped parent's already-loaded ``models``
-            # collection, so the post-commit read would return the stale
-            # pre-update list without an explicit refresh.
+        if models_changed:
+            # Bulk replacement and disablement can change rows outside the
+            # parent's loaded collection, including models acquired concurrently.
             await self._repository.refresh_models(row)
         refreshed = await self._repository.get_by_id(source_id)
         if refreshed is None:

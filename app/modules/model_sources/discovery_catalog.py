@@ -12,7 +12,13 @@ from app.db.models import ModelSourceModel
 class CpaReasoningLevel(BaseModel):
     model_config = ConfigDict(strict=True)
     effort: str = Field(min_length=1)
-    description: str
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def default_description(self) -> CpaReasoningLevel:
+        if self.description is None:
+            self.description = self.effort
+        return self
 
 
 class CpaCatalogModel(BaseModel):
