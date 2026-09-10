@@ -8,6 +8,6 @@
 - [x] 2.1 Verify the delta has no unmerged receipt schema/helper dependency and demonstrate compatibility with the receipt candidate in both application orders without editing its original branch.
 - [x] 2.2 Run lint, type and strict OpenSpec validation; sync the new requirement and record the tested candidate and boundaries.
 
-- [ ] 2.3 Verify the new PostgreSQL race tests on current-head hosted CI before calling the draft ready.
+- [x] 2.3 Verify the new PostgreSQL race tests on hosted CI. Commit `6bc6b6a9b494840f7de6c5849fb2950324b6f388` passed the PostgreSQL Run tests step in job `102621261196`. Later heads require fresh hosted verification before readiness.
 
 - [x] 2.4 Fence detail-only settlement transitions, including unresolved anchor registration, and verify null detail deletion.
