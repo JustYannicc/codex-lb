@@ -1,7 +1,7 @@
 # Whole-home session retag
 
 This command changes provider tags in local Codex session metadata. Its contract
-is defined in [runtime portability](../openspec/specs/runtime-portability/spec.md).
+is defined in [runtime portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability).
 
 Preview first:
 
