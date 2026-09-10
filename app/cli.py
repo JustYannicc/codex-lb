@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.codex_sessions_retag import RetagProgress, RetagResult, default_codex_home, retag_codex_sessions
 from app.core.ingress_limits import MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 
 if TYPE_CHECKING:
@@ -221,6 +221,18 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
     if not args.dry_run:
         _confirm_retag_write(args.yes, progress_json=args.progress_json)
 
+    progress_enabled = args.progress_json
+
+    def report_progress(event: RetagProgress) -> None:
+        nonlocal progress_enabled
+        if progress_enabled:
+            try:
+                print(json.dumps(asdict(event)), file=sys.stderr, flush=True)
+            except BrokenPipeError:
+                progress_enabled = False
+                # Python flushes stderr again at shutdown, including a failed buffered write.
+                sys.stderr = open(os.devnull, "w")
+
     try:
         result = retag_codex_sessions(
             codex_home=codex_home,
@@ -228,9 +240,7 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
             target_provider=args.target_provider,
             dry_run=args.dry_run,
             progress_logger=lambda message: print(message, flush=True),
-            progress_callback=(lambda event: print(json.dumps(asdict(event)), file=sys.stderr, flush=True))
-            if args.progress_json
-            else None,
+            progress_callback=report_progress if args.progress_json else None,
         )
     except sqlite3.OperationalError as exc:
         message = str(exc)

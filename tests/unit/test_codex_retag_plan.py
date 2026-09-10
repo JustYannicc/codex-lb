@@ -251,3 +251,69 @@ def test_cli_legacy_metadata_with_large_transcript_tail(tmp_path):
     header, tail = path.read_bytes().split(b"\n", 1)
     assert json.loads(header)["model_provider"] == "codex-lb"
     assert tail == transcript
+
+
+@pytest.mark.parametrize("phase", ["discovery", "backup", "rewrite", "verification"])
+def test_cli_closed_progress_pipe_does_not_interrupt_retag(tmp_path, monkeypatch, capsys, phase):
+    path = _session(tmp_path, "selected")
+    original = path.read_bytes()
+
+    class ClosingProgressReader:
+        failed = False
+
+        def write(self, text):
+            if self.failed:
+                pytest.fail("Progress was written after the reader closed")
+            if text.startswith("{") and json.loads(text)["phase"] == phase:
+                self.failed = True
+                raise BrokenPipeError("progress reader closed")
+            return len(text)
+
+        def flush(self):
+            pass
+
+    reader = ClosingProgressReader()
+    monkeypatch.setattr("sys.stderr", reader)
+    _run(tmp_path, "--yes", "--progress-json")
+    assert reader.failed
+    assert "Updated JSONL files: 1" in capsys.readouterr().out
+    header, tail = path.read_bytes().split(b"\n", 1)
+    assert json.loads(header)["payload"]["model_provider"] == "codex-lb"
+    assert tail == original.split(b"\n", 1)[1]
+    backup = next((tmp_path / "backups" / "provider-retag").glob("*/sessions/selected.jsonl"))
+    assert backup.read_bytes() == original
+
+
+def test_cli_closed_progress_pipe_exits_successfully(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    path = _session(tmp_path, "selected")
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).with_name("codex-lb")),
+                "codex-sessions",
+                "retag",
+                "--from",
+                "openai",
+                "--to",
+                "codex-lb",
+                "--codex-home",
+                str(tmp_path),
+                "--yes",
+                "--progress-json",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 0
+    assert "Updated JSONL files: 1" in result.stdout
+    assert json.loads(path.read_bytes().split(b"\n", 1)[0])["payload"]["model_provider"] == "codex-lb"
