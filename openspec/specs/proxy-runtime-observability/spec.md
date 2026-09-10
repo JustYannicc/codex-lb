@@ -1377,12 +1377,12 @@ The system MUST persist `sticky_key_source`, `sticky_kind`, and `sticky_key_hash
 - **THEN** only the three new columns are removed and existing record values remain intact
 
 ### Requirement: Affinity history converges with dashboard authentication history
-The system MUST provide a single migration head when the published affinity history is combined with dashboard role and user authentication migrations. Convergence MUST preserve all published revision definitions and apply each missing branch once.
+The system MUST provide a single migration head when the published affinity history is combined with dashboard role, user authentication and invitation migrations. Convergence MUST preserve all published revision definitions and apply each missing branch once.
 
 #### Scenario: Upgrade either populated history
 - **GIVEN** a database at the published affinity merge or the dashboard authentication leaf
 - **WHEN** it upgrades to head
-- **THEN** existing account ownership, request logs, guest generations, roles, grants, users, identities and audit history MUST remain intact except for the existing authentication migrations' specified backfills
+- **THEN** existing account ownership, request logs, guest generations, roles, grants, users, identities, invitations and audit history MUST remain intact except for the existing authentication migrations' specified backfills
 - **AND** historical logs newly receiving affinity columns MUST retain null affinity metadata
 
 #### Scenario: Merge-only downgrade and reupgrade

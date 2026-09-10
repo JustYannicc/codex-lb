@@ -16,6 +16,7 @@ pytestmark = pytest.mark.integration
 _AFFINITY = "20260910_180000_merge_affinity_guest_heads"
 _IDENTITY = "20260909_030000_add_audit_actor_columns"
 _HEAD = "20260910_200000_merge_affinity_identity_heads"
+_CURRENT = "20260910_220000_merge_affinity_invite_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 _AUTH_TABLES = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
 
@@ -153,8 +154,7 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
                 table: _rows(connection, table)
                 for table in ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs")
             }
-        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
-        assert check_schema_drift(url) == ()
+        assert run_upgrade(url, _HEAD, bootstrap_legacy=False).current_revision == _HEAD
         with engine.begin() as connection:
             for table, rows in before.items():
                 after = _rows(connection, table)
@@ -205,7 +205,8 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
             }
             for table, rows in preserved.items():
                 assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
-        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+        assert run_upgrade(url, _HEAD, bootstrap_legacy=False).current_revision == _HEAD
+        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _CURRENT
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in preserved.items():
@@ -217,9 +218,9 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
 def test_fresh_single_head_and_bootstrap_apply_legacy_credential_projection(migration_url: str) -> None:
     url = migration_url
     script = ScriptDirectory.from_config(_build_alembic_config(url))
-    assert script.get_heads() == [_HEAD]
+    assert script.get_heads() == [_CURRENT]
     assert script.get_revision(_HEAD).down_revision == (_AFFINITY, _IDENTITY)
-    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _CURRENT
     engine = create_engine(to_sync_database_url(url))
     try:
         with engine.begin() as connection:
@@ -239,7 +240,7 @@ def test_fresh_single_head_and_bootstrap_apply_legacy_credential_projection(migr
             before["dashboard_users"][0].update(
                 password_hash="legacy-password", totp_secret_encrypted=b"legacy-totp", totp_last_verified_step=11
             )
-        assert run_upgrade(url, "head", bootstrap_legacy=True).current_revision == _HEAD
+        assert run_upgrade(url, "head", bootstrap_legacy=True).current_revision == _CURRENT
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in before.items():
