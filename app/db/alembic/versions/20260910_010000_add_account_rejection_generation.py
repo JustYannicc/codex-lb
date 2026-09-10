@@ -10,17 +10,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("accounts", sa.Column("block_generation", sa.BigInteger(), nullable=False, server_default="0"))
-    op.add_column("accounts", sa.Column("rejected_model", sa.String(), nullable=True))
-    op.add_column("accounts", sa.Column("rejected_service_tier", sa.String(), nullable=True))
-
-    op.add_column("accounts", sa.Column("probe_claim_token", sa.String(), nullable=True))
-    op.add_column("accounts", sa.Column("probe_claim_expires_at", sa.DateTime(), nullable=True))
+    existing = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("accounts")}
+    columns = (
+        sa.Column("block_generation", sa.BigInteger(), nullable=False, server_default="0"),
+        sa.Column("rejected_model", sa.String(), nullable=True),
+        sa.Column("rejected_service_tier", sa.String(), nullable=True),
+        sa.Column("probe_claim_token", sa.String(), nullable=True),
+        sa.Column("probe_claim_expires_at", sa.DateTime(), nullable=True),
+    )
+    for column in columns:
+        if column.name not in existing:
+            op.add_column("accounts", column)
 
 
 def downgrade() -> None:
-    op.drop_column("accounts", "probe_claim_expires_at")
-    op.drop_column("accounts", "probe_claim_token")
-    op.drop_column("accounts", "rejected_service_tier")
-    op.drop_column("accounts", "rejected_model")
-    op.drop_column("accounts", "block_generation")
+    existing = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("accounts")}
+    for name in (
+        "probe_claim_expires_at",
+        "probe_claim_token",
+        "rejected_service_tier",
+        "rejected_model",
+        "block_generation",
+    ):
+        if name in existing:
+            op.drop_column("accounts", name)

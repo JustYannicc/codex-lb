@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, update
+from sqlalchemy.engine import make_url
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -41,9 +42,9 @@ async def held_account(async_client, monkeypatch):
     expected_url = os.environ["CODEX_LB_TEST_DATABASE_URL"]
     assert os.environ["CODEX_LB_DATABASE_URL"] == expected_url
     async with SessionLocal() as main_session:
-        assert str(main_session.get_bind().engine.url) == expected_url
+        assert main_session.get_bind().engine.url == make_url(expected_url)
     async with get_background_session() as session:
-        assert str(session.get_bind().engine.url) == expected_url
+        assert session.get_bind().engine.url == make_url(expected_url)
         session.add(
             Account(
                 id="held-probe",
@@ -233,7 +234,10 @@ async def test_concurrent_probe_has_one_provider_admission(async_client, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_recovery_survives_restart_and_preserves_owner_bindings(async_client, monkeypatch, held_account):
+@pytest.mark.parametrize("record_error_before_selection", [False, True])
+async def test_recovery_survives_restart_and_preserves_owner_bindings(
+    async_client, monkeypatch, held_account, record_error_before_selection
+):
     from sqlalchemy import select
 
     from app.db.models import StickySession, StickySessionKind
@@ -269,6 +273,12 @@ async def test_recovery_survives_restart_and_preserves_owner_bindings(async_clie
     upstream(monkeypatch)
     response = await async_client.post(f"/api/accounts/{held_account}/probe")
     assert response.json()["holdRecovered"] is True
+    if record_error_before_selection:
+        async with get_background_session() as session:
+            recovered = await AccountsRepository(session).get_by_id(held_account)
+            assert recovered is not None
+            session.expunge(recovered)
+        await stale_runtime.record_error(recovered)
     for balancer in (restarted, stale_runtime, LoadBalancer(repos)):
         result = await balancer.select_account()
         assert result.account is not None

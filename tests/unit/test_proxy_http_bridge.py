@@ -46582,7 +46582,7 @@ async def test_concurrent_drains_apply_each_deferred_penalty_exactly_once(
     gate = asyncio.Event()
     applied: list[str] = []
 
-    async def slow_health(account: Any, error: Any, code: str) -> None:
+    async def slow_health(account: Any, error: Any, code: str, **_kwargs: object) -> None:
         del account, error
         applied.append(code)
         first_started.set()

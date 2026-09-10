@@ -1,5 +1,9 @@
+import pytest
+
 from app.db.models import Account, AccountStatus
 from app.modules.proxy.load_balancer import RuntimeState, _state_from_account
+
+pytestmark = pytest.mark.unit
 
 
 def test_stale_recovered_row_cannot_clear_newer_runtime_rejection():

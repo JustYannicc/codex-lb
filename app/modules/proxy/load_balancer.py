@@ -1909,7 +1909,7 @@ class LoadBalancer:
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
-        runtime.block_generation = max(runtime.block_generation, account.block_generation or 0)
+        _reconcile_recovered_generation(account, runtime)
         routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
         return AccountState(
             account_id=account.id,
@@ -2253,6 +2253,16 @@ def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str
     return policies
 
 
+def _reconcile_recovered_generation(account: Account, runtime: RuntimeState) -> None:
+    generation = account.block_generation or 0
+    if generation > runtime.block_generation:
+        if account.status == AccountStatus.ACTIVE and account.blocked_at is None and account.reset_at is None:
+            runtime.blocked_at = None
+            runtime.reset_at = None
+            runtime.cooldown_until = None
+        runtime.block_generation = generation
+
+
 def _state_from_account(
     *,
     account: Account,
@@ -2265,13 +2275,7 @@ def _state_from_account(
     soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     now = REAL_CLOCK.time() if now is None else now
-    generation = account.block_generation or 0
-    if generation > runtime.block_generation:
-        if account.status == AccountStatus.ACTIVE and account.blocked_at is None and account.reset_at is None:
-            runtime.blocked_at = None
-            runtime.reset_at = None
-            runtime.cooldown_until = None
-        runtime.block_generation = generation
+    _reconcile_recovered_generation(account, runtime)
     tunables = routing_tunables or effective_routing_tunables()
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
