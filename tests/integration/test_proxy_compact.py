@@ -26,6 +26,7 @@ from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -182,7 +183,9 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
 @pytest.mark.parametrize("release_failures", [0, 1, 2, 3])
-async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_client, monkeypatch, path, release_failures):
+async def test_proxy_compact_owner_miss_releases_api_key_reservation(
+    async_client, app_instance, monkeypatch, path, release_failures
+):
     """An external compact owner miss settles the real API-key reservation."""
     for raw_account_id, email in (
         ("acc_compact_owner_miss_a", "compact-owner-miss-a@example.com"),
@@ -228,51 +231,79 @@ async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_clien
 
     release = ApiKeysService.release_usage_reservation
     release_attempts = 0
+    reservation_attempts: dict[str, int] = {}
     released = asyncio.Event()
 
     async def fail_then_release(self, reservation_id):
         nonlocal release_attempts
         release_attempts += 1
-        if release_attempts <= release_failures:
+        reservation_attempts[reservation_id] = reservation_attempts.get(reservation_id, 0) + 1
+        if reservation_attempts[reservation_id] <= release_failures:
             raise OSError("reservation database temporarily unavailable")
         await release(self, reservation_id)
         released.set()
 
     monkeypatch.setattr(ApiKeysService, "release_usage_reservation", fail_then_release)
 
-    response = await async_client.post(
-        path,
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": "gpt-5.1",
-            "instructions": "continue",
-            "input": [],
-            "previous_response_id": "resp_compact_owner_miss",
-        },
-    )
+    request_count = 8 if release_failures >= 2 else 1
+    for _ in range(request_count):
+        response = await async_client.post(
+            path,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": "gpt-5.1",
+                "instructions": "continue",
+                "input": [],
+                "previous_response_id": "resp_compact_owner_miss",
+            },
+        )
 
-    assert response.status_code == 502, response.text
-    error = response.json()["error"]
-    if release_failures >= 2:
-        assert error["code"] == "usage_settlement_failed"
-        assert error["message"] == "Compact API key usage could not be settled"
+        assert response.status_code == 502, response.text
+        error = response.json()["error"]
+        if release_failures >= 2:
+            assert error["code"] == "usage_settlement_failed"
+            assert error["message"] == "Compact API key usage could not be settled"
+        else:
+            assert error["code"] == "previous_response_owner_unavailable"
+            assert error["message"] == "Previous response owner account is unavailable; retry later."
+    if release_failures < 2:
+        await asyncio.wait_for(released.wait(), timeout=2)
     else:
-        assert error["code"] == "previous_response_owner_unavailable"
-        assert error["message"] == "Previous response owner account is unavailable; retry later."
-    await asyncio.wait_for(released.wait(), timeout=2)
-    assert release_attempts == release_failures + 1
-    owner_lookup.assert_awaited_once()
+        assert not released.is_set()
+    assert release_attempts == request_count * min(release_failures + 1, 2)
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert not any(
+        task.get_name().startswith("proxy-release_compact_api_key_reservation")
+        for task in service._background_cleanup_tasks
+    )
+    assert owner_lookup.await_count == request_count
 
     async with SessionLocal() as session:
         reservation_result = await session.execute(
             select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
         )
         reservations = reservation_result.scalars().all()
-        assert len(reservations) == 1
-        assert reservations[0].status == "released"
+        assert len(reservations) == request_count
+        assert all(row.status == ("reserved" if release_failures >= 2 else "released") for row in reservations)
 
         limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
         assert len(limits) == 1
+        if release_failures >= 2:
+            assert limits[0].current_value > 0
+            repository = ApiKeysRepository(session)
+            assert await repository.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6)) == 0
+            for row in reservations:
+                row.updated_at = utcnow() - timedelta(hours=7)
+            await session.commit()
+            assert (
+                await repository.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6)) == request_count
+            )
+            assert await repository.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6)) == 0
+            for row in reservations:
+                await session.refresh(row)
+            await session.refresh(limits[0])
+            assert all(row.status == "released" for row in reservations)
         assert limits[0].current_value == 0
 
 

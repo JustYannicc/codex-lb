@@ -15614,6 +15614,7 @@ async def test_compact_owner_miss_fails_closed_and_settles_reservation(monkeypat
     assert exc_info.value.payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
     list_continuity_owner_candidates.assert_awaited_once()
     assert list_continuity_owner_candidates.await_args is not None
+    assert list_continuity_owner_candidates.await_args.kwargs["account_ids"] == api_key.assigned_account_ids
     select_account.assert_not_awaited()
     assert settlement_events == ["settle", "continuity"]
 
@@ -42346,10 +42347,11 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     fail_safe_service.finalize_usage_reservation.assert_not_awaited()
     fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
 
-    cleanup_tasks = tuple(service._background_cleanup_tasks)
-    assert len(cleanup_tasks) == 1
-    await asyncio.gather(*cleanup_tasks)
-    retry_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+    assert not service._background_cleanup_tasks
+    assert await service.drain_persistence_tasks(timeout_seconds=0)
+    assert exc_info.value.reservation_released is False
+    assert service_factory.call_count == 2
+    retry_service.release_usage_reservation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -42454,10 +42456,11 @@ async def test_compact_usage_settlement_signals_cleanup_ready_when_both_writes_f
     assert _proxy_error_code(exc_info.value) == "usage_settlement_failed"
     assert cleanup_ready.is_set()
 
-    cleanup_tasks = tuple(service._background_cleanup_tasks)
-    assert len(cleanup_tasks) == 1
-    await asyncio.gather(*cleanup_tasks)
-    retry_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+    assert not service._background_cleanup_tasks
+    assert await service.drain_persistence_tasks(timeout_seconds=0)
+    assert exc_info.value.reservation_released is False
+    assert service_factory.call_count == 2
+    retry_service.release_usage_reservation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
