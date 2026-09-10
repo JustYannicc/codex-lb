@@ -251,6 +251,27 @@
       "source_tree": "49b417378f3813b87610e5b2276b4acd15a1fe8b",
       "title": "feat(desktop): show pooled quota while preserving ChatGPT login",
       "integration_note": "Includes accepted pooled source 259376baf737fdee6a4c596beb0d25b683e05493 and later acceptance archive only."
+    },
+    {
+      "pr": 2306,
+      "source_commit": "af1f05d91b300ce170da059418ba13acb196a5cc",
+      "source_tree": "ea75a4a06b11147750f11cf889b3f4c2ee151ccd",
+      "title": "ci(openspec): strictly validate changed active folders",
+      "integration_note": "Bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; unrelated upstream history excluded. Existing migration requirements retained when appending PR2307 progress requirement."
+    },
+    {
+      "pr": 2307,
+      "source_commit": "365e97544411bcd0b4eac386d8ddfd8853a841fd",
+      "source_tree": "93ba6a13fd113e2b50c1c89b7a5b6018a9c6ff03",
+      "title": "feat(db): log per-revision migration progress",
+      "integration_note": "Bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; unrelated upstream history excluded. Existing migration requirements retained when appending PR2307 progress requirement."
+    },
+    {
+      "pr": 2310,
+      "source_commit": "da7c1dc12f6914b692df045c44bc4d3227178bba",
+      "source_tree": "c78bfa678ab88648cb62cfa5020c9eec880db732",
+      "title": "docs: align agent instructions with Astra prompt guidance",
+      "integration_note": "Bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; unrelated upstream history excluded. Existing migration requirements retained when appending PR2307 progress requirement."
     }
   ],
   "open_pr_dispositions": [
@@ -688,7 +709,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "Source automated checks and aggregate Standards/Input review complete; exact published-image build, populated-backup rehearsal and live acceptance remain pending. See verification.md.",
+  "verification_status": "Regular local composition proof is recorded in composition-2306-2307-2310.md. Publication, image build and live acceptance remain deployment-owned.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -750,5 +771,11 @@
       "disposition": "deferred_to_separate_owner",
       "reason": "Post-snapshot pooled reset-credit policy and redemption schema. Separate task owns this new feature; live pooled reset acceptance is explicitly outstanding. This refresh preserves accepted pooled usage2286 and does not silently enable or import reset redemption authority."
     }
-  ]
+  ],
+  "local_composition": {
+    "predecessor": "4586507fbdc59584358535125e948a0aa04fcddc",
+    "readme_source": "b82eefe244703ac208dc346368713b845cf91e45",
+    "scope": "PR2306, PR2307 and PR2310 bounded deltas plus exact manifest and README inventory. No broad main refresh.",
+    "publication": "Pending deployment owner; local proof does not establish hosted aggregate or live acceptance."
+  }
 }

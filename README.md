@@ -18,15 +18,15 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 
 ## Included work on this fork
 
-This inventory records the accepted composition at [`971322208a831e3b02c7cae3bf5e7c7046e15fe9`](https://github.com/JustYannicc/codex-lb/commit/971322208a831e3b02c7cae3bf5e7c7046e15fe9) on `JustYannicc/codex-lb:codex/integrated-runtime`. It lists 34 pull request sources, 10 composition repairs and three superseded inputs. Acceptance here refers to the fork runtime, not upstream merge approval.
+This inventory records the local composition above `4586507fbdc59584358535125e948a0aa04fcddc`, with 37 pull request sources, 11 composition repairs and three superseded inputs. The Git commit containing the manifest identifies the candidate. The added sources are locally composed; publication, image build and live acceptance remain separate deployment steps. This inventory does not grant upstream merge approval.
 
 The [source manifest](openspec/changes/reconcile-local-runtime-20260909/source-manifest.json) is the exact source record, including source trees, exclusions and migration hashes. Its included upstream main is [`069b82be3ceda8e468094f03aee0884061b2b43e`](https://github.com/JustYannicc/codex-lb/commit/069b82be3ceda8e468094f03aee0884061b2b43e). The [selection audit](openspec/changes/reconcile-local-runtime-20260909/selection-audit.md) explains source decisions, and the [verification record](openspec/changes/reconcile-local-runtime-20260909/verification.md) records checks and their limits.
 
-### Accepted pull request pins
+### Included pull request pins
 
 These titles and full commit pins come from the manifest. Later pull request updates do not change this inventory. Composition repairs below qualify how the sources were combined.
 
-| Pull request | Source title | Accepted source commit |
+| Pull request | Source title | Included source commit |
 | --- | --- | --- |
 | [#1903](https://github.com/Soju06/codex-lb/pull/1903) | fix(proxy): bound memory used by paused bridge streams | [`67c7a2368bff9f9b69d82d20164bdadad342d7a2`](https://github.com/JustYannicc/codex-lb/commit/67c7a2368bff9f9b69d82d20164bdadad342d7a2) |
 | [#1905](https://github.com/Soju06/codex-lb/pull/1905) | fix(proxy): preserve continuation ownership across source routing | [`a3f3c7a12427be55153dd1893839656cb192f814`](https://github.com/JustYannicc/codex-lb/commit/a3f3c7a12427be55153dd1893839656cb192f814) |
@@ -62,10 +62,13 @@ These titles and full commit pins come from the manifest. Later pull request upd
 | [#2280](https://github.com/Soju06/codex-lb/pull/2280) | fix(proxy): preserve newer retry state during scheduled cleanup | [`6bc6b6a9b494840f7de6c5849fb2950324b6f388`](https://github.com/JustYannicc/codex-lb/commit/6bc6b6a9b494840f7de6c5849fb2950324b6f388) |
 | [#2283](https://github.com/Soju06/codex-lb/pull/2283) | test(shutdown): wait for assertions before completing the response | [`560c609d21a5ebbc893dac83773e0b02f4ea3ce0`](https://github.com/JustYannicc/codex-lb/commit/560c609d21a5ebbc893dac83773e0b02f4ea3ce0) |
 | [#2286](https://github.com/Soju06/codex-lb/pull/2286) | feat(desktop): show pooled quota while preserving ChatGPT login | [`d31ac538412b3ccd644db34e41557d1307994cd8`](https://github.com/JustYannicc/codex-lb/commit/d31ac538412b3ccd644db34e41557d1307994cd8) |
+| [#2306](https://github.com/Soju06/codex-lb/pull/2306) | ci(openspec): strictly validate changed active folders | [`af1f05d91b300ce170da059418ba13acb196a5cc`](https://github.com/JustYannicc/codex-lb/commit/af1f05d91b300ce170da059418ba13acb196a5cc) |
+| [#2307](https://github.com/Soju06/codex-lb/pull/2307) | feat(db): log per-revision migration progress | [`365e97544411bcd0b4eac386d8ddfd8853a841fd`](https://github.com/JustYannicc/codex-lb/commit/365e97544411bcd0b4eac386d8ddfd8853a841fd) |
+| [#2310](https://github.com/Soju06/codex-lb/pull/2310) | docs: align agent instructions with Astra prompt guidance | [`da7c1dc12f6914b692df045c44bc4d3227178bba`](https://github.com/JustYannicc/codex-lb/commit/da7c1dc12f6914b692df045c44bc4d3227178bba) |
 
 ### Composition repairs
 
-These 10 fork commits repair source interactions and verification fixtures. The manifest retains their full contract descriptions.
+These 11 fork commits repair source interactions and verification fixtures. The manifest retains their full contract descriptions.
 
 | Repair commit | Included repair |
 | --- | --- |
@@ -79,6 +82,7 @@ These 10 fork commits repair source interactions and verification fixtures. The 
 | [`2fedc5cf376c2000ce29d6ca207bb739d507b518`](https://github.com/JustYannicc/codex-lb/commit/2fedc5cf376c2000ce29d6ca207bb739d507b518) | Align bridge registration, scheduler and external-turn fixtures with the composed provenance contracts. |
 | [`0ef59c36a2b7e8b30441d45b951f8db93a24e079`](https://github.com/JustYannicc/codex-lb/commit/0ef59c36a2b7e8b30441d45b951f8db93a24e079) | Align dynamic import, native capability and frame budget fixtures. Register PostgreSQL migration coverage. |
 | [`9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f`](https://github.com/JustYannicc/codex-lb/commit/9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f) | Prove branch-specific downgrade preserves upstream siblings and denied WebSocket anchors retire before the next complete request. |
+| [`ebd1cc702f0710e6c40656046ee17432ce8db5e7`](https://github.com/JustYannicc/codex-lb/commit/ebd1cc702f0710e6c40656046ee17432ce8db5e7) | Preserve ownership fences while allowing validated fresh replay of unknown synthesized markers. |
 
 ### Superseded inputs
 
@@ -90,7 +94,7 @@ The manifest records these three older inputs as superseded within the accepted 
 | [#2078](https://github.com/Soju06/codex-lb/pull/2078) | Accepted concern already included through the manifest's upstream base |
 | [#2092](https://github.com/Soju06/codex-lb/pull/2092) | Accepted concern already included through the manifest's upstream base |
 
-The manifest also records [#2265](https://github.com/Soju06/codex-lb/pull/2265) and [#2281](https://github.com/Soju06/codex-lb/pull/2281) as included through upstream. Its exclusion records and supplementary dispositions cover work outside the 34 selected sources, including deferred [#2289](https://github.com/Soju06/codex-lb/pull/2289).
+The manifest also records [#2265](https://github.com/Soju06/codex-lb/pull/2265) and [#2281](https://github.com/Soju06/codex-lb/pull/2281) as included through upstream. Its exclusion records and supplementary dispositions cover work outside the 37 selected sources, including deferred [#2289](https://github.com/Soju06/codex-lb/pull/2289).
 
 ### Dated upstream observations and runtime proof
 
@@ -98,7 +102,7 @@ The [September 10 freshness audit](/Users/justyannicc/.codex/codex-lb-operations
 
 The same audit recorded main at `0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0` at 2026-09-10 05:57:55 UTC. That newer main is not integrated in the composition documented here. Reconciliation of later main commits and changed source pins remains separate work.
 
-The [PostgreSQL delivery receipt](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-delivery.md) and [root acceptance record](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-root-acceptance.json) bind the accepted source to its image and live checks. They provide later deployment evidence than the tracked verification record, whose pending-acceptance notes describe its earlier checkpoint. These operations links refer to local records on the operator's Mac and are unavailable in a standalone clone.
+The [PostgreSQL delivery receipt](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-delivery.md) and [root acceptance record](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-root-acceptance.json) bind the accepted source to its image and live checks. Those receipts describe source `971322208a831e3b02c7cae3bf5e7c7046e15fe9`, not live acceptance of the additions above. They provide later deployment evidence than the tracked verification record, whose pending-acceptance notes describe its earlier checkpoint. These operations links refer to local records on the operator's Mac and are unavailable in a standalone clone.
 
 ## Features
 
