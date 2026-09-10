@@ -148,8 +148,9 @@ async def test_spool_retention_composition_preserves_values_and_binding_on_merge
                         "http_responses_session_bridge_operation_spool_retention_seconds=43200 WHERE id=1"
                     )
                 )
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        await to_thread.run_sync(
+            lambda: run_upgrade(url, "20260910_020000_merge_reset_spool_heads", bootstrap_legacy=False)
+        )
         async with engine.connect() as connection:
             before = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
             assert len(before) == (1 if has_reset else 0)
@@ -176,6 +177,84 @@ async def test_spool_retention_composition_preserves_values_and_binding_on_merge
             assert revisions == {
                 "20260910_010000_merge_desktop_reset_pool_heads",
                 "20260910_010000_dashboard_spool_retention",
+            }
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "starting_revision",
+    ["20260910_020000_merge_reset_spool_heads", "20260908_000000_add_guest_session_generation"],
+)
+async def test_guest_generation_composition_preserves_authentication_and_reset_state(migration_url, starting_revision):
+    url = migration_url
+    await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
+    has_reset = starting_revision == "20260910_020000_merge_reset_spool_heads"
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE dashboard_settings SET password_hash='retained-admin', "
+                    "guest_password_hash='retained-guest', guest_access_enabled=true, "
+                    "http_responses_session_bridge_operation_spool_retention_seconds=43200 WHERE id=1"
+                )
+            )
+            if has_reset:
+                await connection.execute(
+                    text("UPDATE dashboard_settings SET desktop_reset_pool_enabled=true WHERE id=1")
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO desktop_reset_credit_redemptions VALUES "
+                        "('caller','attempt','owner','upstream-owner','credit',CURRENT_TIMESTAMP)"
+                    )
+                )
+            else:
+                await connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=7 WHERE id=1"))
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        async with engine.connect() as connection:
+            before = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
+            assert len(before) == (1 if has_reset else 0)
+            if has_reset:
+                assert tuple(before[0][:5]) == ("caller", "attempt", "owner", "upstream-owner", "credit")
+            settings_before = (
+                await connection.execute(
+                    text(
+                        "SELECT password_hash, guest_password_hash, guest_access_enabled, guest_session_generation, "
+                        "desktop_reset_pool_enabled, http_responses_session_bridge_operation_spool_retention_seconds "
+                        "FROM dashboard_settings WHERE id=1"
+                    )
+                )
+            ).one()
+            assert tuple(settings_before) == (
+                "retained-admin",
+                "retained-guest",
+                True,
+                0 if has_reset else 7,
+                has_reset,
+                43200,
+            )
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), starting_revision))
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == before
+            settings_after = (
+                await connection.execute(
+                    text(
+                        "SELECT password_hash, guest_password_hash, guest_access_enabled, guest_session_generation, "
+                        "desktop_reset_pool_enabled, http_responses_session_bridge_operation_spool_retention_seconds "
+                        "FROM dashboard_settings WHERE id=1"
+                    )
+                )
+            ).one()
+            assert settings_after == settings_before
+            revisions = set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars())
+            assert revisions == {
+                "20260910_020000_merge_reset_spool_heads",
+                "20260908_000000_add_guest_session_generation",
             }
         await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
