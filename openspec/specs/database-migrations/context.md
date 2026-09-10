@@ -76,3 +76,9 @@ to the current head verify later descendants against current ORM metadata.
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Receipt and spool-retention merge
+
+The receipt/request-log merge and spool-retention revision created separate heads when PR1954 was composed with current main. A new schema-neutral merge joins both existing heads without changing their histories. Upgrading from either parent applies the missing parent and preserves existing receipt and retention values. Naming either immediate parent for a merge-only downgrade restores both parent stamps and leaves both schemas intact; relative `-1` is ambiguous at this merge.
+
+This graph correction does not choose receipt reclamation, lifetime, success settlement or mixed-version activation. See the [verified repair context](../../changes/archive/2026-09-10-join-retry-claim-spool-heads/context.md).
