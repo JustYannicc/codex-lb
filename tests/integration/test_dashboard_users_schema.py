@@ -325,7 +325,7 @@ REPROJECT_REVISION = "20260909_020000_reproject_compat_admin_credentials"
 
 def test_reproject_revision_precedes_the_only_head() -> None:
     script = ScriptDirectory.from_config(_build_alembic_config(get_settings().database_url))
-    assert script.get_heads() == ["20260910_200000_merge_users_retry_claim_heads"]
+    assert script.get_heads() == ["20260910_210000_merge_invite_retry_claim_heads"]
     assert REPROJECT_REVISION in {revision.revision for revision in script.walk_revisions()}
     revision = script.get_revision(REPROJECT_REVISION)
     assert revision is not None and revision.down_revision == TARGET_REVISION
