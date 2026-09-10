@@ -214,8 +214,9 @@ async def test_guest_generation_composition_preserves_authentication_and_reset_s
                 )
             else:
                 await connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=7 WHERE id=1"))
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        await to_thread.run_sync(
+            lambda: run_upgrade(url, "20260910_030000_merge_reset_guest_heads", bootstrap_legacy=False)
+        )
         async with engine.connect() as connection:
             before = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
             assert len(before) == (1 if has_reset else 0)
@@ -258,5 +259,125 @@ async def test_guest_generation_composition_preserves_authentication_and_reset_s
             }
         await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "starting_revision",
+    ["20260910_030000_merge_reset_guest_heads", "20260909_020000_reproject_compat_admin_credentials"],
+)
+async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bindings(migration_url, starting_revision):
+    url = migration_url
+    await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
+    has_reset = starting_revision == "20260910_030000_merge_reset_guest_heads"
+    engine = create_async_engine(url)
+    tables = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE dashboard_settings SET password_hash='legacy-password', "
+                    "totp_secret_encrypted=:secret, totp_last_verified_step=42, "
+                    "guest_password_hash='guest-password', guest_access_enabled=true, "
+                    "guest_session_generation=9, "
+                    "http_responses_session_bridge_operation_spool_retention_seconds=43200 WHERE id=1"
+                ),
+                {"secret": b"retained-totp"},
+            )
+            settings_before = (await connection.execute(text("SELECT * FROM dashboard_settings"))).mappings().one()
+            if has_reset:
+                await connection.execute(
+                    text("UPDATE dashboard_settings SET desktop_reset_pool_enabled=true WHERE id=1")
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO desktop_reset_credit_redemptions VALUES "
+                        "('caller','attempt','owner','upstream-owner','credit',CURRENT_TIMESTAMP)"
+                    )
+                )
+                original_bindings = (
+                    await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))
+                ).all()
+            else:
+                await connection.execute(
+                    text("INSERT INTO dashboard_roles (id,slug,name,kind) VALUES ('custom','custom','Custom','custom')")
+                )
+                await connection.execute(
+                    text("INSERT INTO dashboard_role_grants VALUES ('custom','dashboard:read','all')")
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO dashboard_users (id,username,role_id,password_hash,session_generation) "
+                        "VALUES ('existing-user','existing-user','custom','user-password',13)"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO dashboard_identities (id,user_id,provider,provider_key,subject) "
+                        "VALUES ('identity','existing-user','oidc','provider','subject')"
+                    )
+                )
+                original_rows = {
+                    table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all()
+                    for table in tables
+                }
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        async with engine.connect() as connection:
+            settings_after = (await connection.execute(text("SELECT * FROM dashboard_settings"))).mappings().one()
+            for key, value in settings_before.items():
+                if key != "desktop_reset_pool_enabled":
+                    assert settings_after[key] == value
+            assert bool(settings_after["desktop_reset_pool_enabled"]) == has_reset
+            bindings = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
+            assert len(bindings) == (1 if has_reset else 0)
+            if has_reset:
+                assert bindings == original_bindings
+                assert tuple(bindings[0][:5]) == ("caller", "attempt", "owner", "upstream-owner", "credit")
+                admin = (
+                    await connection.execute(
+                        text(
+                            "SELECT username,password_hash,totp_secret_encrypted,totp_last_verified_step, "
+                            "session_generation FROM dashboard_users"
+                        )
+                    )
+                ).one()
+                assert tuple(admin) == ("admin", "legacy-password", b"retained-totp", 42, 0)
+                assert set((await connection.execute(text("SELECT slug FROM dashboard_roles"))).scalars()) == {
+                    "admin",
+                    "operator",
+                    "viewer",
+                    "guest",
+                    "member",
+                }
+            snapshot = {
+                table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all() for table in tables
+            }
+            if not has_reset:
+                assert snapshot == original_rows
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), starting_revision))
+        async with engine.connect() as connection:
+            assert set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars()) == {
+                "20260910_030000_merge_reset_guest_heads",
+                "20260909_020000_reproject_compat_admin_credentials",
+            }
+            assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == bindings
+            assert (
+                await connection.execute(text("SELECT * FROM dashboard_settings"))
+            ).mappings().one() == settings_after
+            assert {
+                table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all() for table in tables
+            } == snapshot
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == bindings
+            assert (
+                await connection.execute(text("SELECT * FROM dashboard_settings"))
+            ).mappings().one() == settings_after
+            assert {
+                table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY 1,2"))).all() for table in tables
+            } == snapshot
     finally:
         await engine.dispose()

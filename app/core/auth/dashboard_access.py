@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from app.core.auth.dashboard_mode import DashboardAuthMode
+
+if TYPE_CHECKING:
+    from app.db.models import DashboardUser
 
 
 class DashboardRole(StrEnum):
@@ -108,13 +113,98 @@ _WRITE_ALIAS_PERMISSIONS: frozenset[Permission] = frozenset(
     }
 )
 
+
+class RoleKind(StrEnum):
+    """``dashboard_roles.kind``: presets resolve from code, custom roles from grant rows."""
+
+    PRESET = "preset"
+    CUSTOM = "custom"
+
+
+class PresetRoleSlug(StrEnum):
+    """The built-in roles. Their grants live in code, never in the database."""
+
+    ADMIN = "admin"
+    OPERATOR = "operator"
+    MEMBER = "member"
+    VIEWER = "viewer"
+    GUEST = "guest"
+
+
+#: Stable identifiers for the preset role rows (``dashboard_roles``), derived
+#: from the slug so every install and every replica agrees without coordination.
+_PRESET_ROLE_ID_NAMESPACE = uuid.UUID("6f1c0e4e-2b4a-4c1e-9c3b-7a5d2e8f0a11")
+
+
+def preset_role_id(slug: PresetRoleSlug) -> str:
+    """Deterministic id of a preset role row (UUIDv5 of the slug)."""
+
+    return str(uuid.uuid5(_PRESET_ROLE_ID_NAMESPACE, f"codex-lb:dashboard-role:{slug.value}"))
+
+
+PRESET_ROLE_IDS: Mapping[PresetRoleSlug, str] = MappingProxyType(
+    {slug: preset_role_id(slug) for slug in PresetRoleSlug}
+)
+
+PRESET_ROLE_NAMES: Mapping[PresetRoleSlug, str] = MappingProxyType(
+    {
+        PresetRoleSlug.ADMIN: "Admin",
+        PresetRoleSlug.OPERATOR: "Operator",
+        PresetRoleSlug.MEMBER: "Member",
+        PresetRoleSlug.VIEWER: "Viewer",
+        PresetRoleSlug.GUEST: "Guest",
+    }
+)
+
 ADMIN_GRANTS: Grants = _grants({permission: Scope.ALL for permission in Permission})
-GUEST_GRANTS: Grants = _grants(
+OPERATOR_GRANTS: Grants = _grants(
+    {
+        Permission.DASHBOARD_READ: Scope.ALL,
+        Permission.ACCOUNTS_READ: Scope.ALL,
+        Permission.ACCOUNTS_WRITE: Scope.ALL,
+        Permission.API_KEYS_READ: Scope.ALL,
+        Permission.API_KEYS_WRITE: Scope.ALL,
+        Permission.API_KEYS_ASSIGN: Scope.ALL,
+        Permission.OPS_WRITE: Scope.ALL,
+    }
+)
+MEMBER_GRANTS: Grants = _grants(
+    {
+        Permission.DASHBOARD_READ: Scope.OWN,
+        Permission.API_KEYS_READ: Scope.OWN,
+        Permission.API_KEYS_WRITE: Scope.OWN,
+    }
+)
+VIEWER_GRANTS: Grants = _grants(
     {
         Permission.DASHBOARD_READ: Scope.ALL,
         Permission.ACCOUNTS_READ: Scope.ALL,
     }
 )
+GUEST_GRANTS: Grants = VIEWER_GRANTS
+
+#: Grants of every preset role. The database stores preset *rows* (for foreign
+#: keys and listings) but never their grants: this table is the single truth,
+#: so an upgrade that adds a permission updates every preset by definition and
+#: replicas of different versions can never disagree about what ``admin`` means.
+PRESET_ROLE_GRANTS: Mapping[PresetRoleSlug, Grants] = MappingProxyType(
+    {
+        PresetRoleSlug.ADMIN: ADMIN_GRANTS,
+        PresetRoleSlug.OPERATOR: OPERATOR_GRANTS,
+        PresetRoleSlug.MEMBER: MEMBER_GRANTS,
+        PresetRoleSlug.VIEWER: VIEWER_GRANTS,
+        PresetRoleSlug.GUEST: GUEST_GRANTS,
+    }
+)
+
+#: Presets that may be assigned to a user account. Guest is the anonymous
+#: shared read-only session and is never a user's role. Member (own-scoped
+#: grants only) becomes assignable once own-scoped views ship; until then the
+#: session dependency refuses roles without ``dashboard:read`` at ``all``.
+ASSIGNABLE_PRESET_ROLES: frozenset[PresetRoleSlug] = frozenset(PresetRoleSlug) - {
+    PresetRoleSlug.GUEST,
+    PresetRoleSlug.MEMBER,
+}
 
 ROLE_GRANTS: Mapping[DashboardRole, Grants] = MappingProxyType(
     {
@@ -155,7 +245,7 @@ def validate_grants(grants: Grants) -> None:
             raise ValueError(f"{permission.value} requires {', '.join(missing)} at 'all' scope")
 
 
-for _role_grants in ROLE_GRANTS.values():
+for _role_grants in PRESET_ROLE_GRANTS.values():
     validate_grants(_role_grants)
 
 
@@ -167,6 +257,14 @@ class DashboardPrincipal:
     the coarse aliases derived from it and is validated for consistency so the
     two can never drift. ``grants`` is excluded from hashing because mappings
     are unhashable; equality still compares it.
+
+    ``role`` stays the coarse wire value (``admin`` for every user account and
+    for the implicit/trusted-header/disabled admin, ``guest`` for guests);
+    ``role_slug`` carries the account's actual role when the principal is a
+    user. ``user_id`` is ``None`` for principals without a user row.
+    ``totp_enrollment_required`` marks a user whose install requires TOTP but
+    who has not enrolled yet: only the dashboard-auth self-service routes may
+    serve such a principal.
     """
 
     role: DashboardRole
@@ -174,6 +272,11 @@ class DashboardPrincipal:
     auth_mode: DashboardAuthMode
     actor: str | None = None
     grants: Grants = field(kw_only=True, hash=False)
+    user_id: str | None = field(default=None, kw_only=True)
+    username: str | None = field(default=None, kw_only=True)
+    role_slug: str | None = field(default=None, kw_only=True)
+    auth_method: str | None = field(default=None, kw_only=True)
+    totp_enrollment_required: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         validate_grants(self.grants)
@@ -197,13 +300,56 @@ ADMIN_PERMISSIONS = legacy_permissions(ADMIN_GRANTS)
 GUEST_PERMISSIONS = legacy_permissions(GUEST_GRANTS)
 
 
-def admin_principal(*, auth_mode: DashboardAuthMode, actor: str | None = None) -> DashboardPrincipal:
+def permission_strings(grants: Grants) -> list[str]:
+    """Wire form of a grant table: the legacy aliases first, then ``<permission>:<scope>``.
+
+    Clients that predate fine-grained permissions only look for ``write``; newer
+    clients read the scoped entries.
+    """
+
+    aliases = sorted(alias.value for alias in legacy_permissions(grants))
+    scoped = sorted(f"{permission.value}:{scope.value}" for permission, scope in grants.items())
+    return aliases + scoped
+
+
+def admin_principal(
+    *,
+    auth_mode: DashboardAuthMode,
+    actor: str | None = None,
+    auth_method: str | None = None,
+) -> DashboardPrincipal:
+    """The implicit admin: no user row (local passwordless install, trusted header, disabled auth)."""
+
     return DashboardPrincipal(
         role=DashboardRole.ADMIN,
         permissions=ADMIN_PERMISSIONS,
         auth_mode=auth_mode,
         actor=actor,
         grants=ADMIN_GRANTS,
+        auth_method=auth_method,
+    )
+
+
+def user_principal(
+    user: DashboardUser,
+    grants: Grants,
+    *,
+    auth_method: str | None,
+    totp_enrollment_required: bool = False,
+) -> DashboardPrincipal:
+    """A signed-in user account. ``grants`` is the resolved grant table of ``user.role``."""
+
+    return DashboardPrincipal(
+        role=DashboardRole.ADMIN,
+        permissions=legacy_permissions(grants),
+        auth_mode=DashboardAuthMode.STANDARD,
+        actor=user.username,
+        grants=grants,
+        user_id=user.id,
+        username=user.username,
+        role_slug=user.role.slug,
+        auth_method=auth_method,
+        totp_enrollment_required=totp_enrollment_required,
     )
 
 
