@@ -1272,7 +1272,7 @@ Recovery MUST preserve routing policy, model eligibility, file ownership, regist
 
 #### Scenario: Shared WebSocket finalization preserves selected rejection scope
 - **GIVEN** pending WebSocket requests with different models or service tiers
-- **WHEN** terminal cleanup selects one request for a persisted rejection
+- **WHEN** a request-specific error identifies the request selected for a persisted rejection
 - **THEN** the rejection MUST retain that selected request's model and service tier
 - **AND** reservation settlement and terminal logging MUST precede the health write
 
@@ -1280,3 +1280,14 @@ Recovery MUST preserve routing policy, model eligibility, file ownership, regist
 - **GIVEN** a WebSocket handshake rejects a known requested model and service tier with an account rate-limit or quota error
 - **WHEN** an operator probe completes for that unchanged scope and generation
 - **THEN** the persisted handshake rejection SHALL be eligible for completed-probe recovery
+
+#### Scenario: Shared failure has ambiguous request scope
+- **GIVEN** a shared WebSocket failure with pending requests for different models or service tiers and no request-specific attribution
+- **WHEN** terminal cleanup persists the account rejection
+- **THEN** the rejection model and service tier MUST remain unknown
+- **AND** a completed probe for any one pending request's scope MUST NOT clear that hold
+
+#### Scenario: Shared failure has one common request scope
+- **GIVEN** every pending request has the same model and service tier
+- **WHEN** terminal cleanup persists a shared account rejection
+- **THEN** the rejection SHALL retain that common scope for completed-probe recovery
