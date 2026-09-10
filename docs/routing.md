@@ -25,7 +25,7 @@ The hash is the first 16 hexadecimal characters of SHA-256 over the resolved sel
 
 Each row keeps its existing meaning: direct streams can emit attempt rows; compact, native WebSocket, and bridge rows describe their final request state. A final row does not enumerate every retry. Existing recovery can clear a key, leaving a null hash with the original source classification. These fields do not by themselves explain account-owner precedence or why an account was skipped.
 
-The columns follow existing request-log retention and never store raw keys or prompts. See the [affinity observation contract](../openspec/specs/proxy-runtime-observability/spec.md) and [query example and privacy notes](../openspec/specs/proxy-runtime-observability/context.md#affinity-decisions-in-request-logs).
+The columns follow existing request-log retention and never store raw keys or prompts. See the [affinity observation contract](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/spec.md) and [query example and privacy notes](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/context.md#affinity-decisions-in-request-logs).
 
 ## Routing, quotas, and eligibility explainer
 
