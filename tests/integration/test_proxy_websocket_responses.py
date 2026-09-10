@@ -8782,7 +8782,7 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         del self
         log_calls.append(kwargs)
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -9779,7 +9779,7 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -9945,9 +9945,10 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
+        assert scope == {"rejected_model": "gpt-5.1", "rejected_service_tier": None}
 
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
@@ -10082,7 +10083,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10226,7 +10227,7 @@ def test_backend_responses_websocket_retries_stale_account_model_route_on_anothe
         excluded_snapshots.append(set(request_state.excluded_account_ids))
         return SimpleNamespace(id=account_ids[index]), upstreams[index]
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10346,7 +10347,7 @@ def test_backend_responses_websocket_previous_response_usage_limit_returns_upstr
         captured_preferred_accounts.append(request_state.preferred_account_id)
         return SimpleNamespace(id="acct_ws_proxy_owner"), first_upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10469,7 +10470,7 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
             )
         return None, None
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **scope):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -13432,9 +13433,9 @@ class _TwoAccountWebSocketFailover:
             failover.connect_accounts.append(selected_account_id)
             return SimpleNamespace(id=selected_account_id), failover.upstreams_by_account[selected_account_id].popleft()
 
-        async def spy_handle_stream_error(self, account, error, code, http_status=None):
+        async def spy_handle_stream_error(self, account, error, code, http_status=None, **scope):
             failover.stream_errors.append((account.id, code))
-            return await real_handle_stream_error(self, account, error, code, http_status)
+            return await real_handle_stream_error(self, account, error, code, http_status, **scope)
 
         async def fake_write_request_log(self, **kwargs):
             del self

@@ -5935,6 +5935,8 @@ class _WebSocketMixin:
                 account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 retry_error_code,
+                rejected_model=request_state.model,
+                rejected_service_tier=request_state.service_tier,
             )
             event, payload, event_type, downstream_text = _rewrite_websocket_previous_response_owner_unavailable_event(
                 request_state=request_state,
@@ -5947,6 +5949,8 @@ class _WebSocketMixin:
                     account,
                     {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                     retry_error_code,
+                    rejected_model=request_state.model,
+                    rejected_service_tier=request_state.service_tier,
                 )
                 event, payload, event_type, downstream_text = (
                     _rewrite_websocket_previous_response_owner_unavailable_event(
@@ -6093,6 +6097,8 @@ class _WebSocketMixin:
                         account,
                         {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                         retry_error_code,
+                        rejected_model=request_state.model,
+                        rejected_service_tier=request_state.service_tier,
                     )
             if retry_error_code is not None:
                 return downstream_text
@@ -6690,6 +6696,8 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        rejected_model=request_state.model,
+                        rejected_service_tier=request_state.service_tier,
                     )
                 except Exception:
                     _facade().logger.warning(

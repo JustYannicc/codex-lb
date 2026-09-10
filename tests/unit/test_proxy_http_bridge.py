@@ -46303,7 +46303,7 @@ async def test_release_reservation_drains_deferred_keyed_health_after_release(
         del reservation
         order.append("settle")
 
-    async def record_health(failed_account: Any, error: Any, code: str) -> None:
+    async def record_health(failed_account: Any, error: Any, code: str, **_kwargs: object) -> None:
         del error
         assert failed_account is account
         order.append(f"health:{code}")
@@ -46419,7 +46419,7 @@ async def test_drain_deferred_keyed_health_drains_full_queue_under_cancellation(
     attempt_gate = asyncio.Event()
     calls: list[str] = []
 
-    async def blocked_health(account: Any, error: Any, code: str) -> None:
+    async def blocked_health(account: Any, error: Any, code: str, **_kwargs: object) -> None:
         del account, error
         calls.append(code)
         attempt_started.set()
@@ -46465,7 +46465,7 @@ async def test_drain_deferred_keyed_health_drops_failed_write_and_continues(
         )
     applied: list[str] = []
 
-    async def flaky_health(account: Any, error: Any, code: str) -> None:
+    async def flaky_health(account: Any, error: Any, code: str, **_kwargs: object) -> None:
         del account, error
         if code == "usage_limit_reached":
             raise RuntimeError("health persistence failed")
@@ -46526,7 +46526,7 @@ async def test_finalize_waits_for_settlement_when_keyed_health_penalties_are_que
 
     drained: list[str] = []
 
-    async def record_health(account: Any, error: Any, code: str) -> None:
+    async def record_health(account: Any, error: Any, code: str, **_kwargs: object) -> None:
         del account, error
         drained.append(code)
 
