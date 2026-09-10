@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 
 import pytest
 
 import app.modules.proxy.service as proxy_module
-from app.core.auth.dashboard_access import guest_principal
+from app.core.auth.dashboard_access import DashboardAuthMode, Permission, Scope, admin_principal, guest_principal
 from app.core.auth.dependencies import validate_dashboard_session
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.types import JsonValue
@@ -239,3 +240,29 @@ async def test_session_selection_key_is_logged_instead_of_payload_cache_key(asyn
     assert row["stickyKeySource"] == "session_header"
     assert row["stickyKind"] == "codex_session"
     assert row["stickyKeyHash"] == "4850c055e8bd28c5"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_affinity_metadata_follows_permission_instead_of_role(async_client, app_instance, allowed):
+    await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.4", "input": "synthetic", "prompt_cache_key": "abc", "stream": True},
+    )
+    principal = guest_principal() if allowed else admin_principal(auth_mode=DashboardAuthMode.STANDARD)
+    grants = dict(principal.grants)
+    if allowed:
+        grants[Permission.CONVERSATIONS_READ] = Scope.ALL
+    else:
+        grants.pop(Permission.CONVERSATIONS_READ)
+    principal = replace(principal, grants=grants)
+    app_instance.dependency_overrides[validate_dashboard_session] = lambda: principal
+    try:
+        response = await async_client.get("/api/request-logs")
+    finally:
+        app_instance.dependency_overrides.pop(validate_dashboard_session)
+    assert response.status_code == 200
+    row = response.json()["requests"][0]
+    assert row["stickyKeySource"] == ("payload" if allowed else None)
+    assert row["stickyKind"] == ("prompt_cache" if allowed else None)
+    assert row["stickyKeyHash"] == ("ba7816bf8f01cfea" if allowed else None)

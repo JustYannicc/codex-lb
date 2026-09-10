@@ -19,7 +19,7 @@ Change the strategy live in the dashboard under **Settings → Routing** — no 
 
 ## Inspect affinity decisions
 
-Request logs record `sticky_key_source`, `sticky_kind`, and `sticky_key_hash` for Responses and compact traffic without enabling trace logs. Administrators can read them as `stickyKeySource`, `stickyKind`, and `stickyKeyHash` through `GET /api/request-logs`. Guest responses hide these fields.
+Request logs record `sticky_key_source`, `sticky_kind`, and `sticky_key_hash` for Responses and compact traffic without enabling trace logs. Callers with `conversations:read` permission can read them as `stickyKeySource`, `stickyKind`, and `stickyKeyHash` through `GET /api/request-logs`. Responses without that permission hide these fields.
 
 The hash is the first 16 lowercase hexadecimal characters of SHA-256 over the UTF-8-encoded resolved selection key. Compare hashes to identify repeated keys; raw session headers can differ from selection keys. Historical rows and paths without an observation return null. Source `none` means resolution explicitly found no affinity.
 

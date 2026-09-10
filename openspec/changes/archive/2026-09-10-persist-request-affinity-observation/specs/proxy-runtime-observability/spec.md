@@ -7,7 +7,7 @@ The system MUST persist `sticky_key_source`, `sticky_kind`, and `sticky_key_hash
 #### Scenario: Resolved affinity is recorded without trace
 - **WHEN** an HTTP or native WebSocket Responses request resolves affinity and emits a request-log row with tracing disabled
 - **THEN** the row stores the source, kind, and hash from that decision
-- **AND** the admin request-log listing returns `stickyKeySource`, `stickyKind`, and `stickyKeyHash`
+- **AND** the authorized request-log listing returns `stickyKeySource`, `stickyKind`, and `stickyKeyHash`
 - **AND** these fields contain no raw keys or prompt content
 
 #### Scenario: Stable grouping across requests
@@ -33,7 +33,7 @@ The system MUST persist `sticky_key_source`, `sticky_kind`, and `sticky_key_hash
 #### Scenario: Existing privacy and retention apply
 - **WHEN** request logs are read, retained, or deleted
 - **THEN** affinity metadata follows the same access controls and retention lifecycle as its owning row
-- **AND** guest request-log responses return null for the three affinity fields
+- **AND** request-log responses without `conversations:read` permission return null for the three affinity fields
 - **AND** enabling raw-key tracing does not make these columns store raw keys
 
 #### Scenario: Upgrade and downgrade preserve existing records
