@@ -40,14 +40,14 @@ def disposable_url() -> Iterator[str]:
 
 
 def invoke(url: str, output: Path, *extra: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "CODEX_LB_DATABASE_URL": url, "CODEX_LB_TEST_DATABASE_URL": url}
+    env = {**os.environ, "CODEX_LB_DATABASE_URL": url, "CODEX_LB_TEST_DATABASE_URL": url, "BENCHMARK_DATABASE_URL": url}
     return subprocess.run(
         [
             sys.executable,
             "-m",
             "scripts.benchmark_migrations",
-            "--db-url",
-            url,
+            "--db-url-env",
+            "BENCHMARK_DATABASE_URL",
             "--disposable",
             "--base",
             BASE,
@@ -75,6 +75,7 @@ def test_benchmark_measures_selected_revisions(disposable_url: str, tmp_path: Pa
     output = tmp_path / "measurement"
     result = invoke(disposable_url, output)
     assert result.returncode == 0, result.stderr
+    assert disposable_url not in result.args
     report = json.loads((output / "report.json").read_text())
     assert report["status"] == "completed"
     assert [step["revision"] for step in report["steps"]] == [
@@ -82,6 +83,10 @@ def test_benchmark_measures_selected_revisions(disposable_url: str, tmp_path: Pa
         TARGET,
     ]
     assert all(step["elapsed_seconds"] > 0 and step["returncode"] == 0 for step in report["steps"])
+    assert [step["resulting_revisions"] for step in report["steps"]] == [
+        ["20260909_130000_add_request_logs_live_facet_indexes"],
+        [TARGET],
+    ]
     assert report["resulting_revisions"] == [TARGET]
     assert report["fixture"]["observed"]["rows"] == 12
     assert report["fixture"]["observed"]["accounts"] == 3
@@ -188,6 +193,10 @@ def test_benchmark_reports_failed_revision(disposable_url: str, tmp_path: Path) 
     assert report["steps"][-1]["revision"] == TARGET
     assert report["steps"][-1]["returncode"] != 0
     assert report["steps"][-1]["elapsed_seconds"] > 0
+    assert [step["resulting_revisions"] for step in report["steps"]] == [
+        ["20260909_130000_add_request_logs_live_facet_indexes"],
+        ["20260909_130000_add_request_logs_live_facet_indexes"],
+    ]
     assert report["resulting_revisions"] == ["20260909_130000_add_request_logs_live_facet_indexes"]
     assert "check" not in report
     assert "benchmark-disposable" not in (output / "report.json").read_text()
@@ -201,3 +210,23 @@ def test_benchmark_accepts_maximum_seed(disposable_url: str, tmp_path: Path) -> 
     assert fixture["seed"] == 2147483647
     assert fixture["observed"]["rows"] == 1
     assert fixture["observed"]["by_account"] == {"benchmark-account-3": 1}
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_benchmark_requires_selected_url_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv("MISSING_BENCHMARK_URL", raising=False)
+    else:
+        monkeypatch.setenv("MISSING_BENCHMARK_URL", value)
+    output = tmp_path / "missing-url"
+    result = invoke(
+        "postgresql+asyncpg://synthetic:synthetic@127.0.0.1:1/disposable",
+        output,
+        "--db-url-env",
+        "MISSING_BENCHMARK_URL",
+    )
+    assert result.returncode == 2
+    assert "selected URL environment variable must be nonempty" in result.stderr
+    assert not output.exists()

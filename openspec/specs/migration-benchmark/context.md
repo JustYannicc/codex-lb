@@ -6,13 +6,13 @@ This developer command produces advisory measurements for [#1471](https://github
 
 Use a source checkout with `uv sync --frozen`. Provision an empty PostgreSQL database that you own and can discard. Keep other writers off it. The command rejects existing tables and never resets a database.
 
-Set both database variables to the same dedicated disposable target before importing application code or running tests. Use an explicit `postgresql+asyncpg://` URL without query options. `--db-url` pins both variables inside the command and its migration subprocesses.
+Set both database variables to the same dedicated disposable target before importing application code or running tests. Use an explicit `postgresql+asyncpg://` URL without query options. `--db-url-env NAME` reads the URL from that explicitly selected environment variable and pins both routes inside the command and its migration subprocesses. The variable must be nonempty. Provision it through a secret manager or protected shell input; do not put credentials in command arguments or shell history.
 
 ```bash
 export CODEX_LB_DATABASE_URL="$disposable_database_url"
 export CODEX_LB_TEST_DATABASE_URL="$CODEX_LB_DATABASE_URL"
 uv run python -m scripts.benchmark_migrations \
-  --db-url "$CODEX_LB_DATABASE_URL" --disposable \
+  --db-url-env CODEX_LB_DATABASE_URL --disposable \
   --base 20260720_000000_add_request_log_conversation_id \
   --target 20260910_000000_request_logs_missing_cost_index \
   --rows 100000 --accounts 100 --seed 7 \
@@ -30,7 +30,7 @@ Each measured revision uses a fresh `python -m app.db.migrate upgrade REVISION` 
 
 `status: completed` means the selected range finished. Durations never determine exit status. At the current source head, completion also requires the existing public migration `check` to pass. Historical targets still run that check, but its comparison to current ORM metadata can report expected drift. That check result is recorded separately and the command does not silently upgrade beyond the requested target.
 
-Setup, seeding or upgrade failures produce nonzero exits and `status: failed`. The report records the stage, attempted revision, elapsed time and observed stamps when available. Raw subprocess errors are omitted because they can contain credentials or SQL values. The report provides benchmark-owned error text or the exception class. Inspect the owned disposable database separately if more diagnosis is needed. An interrupted attempt remains incomplete; discard its database before a fresh run.
+Setup, seeding or upgrade failures produce nonzero exits and `status: failed`. The report records the stage, attempted revision, elapsed time and observed stamps when available. Each measured step retains its own `resulting_revisions`, including failed attempts. The top-level `resulting_revisions` records the final observed database state. Raw subprocess errors are omitted because they can contain credentials or SQL values. The report provides benchmark-owned error text or the exception class. Inspect the owned disposable database separately if more diagnosis is needed. An interrupted attempt remains incomplete; discard its database before a fresh run.
 
 ## Fixture limits
 

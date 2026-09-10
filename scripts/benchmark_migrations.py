@@ -28,7 +28,9 @@ class BenchmarkFailure(Exception):
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db-url", required=True)
+    parser.add_argument(
+        "--db-url-env", required=True, help="Name of the environment variable containing the disposable PostgreSQL URL."
+    )
     parser.add_argument(
         "--disposable",
         required=True,
@@ -45,6 +47,9 @@ def _arguments() -> argparse.Namespace:
         "--runner-note", default="unspecified", help="Database host/container resource limits and other runner context."
     )
     args = parser.parse_args()
+    args.db_url = os.environ.get(args.db_url_env)
+    if not args.db_url:
+        parser.error("selected URL environment variable must be nonempty")
     if args.rows < 0 or args.accounts < 1 or args.seed < 0 or max(args.rows, args.accounts, args.seed) > 2**31 - 1:
         parser.error("rows and seed must be nonnegative and accounts positive, all within signed 32-bit range")
     return args
@@ -178,7 +183,8 @@ def _run(args: argparse.Namespace, report: dict[str, Any]) -> None:
             _save(args.output, report)
             step = {"revision": revision.revision, **_cli("upgrade", revision.revision)}
             report["steps"].append(step)
-            report["resulting_revisions"] = stamps()
+            step["resulting_revisions"] = stamps()
+            report["resulting_revisions"] = step["resulting_revisions"]
             _save(args.output, report)
             if step["returncode"]:
                 raise BenchmarkFailure("revision upgrade failed")

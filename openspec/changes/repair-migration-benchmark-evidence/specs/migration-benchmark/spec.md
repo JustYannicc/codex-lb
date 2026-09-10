@@ -1,10 +1,4 @@
-# migration-benchmark Specification
-
-## Purpose
-
-The developer benchmark SHALL produce advisory measurements for explicitly selected Alembic revisions on disposable PostgreSQL data.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Explicit disposable benchmark invocation
 
@@ -18,14 +12,6 @@ The developer benchmark MUST read its PostgreSQL URL from a nonempty environment
 - **WHEN** the operator selects a populated URL environment variable and acknowledges disposable ownership
 - **THEN** the command MUST use that target without requiring URL credentials in its arguments
 
-### Requirement: Reproducible synthetic fixture
-
-The benchmark MUST seed synthetic accounts and request logs at the selected base revision with deterministic values for a given seed and counts. It MUST report its fixture algorithm version, count/distribution parameters and observed aggregate counts. It MUST NOT read or copy production rows.
-
-#### Scenario: Repeated small fixture
-- **WHEN** the same parameters are used on two empty disposable databases
-- **THEN** the fixture counts and distribution evidence MUST match
-
 ### Requirement: Advisory revision measurements
 
 The benchmark MUST use the existing migration CLI and Alembic graph for the selected revision range. It MUST emit JSON and human-readable results containing source commit and working-tree provenance, runner and PostgreSQL details, fixture provenance, each attempted revision's elapsed wall time, completion state and resulting revisions. Each measured step MUST retain its own observed resulting revisions after that attempt, including failed attempts, without later steps overwriting them. It MUST disclose separate subprocess and transaction semantics. Duration alone MUST NOT produce failure.
@@ -38,14 +24,3 @@ The benchmark MUST use the existing migration CLI and Alembic graph for the sele
 - **WHEN** base and target are the same revision
 - **THEN** the report MUST contain no measured upgrade steps and MUST identify the result as a no-op
 
-### Requirement: Failure and final migration check
-
-The benchmark MUST return nonzero for setup, fixture or upgrade failure and MUST NOT mark an incomplete attempt successful. It MUST record the failing stage and any observed resulting revisions. After a successful range it MUST run the existing public migration check and record its exit status without extending the selected range. A failed check at current head MUST fail the benchmark; a historical target MUST report the check result separately from range completion.
-
-#### Scenario: Upgrade fails
-- **WHEN** a selected upgrade exits unsuccessfully
-- **THEN** the report MUST retain failed status, measured attempts and the resulting revision evidence
-
-#### Scenario: Current head is checked
-- **WHEN** the selected target is the current source's Alembic head
-- **THEN** success MUST require the public migration check to succeed
