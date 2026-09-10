@@ -7103,10 +7103,6 @@ async def _compact_responses(
     )
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = payload.model
-    apply_enforced_service_tier_model_fallback(
-        payload,
-        service_tier_was_enforced=enforcement.service_tier_was_enforced,
-    )
     validate_model_access(api_key, payload.model)
     source_route_excluded = bool(extract_input_file_ids(payload.input))
     try:
@@ -7137,6 +7133,10 @@ async def _compact_responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=enforcement.service_tier_was_enforced,
+    )
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:
