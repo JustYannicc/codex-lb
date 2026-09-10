@@ -139,3 +139,10 @@ performance acceptance remain open. See section 14.
 - [ ] 14.4 Prove the public/shared-reader regression fails for the missing stall bound with request deadlines still in the future, then implement the accepted bound
 - [ ] 14.5 Prove retained-prefix/failure/EOS, blocked and retained byte accounting, real reservation settlement, same-session sibling success, and cancellation/timer cleanup
 - [ ] 14.6 Complete required checks, independent candidate review, and hosted verification before claiming the stall path delivered
+
+## 15. Recovery-mode removal composition
+
+- [x] 15.1 Resolve the merge with `aae61f6f` while preserving fail-closed removal, bounded queue scheduler, and shielded downstream detachment
+- [x] 15.2 Prove the unshielded upstream detach loses ownership/cleanup in all four existing HTTP/SSE cancellation regression variants
+- [x] 15.3 Verify affected public bridge/error paths, queue lifecycle, settings removal, static/spec checks and independent Medium review
+- [ ] 15.4 Publish the history-preserving composition and verify its hosted checks; preserve the independent numeric stall decision

@@ -39,6 +39,8 @@ The initial regression must fail on the current head because the shared reader s
 
 A progressing-consumer control must complete even when total stream duration exceeds `D`; the bound concerns continuous blocked delivery. Test that wakeups without enqueue progress do not postpone expiry. Keep the existing process-budget failure control, including a failure payload that cannot reserve bytes.
 
-## Pending upstream overlap
+## Recovery-mode removal composition
 
-PR [2336](https://github.com/Soju06/codex-lb/pull/2336), inspected open at `940eeeeb919571117610e324cd44ba89999fc7c0`, removes optional ambiguous-continuation recovery modes. It changes request submission and streaming, which future proof fixtures may touch. Its listed scope does not implement the independent live-queue stall bound. Recheck its actual merge/head before implementation and adapt obsolete recovery-mode fixtures if necessary. Do not treat the unmerged proposal as delivery or reopen the accepted live-queue outcome.
+PR [2336](https://github.com/Soju06/codex-lb/pull/2336) merged as `aae61f6f30466b3e72fcc15e3c5a38c98e4971cb`. The composition preserves its removal of optional ambiguous-continuation recovery modes. It retains the bounded queue scheduler and shielded downstream detachment, together with their pending-terminal and cancellation regressions. Removed-mode cooldown tests are deleted; fail-closed tests remain.
+
+This composition does not implement the independent live-queue stall bound or select its duration. The shared-reader and actual-settlement proof above remains required. Native bypass and completed-replay contracts remain unchanged.
