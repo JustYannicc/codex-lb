@@ -167,7 +167,8 @@ def test_benchmark_reports_failed_revision(disposable_url: str, tmp_path: Path) 
     engine = create_engine(to_sync_database_url(disposable_url))
     with engine.begin() as connection:
         assert connection.execute(text("SELECT current_setting('is_superuser')")).scalar_one() == "on", (
-            "failure-injection test requires a PostgreSQL superuser on the disposable server; CREATEDB alone is insufficient"
+            "failure-injection test requires a PostgreSQL superuser on the disposable server; "
+            "CREATEDB alone is insufficient"
         )
         connection.execute(
             text("""
