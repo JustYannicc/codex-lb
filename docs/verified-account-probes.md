@@ -18,4 +18,4 @@ Historical holds have no trustworthy rejected scope and are not cleared by this 
 
 For example, an Astra/default hold can be cleared by a completed Astra/default probe. A Spark probe or a positive pooled usage percentage cannot establish that the Astra hold is stale.
 
-The source of truth is [account routing](../openspec/specs/account-routing/spec.md) and [usage refresh policy](../openspec/specs/usage-refresh-policy/spec.md).
+The source of truth is [account routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) and [usage refresh policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy).
