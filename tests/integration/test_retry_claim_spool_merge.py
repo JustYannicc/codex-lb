@@ -1,4 +1,4 @@
-"""Exercise public head upgrades from both populated receipt/spool branches."""
+"""Exercise populated receipt/spool and guest merge upgrades and downgrades."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ _RECEIPTS = "20260910_040000_merge_retry_claim_and_request_log_heads"
 _SPOOL = "20260910_010000_dashboard_spool_retention"
 _PARENTS = (_RECEIPTS, _SPOOL)
 _MERGE = "20260910_160000_merge_retry_claim_spool_heads"
+_GUEST = "20260908_000000_add_guest_session_generation"
+_CURRENT_MERGE = "20260910_170000_merge_guest_retry_claim_heads"
+_CURRENT_PARENTS = (_MERGE, _GUEST)
 _RETENTION = "http_responses_session_bridge_operation_spool_retention_seconds"
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,6 +74,8 @@ def _seed_branch_values(path: Path, branch: str) -> None:
     with sqlite3.connect(path) as connection:
         if branch == _SPOOL:
             connection.execute(f"UPDATE dashboard_settings SET {_RETENTION} = 98765.5 WHERE id = 1")
+        elif branch == _GUEST:
+            connection.execute("UPDATE dashboard_settings SET guest_session_generation = 17 WHERE id = 1")
         else:
             connection.execute(
                 """
@@ -108,19 +113,29 @@ def _assert_parent_rows_preserved(before: dict[str, Any], after: dict[str, Any])
             assert {column: actual[column] for column in expected} == expected, table
 
 
+def _downgrade_to_parent(path: Path, parent: str) -> None:
+    # Name the parent: a relative -1 walk is ambiguous at a merge.
+    # The public DB CLI has no downgrade command; invoke Alembic with the same isolated URL.
+    _run(
+        path,
+        sys.executable,
+        "-c",
+        "import os, sys; from alembic import command; from app.db.migrate import _build_alembic_config; "
+        "command.downgrade(_build_alembic_config(os.environ['CODEX_LB_DATABASE_URL']), sys.argv[1])",
+        parent,
+    )
+
+
 @pytest.mark.parametrize("parent", _PARENTS, ids=["receipt-parent", "spool-parent"])
-def test_public_head_upgrade_and_merge_only_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
+def test_historical_merge_upgrade_and_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
     path = tmp_path / "receipt-spool.sqlite"
     _cli(path, "upgrade", parent)
     assert _revisions(path) == (parent,)
     _seed_branch(path, parent)
     before = _state(path)
 
-    assert f"current_revision={_MERGE}" in _cli(path, "upgrade", "head")
+    assert f"current_revision={_MERGE}" in _cli(path, "upgrade", _MERGE)
     assert _revisions(path) == (_MERGE,)
-    check = _cli(path, "check")
-    assert "migration_policy=ok" in check
-    assert "schema_drift=none" in check
     merged = _state(path)
     _assert_parent_rows_preserved(before, merged)
     assert _RETENTION in merged["rows"]["dashboard_settings"][0]
@@ -136,19 +151,54 @@ def test_public_head_upgrade_and_merge_only_downgrade_preserve_populated_parents
     populated = _state(path)
     assert populated["rows"]["dashboard_settings"][0][_RETENTION] == 98765.5
     assert populated["rows"]["http_bridge_retry_circuits"][0]["admission_claimed_until_epoch"] == 4102444800.0
-    # Name the parent: a relative -1 walk is ambiguous at a merge.
-    # The public DB CLI has no downgrade command; invoke Alembic with the same isolated URL.
-    _run(
-        path,
-        sys.executable,
-        "-c",
-        "import os, sys; from alembic import command; from app.db.migrate import _build_alembic_config; "
-        "command.downgrade(_build_alembic_config(os.environ['CODEX_LB_DATABASE_URL']), sys.argv[1])",
-        parent,
-    )
+    _downgrade_to_parent(path, parent)
     assert _revisions(path) == tuple(sorted(_PARENTS))
     assert _state(path) == populated
-    assert f"current_revision={_MERGE}" in _cli(path, "upgrade", "head")
+    assert f"current_revision={_MERGE}" in _cli(path, "upgrade", _MERGE)
     assert _revisions(path) == (_MERGE,)
     assert _state(path) == populated
+    assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
+    assert _revisions(path) == (_CURRENT_MERGE,)
+    _assert_parent_rows_preserved(populated, _state(path))
+    assert "schema_drift=none" in _cli(path, "check")
+
+
+@pytest.mark.parametrize("parent", _CURRENT_PARENTS, ids=["receipt-spool-parent", "guest-parent"])
+def test_public_guest_head_upgrade_and_merge_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
+    path = tmp_path / "guest-receipt.sqlite"
+    _cli(path, "upgrade", parent)
+    assert _revisions(path) == (parent,)
+    _seed_branch(path, _RECEIPTS if parent == _MERGE else _GUEST)
+    _seed_branch_values(path, _SPOOL)
+    before = _state(path)
+
+    assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
+    assert _revisions(path) == (_CURRENT_MERGE,)
+    check = _cli(path, "check")
+    assert "migration_policy=ok" in check
+    assert "schema_drift=none" in check
+    merged = _state(path)
+    _assert_parent_rows_preserved(before, merged)
+    settings = merged["rows"]["dashboard_settings"][0]
+    retry = merged["rows"]["http_bridge_retry_circuits"][0]
+    assert settings[_RETENTION] == 98765.5
+    assert settings["guest_session_generation"] == (0 if parent == _MERGE else 17)
+    for column, value in (
+        ("admission_claimed_at_epoch", 1201.25),
+        ("admission_claimed_generation", 7),
+        ("admission_claimed_until_epoch", 4102444800.0),
+    ):
+        assert retry[column] == (value if parent == _MERGE else None)
+
+    _seed_branch_values(path, _GUEST if parent == _MERGE else _RECEIPTS)
+    populated = _state(path)
+    assert populated["rows"]["dashboard_settings"][0]["guest_session_generation"] == 17
+    assert populated["rows"]["http_bridge_retry_circuits"][0]["admission_claimed_until_epoch"] == 4102444800.0
+    for downgrade_parent in _CURRENT_PARENTS:
+        _downgrade_to_parent(path, downgrade_parent)
+        assert _revisions(path) == tuple(sorted(_CURRENT_PARENTS))
+        assert _state(path) == populated
+        assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
+        assert _revisions(path) == (_CURRENT_MERGE,)
+        assert _state(path) == populated
     assert "schema_drift=none" in _cli(path, "check")

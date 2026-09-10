@@ -181,7 +181,9 @@ def _assert_preserved_parent_data(database: _MigrationDatabase, before: dict[str
     ]
     assert projected_settings == expected_settings
     for row, expected in zip(after["settings"], expected_settings, strict=True):
-        assert all(row[column] is None for column in row.keys() - expected.keys())
+        for column in row.keys() - expected.keys():
+            expected_default = 0 if column == "guest_session_generation" else None
+            assert row[column] == expected_default, column
     assert [row["upstream_stream_transport"] for row in after["settings"]] == ["auto", "http", "websocket", "auto"]
     expected_pins = before["pins"] if before["pins"] is not None else []
     assert [

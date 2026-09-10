@@ -82,3 +82,11 @@ Branch A and B each create migration revisions in parallel. After merge, CI dete
 The receipt/request-log merge and spool-retention revision created separate heads when PR1954 was composed with current main. A new schema-neutral merge joins both existing heads without changing their histories. Upgrading from either parent applies the missing parent and preserves existing receipt and retention values. Naming either immediate parent for a merge-only downgrade restores both parent stamps and leaves both schemas intact; relative `-1` is ambiguous at this merge.
 
 This graph correction does not choose receipt reclamation, lifetime, success settlement or mixed-version activation. See the [verified repair context](../../changes/archive/2026-09-10-join-retry-claim-spool-heads/context.md).
+
+## Guest-session and receipt history composition
+
+Candidate feaa8db312d7e540b306056ad9c981491dd26701 and main d6a7ca662860e2b427e462f434319273bcd240bd compose to heads 20260910_160000_merge_retry_claim_spool_heads and 20260908_000000_add_guest_session_generation. The latter's published parent is 20260910_010000_dashboard_spool_retention. Keep those edges intact.
+
+A database on the receipt/spool join gains guest_session_generation with its incoming zero default and retains its active receipt and spool value. A guest-parent database retains a nonzero generation and spool value while adding nullable receipt fields. Joining or downgrading only the join changes version stamps without changing either schema or its rows. Removing receipt schema remains governed by its existing live-receipt guard.
+
+The original graph-repair evidence stays immutable. Receipt reclaim/reset/settlement and mixed-version decisions stay open. No broader guest authorization changes or other PR graph changes belong here.
