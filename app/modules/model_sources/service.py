@@ -45,11 +45,13 @@ class ModelSourcesService:
         return await self._repository.list_enabled_sources()
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
+        _validate_catalog_configuration(payload.catalog_mode, payload.supports_responses, bool(payload.models))
         model_rows = _model_inputs_to_rows(payload.models)
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
             name=_normalize_name(payload.name),
             kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+            catalog_mode=payload.catalog_mode,
             base_url=_normalize_base_url(payload.base_url),
             api_key_encrypted=_encrypt_optional(self._encryptor, payload.api_key),
             is_enabled=True,
@@ -75,6 +77,13 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
         fields = payload.model_fields_set
+        mode = payload.catalog_mode or row.catalog_mode
+        responses = payload.supports_responses if payload.supports_responses is not None else row.supports_responses
+        _validate_catalog_configuration(mode, responses, payload.models is not None)
+        row.catalog_mode = mode
+        # Invalidate in-flight acquisitions on every operator edit.
+        row.catalog_refresh_token = uuid.uuid4().hex
+        row.catalog_next_refresh_at = None
         if "name" in fields and payload.name is not None:
             row.name = _normalize_name(payload.name)
         if "base_url" in fields and payload.base_url is not None:
@@ -221,6 +230,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         id=row.id,
         name=row.name,
         kind=row.kind,
+        catalog_mode=row.catalog_mode,
         base_url=row.base_url,
         is_enabled=row.is_enabled,
         health_status=row.health_status,
@@ -234,3 +244,10 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         updated_at=row.updated_at,
         models=[_to_model_response(model) for model in row.models],
     )
+
+
+def _validate_catalog_configuration(mode: str, supports_responses: bool, has_models: bool) -> None:
+    if mode == "cli_proxy_api" and not supports_responses:
+        raise ModelSourceValidationError("CLIProxyAPI discovery requires Responses support")
+    if mode == "cli_proxy_api" and has_models:
+        raise ModelSourceValidationError("CLIProxyAPI discovery owns its model catalog; omit manual models")
