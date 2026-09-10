@@ -9,5 +9,5 @@
 
 - [x] 2.1 Verify Responses workflow preservation with disposable fixtures and record provider-specific gaps.
 - [x] 2.2 Run repository lint, affected tests and strict OpenSpec validation; retain exact receipts.
-- [ ] 2.3 Publish one issue-linked main-independent PR and capture hosted review state.
+- [x] 2.3 Publish one issue-linked main-independent PR and capture hosted review state.
 - [x] 2.4 Record real CPA/provider proof or exact missing access without claiming live delivery.
