@@ -41,9 +41,9 @@ that event before reporting the timeout.
 
 ### Requirement: HTTP bridge live event buffering is bounded
 
-Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. In this finite-queue backpressure path, the relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure. Cancelling a pending queue read MUST NOT strand an event that another task removed from the queue, and timeout reconciliation MUST return a completed read before reporting the timeout. This no-drop guarantee does not apply after the process-wide byte budget rejects a payload and revokes the queue.
+Each admitted HTTP-bridge Responses request MUST use a finite-capacity in-memory queue for live upstream events. When an attached downstream SSE consumer does not keep pace and that queue reaches capacity, the upstream relay MUST wait for downstream capacity before enqueueing another live event. In this finite-queue backpressure path, the relay MUST preserve event order and MUST NOT drop attached-consumer events to relieve pressure. Cancelling a pending queue read MUST NOT strand an event that another task removed from the queue, and timeout reconciliation MUST return a completed read before reporting the timeout. After delivery-stall expiry or process-wide byte-budget rejection revokes the queue, the retained-prefix and explicit failure contract applies instead.
 
-Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; an attached stream MUST surface one `response.failed` terminal result with `upstream_unavailable` (or the equivalent HTTP 503 error when the route propagates HTTP errors), while a later upstream `response.failed` publication MAY be ignored by the revoked queue. A pre-consumer queue MAY be discarded only after explicit downstream detachment or another proof that no delayed generator can attach. Such an abandoned queue MAY expose only EOS to a delayed reader. The service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
+Across all live HTTP-bridge queues, retained event payload bytes MUST remain within a fixed process-wide internal budget of 256 MiB, including payloads held by blocked producers. Completed replay MUST retain its separate durable spool contract; aggregate completed replay bytes and total process memory are outside this live-payload requirement. A payload MUST reserve its UTF-8 byte length before entering a queue and release that reservation when dequeued. If the budget cannot admit a payload, that request's queue MUST fail closed and revoke further producers; an attached stream MUST surface one `response.failed` terminal result with `upstream_unavailable` (or the equivalent HTTP 503 error when the route propagates HTTP errors), while a later upstream `response.failed` publication MAY be ignored by the revoked queue. A pre-consumer queue MAY be discarded only after explicit downstream detachment or another proof that no delayed generator can attach. Such an abandoned queue MAY expose only EOS to a delayed reader. The service MUST continue durable persistence, reservation settlement, request logging, and cleanup, and MUST record the pressure without exposing payload content or adding an operator setting.
 
 The HTTP route MAY translate budget exhaustion into an HTTP 503 only before it has emitted its first stream event. Once any SSE event has been emitted, later budget exhaustion MUST remain inside the committed stream and emit the `response.failed` terminal result instead of raising a route-level HTTP error.
 
@@ -143,6 +143,21 @@ Completed durable transcript replay MUST remain byte-bounded by the durable spoo
 - **WHEN** cancellation is requested repeatedly before the producer resumes
 - **THEN** the producer releases the blocked payload reservation without an asynchronous cleanup wait
 - **AND** cancellation propagates only after the process-wide byte budget reflects that release
+
+### Requirement: Continuous live delivery stall terminates only the affected request
+
+An attached request whose full live queue prevents enqueue progress MUST stop waiting at a finite per-request continuous delivery-stall bound, independently of the overall request budget. Expiry MUST return control to the shared reader without closing the shared session or failing a healthy sibling. When expiry rejects an event payload, the delayed consumer MUST receive its retained prefix followed by one explicit failure and EOS, never success after rejected output. Expiry of only EOS after an accepted terminal payload MUST preserve that payload and append EOS. Revocation MUST release blocked-producer byte reservations before returning; retained payloads MUST remain accounted until consumed or explicitly abandoned. Upstream persistence and API-key settlement MUST retain their existing ownership and complete without another downstream read.
+
+#### Scenario: Paused delivery releases a healthy same-session sibling
+
+- **GIVEN** attached requests A and B share an upstream session and both request deadlines are later than A's delivery-stall bound
+- **AND** A's live queue is full and its next payload blocks the shared reader
+- **WHEN** A reaches the continuous delivery-stall bound without another downstream read
+- **THEN** A's blocked enqueue returns and its blocked-payload reservation is released
+- **AND** B's queued upstream events progress to successful completion before either request deadline
+- **AND** A later receives its retained prefix followed by failure and EOS
+- **AND** A's retained byte reservations are released on consumption or explicit abandonment
+- **AND** upstream terminal persistence and API-key settlement complete exactly once under their existing ownership
 
 ## MODIFIED Requirements
 

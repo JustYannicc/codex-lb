@@ -8,10 +8,11 @@ An admitted HTTP-bridge Responses stream currently stores upstream events in an 
 - Apply a fixed process-wide byte budget to retained live-event payloads so many
   concurrent sessions cannot multiply the per-queue envelope into worker OOM.
 - Make the existing awaited producer enqueue apply backpressure when that queue is full.
-- Bound a full-queue enqueue by the request's existing bridge deadline; when the
-  deadline expires, revoke only that request's queue and return the shared
-  upstream reader to sibling lifecycle work without raising through the reader
-  failure handler.
+- Bound continuous full-queue delivery stall independently of the request budget.
+  At expiry, revoke only that request's delivery, preserve its retained prefix
+  followed by failure/EOS, and return the shared reader to sibling work.
+  The numeric maximum remains maintainer-owned; the current implementation
+  still uses only the request deadline.
 - When the process budget is exhausted, fail closed for that queue and record the
   pressure without adding an operator-configurable memory setting. An attached
   stream receives one explicit upstream-unavailable terminal result. A delayed

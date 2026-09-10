@@ -110,3 +110,32 @@ the completed local implementation tasks.
 
 The native-egress exception remains an owner decision. No new timeout or queue
 capacity policy is accepted by this performance change.
+
+## 12. September 9 upstream composition
+
+- [x] 12.1 Preserve native Responses interpretation and the HTTP-bridge bypass in the routed opener; retain production message and liveness/timing imports
+- [x] 12.2 Prove routed Responses through the real CodexClient selects legacy on explicit bypass and interpreted native transport by default
+- [x] 12.3 Validate affected bridge lifecycle, upstream integrations, specs, and independent review on the composed candidate
+
+This reconciliation changes no delivery-stall, replay-budget, or native
+acceptance policy. Exact target, candidate, and hosted evidence stay in the
+PR delivery record.
+
+## 13. Trusted routing and retry upstream composition
+
+- [x] 13.1 Preserve trusted routing hints together with native interpretation and explicit HTTP-bridge bypass
+- [x] 13.2 Prove combined routed-client dispatch and assess retry/backoff overlap with queue and completion ownership
+- [x] 13.3 Run isolated affected tests, strict specs, and independent reviews on the composed candidate
+
+The later September 10 disposition accepts live-only budget scope and the
+delivery-stall failure/cleanup outcome. Numeric stall duration, native, and
+performance acceptance remain open. See section 14.
+
+## 14. Accepted delivery-stall contract
+
+- [x] 14.1 Reconcile live-only budget scope and accepted retained-prefix/failure/EOS, reservation release, and sibling-progress requirements with the September 10 maintainer disposition
+- [x] 14.2 Prepare duration-independent regression design and identify limits of existing deadline proofs in `accepted-stall-contract.md`
+- [ ] 14.3 Obtain the maintainer's numeric maximum continuous delivery stall
+- [ ] 14.4 Prove the public/shared-reader regression fails for the missing stall bound with request deadlines still in the future, then implement the accepted bound
+- [ ] 14.5 Prove retained-prefix/failure/EOS, blocked and retained byte accounting, real reservation settlement, same-session sibling success, and cancellation/timer cleanup
+- [ ] 14.6 Complete required checks, independent candidate review, and hosted verification before claiming the stall path delivered
