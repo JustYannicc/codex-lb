@@ -50,3 +50,7 @@ FROM request_logs
 WHERE requested_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
 GROUP BY sticky_key_source, sticky_kind, sticky_key_hash;
 ```
+
+## Authentication migration convergence
+
+The affinity history converges with dashboard roles, users, the final compatibility-credential projection and audit actor columns through a no-op merge. Published revisions remain unchanged. Databases already on the authentication branch retain their current credentials and session generations; the earlier credential projection is not replayed on merge-only reupgrade. Databases on the older affinity history run the existing authentication backfills once. Ledgerless schema bootstrap retains those migrations' existing legacy-credential projection behavior.

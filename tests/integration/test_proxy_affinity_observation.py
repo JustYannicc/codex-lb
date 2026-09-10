@@ -4,13 +4,24 @@ import base64
 import json
 from dataclasses import replace
 
+import bcrypt
 import pytest
 
 import app.modules.proxy.service as proxy_module
-from app.core.auth.dashboard_access import DashboardAuthMode, Permission, Scope, admin_principal, guest_principal
+from app.core.auth.dashboard_access import (
+    PRESET_ROLE_IDS,
+    DashboardAuthMode,
+    Permission,
+    PresetRoleSlug,
+    Scope,
+    admin_principal,
+    guest_principal,
+)
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.dependencies import validate_dashboard_session
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.types import JsonValue
+from app.db.models import DashboardUser
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -263,6 +274,44 @@ async def test_affinity_metadata_follows_permission_instead_of_role(async_client
         app_instance.dependency_overrides.pop(validate_dashboard_session)
     assert response.status_code == 200
     row = response.json()["requests"][0]
+    assert row["stickyKeySource"] == ("payload" if allowed else None)
+    assert row["stickyKind"] == ("prompt_cache" if allowed else None)
+    assert row["stickyKeyHash"] == ("ba7816bf8f01cfea" if allowed else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [PresetRoleSlug.ADMIN, PresetRoleSlug.OPERATOR])
+async def test_stored_user_session_gates_affinity_metadata(async_client, role):
+    await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.4", "input": "synthetic", "prompt_cache_key": "abc", "stream": True},
+    )
+    setup = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "synthetic-admin-password"})
+    assert setup.status_code == 200
+    async with SessionLocal() as session:
+        session.add(
+            DashboardUser(
+                id="affinity-observer",
+                username="observer",
+                role_id=PRESET_ROLE_IDS[role],
+                status="active",
+                password_hash=bcrypt.hashpw(b"synthetic-observer-password", bcrypt.gensalt(4)).decode(),
+            )
+        )
+        await session.commit()
+    await get_dashboard_users_cache().invalidate()
+    logout = await async_client.post("/api/dashboard-auth/logout", json={})
+    assert logout.status_code == 200
+    login = await async_client.post(
+        "/api/dashboard-auth/password/login",
+        json={"username": "observer", "password": "synthetic-observer-password"},
+    )
+    assert login.status_code == 200
+    assert login.json()["user"]["role"]["slug"] == role.value
+    response = await async_client.get("/api/request-logs")
+    assert response.status_code == 200
+    row = response.json()["requests"][0]
+    allowed = role == PresetRoleSlug.ADMIN
     assert row["stickyKeySource"] == ("payload" if allowed else None)
     assert row["stickyKind"] == ("prompt_cache" if allowed else None)
     assert row["stickyKeyHash"] == ("ba7816bf8f01cfea" if allowed else None)

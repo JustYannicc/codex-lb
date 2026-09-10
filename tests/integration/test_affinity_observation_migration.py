@@ -14,7 +14,8 @@ pytestmark = pytest.mark.integration
 _PARENT = "20260910_010000_dashboard_spool_retention"
 _REVISION = "20260910_143000_request_log_affinity"
 _GUEST = "20260908_000000_add_guest_session_generation"
-_HEAD = "20260910_180000_merge_affinity_guest_heads"
+_MERGE = "20260910_180000_merge_affinity_guest_heads"
+_HEAD = "20260910_200000_merge_affinity_identity_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 
 
@@ -68,7 +69,7 @@ def test_fresh_upgrade_has_single_affinity_head_and_nullable_metadata(tmp_path: 
     url = f"sqlite+aiosqlite:///{path}"
     script = ScriptDirectory.from_config(_build_alembic_config(url))
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == (_REVISION, _GUEST)
+    assert script.get_revision(_MERGE).down_revision == (_REVISION, _GUEST)
     assert script.get_revision(_REVISION).down_revision == _PARENT
     assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
     assert check_schema_drift(url) == ()
@@ -145,7 +146,7 @@ def _prove_populated_branch_merge(url: str, starting_revision: str) -> None:
                 connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=7 WHERE id=1"))
             owner = dict(connection.execute(text("SELECT * FROM accounts")).mappings().one())
             before = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
-        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+        assert run_upgrade(url, _MERGE, bootstrap_legacy=False).current_revision == _MERGE
         with engine.begin() as connection:
             after = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
             assert {name: after[name] for name in before} == before
@@ -169,7 +170,7 @@ def _prove_populated_branch_merge(url: str, starting_revision: str) -> None:
                 ).scalar_one()
                 == 9
             )
-        assert check_schema_drift(url) == ()
+        assert run_upgrade(url, _MERGE, bootstrap_legacy=False).current_revision == _MERGE
         assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
         assert check_schema_drift(url) == ()
     finally:
