@@ -6,7 +6,8 @@ All three tasks are complete. The added observed-monthly requirement is implemen
 
 - Team observation and zero secondary scenarios: live ingestion through GET /api/accounts, 43200 and 43800 minutes, verifies Monthly 4 percent, preserved duration, absent short/weekly slots and null credit estimate.
 - Duration boundaries and ordinary/unknown secondary scenarios: public normalization tests cover inclusive 40320/46080 and excluded 40319/46081, 300, 10080 and unknown durations.
-- Paid upgrade scenario: existing GET /api/accounts regression passes. Additional API cases prove newer monthly history supersedes older primary or secondary history.
+- Paid upgrade scenario: the existing GET /api/accounts regression proves newer primary or secondary usage supersedes older monthly usage.
+- Reverse transition: additional GET /api/accounts cases prove newer monthly history supersedes older primary or secondary history.
 - Polling: the existing refresh test now covers Team 43800 alongside Free 43200.
 
 Affected suite: 252 passed, four skipped. Follow-up reverse-transition selection: seven passed. Ruff, ty, diff whitespace checks and 65 main specs passed. Strict change validation passed before archive; strict main validation passed after sync. Tests use one dedicated disposable SQLite database for main, background and fixture engines. No live acceptance is claimed.
