@@ -7,4 +7,4 @@
 ## 2. Delivery
 
 - [x] 2.1 Document usage and recovery with owning spec links; run targeted tests, lint, type checks and strict OpenSpec validation.
-- [ ] 2.2 Review the exact candidate, sync and archive the verified change, and publish an independent partial #1636 PR with remaining whole-home work explicit.
+- [x] 2.2 Review the exact candidate, sync and archive the verified change, and publish an independent partial #1636 PR with remaining whole-home work explicit.
