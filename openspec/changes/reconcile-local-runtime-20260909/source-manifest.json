@@ -279,6 +279,20 @@
       "source_tree": "8d877e7a715e9ada1478a109f44c50c81684cdfc",
       "title": "fix(proxy): bound aggregate detached retirement lock waits",
       "integration_note": "Only bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0. Preserve all other aggregate helper behavior and append context alongside prior ERR/ownership notes."
+    },
+    {
+      "pr": 2323,
+      "source_commit": "f39b4a3e853cb828421b00d2ac19d4e228f473c5",
+      "source_tree": "7f5aa50d5356db4d33491218b5524384fc19a52d",
+      "title": "feat(cli): add targeted session metadata preview and repair",
+      "integration_note": "Bounded delta from 07f42aa73e457dbe3b268087c066521904dd649d; preserve distinct targeted active/archive1MiB and whole-home sessions64KiB discovery/progress/backup contracts. Existing Desktop CLI/listener and nav retained."
+    },
+    {
+      "pr": 2325,
+      "source_commit": "b609a47c8efcdb9e6431614629beffd9cb278e58",
+      "source_tree": "6b2ca5dce7ed8047acda180d57feeb9eaf611d3c",
+      "title": "feat(cli): bound whole-home retag planning and report progress",
+      "integration_note": "Bounded delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; preserve distinct targeted active/archive1MiB and whole-home sessions64KiB discovery/progress/backup contracts. Existing Desktop CLI/listener and nav retained."
     }
   ],
   "open_pr_dispositions": [
@@ -716,7 +730,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "Successor local proof is recorded in composition-2286-2315.md and its immutable operations receipt. Earlier b999 composition remains frozen. Publication, image build and live acceptance remain deployment-owned.",
+  "verification_status": "CLI successor local proof is recorded in composition-cli-2323-2325.md and its immutable operations receipt. Earlier candidates remain frozen. Publication, image build and live acceptance remain deployment-owned.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -815,6 +829,15 @@
       ],
       "proof_note": "composition-2286-2315.md",
       "publication": "Pending deployment owner; no image or live acceptance."
+    },
+    {
+      "predecessor": "007540786dc3df71c6dc2d9a96a8c03f4d9456ed",
+      "added_prs": [
+        2323,
+        2325
+      ],
+      "proof_note": "composition-cli-2323-2325.md",
+      "publication": "Pending deployment owner; disposable-home source proof only, no live home/image/runtime acceptance."
     }
   ]
 }

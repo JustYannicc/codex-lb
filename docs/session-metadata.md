@@ -26,4 +26,4 @@ Backups live under `backups/session-metadata-repair/repair-*` in the selected ho
 
 Repair is not one transaction across files and databases. Keep Codex closed, inspect the error and retained backups, and compare current files before restoring anything. Restore only affected files. Restoring a full SQLite snapshot also reverts unrelated rows to the snapshot time; preserve any newer work first. Restore with a copy or atomic replacement, not by editing a hard-linked backup in place. Automatic rollback is intentionally absent.
 
-The existing `codex-sessions retag` command remains the whole-home provider migration. Its large-home discovery and progress improvements in [#1636](https://github.com/Soju06/codex-lb/issues/1636) remain separate work.
+The separate [`codex-sessions retag` command](session-retag.md) performs whole-home provider migration with its own discovery, progress and backup contract.
