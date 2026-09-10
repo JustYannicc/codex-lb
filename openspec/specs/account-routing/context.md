@@ -194,3 +194,7 @@ The response separately reports HTTP status, completed execution and whether the
 ## Recovery before failure recording
 
 A replica can receive a recovered account row before its next selection. For example, an ordinary transient error can arrive just after an operator probe clears the old hold. Generation reconciliation runs before either selection or failure recording constructs runtime state. This prevents the error path from persisting the previous hold again while retaining transient-error accounting. Older recovered snapshots cannot clear newer rejection evidence. See [the recovery requirements](spec.md#requirement-completed-operator-probe-recovery).
+
+## WebSocket rejection scope
+
+Handshake classification forwards the request model and tier to the shared health writer. Terminal batch cleanup captures the selected request's scope before awaiting settlement and logs, so a later request cannot replace it. For example, a priority-model handshake rejected with 429 retains enough evidence for a completed matching operator probe to clear the unchanged hold. Transport-neutral errors and failed settlement still follow their existing exclusions. See [completed operator probe recovery](spec.md#requirement-completed-operator-probe-recovery).
