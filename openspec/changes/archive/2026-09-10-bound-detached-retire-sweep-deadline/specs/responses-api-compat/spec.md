@@ -9,7 +9,8 @@ The fail-safe sweep that reconsiders detached HTTP-bridge generations on every b
 - **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is held by another task for longer than the bound
 - **WHEN** a request runs the fail-safe sweep
 - **THEN** the sweep returns after the bound without closing the session
-- **AND** a warning names the skipped session
+- **AND** if sessions remain unattempted when the deadline expires, one warning reports their count
+- **AND** the timed-out session remains tracked for later sweeps and lifecycle cleanup
 - **AND** the lock remains owned by its holder with no stranded waiter
 
 #### Scenario: Free detached lock still retires
