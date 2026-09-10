@@ -56,25 +56,30 @@ async def test_refresh_database_failure_serves_stored_catalog(async_client, monk
         assert calls >= failed_session
 
 
-async def test_stalled_source_does_not_block_later_sources(async_client):
+@pytest.mark.parametrize("creation_order", [(0, 1, 2, 3, 4), (4, 3, 2, 1, 0)])
+async def test_stalled_source_does_not_block_later_sources(async_client, creation_order):
     import asyncio
 
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    later_acquired = asyncio.Event()
+    first_four_acquired = asyncio.Event()
+    release_initial = [asyncio.Event() for _ in range(4)]
+    fifth_acquired = asyncio.Event()
+    acquisitions = []
 
     async def catalog(request):
         index = int(request.headers["Authorization"].split()[-1])
-        if index == 0:
-            entered.set()
-            await release.wait()
-        elif index == 4:
-            later_acquired.set()
+        position = len(acquisitions)
+        acquisitions.append(index)
+        if position < 4:
+            if position == 3:
+                first_four_acquired.set()
+            await release_initial[position].wait()
+        else:
+            fifth_acquired.set()
         return web.json_response({"models": [{"slug": f"source-{index}", "context_window": 8192}]})
 
     async with stub_source_upstreams() as start:
         base_url = await start(catalog, handler_cancellation=True, shutdown_timeout=0.1)
-        for index in range(5):
+        for index in creation_order:
             created = await async_client.post(
                 "/api/model-sources/",
                 json={
@@ -88,11 +93,15 @@ async def test_stalled_source_does_not_block_later_sources(async_client):
             assert created.status_code == 200
         pending = asyncio.create_task(async_client.get("/v1/models"))
         try:
-            await asyncio.wait_for(entered.wait(), timeout=2)
-            # The fifth source must start while the first one is still blocked.
-            await asyncio.wait_for(later_acquired.wait(), timeout=2)
+            await asyncio.wait_for(first_four_acquired.wait(), timeout=2)
+            assert len(acquisitions) == 4
+            release_initial[0].set()
+            # The fifth arrival must reuse this slot while three peers remain blocked.
+            await asyncio.wait_for(fifth_acquired.wait(), timeout=2)
+            assert len(acquisitions) == 5
         finally:
-            release.set()
+            for release in release_initial:
+                release.set()
             response = await pending
         assert response.status_code == 200
         ids = {item["id"] for item in response.json()["data"]}
