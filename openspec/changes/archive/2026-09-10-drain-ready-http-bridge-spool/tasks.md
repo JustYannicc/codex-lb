@@ -7,4 +7,6 @@
 
 - [x] 2.1 Repeat pinned-base and candidate measurements with identical synthetic workloads and report percentiles, throughput, write count and limitations.
 - [x] 2.2 Run affected tests, lint, type checks, architecture gates and strict OpenSpec validation; review exact base and candidate.
-- [ ] 2.3 Sync and archive verified requirements, publish one issue-linked standalone PR and record hosted state plus monitoring ownership.
+- [x] 2.3 Sync and archive verified requirements, publish one issue-linked standalone PR and record hosted state plus monitoring ownership.
+
+PR: https://github.com/Soju06/codex-lb/pull/2303. The PR readiness task accepts continuing monitoring after the final SHA receipt. Initial hosted snapshot: ten passed, thirteen pending, no failures; mergeable with checks still blocking. No upstream merge or deployment claimed.
