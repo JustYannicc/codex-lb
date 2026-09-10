@@ -21,7 +21,7 @@ Change the strategy live in the dashboard under **Settings → Routing** — no 
 
 Request logs record `sticky_key_source`, `sticky_kind`, and `sticky_key_hash` for Responses and compact traffic without enabling trace logs. Administrators can read them as `stickyKeySource`, `stickyKind`, and `stickyKeyHash` through `GET /api/request-logs`. Guest responses hide these fields.
 
-The hash is the first 16 hexadecimal characters of SHA-256 over the resolved selection key. Compare hashes to identify repeated keys; raw session headers can differ from selection keys. Historical rows and paths without an observation return null. Source `none` means resolution explicitly found no affinity.
+The hash is the first 16 lowercase hexadecimal characters of SHA-256 over the UTF-8-encoded resolved selection key. Compare hashes to identify repeated keys; raw session headers can differ from selection keys. Historical rows and paths without an observation return null. Source `none` means resolution explicitly found no affinity.
 
 Each row keeps its existing meaning: direct streams can emit attempt rows; compact, native WebSocket, and bridge rows describe their final request state. A final row does not enumerate every retry. Existing recovery can clear a key, leaving a null hash with the original source classification. These fields do not by themselves explain account-owner precedence or why an account was skipped.
 

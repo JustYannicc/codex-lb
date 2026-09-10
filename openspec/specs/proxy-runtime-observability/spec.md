@@ -1359,7 +1359,8 @@ The system MUST persist `sticky_key_source`, `sticky_kind`, and `sticky_key_hash
 - **WHEN** resolution explicitly finds no affinity
 - **THEN** the source is `none` and kind and hash are null
 - **WHEN** the policy has no key after an existing routing adjustment
-- **THEN** the hash is null
+- **THEN** the hash is null and source retains its original resolved classification
+- **AND** kind equals the adjusted policy kind: null when recovery clears it, or `codex_session` when only a broad session key is ignored
 - **WHEN** a row predates the migration or no affinity observation was available to its emitter
 - **THEN** all three fields are null without an invented backfill
 

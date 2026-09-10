@@ -3931,6 +3931,7 @@ class _HTTPBridgeStreamingMixin:
                     # atomically moves it back to submitted before send.
                     retry_request_state.operation_rebind_required = True
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                retry_request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,
