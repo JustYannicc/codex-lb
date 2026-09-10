@@ -16,6 +16,90 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 
 **Documentation: <https://soju06.github.io/codex-lb/>** — getting started, client setup, configuration, deployment, troubleshooting, and more screenshots.
 
+## Included work on this fork
+
+This inventory records the accepted composition at [`971322208a831e3b02c7cae3bf5e7c7046e15fe9`](https://github.com/JustYannicc/codex-lb/commit/971322208a831e3b02c7cae3bf5e7c7046e15fe9) on `JustYannicc/codex-lb:codex/integrated-runtime`. It lists 34 pull request sources, 10 composition repairs and three superseded inputs. Acceptance here refers to the fork runtime, not upstream merge approval.
+
+The [source manifest](openspec/changes/reconcile-local-runtime-20260909/source-manifest.json) is the exact source record, including source trees, exclusions and migration hashes. Its included upstream main is [`069b82be3ceda8e468094f03aee0884061b2b43e`](https://github.com/JustYannicc/codex-lb/commit/069b82be3ceda8e468094f03aee0884061b2b43e). The [selection audit](openspec/changes/reconcile-local-runtime-20260909/selection-audit.md) explains source decisions, and the [verification record](openspec/changes/reconcile-local-runtime-20260909/verification.md) records checks and their limits.
+
+### Accepted pull request pins
+
+These titles and full commit pins come from the manifest. Later pull request updates do not change this inventory. Composition repairs below qualify how the sources were combined.
+
+| Pull request | Source title | Accepted source commit |
+| --- | --- | --- |
+| [#1903](https://github.com/Soju06/codex-lb/pull/1903) | fix(proxy): bound memory used by paused bridge streams | [`67c7a2368bff9f9b69d82d20164bdadad342d7a2`](https://github.com/JustYannicc/codex-lb/commit/67c7a2368bff9f9b69d82d20164bdadad342d7a2) |
+| [#1905](https://github.com/Soju06/codex-lb/pull/1905) | fix(proxy): preserve continuation ownership across source routing | [`a3f3c7a12427be55153dd1893839656cb192f814`](https://github.com/JustYannicc/codex-lb/commit/a3f3c7a12427be55153dd1893839656cb192f814) |
+| [#1952](https://github.com/Soju06/codex-lb/pull/1952) | fix(proxy): preserve tool search pairs through replay | [`124fbe2b17ab5510542fcb1a3a910bb7f717a7fb`](https://github.com/JustYannicc/codex-lb/commit/124fbe2b17ab5510542fcb1a3a910bb7f717a7fb) |
+| [#1954](https://github.com/Soju06/codex-lb/pull/1954) | fix(proxy): track retry claims through cancellation and cleanup | [`0471689e5b81587030778a86cdc6808e8a24bca6`](https://github.com/JustYannicc/codex-lb/commit/0471689e5b81587030778a86cdc6808e8a24bca6) |
+| [#1962](https://github.com/Soju06/codex-lb/pull/1962) | fix(proxy): preserve half-open probe ownership during cleanup | [`1c4701fb7e14e3025805c6742fabdf51eb6098ff`](https://github.com/JustYannicc/codex-lb/commit/1c4701fb7e14e3025805c6742fabdf51eb6098ff) |
+| [#1997](https://github.com/Soju06/codex-lb/pull/1997) | fix(http-bridge): bound terminal spool writes | [`5c769fcc335c2e4782bc07a70b1918451811c207`](https://github.com/JustYannicc/codex-lb/commit/5c769fcc335c2e4782bc07a70b1918451811c207) |
+| [#2048](https://github.com/Soju06/codex-lb/pull/2048) | fix(proxy): preserve exhausted sticky failover | [`86a1dda0e06dc3afddc20edbabc928d2367e5ec0`](https://github.com/JustYannicc/codex-lb/commit/86a1dda0e06dc3afddc20edbabc928d2367e5ec0) |
+| [#2070](https://github.com/Soju06/codex-lb/pull/2070) | fix(accounts): recover paid accounts after long-window reset | [`dd2491f4eb2b4b0638543da653a66315ff346850`](https://github.com/JustYannicc/codex-lb/commit/dd2491f4eb2b4b0638543da653a66315ff346850) |
+| [#2075](https://github.com/Soju06/codex-lb/pull/2075) | fix(proxy): keep frameless bridge drops account neutral | [`65629172d6138426accfda2858b60b5eceb6b4d1`](https://github.com/JustYannicc/codex-lb/commit/65629172d6138426accfda2858b60b5eceb6b4d1) |
+| [#2083](https://github.com/Soju06/codex-lb/pull/2083) | fix(proxy): fork model-transition owner conflicts | [`7ffbb8049f9459343de40fd9deb28951dc96c50d`](https://github.com/JustYannicc/codex-lb/commit/7ffbb8049f9459343de40fd9deb28951dc96c50d) |
+| [#2084](https://github.com/Soju06/codex-lb/pull/2084) | fix(http-bridge): wait for aborted bridge owner | [`3b5815d213b76a05915bbd0addcb2a348b6f71f2`](https://github.com/JustYannicc/codex-lb/commit/3b5815d213b76a05915bbd0addcb2a348b6f71f2) |
+| [#2085](https://github.com/Soju06/codex-lb/pull/2085) | feat(models): add gpt-6 astra catalog support | [`bf30a57425e3974b27a560f8fccca80e24b75a88`](https://github.com/JustYannicc/codex-lb/commit/bf30a57425e3974b27a560f8fccca80e24b75a88) |
+| [#2086](https://github.com/Soju06/codex-lb/pull/2086) | fix(proxy): allow prefix-settled replay outputs | [`52d3b5bceaee8ffa8aafad57749c3dcc01e2393d`](https://github.com/JustYannicc/codex-lb/commit/52d3b5bceaee8ffa8aafad57749c3dcc01e2393d) |
+| [#2088](https://github.com/Soju06/codex-lb/pull/2088) | fix(http-bridge): recover from draining owner rejection | [`696821da110ccc9df479b19a815177c7c1e5e528`](https://github.com/JustYannicc/codex-lb/commit/696821da110ccc9df479b19a815177c7c1e5e528) |
+| [#2093](https://github.com/Soju06/codex-lb/pull/2093) | fix(accounts): classify upstream token_revoked as reauth-required | [`2c039e5d02bc09b878c87cb18f6a6fb49fddbc80`](https://github.com/JustYannicc/codex-lb/commit/2c039e5d02bc09b878c87cb18f6a6fb49fddbc80) |
+| [#2096](https://github.com/Soju06/codex-lb/pull/2096) | fix(proxy): preserve anonymous output response ownership | [`279e49263fe336261b1ecc4334dae90105bdb7c2`](https://github.com/JustYannicc/codex-lb/commit/279e49263fe336261b1ecc4334dae90105bdb7c2) |
+| [#2102](https://github.com/Soju06/codex-lb/pull/2102) | feat(proxy): support Codex history and notes across account pools | [`cfecb70a02fbb566aed00775eb813aad6a282813`](https://github.com/JustYannicc/codex-lb/commit/cfecb70a02fbb566aed00775eb813aad6a282813) |
+| [#2110](https://github.com/Soju06/codex-lb/pull/2110) | fix(clients): reuse system trust for Python WSS | [`880861fcf2dd555636111cdcfd5efe6b81fc8ad6`](https://github.com/JustYannicc/codex-lb/commit/880861fcf2dd555636111cdcfd5efe6b81fc8ad6) |
+| [#2113](https://github.com/Soju06/codex-lb/pull/2113) | refactor(proxy): skip unused HTTP preparation serialization | [`6bdde31e7dcf838e8567acaa71ec2f77a5152198`](https://github.com/JustYannicc/codex-lb/commit/6bdde31e7dcf838e8567acaa71ec2f77a5152198) |
+| [#2119](https://github.com/Soju06/codex-lb/pull/2119) | fix(accounts): require spendable credits for quota override | [`c5fe2d5792f4f3038269d90f20cb110066a2411a`](https://github.com/JustYannicc/codex-lb/commit/c5fe2d5792f4f3038269d90f20cb110066a2411a) |
+| [#2193](https://github.com/Soju06/codex-lb/pull/2193) | fix(db): preserve rollback after SQLite invalidation | [`cae31f0a928200b637425e72941b6a9110731948`](https://github.com/JustYannicc/codex-lb/commit/cae31f0a928200b637425e72941b6a9110731948) |
+| [#2206](https://github.com/Soju06/codex-lb/pull/2206) | chore(deps): bump httpx2 from 2.10.0 to 2.12.0 | [`a1da9f27e5658587cbf2503acbaac40944cefe21`](https://github.com/JustYannicc/codex-lb/commit/a1da9f27e5658587cbf2503acbaac40944cefe21) |
+| [#2234](https://github.com/Soju06/codex-lb/pull/2234) | fix(load-balancer): keep soft sticky owner when it is only request-locally unavailable | [`c01c2be95003f4d079d3e3323e7f91e330df3f53`](https://github.com/JustYannicc/codex-lb/commit/c01c2be95003f4d079d3e3323e7f91e330df3f53) |
+| [#2236](https://github.com/Soju06/codex-lb/pull/2236) | perf(dashboard): memoize weekly demand delta aggregates with a short TTL | [`bed74e5b493f1b0408ed827852a2f8ee9aa4a77d`](https://github.com/JustYannicc/codex-lb/commit/bed74e5b493f1b0408ed827852a2f8ee9aa4a77d) |
+| [#2248](https://github.com/Soju06/codex-lb/pull/2248) | fix(proxy): retire a denied proxy-injected WebSocket anchor instead of re-injecting it | [`1cf22a8790e036382714edd63edbef50cbac6dee`](https://github.com/JustYannicc/codex-lb/commit/1cf22a8790e036382714edd63edbef50cbac6dee) |
+| [#2253](https://github.com/Soju06/codex-lb/pull/2253) | perf(request-logs): speed up SQLite filter options | [`a50159fd65ac1b6f7317fa14d5b39af11ceaa27e`](https://github.com/JustYannicc/codex-lb/commit/a50159fd65ac1b6f7317fa14d5b39af11ceaa27e) |
+| [#2255](https://github.com/Soju06/codex-lb/pull/2255) | fix(shutdown): deny WebSocket upgrades during drain with 503 instead of a pre-handshake close | [`80a3c737521c0312ae98d4e09e8b58a0adf0d093`](https://github.com/JustYannicc/codex-lb/commit/80a3c737521c0312ae98d4e09e8b58a0adf0d093) |
+| [#2260](https://github.com/Soju06/codex-lb/pull/2260) | fix(proxy): sanitize rebuilt HTTP hop-by-hop headers | [`8244933c0c1d8d45aaceb0564776c2c603a9d3f1`](https://github.com/JustYannicc/codex-lb/commit/8244933c0c1d8d45aaceb0564776c2c603a9d3f1) |
+| [#2276](https://github.com/Soju06/codex-lb/pull/2276) | fix(proxy): preserve newer quarantine during response cleanup | [`2e419652e20f31eda223470484f27814a1a523af`](https://github.com/JustYannicc/codex-lb/commit/2e419652e20f31eda223470484f27814a1a523af) |
+| [#2277](https://github.com/Soju06/codex-lb/pull/2277) | fix(proxy): preserve continuation anchors during input normalization | [`44100a02e1b4e9279563ea03609e3b00f7fe5f21`](https://github.com/JustYannicc/codex-lb/commit/44100a02e1b4e9279563ea03609e3b00f7fe5f21) |
+| [#2278](https://github.com/Soju06/codex-lb/pull/2278) | fix(proxy): count incomplete responses toward bridge retries | [`b69abad0b389982fa071a28eb950cf0110a981f4`](https://github.com/JustYannicc/codex-lb/commit/b69abad0b389982fa071a28eb950cf0110a981f4) |
+| [#2280](https://github.com/Soju06/codex-lb/pull/2280) | fix(proxy): preserve newer retry state during scheduled cleanup | [`6bc6b6a9b494840f7de6c5849fb2950324b6f388`](https://github.com/JustYannicc/codex-lb/commit/6bc6b6a9b494840f7de6c5849fb2950324b6f388) |
+| [#2283](https://github.com/Soju06/codex-lb/pull/2283) | test(shutdown): wait for assertions before completing the response | [`560c609d21a5ebbc893dac83773e0b02f4ea3ce0`](https://github.com/JustYannicc/codex-lb/commit/560c609d21a5ebbc893dac83773e0b02f4ea3ce0) |
+| [#2286](https://github.com/Soju06/codex-lb/pull/2286) | feat(desktop): show pooled quota while preserving ChatGPT login | [`d31ac538412b3ccd644db34e41557d1307994cd8`](https://github.com/JustYannicc/codex-lb/commit/d31ac538412b3ccd644db34e41557d1307994cd8) |
+
+### Composition repairs
+
+These 10 fork commits repair source interactions and verification fixtures. The manifest retains their full contract descriptions.
+
+| Repair commit | Included repair |
+| --- | --- |
+| [`11b3dfa534235e9d575b37ee7b3a0942e25ee924`](https://github.com/JustYannicc/codex-lb/commit/11b3dfa534235e9d575b37ee7b3a0942e25ee924) | Retain bounded retry-receipt cleanup and half-open probe ownership without recapturing newer quarantine state. |
+| [`5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1`](https://github.com/JustYannicc/codex-lb/commit/5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1) | Use the service scheduler for owner cleanup waits and event batcher tasks and timeouts. |
+| [`8e52e6e8ab5a3eaff587ef514bc8be5cad964359`](https://github.com/JustYannicc/codex-lb/commit/8e52e6e8ab5a3eaff587ef514bc8be5cad964359) | Preserve synthesized-marker provenance and raw input identity. Keep shape proof separate from legacy v2 signatures and reject epoch-bound forwards without it. |
+| [`ddf3d70942717365a7cc691a685554cfb46cce68`](https://github.com/JustYannicc/codex-lb/commit/ddf3d70942717365a7cc691a685554cfb46cce68) | Preserve deployed migration bytes and parents while joining upstream. Retain current credit helper behavior. |
+| [`f55e9cfddcccb80b15edffff30c65095f1be52b9`](https://github.com/JustYannicc/codex-lb/commit/f55e9cfddcccb80b15edffff30c65095f1be52b9) | Combine precise reset evidence and compare-and-swap rollback with spendable-credit and unknown-plan exhaustion rules. |
+| [`160c03adac4780128a239ee3ebed1981d7e95ef7`](https://github.com/JustYannicc/codex-lb/commit/160c03adac4780128a239ee3ebed1981d7e95ef7) | Combine pre-dispatch drain recovery and release-before-local-reserve ordering with input-shape and injected-anchor ownership checks. |
+| [`c4703734cf5d2b6817b1ebb593e5acccc586022e`](https://github.com/JustYannicc/codex-lb/commit/c4703734cf5d2b6817b1ebb593e5acccc586022e) | Join the repaired reset-recovery migration head and update the alias test for generalized long-window evidence. |
+| [`2fedc5cf376c2000ce29d6ca207bb739d507b518`](https://github.com/JustYannicc/codex-lb/commit/2fedc5cf376c2000ce29d6ca207bb739d507b518) | Align bridge registration, scheduler and external-turn fixtures with the composed provenance contracts. |
+| [`0ef59c36a2b7e8b30441d45b951f8db93a24e079`](https://github.com/JustYannicc/codex-lb/commit/0ef59c36a2b7e8b30441d45b951f8db93a24e079) | Align dynamic import, native capability and frame budget fixtures. Register PostgreSQL migration coverage. |
+| [`9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f`](https://github.com/JustYannicc/codex-lb/commit/9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f) | Prove branch-specific downgrade preserves upstream siblings and denied WebSocket anchors retire before the next complete request. |
+
+### Superseded inputs
+
+The manifest records these three older inputs as superseded within the accepted composition.
+
+| Older input | Replacement or disposition |
+| --- | --- |
+| [#1953](https://github.com/Soju06/codex-lb/pull/1953) | Replaced by [#2276](https://github.com/Soju06/codex-lb/pull/2276), [#2277](https://github.com/Soju06/codex-lb/pull/2277) and [#2283](https://github.com/Soju06/codex-lb/pull/2283) |
+| [#2078](https://github.com/Soju06/codex-lb/pull/2078) | Accepted concern already included through the manifest's upstream base |
+| [#2092](https://github.com/Soju06/codex-lb/pull/2092) | Accepted concern already included through the manifest's upstream base |
+
+The manifest also records [#2265](https://github.com/Soju06/codex-lb/pull/2265) and [#2281](https://github.com/Soju06/codex-lb/pull/2281) as included through upstream. Its exclusion records and supplementary dispositions cover work outside the 34 selected sources, including deferred [#2289](https://github.com/Soju06/codex-lb/pull/2289).
+
+### Dated upstream observations and runtime proof
+
+The [September 10 freshness audit](/Users/justyannicc/.codex/codex-lb-operations/reports/integrated-refresh-postpg-20260910/receipt.md) observed seven selected sources merged upstream at 2026-09-10 05:57:39 UTC: [#2193](https://github.com/Soju06/codex-lb/pull/2193), [#2206](https://github.com/Soju06/codex-lb/pull/2206), [#2234](https://github.com/Soju06/codex-lb/pull/2234), [#2236](https://github.com/Soju06/codex-lb/pull/2236), [#2253](https://github.com/Soju06/codex-lb/pull/2253), [#2260](https://github.com/Soju06/codex-lb/pull/2260), [#2283](https://github.com/Soju06/codex-lb/pull/2283). These are historical observations, not current pull request status. Their accepted source pins remain listed above.
+
+The same audit recorded main at `0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0` at 2026-09-10 05:57:55 UTC. That newer main is not integrated in the composition documented here. Reconciliation of later main commits and changed source pins remains separate work.
+
+The [PostgreSQL delivery receipt](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-delivery.md) and [root acceptance record](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-root-acceptance.json) bind the accepted source to its image and live checks. They provide later deployment evidence than the tracked verification record, whose pending-acceptance notes describe its earlier checkpoint. These operations links refer to local records on the operator's Mac and are unavailable in a standalone clone.
+
 ## Features
 
 <table>
