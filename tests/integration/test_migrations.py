@@ -2082,7 +2082,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     parent_revision = "20260909_110000_model_context_window_overrides"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
-    assert script.get_heads() == [marker_revision]
+    assert script.get_heads() == ["20260910_040000_merge_retry_claim_and_request_log_heads"]
     marker_script = script.get_revision(marker_revision)
     assert marker_script is not None and marker_script.down_revision == parent_revision
 
@@ -2440,7 +2440,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
         assert "admission_claimed_until_epoch" not in after_release_downgrade
         assert revision_after_release_downgrade == parent_revision
 
-        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
         assert reupgrade.current_revision == marker_revision
         async with engine.connect() as conn:
             state = await conn.run_sync(_schema_state)
