@@ -187,7 +187,7 @@ class StubNativeClient:
         self.close_calls += 1
 
 
-def _usage_payload() -> dict[str, object]:
+def _usage_payload() -> dict[str, JsonValue]:
     return {
         "plan_type": "plus",
         "rate_limit": {
