@@ -35,7 +35,7 @@ On issues opened, the workflow SHALL add triage for form and API submissions tha
 
 ### Requirement: Metadata-only privileges
 
-Classification workflows SHALL use SHA-pinned actions and only the permissions needed to read metadata and add their existing labels. They SHALL NOT check out or execute contributor code, interpolate author text into scripts, remove labels, or grant lifecycle, review, or approval labels.
+Classification workflows SHALL use SHA-pinned actions and only the permissions needed to read metadata and add their existing labels. They SHALL NOT check out or execute contributor code, interpolate author text into scripts, remove labels, grant review or approval labels, or change lifecycle status beyond initial issue triage.
 
 #### Scenario: Approval text in a title
 - **WHEN** an issue title contains script syntax or an approval label name

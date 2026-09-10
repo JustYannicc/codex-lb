@@ -7,4 +7,4 @@
 
 - [x] 2.1 Verify manual/status label preservation and untrusted-title handling.
 - [x] 2.2 Validate workflows and strict OpenSpec requirements; review the pinned candidate.
-- [ ] 2.3 Publish an issue-linked PR and record hosted adoption limitations.
+- [x] 2.3 Publish an issue-linked PR and record hosted adoption limitations.
