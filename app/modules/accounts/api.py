@@ -5,7 +5,9 @@ import logging
 from fastapi import APIRouter, Depends, Request, Response
 
 from app.core.audit.service import AuditService
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -97,9 +99,12 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
 
 @router.get("", response_model=AccountsResponse)
 async def list_accounts(
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountsResponse:
-    accounts = await context.service.list_accounts()
+    accounts = await context.service.list_accounts(
+        redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+    )
     return AccountsResponse(accounts=accounts)
 
 
@@ -183,7 +188,7 @@ async def export_account_auth(
     request: Request,
     response: Response,
     account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    _export_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_EXPORT)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAuthExportResponse:
     result = await context.service.export_auth(account_id)
