@@ -1,6 +1,6 @@
 ## Why
 
-#1367 reports Team monthly quota hidden or shown as 5h. Current main reproduces the hidden quota through GET /api/accounts because presentation depends on an estimated credit capacity.
+Issue #1367 reports Team monthly quota hidden or shown as 5h. Current main reproduces the hidden quota through GET /api/accounts because presentation depends on an estimated credit capacity.
 
 ## What Changes
 
