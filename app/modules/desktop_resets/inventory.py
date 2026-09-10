@@ -10,6 +10,7 @@ from app.core.crypto import TokenEncryptor
 from app.db.models import Account
 from app.db.session import detach_session_objects
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.desktop_resets.projection import OwnedCredit, ResetPoolUnavailable, eligible, pool_credits
 from app.modules.desktop_usage.identity import DesktopIdentity
@@ -87,12 +88,14 @@ class CreditInventory:
             account = await repos.accounts.get_by_id(account_id)
             if account is None or not eligible(account):
                 raise ResetPoolUnavailable()
-            account = await AuthManager(repos.accounts, refresh_repo_factory=self.account_repo).ensure_fresh(account)
-            if not eligible(account):
-                raise ResetPoolUnavailable()
-            route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
-            token = TokenEncryptor().decrypt(account.access_token_encrypted)
-            upstream_account_id = account.chatgpt_account_id
+            if repos.session is not None:
+                detach_session_objects(repos.session)
+        account = await AuthManager(BackgroundAccountsRepository()).ensure_fresh(account)
+        if not eligible(account):
+            raise ResetPoolUnavailable()
+        route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
+        token = TokenEncryptor().decrypt(account.access_token_encrypted)
+        upstream_account_id = account.chatgpt_account_id
         result = await fetch_reset_credits(
             token,
             upstream_account_id,

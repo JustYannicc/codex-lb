@@ -7,7 +7,8 @@ The Desktop reset candidate has a divergent migration head and review findings a
 ## What Changes
 
 - Reconcile current main and join the migration graph without discarding existing revisions.
-- Release inventory database sessions before upstream reset-credit I/O.
+- Release inventory database sessions before upstream reset-credit and OAuth I/O.
+- Guard destructive migration tests with an explicitly dedicated PostgreSQL test database.
 - Return the existing conflict response when durable and helper redemption bindings disagree.
 - Normalize empty WebSocket close status and strengthen existing route and serialization checks.
 

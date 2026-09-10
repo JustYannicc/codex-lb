@@ -22,7 +22,7 @@ The system MUST default Desktop reset pooling to disabled and expose its policy 
 
 ### Requirement: Inventory reflects genuine available credits
 
-The enabled native reset list and optional usage reset summary MUST use the same complete fresh pool inventory. They MUST exclude paused, deactivated, reauthentication-required, pending-deletion and expired contributions. Missing, stale or inconsistent observations MUST NOT become invented credits. Credits MUST retain their genuine IDs, type and expiry, and duplicate IDs with different owners MUST be rejected as ambiguous. Refresh concurrency MUST be bounded and each concurrent operation MUST own its database session. Inventory refresh MUST release its database session before waiting for upstream credit HTTP responses. Inventory failure MUST NOT replace otherwise valid pooled quota with fabricated quota or reset counts.
+The enabled native reset list and optional usage reset summary MUST use the same complete fresh pool inventory. They MUST exclude paused, deactivated, reauthentication-required, pending-deletion and expired contributions. Missing, stale or inconsistent observations MUST NOT become invented credits. Credits MUST retain their genuine IDs, type and expiry, and duplicate IDs with different owners MUST be rejected as ambiguous. Refresh concurrency MUST be bounded and each concurrent operation MUST own its database session. Inventory refresh MUST release its database session before waiting for upstream credit or OAuth HTTP responses. Inventory failure MUST NOT replace otherwise valid pooled quota with fabricated quota or reset counts.
 
 #### Scenario: Credits from two accounts are available
 
