@@ -26,7 +26,7 @@ HEAD = ScriptDirectory(str(ROOT / "app/db/alembic")).get_current_head()
 def disposable_url() -> Iterator[str]:
     url = os.environ.get("CODEX_LB_TEST_DATABASE_URL", "")
     if not url.startswith("postgresql"):
-        pytest.skip("requires a disposable PostgreSQL test target with CREATEDB")
+        pytest.skip("requires disposable PostgreSQL with CREATEDB; failure injection also requires a superuser")
     database = "migration_benchmark_" + uuid4().hex
     engine = create_engine(to_sync_database_url(url), isolation_level="AUTOCOMMIT")
     with engine.connect() as connection:
@@ -166,6 +166,9 @@ def test_benchmark_fixture_is_repeatable(disposable_url: str, tmp_path: Path, re
 def test_benchmark_reports_failed_revision(disposable_url: str, tmp_path: Path) -> None:
     engine = create_engine(to_sync_database_url(disposable_url))
     with engine.begin() as connection:
+        assert connection.execute(text("SELECT current_setting('is_superuser')")).scalar_one() == "on", (
+            "failure-injection test requires a PostgreSQL superuser on the disposable server; CREATEDB alone is insufficient"
+        )
         connection.execute(
             text("""
             CREATE FUNCTION reject_benchmark_index() RETURNS event_trigger LANGUAGE plpgsql AS $$

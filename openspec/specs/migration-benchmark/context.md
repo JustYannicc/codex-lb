@@ -42,7 +42,7 @@ The seed transaction runs `ANALYZE` before measurement. Hardware, container limi
 
 ## Verify the command
 
-Run the subprocess contract tests explicitly with both variables pointing at an owned PostgreSQL test database. The test role needs database-creation and event-trigger privileges. Tests create and drop uniquely named child databases, including one with an intentional DDL failure.
+Run the subprocess contract tests explicitly with both variables pointing at an owned PostgreSQL test database. Provision a PostgreSQL superuser on the disposable test server for the full suite. `CREATEDB` alone is insufficient: the failure-injection test uses `CREATE EVENT TRIGGER`, which [requires a superuser](https://www.postgresql.org/docs/18/sql-createeventtrigger.html). That test verifies the active role before creating its trigger. Tests create and drop uniquely named child databases, including one with an intentional DDL failure. The benchmark command itself does not require a superuser.
 
 ```bash
 uv run pytest tests/integration/test_migration_benchmark.py -q
