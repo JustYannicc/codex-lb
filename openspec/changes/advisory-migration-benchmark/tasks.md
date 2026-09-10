@@ -6,6 +6,6 @@
 
 ## 2. Verify and deliver
 
-- [ ] 2.1 Run local checks and a coordinated bounded scale sample with measured context.
-- [ ] 2.2 Independently review the immutable candidate/base and address findings.
+- [x] 2.1 Run local checks and a coordinated bounded scale sample with measured context.
+- [x] 2.2 Independently review the immutable candidate/base and address findings.
 - [ ] 2.3 Validate and archive OpenSpec, publish a partial #1471 PR and hand hosted follow-up to readiness.
