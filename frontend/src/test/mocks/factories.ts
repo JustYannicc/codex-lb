@@ -574,6 +574,9 @@ export function createDashboardSettings(
 		// M5 conversation archive
 		conversationArchiveEnabled: false,
 		conversationArchiveDir: "/var/lib/codex-lb/conversation-archive",
+		// R2 spool retention: the 7-day default and the floor at shipped defaults.
+		httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 604800,
+		httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds: 7200,
 		...overrides,
 	});
 }

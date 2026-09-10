@@ -95,8 +95,9 @@ async def test_populated_branch_upgrade_and_merge_downgrade_preserve_settings_an
                         "VALUES ('caller','attempt','deleted-owner','upstream-owner','credit',CURRENT_TIMESTAMP)"
                     )
                 )
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        await to_thread.run_sync(
+            lambda: run_upgrade(url, "20260910_010000_merge_desktop_reset_pool_heads", bootstrap_legacy=False)
+        )
         async with engine.connect() as connection:
             assert not await connection.scalar(text("SELECT sticky_threads_enabled FROM dashboard_settings WHERE id=1"))
             assert not await connection.scalar(
@@ -111,6 +112,71 @@ async def test_populated_branch_upgrade_and_merge_downgrade_preserve_settings_an
             assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == before
             revisions = set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars())
             assert revisions == {REVISION, "20260910_000000_request_logs_missing_cost_index"}
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "starting_revision",
+    ["20260910_010000_merge_desktop_reset_pool_heads", "20260910_010000_dashboard_spool_retention"],
+)
+async def test_spool_retention_composition_preserves_values_and_binding_on_merge_downgrade(
+    migration_url, starting_revision
+):
+    url = migration_url
+    await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
+    engine = create_async_engine(url)
+    has_reset = starting_revision == "20260910_010000_merge_desktop_reset_pool_heads"
+    try:
+        async with engine.begin() as connection:
+            if has_reset:
+                await connection.execute(
+                    text("UPDATE dashboard_settings SET desktop_reset_pool_enabled=true WHERE id=1")
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO desktop_reset_credit_redemptions VALUES "
+                        "('caller','attempt','owner','upstream-owner','credit',CURRENT_TIMESTAMP)"
+                    )
+                )
+            else:
+                await connection.execute(
+                    text(
+                        "UPDATE dashboard_settings SET "
+                        "http_responses_session_bridge_operation_spool_retention_seconds=43200 WHERE id=1"
+                    )
+                )
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        async with engine.connect() as connection:
+            before = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
+            assert len(before) == (1 if has_reset else 0)
+            if has_reset:
+                assert tuple(before[0][:5]) == ("caller", "attempt", "owner", "upstream-owner", "credit")
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), starting_revision))
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == before
+            assert (
+                bool(
+                    await connection.scalar(
+                        text("SELECT desktop_reset_pool_enabled FROM dashboard_settings WHERE id=1")
+                    )
+                )
+                == has_reset
+            )
+            assert await connection.scalar(
+                text(
+                    "SELECT http_responses_session_bridge_operation_spool_retention_seconds "
+                    "FROM dashboard_settings WHERE id=1"
+                )
+            ) == (None if has_reset else 43200)
+            revisions = set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars())
+            assert revisions == {
+                "20260910_010000_merge_desktop_reset_pool_heads",
+                "20260910_010000_dashboard_spool_retention",
+            }
         await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
     finally:
