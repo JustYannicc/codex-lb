@@ -2388,16 +2388,25 @@ not mutate account health, routing, or durable ownership.
 
 For this requirement, the canonical full-resend-shape predicate MUST inspect
 the decoded Responses request's `input` before durable lookup or replay
-projection. It is true for a string with at least 4096 characters, an array
-with more than one item unless every item is a `function_call_output`,
-`custom_tool_call_output`, or `apply_patch_call_output`, or a one-item array whose compact serialization of the
-entire array (`ensure_ascii=true` and no separator whitespace) is at least 4096
-characters. Shorter strings and arrays, empty or null input, and any other
-shape MUST remain delta-only. A multi-item array containing only those tool
-output items is delta-only because their corresponding calls exist only behind
-the continuation anchor. Exactly 4096 is included and 4095 is not. A
-serialization failure MUST classify the one-item array as delta-only. This is
-only a payload-shape signal and does not establish durable full-resend proof,
+projection. It MUST classify each shape as follows:
+
+- A string is full-resend-shaped if it contains at least 4096 Unicode code
+  points; a shorter string is delta-only.
+- An array with more than one item is full-resend-shaped unless every item is
+  a `function_call_output`, `custom_tool_call_output`, or
+  `apply_patch_call_output`. An array containing only those output items is
+  delta-only because their corresponding calls exist behind the anchor.
+- A one-item array is full-resend-shaped if the compact serialization of the
+  entire array (`ensure_ascii=true` and no separator whitespace) contains at
+  least 4096 characters. A shorter serialization or a serialization failure
+  is delta-only.
+- Empty arrays, null input, and all other shapes are delta-only.
+
+Every length threshold in the current and legacy predicates MUST count
+characters, not UTF-8 bytes. Raw text uses Unicode code points; compact JSON
+uses the characters in its ASCII-escaped serialization, including escapes and
+punctuation. Exactly 4096 is included and 4095 is not. This is only a
+payload-shape signal and does not establish durable full-resend proof,
 prefix identity, or account-neutral replay safety. Request validation MUST
 preserve a client-supplied string's original shape and character length for
 this decision; normalizing that string into a one-item array MUST NOT add the
@@ -2457,9 +2466,23 @@ An upgraded owner-forward request MUST advertise
 shape is known. The value MUST be included in the exact-body bridge signature.
 The owner MUST trust the current-shape mode only when that signature validates
 with the same header value; a missing, malformed, or primary-signature-only
-marker MUST keep legacy compatibility classification. An unsupported nonempty
-version MUST be rejected before the forwarded request reaches continuity
-selection.
+marker MUST keep legacy compatibility classification. Receivers implementing
+this versioned input-shape contract MUST reject an unsupported nonempty
+version before the forwarded request reaches continuity selection.
+
+The marker advertises the origin's input-shape provenance, not the selected
+owner's capability. For inputs whose current and legacy classifications agree,
+forwarding MUST NOT require classifier capability proof and MUST retain the
+existing primary-signature fallback, subject to its existing restrictions.
+A predecessor owner may ignore the additive marker and validate that fallback.
+The origin MUST NOT remove a known-shape marker merely because the destination
+lacks classifier capability proof.
+
+A payload already classified under legacy forwarding MUST omit the marker
+when forwarded again. Its exact-body signature MUST bind the posted body
+without an input-shape version. A current receiver accepting that signature
+MUST retain legacy compatibility classification. This MUST NOT bypass the
+capability and process-epoch checks for classification-ambiguous requests.
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
@@ -2489,7 +2512,7 @@ selection.
 - **AND** the forward validates only through the rolling-upgrade legacy
   signature fallback
 - **WHEN** the newer owner classifies the request shape
-- **THEN** it MUST use the compact serialization of that item for the 4096-byte
+- **THEN** it MUST use the compact serialization of that item for the 4096-character
   boundary
 - **AND** it MUST classify the item as full-resend-shaped at exactly 4096
   characters

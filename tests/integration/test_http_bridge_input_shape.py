@@ -66,10 +66,10 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
         assert len(connected) == 2
         sent = json.loads(upstreams[1].sent_text[0])
         assert sent["previous_response_id"] == first_id
-        expected = bridge.proxy_module.ResponsesRequest.model_validate(
-            {"model": "gpt-5.1", "instructions": "", "input": continuation}
-        )
-        assert sent["input"] == expected.to_payload()["input"]
+        if input_shape == "parallel_outputs":
+            assert sent["input"] == continuation
+        else:
+            assert sent["input"] == [{"role": "user", "content": [{"type": "input_text", "text": continuation}]}]
     finally:
         for live in list(service._http_bridge_sessions.values()):
             await service._close_http_bridge_session(live)
