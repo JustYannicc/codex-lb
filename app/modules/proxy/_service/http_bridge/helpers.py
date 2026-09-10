@@ -2100,6 +2100,11 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
                 _http_bridge_input_item_type(item) in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES for item in input_value
             )
         if len(input_value) == 1:
+            if (
+                not payload._codex_lb_legacy_owner_forwarding_input_shape
+                and _http_bridge_input_item_type(input_value[0]) in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES
+            ):
+                return False
             if payload._codex_lb_legacy_owner_forwarding_input_shape:
                 normalized_text_length = _http_bridge_legacy_normalized_input_text_length(input_value)
                 if normalized_text_length is not None:

@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_shape", ["parallel_outputs", "short_raw_string"])
+@pytest.mark.parametrize("input_shape", ["parallel_outputs", "short_raw_string", "large_single_output"])
 async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, app_instance, monkeypatch, input_shape):
     bridge._install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await bridge._import_account(async_client, "shape-account", "shape@example.com")
@@ -59,6 +59,8 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
             if input_shape == "parallel_outputs"
             else "x" * 4095
         )
+        if input_shape == "large_single_output":
+            continuation = [{"type": "function_call_output", "call_id": "call_a", "output": "x" * 4096}]
         response = await async_client.post(
             "/v1/responses", json={"model": "gpt-5.1", "input": continuation}, headers=headers
         )
@@ -66,7 +68,7 @@ async def test_quarantined_http_continuation_keeps_durable_anchor(async_client, 
         assert len(connected) == 2
         sent = json.loads(upstreams[1].sent_text[0])
         assert sent["previous_response_id"] == first_id
-        if input_shape == "parallel_outputs":
+        if input_shape in {"parallel_outputs", "large_single_output"}:
             assert sent["input"] == continuation
         else:
             assert sent["input"] == [{"role": "user", "content": [{"type": "input_text", "text": continuation}]}]

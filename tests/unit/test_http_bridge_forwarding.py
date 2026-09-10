@@ -1448,6 +1448,10 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     "input_value",
     [
         pytest.param("x" * 4095, id="raw-string-boundary"),
+        pytest.param(
+            [{"type": "function_call_output", "call_id": "call-1", "output": "x" * 4096}],
+            id="large-single-tool-output-delta",
+        ),
         pytest.param(["x" * 4092], id="array-full-legacy-delta"),
         pytest.param(["x" * 4093], id="array-full-legacy-delta-upper"),
         pytest.param(

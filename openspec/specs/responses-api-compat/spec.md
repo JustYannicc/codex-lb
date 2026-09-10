@@ -2396,7 +2396,9 @@ projection. It MUST classify each shape as follows:
   a `function_call_output`, `custom_tool_call_output`, or
   `apply_patch_call_output`. An array containing only those output items is
   delta-only because their corresponding calls exist behind the anchor.
-- A one-item array is full-resend-shaped if the compact serialization of the
+- A one-item array containing one of those tool-output types is delta-only,
+  regardless of output length. Other one-item arrays are full-resend-shaped if
+  the compact serialization of the
   entire array (`ensure_ascii=true` and no separator whitespace) contains at
   least 4096 characters. A shorter serialization or a serialization failure
   is delta-only.
@@ -2428,7 +2430,8 @@ that the selected owner implements this classifier MUST NOT dispatch an input
 whose current and legacy classifications disagree in either direction. This
 guard MUST cover a client string below 4096 characters whose normalized item
 reaches 4096 compact-serialization characters, a multi-item array containing
-only the allowed tool-output item types, and a one-item array whose whole-array
+only the allowed tool-output item types, a single tool output whose legacy
+item serialization reaches 4096 characters, and a one-item array whose whole-array
 serialization reaches 4096 characters while its item serialization does not.
 It MUST also cover full-resend-shaped system/developer-only arrays that
 normalize to empty input. Truly empty input and small single-message arrays
@@ -2483,6 +2486,15 @@ when forwarded again. Its exact-body signature MUST bind the posted body
 without an input-shape version. A current receiver accepting that signature
 MUST retain legacy compatibility classification. This MUST NOT bypass the
 capability and process-epoch checks for classification-ambiguous requests.
+
+#### Scenario: Large single tool output retains its continuation anchor
+
+- **GIVEN** a quarantined session has a durable turn-state anchor
+- **AND** a request contains one tool output whose serialized size exceeds 4096 characters
+- **AND** the client omits `previous_response_id`
+- **WHEN** the bridge classifies the request
+- **THEN** it MUST treat the input as delta-only and retain the durable anchor
+- **AND** forwarding to an owner with a disagreeing legacy classifier MUST require the existing capability and process-epoch proof
 
 #### Scenario: Quarantine preserves durable context for delta-only requests
 
@@ -11022,4 +11034,3 @@ still awaiting I/O.
 - **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
 - **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
-
