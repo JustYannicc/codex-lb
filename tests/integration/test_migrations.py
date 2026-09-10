@@ -2082,7 +2082,7 @@ async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgr
     parent_revision = "20260909_110000_model_context_window_overrides"
     marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
     script = ScriptDirectory.from_config(_build_alembic_config(db_url))
-    assert script.get_heads() == ["20260910_170000_merge_guest_retry_claim_heads"]
+    assert script.get_heads() == ["20260910_200000_merge_users_retry_claim_heads"]
     marker_script = script.get_revision(marker_revision)
     assert marker_script is not None and marker_script.down_revision == parent_revision
 

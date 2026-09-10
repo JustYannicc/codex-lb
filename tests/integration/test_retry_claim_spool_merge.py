@@ -1,4 +1,4 @@
-"""Exercise populated receipt/spool and guest merge upgrades and downgrades."""
+"""Exercise populated receipt, spool, guest and user migration joins."""
 
 from __future__ import annotations
 
@@ -18,8 +18,11 @@ _SPOOL = "20260910_010000_dashboard_spool_retention"
 _PARENTS = (_RECEIPTS, _SPOOL)
 _MERGE = "20260910_160000_merge_retry_claim_spool_heads"
 _GUEST = "20260908_000000_add_guest_session_generation"
-_CURRENT_MERGE = "20260910_170000_merge_guest_retry_claim_heads"
-_CURRENT_PARENTS = (_MERGE, _GUEST)
+_GUEST_MERGE = "20260910_170000_merge_guest_retry_claim_heads"
+_GUEST_PARENTS = (_MERGE, _GUEST)
+_USERS = "20260909_020000_reproject_compat_admin_credentials"
+_CURRENT_MERGE = "20260910_200000_merge_users_retry_claim_heads"
+_CURRENT_PARENTS = (_GUEST_MERGE, _USERS)
 _RETENTION = "http_responses_session_bridge_operation_spool_retention_seconds"
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -163,8 +166,8 @@ def test_historical_merge_upgrade_and_downgrade_preserve_populated_parents(tmp_p
     assert "schema_drift=none" in _cli(path, "check")
 
 
-@pytest.mark.parametrize("parent", _CURRENT_PARENTS, ids=["receipt-spool-parent", "guest-parent"])
-def test_public_guest_head_upgrade_and_merge_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
+@pytest.mark.parametrize("parent", _GUEST_PARENTS, ids=["receipt-spool-parent", "guest-parent"])
+def test_historical_guest_merge_and_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
     path = tmp_path / "guest-receipt.sqlite"
     _cli(path, "upgrade", parent)
     assert _revisions(path) == (parent,)
@@ -172,11 +175,8 @@ def test_public_guest_head_upgrade_and_merge_downgrade_preserve_populated_parent
     _seed_branch_values(path, _SPOOL)
     before = _state(path)
 
-    assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
-    assert _revisions(path) == (_CURRENT_MERGE,)
-    check = _cli(path, "check")
-    assert "migration_policy=ok" in check
-    assert "schema_drift=none" in check
+    assert f"current_revision={_GUEST_MERGE}" in _cli(path, "upgrade", _GUEST_MERGE)
+    assert _revisions(path) == (_GUEST_MERGE,)
     merged = _state(path)
     _assert_parent_rows_preserved(before, merged)
     settings = merged["rows"]["dashboard_settings"][0]
@@ -194,6 +194,82 @@ def test_public_guest_head_upgrade_and_merge_downgrade_preserve_populated_parent
     populated = _state(path)
     assert populated["rows"]["dashboard_settings"][0]["guest_session_generation"] == 17
     assert populated["rows"]["http_bridge_retry_circuits"][0]["admission_claimed_until_epoch"] == 4102444800.0
+    for downgrade_parent in _GUEST_PARENTS:
+        _downgrade_to_parent(path, downgrade_parent)
+        assert _revisions(path) == tuple(sorted(_GUEST_PARENTS))
+        assert _state(path) == populated
+        assert f"current_revision={_GUEST_MERGE}" in _cli(path, "upgrade", _GUEST_MERGE)
+        assert _revisions(path) == (_GUEST_MERGE,)
+        assert _state(path) == populated
+    assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
+    assert _revisions(path) == (_CURRENT_MERGE,)
+    _assert_parent_rows_preserved(populated, _state(path))
+    assert "schema_drift=none" in _cli(path, "check")
+
+
+def _seed_users(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO dashboard_roles (id, slug, name, kind, permissions_version) "
+            "VALUES ('retained-role', 'retained-role', 'Retained role', 'custom', 9)"
+        )
+        connection.executemany(
+            "INSERT INTO dashboard_role_grants (role_id, permission, scope) VALUES ('retained-role', ?, ?)",
+            [("api_keys:read", "own"), ("accounts:read", "all")],
+        )
+        connection.execute(
+            "INSERT INTO dashboard_users (id, username, role_id, session_generation, password_hash) "
+            "VALUES ('retained-user', 'retained-user', 'retained-role', 23, 'retained-user-hash')"
+        )
+        connection.execute(
+            "INSERT INTO dashboard_identities (id, user_id, provider, provider_key, subject) "
+            "VALUES ('retained-identity', 'retained-user', 'oidc', 'retained-provider', 'retained-subject')"
+        )
+
+
+@pytest.mark.parametrize("parent", _CURRENT_PARENTS, ids=["guest-retry-parent", "users-parent"])
+def test_public_users_head_upgrade_and_downgrade_preserve_populated_parents(tmp_path: Path, parent: str) -> None:
+    path = tmp_path / "users-receipt.sqlite"
+    _cli(path, "upgrade", parent)
+    assert _revisions(path) == (parent,)
+    _seed_branch(path, _RECEIPTS if parent == _GUEST_MERGE else _GUEST)
+    _seed_branch_values(path, _SPOOL)
+    _seed_branch_values(path, _GUEST)
+    if parent == _USERS:
+        _seed_users(path)
+    else:
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE dashboard_settings SET password_hash = 'legacy-admin-hash' WHERE id = 1")
+    before = _state(path)
+
+    assert f"current_revision={_CURRENT_MERGE}" in _cli(path, "upgrade", "head")
+    assert _revisions(path) == (_CURRENT_MERGE,)
+    check = _cli(path, "check")
+    assert "migration_policy=ok" in check and "schema_drift=none" in check
+    merged = _state(path)
+    _assert_parent_rows_preserved(before, merged)
+    assert {row["slug"] for row in merged["rows"]["dashboard_roles"] if row["kind"] == "preset"} == {
+        "admin",
+        "operator",
+        "member",
+        "viewer",
+        "guest",
+    }
+    retry = merged["rows"]["http_bridge_retry_circuits"][0]
+    for column, value in (
+        ("admission_claimed_at_epoch", 1201.25),
+        ("admission_claimed_generation", 7),
+        ("admission_claimed_until_epoch", 4102444800.0),
+    ):
+        assert retry[column] == (value if parent == _GUEST_MERGE else None)
+    if parent == _GUEST_MERGE:
+        admin = next(row for row in merged["rows"]["dashboard_users"] if row["username"] == "admin")
+        assert admin["password_hash"] == "legacy-admin-hash" and admin["is_break_glass"] == 1
+        _seed_users(path)
+    else:
+        _seed_branch_values(path, _RECEIPTS)
+    populated = _state(path)
     for downgrade_parent in _CURRENT_PARENTS:
         _downgrade_to_parent(path, downgrade_parent)
         assert _revisions(path) == tuple(sorted(_CURRENT_PARENTS))
