@@ -1,0 +1,3 @@
+The measurement at upstream 069b82be3 used 320 synthetic 1 KiB events, batch size 32, flush interval 100 ms and a fake writer sleeping 1 ms per persistence call. Three baseline runs took 915–929 ms. Rearming the wake after each nonempty pass took 15.8–16.1 ms with ten writes in both variants. This measures scheduling, not database throughput or end-to-end response speed.
+
+PR #1997 changes terminal persistence timeout and cleanup. This change affects the independent background loop and starts from current main. The integration candidate 971322208 and live source 1a58a006 contain the same sleeping loop, with separately owned terminal/scheduler changes around it.
