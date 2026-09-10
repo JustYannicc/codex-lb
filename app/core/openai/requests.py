@@ -646,6 +646,12 @@ class ResponsesRequest(BaseModel):
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
     _codex_lb_turn_state_owner_account_id: str | None = PrivateAttr(default=None)
     _codex_lb_turn_state_owner_lookup_completed: bool = PrivateAttr(default=False)
+    # The client's own ``store`` value (``None`` when the client omitted it),
+    # captured by ``normalize_responses_request_payload`` before ``store`` is
+    # forced to ``False`` for the ChatGPT backend. Read only by the
+    # subscription-overflow dispatch (anchor rule and the source-direction
+    # body); the ChatGPT-bound serialization never consults it.
+    _codex_lb_client_store: bool | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
