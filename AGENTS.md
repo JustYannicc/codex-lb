@@ -12,7 +12,7 @@ Carry authorized work through implementation, required verification and the requ
 
 Delegate independent work only when it helps. Give each worker a bounded outcome, write boundary and completion checks. Keep one owner per change or live operation, integrate returned evidence, and transfer remaining obligations before ending a worker task.
 
-When a step fails, compare the candidate, failure and operating conditions before retrying. Change the diagnostic when an unchanged attempt gives no new evidence. Record the recovery point and exact blocker when progress requires external action.
+When a step fails, compare the candidate, failure and operating conditions before retrying. Do not repeat the same failed action when all three are unchanged. Change the diagnostic only when it can produce new evidence. Stop that line of work and escalate when no justified next step remains or progress requires external action; record the recovery point and exact blocker. Continue independent authorized work.
 
 ## Protect the running service
 
