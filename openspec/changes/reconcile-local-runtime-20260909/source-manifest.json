@@ -293,6 +293,20 @@
       "source_tree": "6b2ca5dce7ed8047acda180d57feeb9eaf611d3c",
       "title": "feat(cli): bound whole-home retag planning and report progress",
       "integration_note": "Bounded delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; preserve distinct targeted active/archive1MiB and whole-home sessions64KiB discovery/progress/backup contracts. Existing Desktop CLI/listener and nav retained."
+    },
+    {
+      "pr": 2322,
+      "source_commit": "dbdd591c500bb1a568aa458ae51e2b2d0ca522a8",
+      "source_tree": "a014733c3ec2e39536ade275633b62408d1287d2",
+      "title": "feat(db): explain guarded migration recovery stamping",
+      "integration_note": "Bounded delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; preserve aggregate migration drift/progress and existing fixture/cache/real-builder semantics. No metadata-refresh builder or unrelated main import."
+    },
+    {
+      "pr": 2342,
+      "source_commit": "5b080dfee1f82609a09977f81c08fa5638225557",
+      "source_tree": "4cb966a88aad189446d1f65c3e4e1d4bdd10028f",
+      "title": "test: stub ambient account deletion scheduler",
+      "integration_note": "Bounded delta from 3b4222a08561f2e948e212535680cf3f1773252d; preserve aggregate migration drift/progress and existing fixture/cache/real-builder semantics. No metadata-refresh builder or unrelated main import."
     }
   ],
   "open_pr_dispositions": [
@@ -730,7 +744,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "CLI successor local proof is recorded in composition-cli-2323-2325.md and its immutable operations receipt. Earlier candidates remain frozen. Publication, image build and live acceptance remain deployment-owned.",
+  "verification_status": "Diagnostic/harness successor proof is in composition-2322-2342.md and immutable operations receipt. Earlier candidates remain frozen; publication/build/live remain deployment-owned.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -838,6 +852,15 @@
       ],
       "proof_note": "composition-cli-2323-2325.md",
       "publication": "Pending deployment owner; disposable-home source proof only, no live home/image/runtime acceptance."
+    },
+    {
+      "predecessor": "2c4129b788eaacad8f999a963b34efd48eda6277",
+      "added_prs": [
+        2322,
+        2342
+      ],
+      "proof_note": "composition-2322-2342.md",
+      "publication": "Pending deployment owner; diagnostic and harness proof is not live recovery or production scheduler acceptance."
     }
   ]
 }
