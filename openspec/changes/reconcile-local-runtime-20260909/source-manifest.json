@@ -272,6 +272,13 @@
       "source_tree": "c78bfa678ab88648cb62cfa5020c9eec880db732",
       "title": "docs: align agent instructions with Astra prompt guidance",
       "integration_note": "Bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0; unrelated upstream history excluded. Existing migration requirements retained when appending PR2307 progress requirement."
+    },
+    {
+      "pr": 2315,
+      "source_commit": "f72cf35b0ce6e94217d20d0b1b1116486012e435",
+      "source_tree": "8d877e7a715e9ada1478a109f44c50c81684cdfc",
+      "title": "fix(proxy): bound aggregate detached retirement lock waits",
+      "integration_note": "Only bounded PR delta from 0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0. Preserve all other aggregate helper behavior and append context alongside prior ERR/ownership notes."
     }
   ],
   "open_pr_dispositions": [
@@ -709,7 +716,7 @@
     ],
     "normalization": "Existing upstream migration changes transport sentinel default to auto; all other synthetic account, key, context, retry-receipt, usage and operator setting values were preserved."
   },
-  "verification_status": "Regular local composition proof is recorded in composition-2306-2307-2310.md. Publication, image build and live acceptance remain deployment-owned.",
+  "verification_status": "Successor local proof is recorded in composition-2286-2315.md and its immutable operations receipt. Earlier b999 composition remains frozen. Publication, image build and live acceptance remain deployment-owned.",
   "composition_repairs": [
     {
       "commit": "11b3dfa534235e9d575b37ee7b3a0942e25ee924",
@@ -777,5 +784,37 @@
     "readme_source": "b82eefe244703ac208dc346368713b845cf91e45",
     "scope": "PR2306, PR2307 and PR2310 bounded deltas plus exact manifest and README inventory. No broad main refresh.",
     "publication": "Pending deployment owner; local proof does not establish hosted aggregate or live acceptance."
-  }
+  },
+  "selected_source_supplements": [
+    {
+      "pr": 2286,
+      "retained_source_commit": "d31ac538412b3ccd644db34e41557d1307994cd8",
+      "reviewed_head": "68aa998f12f55c267307b132d29f707209b1059e",
+      "reviewed_tree": "30a25bc7fa24965b2a3164b87ca5cb0a166d3f6d",
+      "delta_base": "a3b4d42f66ea505bdd3feb87737445b769afc9f8",
+      "applied_source_commits": [
+        "c6aa5e60eed40a40d65038d84e974e532132afff",
+        "68aa998f12f55c267307b132d29f707209b1059e"
+      ],
+      "scope": "Empty CLOSE normalizes to1000, archived requirement and relay/shared-refresh tests. Omit upstream-only _usage_payload typing hunk because that fixture is absent in this aggregate. No broad PR base reconciliation."
+    }
+  ],
+  "successor_compositions": [
+    {
+      "predecessor": "b9997df7ef58721da242a74282535776b30b2eeb",
+      "added_prs": [
+        2315
+      ],
+      "supplemented_prs": [
+        2286
+      ],
+      "excluded_intakes": [
+        2303,
+        2312,
+        2316
+      ],
+      "proof_note": "composition-2286-2315.md",
+      "publication": "Pending deployment owner; no image or live acceptance."
+    }
+  ]
 }
