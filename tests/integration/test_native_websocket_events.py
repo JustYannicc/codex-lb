@@ -7,7 +7,7 @@ import sys
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import anyio
