@@ -23,4 +23,3 @@ The benchmark MUST use the existing migration CLI and Alembic graph for the sele
 #### Scenario: No pending revisions
 - **WHEN** base and target are the same revision
 - **THEN** the report MUST contain no measured upgrade steps and MUST identify the result as a no-op
-

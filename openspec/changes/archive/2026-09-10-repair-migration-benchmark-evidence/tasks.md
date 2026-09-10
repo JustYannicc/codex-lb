@@ -6,5 +6,5 @@
 ## 2. Verification
 
 - [x] 2.1 Update usage and sync requirements; pass strict OpenSpec validation.
-- [ ] 2.2 Pass affected tests and repository checks; obtain independent exact-candidate review.
-- [ ] 2.3 Archive the verified repair and publish it; verify current-head hosted checks and review state in the delivery receipt.
+- [x] 2.2 Pass affected tests and repository checks; obtain independent exact-candidate review.
+- [x] 2.3 Verify requirement coverage and archive readiness against the passing tests and independent review. Track publication and hosted checks separately in the delivery receipt.
