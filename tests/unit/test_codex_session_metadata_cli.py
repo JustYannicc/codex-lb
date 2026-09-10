@@ -259,7 +259,19 @@ def test_stale_target_is_not_overwritten_after_backup(
         assert jsonl_path.read_bytes().endswith(b"new external transcript\n")
 
 
-def test_archived_legacy_header_and_large_opaque_body(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("force_copy", [False, True])
+def test_archived_legacy_header_and_large_opaque_body(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, force_copy: bool
+) -> None:
+    import os
+
+    if force_copy:
+
+        def unavailable(*args: object, **kwargs: object) -> None:
+            raise OSError("Hard links unavailable")
+
+        monkeypatch.setattr(os, "link", unavailable)
+
     make_home(tmp_path)
     archive = tmp_path / "archived_sessions"
     archive.mkdir()
@@ -268,11 +280,20 @@ def test_archived_legacy_header_and_large_opaque_body(tmp_path: Path, capsys: py
     original = b'{"id":"archived","model_provider":"openai","keep":42}\r\n' + body
     path.write_bytes(original)
     inode = path.stat().st_ino
+    probe = tmp_path / "hard-link-probe"
+    try:
+        os.link(path, probe)
+    except OSError:
+        supports_hard_links = False
+    else:
+        supports_hard_links = True
+        probe.unlink()
     cli.main(repair_args(tmp_path, "--provider", "codex-lb", "--session-id", "archived", "--yes"))
     captured = capsys.readouterr()
     backup = Path(json.loads(captured.out)["backup_path"])
     assert (backup / "archived_sessions/legacy.jsonl").read_bytes() == original
-    assert (backup / "archived_sessions/legacy.jsonl").stat().st_ino == inode
+    if supports_hard_links:
+        assert (backup / "archived_sessions/legacy.jsonl").stat().st_ino == inode
     assert path.read_bytes().split(b"\n", 1)[1] == body
     assert json.loads(path.read_bytes().split(b"\n", 1)[0]) == {
         "id": "archived",
