@@ -9,6 +9,6 @@
 
 ## 2. Verify and deliver
 
-- [ ] 2.1 Run relevant route, ownership, replay and static checks with both database URLs isolated; retain exact candidate evidence.
-- [ ] 2.2 Validate and synchronize the specification, independently review the exact correction, and provide an immutable integrated correction to the deployment owner.
+- [x] 2.1 Run relevant route, ownership, replay and static checks with both database URLs isolated; retain exact candidate evidence.
+- [x] 2.2 Validate and synchronize the specification, independently review the exact correction, and provide an immutable integrated correction to the deployment owner.
 - [ ] 2.3 Publish the existing issue-linked PR update and transfer hosted monitoring ownership with current-head evidence.

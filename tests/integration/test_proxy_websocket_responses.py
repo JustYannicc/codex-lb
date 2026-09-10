@@ -12135,6 +12135,7 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
         ]
     )
     selection_requirements: list[bool] = []
+    opened_account_ids: list[str] = []
     account = Account(
         id="acct_ws_capability_session",
         chatgpt_account_id="acct_ws_capability_session",
@@ -12185,14 +12186,12 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
     ):
         del self, deadline
         selection_requirements.append(require_security_work_authorized)
-        if len(selection_requirements) == 2 and echo_turn_state:
-            assert request_state.preferred_account_id == account.id
-            assert _kwargs["require_preferred_account"] is True
         return account
 
     async def fake_try_open_websocket_connect_attempt(self, account, headers, **_kwargs):
         del self, _kwargs
         assert not any(name.lower() == REQUIRED_CAPABILITY_HEADER for name in headers)
+        opened_account_ids.append(account.id)
         return account, upstreams.popleft()
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
@@ -12227,8 +12226,8 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
     marker_request["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
 
     with TestClient(app_instance) as client:
-        # The echoed marker has no durable alias in this capability fixture.
-        # Its sole-owner fallback must see the same account the selector uses.
+        # An unregistered placeholder on a stateless reconnect still carries
+        # the session's capability requirement through normal selection.
         assert client.portal is not None
         client.portal.call(store_subscription_owner)
         with client.websocket_connect(
@@ -12266,6 +12265,7 @@ def test_backend_responses_websocket_trusted_capability_survives_session_reconne
     assert reconnect_created["response"]["id"] == "resp_ws_capability_session_reconnect"
     assert reconnect_completed["type"] == "response.completed"
     assert selection_requirements == [True, True]
+    assert opened_account_ids == [account.id, account.id]
     assert (reconnect_turn_state == first_turn_state) is echo_turn_state
 
 
