@@ -18,13 +18,7 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 
 ## Included work on this fork
 
-This inventory records the local composition above `4586507fbdc59584358535125e948a0aa04fcddc`, with 37 pull request sources, 11 composition repairs and three superseded inputs. The Git commit containing the manifest identifies the candidate. The added sources are locally composed; publication, image build and live acceptance remain separate deployment steps. This inventory does not grant upstream merge approval.
-
-The [source manifest](openspec/changes/reconcile-local-runtime-20260909/source-manifest.json) is the exact source record, including source trees, exclusions and migration hashes. Its included upstream main is [`069b82be3ceda8e468094f03aee0884061b2b43e`](https://github.com/JustYannicc/codex-lb/commit/069b82be3ceda8e468094f03aee0884061b2b43e). The [selection audit](openspec/changes/reconcile-local-runtime-20260909/selection-audit.md) explains source decisions, and the [verification record](openspec/changes/reconcile-local-runtime-20260909/verification.md) records checks and their limits.
-
-### Included pull request pins
-
-These titles and full commit pins come from the manifest. Later pull request updates do not change this inventory. Composition repairs below qualify how the sources were combined.
+This local composition above `4586507fbdc59584358535125e948a0aa04fcddc` includes 37 PR sources and 11 repairs. The [exact manifest](openspec/changes/reconcile-local-runtime-20260909/source-manifest.json) binds all pins, source trees, exclusions and migration hashes to the containing Git commit. Included upstream main remains `069b82be3ceda8e468094f03aee0884061b2b43e`. Publication, image build and live acceptance of the additions remain deployment-owned; this inventory grants no upstream merge approval.
 
 | Pull request | Source title | Included source commit |
 | --- | --- | --- |
@@ -66,43 +60,11 @@ These titles and full commit pins come from the manifest. Later pull request upd
 | [#2307](https://github.com/Soju06/codex-lb/pull/2307) | feat(db): log per-revision migration progress | [`365e97544411bcd0b4eac386d8ddfd8853a841fd`](https://github.com/JustYannicc/codex-lb/commit/365e97544411bcd0b4eac386d8ddfd8853a841fd) |
 | [#2310](https://github.com/Soju06/codex-lb/pull/2310) | docs: align agent instructions with Astra prompt guidance | [`da7c1dc12f6914b692df045c44bc4d3227178bba`](https://github.com/JustYannicc/codex-lb/commit/da7c1dc12f6914b692df045c44bc4d3227178bba) |
 
-### Composition repairs
+Retained composition repairs: [`11b3dfa53`](https://github.com/JustYannicc/codex-lb/commit/11b3dfa534235e9d575b37ee7b3a0942e25ee924), [`5ab3dc1b5`](https://github.com/JustYannicc/codex-lb/commit/5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1), [`8e52e6e8a`](https://github.com/JustYannicc/codex-lb/commit/8e52e6e8ab5a3eaff587ef514bc8be5cad964359), [`ddf3d7094`](https://github.com/JustYannicc/codex-lb/commit/ddf3d70942717365a7cc691a685554cfb46cce68), [`f55e9cfdd`](https://github.com/JustYannicc/codex-lb/commit/f55e9cfddcccb80b15edffff30c65095f1be52b9), [`160c03ada`](https://github.com/JustYannicc/codex-lb/commit/160c03adac4780128a239ee3ebed1981d7e95ef7), [`c4703734c`](https://github.com/JustYannicc/codex-lb/commit/c4703734cf5d2b6817b1ebb593e5acccc586022e), [`2fedc5cf3`](https://github.com/JustYannicc/codex-lb/commit/2fedc5cf376c2000ce29d6ca207bb739d507b518), [`0ef59c36a`](https://github.com/JustYannicc/codex-lb/commit/0ef59c36a2b7e8b30441d45b951f8db93a24e079), [`9eddfb00a`](https://github.com/JustYannicc/codex-lb/commit/9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f), [`ebd1cc702`](https://github.com/JustYannicc/codex-lb/commit/ebd1cc702f0710e6c40656046ee17432ce8db5e7). The manifest describes each contract; these include preserved migration ancestry, marker/ownership fences, scheduler integration, reset recovery, fixtures and the ERR correction.
 
-These 11 fork commits repair source interactions and verification fixtures. The manifest retains their full contract descriptions.
+Superseded inputs: #1953 is replaced by #2276, #2277 and #2283; #2078 and #2092 are included through upstream. #2265 and #2281 are also included through upstream; #2289 remains deferred. Later PR updates do not change these pins.
 
-| Repair commit | Included repair |
-| --- | --- |
-| [`11b3dfa534235e9d575b37ee7b3a0942e25ee924`](https://github.com/JustYannicc/codex-lb/commit/11b3dfa534235e9d575b37ee7b3a0942e25ee924) | Retain bounded retry-receipt cleanup and half-open probe ownership without recapturing newer quarantine state. |
-| [`5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1`](https://github.com/JustYannicc/codex-lb/commit/5ab3dc1b5ce5d1242b112f56cb980181e96cfcc1) | Use the service scheduler for owner cleanup waits and event batcher tasks and timeouts. |
-| [`8e52e6e8ab5a3eaff587ef514bc8be5cad964359`](https://github.com/JustYannicc/codex-lb/commit/8e52e6e8ab5a3eaff587ef514bc8be5cad964359) | Preserve synthesized-marker provenance and raw input identity. Keep shape proof separate from legacy v2 signatures and reject epoch-bound forwards without it. |
-| [`ddf3d70942717365a7cc691a685554cfb46cce68`](https://github.com/JustYannicc/codex-lb/commit/ddf3d70942717365a7cc691a685554cfb46cce68) | Preserve deployed migration bytes and parents while joining upstream. Retain current credit helper behavior. |
-| [`f55e9cfddcccb80b15edffff30c65095f1be52b9`](https://github.com/JustYannicc/codex-lb/commit/f55e9cfddcccb80b15edffff30c65095f1be52b9) | Combine precise reset evidence and compare-and-swap rollback with spendable-credit and unknown-plan exhaustion rules. |
-| [`160c03adac4780128a239ee3ebed1981d7e95ef7`](https://github.com/JustYannicc/codex-lb/commit/160c03adac4780128a239ee3ebed1981d7e95ef7) | Combine pre-dispatch drain recovery and release-before-local-reserve ordering with input-shape and injected-anchor ownership checks. |
-| [`c4703734cf5d2b6817b1ebb593e5acccc586022e`](https://github.com/JustYannicc/codex-lb/commit/c4703734cf5d2b6817b1ebb593e5acccc586022e) | Join the repaired reset-recovery migration head and update the alias test for generalized long-window evidence. |
-| [`2fedc5cf376c2000ce29d6ca207bb739d507b518`](https://github.com/JustYannicc/codex-lb/commit/2fedc5cf376c2000ce29d6ca207bb739d507b518) | Align bridge registration, scheduler and external-turn fixtures with the composed provenance contracts. |
-| [`0ef59c36a2b7e8b30441d45b951f8db93a24e079`](https://github.com/JustYannicc/codex-lb/commit/0ef59c36a2b7e8b30441d45b951f8db93a24e079) | Align dynamic import, native capability and frame budget fixtures. Register PostgreSQL migration coverage. |
-| [`9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f`](https://github.com/JustYannicc/codex-lb/commit/9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f) | Prove branch-specific downgrade preserves upstream siblings and denied WebSocket anchors retire before the next complete request. |
-| [`ebd1cc702f0710e6c40656046ee17432ce8db5e7`](https://github.com/JustYannicc/codex-lb/commit/ebd1cc702f0710e6c40656046ee17432ce8db5e7) | Preserve ownership fences while allowing validated fresh replay of unknown synthesized markers. |
-
-### Superseded inputs
-
-The manifest records these three older inputs as superseded within the accepted composition.
-
-| Older input | Replacement or disposition |
-| --- | --- |
-| [#1953](https://github.com/Soju06/codex-lb/pull/1953) | Replaced by [#2276](https://github.com/Soju06/codex-lb/pull/2276), [#2277](https://github.com/Soju06/codex-lb/pull/2277) and [#2283](https://github.com/Soju06/codex-lb/pull/2283) |
-| [#2078](https://github.com/Soju06/codex-lb/pull/2078) | Accepted concern already included through the manifest's upstream base |
-| [#2092](https://github.com/Soju06/codex-lb/pull/2092) | Accepted concern already included through the manifest's upstream base |
-
-The manifest also records [#2265](https://github.com/Soju06/codex-lb/pull/2265) and [#2281](https://github.com/Soju06/codex-lb/pull/2281) as included through upstream. Its exclusion records and supplementary dispositions cover work outside the 37 selected sources, including deferred [#2289](https://github.com/Soju06/codex-lb/pull/2289).
-
-### Dated upstream observations and runtime proof
-
-The [September 10 freshness audit](/Users/justyannicc/.codex/codex-lb-operations/reports/integrated-refresh-postpg-20260910/receipt.md) observed seven selected sources merged upstream at 2026-09-10 05:57:39 UTC: [#2193](https://github.com/Soju06/codex-lb/pull/2193), [#2206](https://github.com/Soju06/codex-lb/pull/2206), [#2234](https://github.com/Soju06/codex-lb/pull/2234), [#2236](https://github.com/Soju06/codex-lb/pull/2236), [#2253](https://github.com/Soju06/codex-lb/pull/2253), [#2260](https://github.com/Soju06/codex-lb/pull/2260), [#2283](https://github.com/Soju06/codex-lb/pull/2283). These are historical observations, not current pull request status. Their accepted source pins remain listed above.
-
-The same audit recorded main at `0f6a31c56ac30804ca1c0fac27ca02c6f59bf2b0` at 2026-09-10 05:57:55 UTC. That newer main is not integrated in the composition documented here. Reconciliation of later main commits and changed source pins remains separate work.
-
-The [PostgreSQL delivery receipt](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-delivery.md) and [root acceptance record](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-root-acceptance.json) bind the accepted source to its image and live checks. Those receipts describe source `971322208a831e3b02c7cae3bf5e7c7046e15fe9`, not live acceptance of the additions above. They provide later deployment evidence than the tracked verification record, whose pending-acceptance notes describe its earlier checkpoint. These operations links refer to local records on the operator's Mac and are unavailable in a standalone clone.
+The [selection audit](openspec/changes/reconcile-local-runtime-20260909/selection-audit.md) records earlier source decisions. The [composition note](openspec/changes/reconcile-local-runtime-20260909/composition-2306-2307-2310.md) records the bounded additions and proof ownership. Historical [PostgreSQL acceptance](/Users/justyannicc/.codex/codex-lb-operations/reports/postgres-root-acceptance.json) applies to source `971322208a831e3b02c7cae3bf5e7c7046e15fe9`, not these additions; that operations link is local to the operator's Mac.
 
 ## Features
 
