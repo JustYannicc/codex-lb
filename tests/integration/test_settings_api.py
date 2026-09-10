@@ -365,6 +365,11 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "circuit_breaker_enabled",
         # M3 codex prewarm
         "http_responses_session_bridge_codex_prewarm_enabled",
+        # M2 background jobs
+        "auth_guardian_enabled",
+        "automations_scheduler_enabled",
+        "rate_limit_reset_credits_refresh_enabled",
+        "conversation_archive_enabled",  # M5 conversation archive
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -1834,11 +1839,11 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client)
 
 
 @pytest.mark.asyncio
-async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
+async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client):
+    # M2 background jobs: the gate reads the effective (dashboard) toggle, not the env alias.
+    disabled = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["rateLimitResetCreditsRefreshEnabled"] is False
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1850,20 +1855,63 @@ async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(a
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    assert "Background jobs" in response.json()["error"]["message"]
+
+    # Re-enabling polling in the same request satisfies the gate: the proposed
+    # effective value is what counts, and so does clearing the dashboard value
+    # back to the inherited (env default = on) layer.
+    both = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": True},
+    )
+    assert both.status_code == 200
+    assert both.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+    reset = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert reset.status_code == 200
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
 
 
 @pytest.mark.asyncio
-async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
+async def test_disabling_polling_is_rejected_while_auto_redeem_is_on(async_client):
+    """M2 background jobs: the gate is symmetric — the other direction cannot create the same dead state."""
+    opt_in = await async_client.put("/api/settings", json={"autoRedeemResetCreditsBeforeExpiry": True})
+    assert opt_in.status_code == 200
+    assert opt_in.json()["autoRedeemResetCreditsBeforeExpiry"] is True
 
+    response = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    current = await async_client.get("/api/settings")
+    assert current.json()["rateLimitResetCreditsRefreshEnabled"] is True
+
+    # Turning both off in one request is consistent, so it is accepted.
+    both_off = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert both_off.status_code == 200
+    assert both_off.json()["rateLimitResetCreditsRefreshEnabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client):
     async with SessionLocal() as session:
         await session.execute(
-            text("UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1 WHERE id = 1")
+            text(
+                "UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1, "
+                "rate_limit_reset_credits_refresh_enabled = 0 WHERE id = 1"
+            )
         )
         await session.commit()
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1874,6 +1922,82 @@ async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disable
 
     assert response.status_code == 200
     assert response.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_api_background_job_toggles_round_trip_with_provenance(async_client, monkeypatch):
+    """M2 background jobs: default -> dashboard -> cleared/env -> unchanged on omit, plus the topology flag."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    for camel in ("authGuardianEnabled", "automationsSchedulerEnabled", "rateLimitResetCreditsRefreshEnabled"):
+        assert payload[camel] is True
+    assert payload["authGuardianBlockedByTopology"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert payload["provenance"][name] == {"source": "default", "envValue": True, "default": True}
+
+    # Storing a value (including the inherited one) makes the toggle dashboard-owned.
+    stored = await async_client.put(
+        "/api/settings",
+        json={
+            "authGuardianEnabled": True,
+            "automationsSchedulerEnabled": False,
+            "rateLimitResetCreditsRefreshEnabled": False,
+        },
+    )
+    assert stored.status_code == 200
+    stored_payload = stored.json()
+    assert stored_payload["authGuardianEnabled"] is True
+    assert stored_payload["automationsSchedulerEnabled"] is False
+    assert stored_payload["rateLimitResetCreditsRefreshEnabled"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert stored_payload["provenance"][name]["source"] == "dashboard"
+
+    # Explicit null clears the column; a deprecated env alias that differs from
+    # the default is inherited, and the topology gate is reported alongside.
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "auth_guardian_enabled": False,
+            "leader_election_enabled": False,
+            "http_responses_session_bridge_instance_ring": ["pod-a", "pod-b"],
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"authGuardianEnabled": None, "rateLimitResetCreditsRefreshEnabled": None}
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["authGuardianEnabled"] is False
+    assert cleared_payload["authGuardianBlockedByTopology"] is True
+    assert cleared_payload["provenance"]["auth_guardian_enabled"] == {
+        "source": "env",
+        "envValue": False,
+        "default": True,
+    }
+    assert cleared_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"] == {
+        "source": "default",
+        "envValue": True,
+        "default": True,
+    }
+    assert cleared_payload["automationsSchedulerEnabled"] is False
+    assert cleared_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+
+    # Omitting the fields (any unrelated save) leaves every toggle as it was.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["provenance"]["auth_guardian_enabled"]["source"] == "env"
+    assert unchanged_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+    assert unchanged_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.auth_guardian_enabled is None
+        assert row.automations_scheduler_enabled is False
+        assert row.rate_limit_reset_credits_refresh_enabled is None
 
 
 # --- C2-2 routing/overload: dashboard-managed routing weights and isolation ---
@@ -2200,3 +2324,189 @@ async def test_settings_api_codex_prewarm_dashboard_value_reaches_the_bridge_res
     cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
     assert cleared.status_code == 200
     assert await prewarm_enabled_for_the_next_request() is False
+
+
+# M4 model catalogue: per-model context window overrides sub-API.
+_OVERRIDES_PATH = "/api/settings/model-context-window-overrides"
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_overrides_round_trip_with_provenance(async_client, monkeypatch):
+    initial = await async_client.get(_OVERRIDES_PATH)
+    assert initial.status_code == 200
+    assert initial.json() == {"overrides": []}
+
+    # The environment dict is the per-slug fallback and is reported as such.
+    environment = settings_api_module.get_app_settings().model_copy(
+        update={"model_context_window_overrides": {"gpt-5.4": 300_000}}
+    )
+    monkeypatch.setattr(settings_api_module, "get_app_settings", lambda: environment)
+    inherited = await async_client.get(_OVERRIDES_PATH)
+    assert inherited.json() == {
+        "overrides": [{"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000}]
+    }
+
+    # A dashboard row wins for its slug and still reports the environment value.
+    stored = await async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json={"contextWindow": 515_000})
+    assert stored.status_code == 200
+    assert stored.json()["overrides"] == [
+        {"slug": "gpt-5.4", "contextWindow": 515_000, "source": "dashboard", "envValue": 300_000}
+    ]
+
+    # Rows for slugs the environment does not know have no environment value.
+    added = await async_client.put(f"{_OVERRIDES_PATH}/custom-model", json={"contextWindow": 32_768})
+    assert added.status_code == 200
+    assert added.json()["overrides"] == [
+        {"slug": "custom-model", "contextWindow": 32_768, "source": "dashboard", "envValue": None},
+        {"slug": "gpt-5.4", "contextWindow": 515_000, "source": "dashboard", "envValue": 300_000},
+    ]
+
+    # PUT on an existing slug updates in place (no duplicate row).
+    updated = await async_client.put(f"{_OVERRIDES_PATH}/custom-model", json={"contextWindow": 65_536})
+    assert [o["contextWindow"] for o in updated.json()["overrides"] if o["slug"] == "custom-model"] == [65_536]
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("SELECT slug, context_window FROM model_context_window_overrides"))).all()
+    assert sorted(tuple(row) for row in rows) == [("custom-model", 65_536), ("gpt-5.4", 515_000)]
+
+    # Deleting the row returns the slug to the environment entry; deleting a
+    # dashboard-only slug removes it from the list.
+    cleared = await async_client.delete(f"{_OVERRIDES_PATH}/gpt-5.4")
+    assert cleared.status_code == 200
+    assert cleared.json()["overrides"] == [
+        {"slug": "custom-model", "contextWindow": 65_536, "source": "dashboard", "envValue": None},
+        {"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000},
+    ]
+    removed = await async_client.delete(f"{_OVERRIDES_PATH}/custom-model")
+    assert removed.json()["overrides"] == [
+        {"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_delete_without_row_is_not_found(async_client, monkeypatch):
+    environment = settings_api_module.get_app_settings().model_copy(
+        update={"model_context_window_overrides": {"gpt-5.4": 300_000}}
+    )
+    monkeypatch.setattr(settings_api_module, "get_app_settings", lambda: environment)
+    # An environment-inherited entry has no dashboard row to delete.
+    response = await async_client.delete(f"{_OVERRIDES_PATH}/gpt-5.4")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "model_context_window_override_not_found"
+    assert (await async_client.delete(f"{_OVERRIDES_PATH}/never-stored")).status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contextWindow": 0},
+        {"contextWindow": -1},
+        {"contextWindow": 1.5},
+        # A token count is an integer: a float, a numeric string and a bool are
+        # operator mistakes, not values to coerce into a stored window.
+        {"contextWindow": 515000.0},
+        {"contextWindow": "515000"},
+        {"contextWindow": True},
+        {"contextWindow": None},
+        # Wider than the database Integer column: a 422, not a commit-time 500.
+        {"contextWindow": 2_147_483_648},
+        {},
+    ],
+)
+async def test_model_context_window_override_rejects_invalid_window(async_client, payload):
+    response = await async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json=payload)
+    assert response.status_code == 422
+    assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+# The padded variants must be rejected, not silently trimmed into "gpt-5.4".
+@pytest.mark.parametrize("slug", ["%20", "gpt%205.4", "a%09b", "%20gpt-5.4", "gpt-5.4%20", "x" * 257])
+async def test_model_context_window_override_rejects_invalid_slug(async_client, slug):
+    response = await async_client.put(f"{_OVERRIDES_PATH}/{slug}", json={"contextWindow": 1000})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_model_slug"
+    assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_concurrent_creates_of_one_slug_both_succeed(async_client):
+    # Create-or-replace is one upsert statement, so two writers racing on the
+    # same previously absent slug cannot leave one of them with a primary-key 500.
+    import asyncio
+
+    responses = await asyncio.gather(
+        *(
+            async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json={"contextWindow": window})
+            for window in (515_000, 400_000)
+        )
+    )
+    assert [response.status_code for response in responses] == [200, 200]
+    listed = (await async_client.get(_OVERRIDES_PATH)).json()["overrides"]
+    assert [entry["slug"] for entry in listed] == ["gpt-5.4"]
+    assert listed[0]["contextWindow"] in {515_000, 400_000}
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_slug_may_contain_a_slash(async_client):
+    # Source-catalog slugs such as "vendor/model" are reachable through the
+    # path-typed segment.
+    response = await async_client.put(f"{_OVERRIDES_PATH}/vendor/model-a", json={"contextWindow": 4096})
+    assert response.status_code == 200
+    assert response.json()["overrides"][0]["slug"] == "vendor/model-a"
+    assert (await async_client.delete(f"{_OVERRIDES_PATH}/vendor/model-a")).status_code == 200
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_settings_api_conversation_archive_round_trip_with_provenance(async_client, monkeypatch):
+    """default -> dashboard on -> cleared/env -> unchanged on omit; the archive dir is read-only."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["conversationArchiveEnabled"] is False
+    assert payload["provenance"]["conversation_archive_enabled"] == {
+        "source": "default",
+        "envValue": False,
+        "default": False,
+    }
+    # T1 directory of this replica, shown read-only next to the toggle.
+    assert payload["conversationArchiveDir"] == str(settings_service.get_settings().conversation_archive_dir)
+
+    enabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["conversationArchiveEnabled"] is True
+    assert enabled.json()["provenance"]["conversation_archive_enabled"]["source"] == "dashboard"
+
+    # The directory is not writable through the API (unknown fields are ignored).
+    renamed = await async_client.put("/api/settings", json={"conversationArchiveDir": "/elsewhere"})
+    assert renamed.status_code == 200
+    assert renamed.json()["conversationArchiveDir"] == payload["conversationArchiveDir"]
+
+    # Explicit null clears the column; the deprecated env alias applies again.
+    inherited = settings_service.get_settings().model_copy(update={"conversation_archive_enabled": True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"conversationArchiveEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["conversationArchiveEnabled"] is True
+    assert cleared.json()["provenance"]["conversation_archive_enabled"] == {
+        "source": "env",
+        "envValue": True,
+        "default": False,
+    }
+
+    # Omitting the field (any unrelated save) never copies the inherited value
+    # into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"]["conversation_archive_enabled"]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.conversation_archive_enabled is None
+
+
+# end M5 conversation archive
