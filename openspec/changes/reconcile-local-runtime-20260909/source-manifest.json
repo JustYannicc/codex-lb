@@ -729,6 +729,12 @@
     {
       "commit": "9eddfb00a0e4b2b13ae419b66d7f0929ac6f3e6f",
       "contract": "Prove branch-specific migration downgrade without removing current upstream siblings; prove real WebSocket denied-anchor retirement on the subsequent complete request."
+    },
+    {
+      "commit": "ebd1cc702f0710e6c40656046ee17432ce8db5e7",
+      "adapted_from": "1eb00f11adba2699be3626b2db44c50a48a27a8d",
+      "base": "971322208a831e3b02c7cae3bf5e7c7046e15fe9",
+      "contract": "Treat unknown synthesized turn-state markers as placeholders only when the complete original request passes the existing account-neutral fresh-replay validator. Preserve previous-response, known marker, bridge, file and opaque ownership fences across HTTP bridge, direct HTTP streaming and WebSocket admission."
     }
   ],
   "supplementary_pr_dispositions": [
