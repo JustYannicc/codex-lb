@@ -7,6 +7,7 @@
 ## 2. Verify and deliver
 
 - [x] 2.1 Verify SQLite and PostgreSQL populated upgrades, merge-only downgrade, roundtrip, single head and drift.
-- [ ] 2.2 Run affected ERR controls, lint, typing and strict OpenSpec validation.
-- [ ] 2.3 Complete independent Medium review, archive/sync verified specs and push normally.
-- [ ] 2.4 Own hosted CI/review until green and acknowledged handoff.
+- [x] 2.2 Run affected ERR controls, lint, typing and strict OpenSpec validation.
+- [x] 2.3 Complete independent Medium review and sync verified migration requirements.
+
+Publication and hosted CI/review remain required delivery work. The repair owner tracks them in `reports/pr2330-migration-20260910/` under the operations directory and retains the watcher until readiness acknowledges the handoff.
