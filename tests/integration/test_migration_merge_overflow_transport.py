@@ -182,14 +182,14 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert result.current_revision == head
     assert _revisions(database.engine) == (head,)
     merged = _state(database.engine)
-    # Revisions after the merge add nullable dashboard_settings columns (for
-    # example the resilience toggles); they must start NULL and are compared
-    # separately so this test keeps covering the two original branches.
+    # Later nullable overrides start NULL; reset pooling explicitly defaults
+    # to disabled. Compare these additions separately from the original branches.
     merged_settings = [dict(row) for row in merged["settings"]]
     added_columns = set(merged_settings[0]) - set(expected_settings[0])
     for row in merged_settings:
         for column in added_columns:
-            assert row.pop(column) is None
+            expected_default = 0 if column == "desktop_reset_pool_enabled" else None
+            assert row.pop(column) == expected_default
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])

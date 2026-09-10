@@ -22,7 +22,7 @@ The system MUST default Desktop reset pooling to disabled and expose its policy 
 
 ### Requirement: Inventory reflects genuine available credits
 
-The enabled native reset list and optional usage reset summary MUST use the same complete fresh pool inventory. They MUST exclude paused, deactivated, reauthentication-required, pending-deletion and expired contributions. Missing, stale or inconsistent observations MUST NOT become invented credits. Credits MUST retain their genuine IDs, type and expiry, and duplicate IDs with different owners MUST be rejected as ambiguous. Refresh concurrency MUST be bounded and each concurrent operation MUST own its database session. Inventory failure MUST NOT replace otherwise valid pooled quota with fabricated quota or reset counts.
+The enabled native reset list and optional usage reset summary MUST use the same complete fresh pool inventory. They MUST exclude paused, deactivated, reauthentication-required, pending-deletion and expired contributions. Missing, stale or inconsistent observations MUST NOT become invented credits. Credits MUST retain their genuine IDs, type and expiry, and duplicate IDs with different owners MUST be rejected as ambiguous. Refresh concurrency MUST be bounded and each concurrent operation MUST own its database session. Inventory refresh MUST release its database session before waiting for upstream credit HTTP responses. Inventory failure MUST NOT replace otherwise valid pooled quota with fabricated quota or reset counts.
 
 #### Scenario: Credits from two accounts are available
 
@@ -66,3 +66,29 @@ Before upstream consumption, the system MUST durably bind caller identity and re
 
 - **WHEN** upstream reports no credit, nothing to reset or an uncertain transport result
 - **THEN** the native response preserves that outcome without switching accounts or claiming success
+
+#### Scenario: Redemption ledgers disagree
+
+- **WHEN** the helper ledger and permanent Desktop binding disagree for the same request
+- **THEN** the endpoint returns HTTP 409 with `reset_credit_request_conflict` without consuming a credit
+
+
+### Requirement: Reset pooling shares one migration head with main
+
+The database MUST upgrade to one Alembic head from either the reset-pooling revision or the main revision. Upgrading MUST preserve existing settings and redemption bindings. Downgrading only the merge MUST preserve both parent schemas and their data.
+
+#### Scenario: Existing reset binding survives integration
+
+- **WHEN** a database at the reset-pooling revision contains a redemption binding and upgrades to head
+- **THEN** the original owner and credit binding remain unchanged
+- **AND** the resulting schema matches the application models
+
+#### Scenario: Main database enables the new schema
+
+- **WHEN** a database at the main revision upgrades to head
+- **THEN** reset pooling defaults to disabled and existing settings remain unchanged
+
+#### Scenario: Operator reverses only the merge
+
+- **WHEN** the merge revision downgrades to either immediate parent
+- **THEN** both parent stamps and all settings and bindings remain intact

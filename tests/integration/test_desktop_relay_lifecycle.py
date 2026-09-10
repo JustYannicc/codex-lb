@@ -9,11 +9,19 @@ import pytest
 from aiohttp import ClientConnectorError, ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestServer
 
+from app.core.config.settings import get_settings
 from app.modules.desktop_relay import lifecycle
 from app.modules.desktop_relay.api import _create_app
 from app.modules.desktop_relay.transport import RelayTransport
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def restore_settings(monkeypatch):
+    yield
+    monkeypatch.undo()
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -182,7 +190,6 @@ async def test_normal_lifespan_owns_listener_and_closes_it_before_shared_clients
     db_setup, monkeypatch, relay_port, mode
 ):
     import app.main as main
-    from app.core.config.settings import get_settings
 
     monkeypatch.setenv("CODEX_LB_DESKTOP_RELAY_MODE", mode)
     monkeypatch.setenv("HOST", "0.0.0.0")
@@ -219,7 +226,6 @@ async def test_normal_lifespan_owns_listener_and_closes_it_before_shared_clients
 
 async def test_normal_lifespan_cleans_main_resources_when_relay_startup_fails(db_setup, monkeypatch):
     import app.main as main
-    from app.core.config.settings import get_settings
 
     monkeypatch.setenv("CODEX_LB_DESKTOP_RELAY_MODE", "container")
     monkeypatch.setenv("HOST", "0.0.0.0")

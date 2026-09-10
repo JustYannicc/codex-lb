@@ -161,6 +161,8 @@ class DesktopResetService:
                     bound_credit_id=pin.credit_id,
                 )
             except DashboardConflictError as error:
+                if error.code == "reset_credit_request_conflict":
+                    raise ResetRequestConflict() from None
                 if error.code == "no_available_reset_credit":
                     return no_credit()
                 raise ResetPoolUnavailable("Reset credit redemption could not complete") from None

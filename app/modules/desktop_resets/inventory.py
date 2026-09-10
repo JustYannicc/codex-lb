@@ -91,10 +91,12 @@ class CreditInventory:
             if not eligible(account):
                 raise ResetPoolUnavailable()
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
-            result = await fetch_reset_credits(
-                TokenEncryptor().decrypt(account.access_token_encrypted),
-                account.chatgpt_account_id,
-                route=route,
-                allow_direct_egress=route is None,
-            )
+            token = TokenEncryptor().decrypt(account.access_token_encrypted)
+            upstream_account_id = account.chatgpt_account_id
+        result = await fetch_reset_credits(
+            token,
+            upstream_account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
         await self.store.set_if_generation(account_id, build_snapshot(result), generation)

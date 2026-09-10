@@ -78,8 +78,12 @@ async def test_inventory_failure_awaits_cancelled_sibling(async_client, db_setup
     assert sibling_stopped.is_set()
 
 
-@pytest.mark.parametrize("change", ["policy", "owner", "caller", "identity"])
-async def test_admission_is_rechecked_immediately_before_consumption(async_client, db_setup, monkeypatch, change):
+@pytest.mark.parametrize(
+    ("change", "expected_status"), [("policy", 401), ("owner", 503), ("caller", 401), ("identity", 503)]
+)
+async def test_admission_is_rechecked_immediately_before_consumption(
+    async_client, db_setup, monkeypatch, change, expected_status
+):
     fake = await seed(monkeypatch)
 
     async def change_before_consume(account):
@@ -99,7 +103,7 @@ async def test_admission_is_rechecked_immediately_before_consumption(async_clien
 
     monkeypatch.setattr("app.modules.desktop_resets.service._consume_route", change_before_consume)
     response = await async_client.post(URL + "/consume", headers=HEADERS, json={"redeem_request_id": "changed"})
-    assert response.status_code in {401, 503}, response.text
+    assert response.status_code == expected_status, response.text
     assert not fake.calls
     assert not fake.spent
 
@@ -207,3 +211,50 @@ async def test_reauthorized_owner_cannot_redirect_a_pinned_retry(async_client, d
     response = await async_client.post(URL + "/consume", headers=HEADERS, json=payload)
     assert response.status_code == 503, response.text
     assert len(fake.calls) == 1
+
+
+async def test_disagreeing_helper_binding_returns_permanent_conflict(async_client, db_setup, monkeypatch):
+    fake = await seed(monkeypatch, pooled=False)
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id="primary",
+                redeem_request_id="disagreement",
+                credit_id="different-credit",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+    response = await async_client.post(URL + "/consume", headers=HEADERS, json={"redeem_request_id": "disagreement"})
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "reset_credit_request_conflict"
+    assert not fake.calls
+
+
+async def test_inventory_releases_database_connections_before_upstream_io(async_client, db_setup, monkeypatch):
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    fake = await seed(monkeypatch)
+    checked_out = {}
+
+    def checkout(connection, record, proxy):
+        checked_out[record] = asyncio.current_task()
+
+    def checkin(connection, record):
+        checked_out.pop(record, None)
+
+    async def fetch_without_connection(token, account_id, **kwargs):
+        assert asyncio.current_task() not in checked_out.values()
+        return await fake.fetch(token, account_id, **kwargs)
+
+    event.listen(Engine, "checkout", checkout)
+    event.listen(Engine, "checkin", checkin)
+    monkeypatch.setattr("app.modules.desktop_resets.inventory.fetch_reset_credits", fetch_without_connection)
+    try:
+        response = await async_client.get(URL, headers=HEADERS)
+        assert response.status_code == 200, response.text
+        assert response.json()["available_count"] == 2
+    finally:
+        event.remove(Engine, "checkout", checkout)
+        event.remove(Engine, "checkin", checkin)

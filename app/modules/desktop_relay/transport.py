@@ -97,7 +97,7 @@ async def _pump(
         elif message.type == WSMsgType.PONG:
             await target.pong(message.data)
         elif message.type == WSMsgType.CLOSE:
-            await target.close(code=message.data, message=(message.extra or "").encode("utf-8"))
+            await target.close(code=message.data or 1000, message=(message.extra or "").encode("utf-8"))
             return
         elif message.type in {WSMsgType.ERROR, WSMsgType.CLOSED, WSMsgType.CLOSING}:
             await target.close(code=source.close_code or 1011)

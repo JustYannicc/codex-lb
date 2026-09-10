@@ -260,6 +260,24 @@ async def test_websocket_preserves_upstream_close_code_and_reason():
             assert message.extra == "expired"
 
 
+async def test_websocket_empty_upstream_close_becomes_normal_close():
+    async def upstream(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        assert request.transport is not None
+        # RFC 6455 permits a CLOSE frame with no status payload.
+        request.transport.write(b"\x88\x00")
+        await ws.receive()
+        return ws
+
+    async with servers(upstream) as (client, relay):
+        async with client.ws_connect(relay.make_url("/backend-api/ws"), headers={"Host": "localhost:8000"}) as ws:
+            message = await ws.receive(timeout=2)
+            assert message.type == WSMsgType.CLOSE
+            assert message.data == 1000
+            assert message.extra == ""
+
+
 async def test_compressed_request_body_retains_encoding():
     import gzip
 

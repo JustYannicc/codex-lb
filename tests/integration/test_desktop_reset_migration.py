@@ -67,3 +67,42 @@ async def test_reset_pool_downgrade_retains_redemption_bindings(migration_url):
             assert await connection.scalar(text("SELECT COUNT(*) FROM desktop_reset_credit_redemptions")) == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("starting_revision", [REVISION, "20260910_000000_request_logs_missing_cost_index"])
+async def test_populated_branch_upgrade_and_merge_downgrade_preserve_settings_and_bindings(
+    migration_url, starting_revision
+):
+    url = migration_url
+    await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("UPDATE dashboard_settings SET sticky_threads_enabled = false WHERE id=1"))
+            if starting_revision == REVISION:
+                await connection.execute(
+                    text(
+                        "INSERT INTO desktop_reset_credit_redemptions "
+                        "VALUES ('caller','attempt','deleted-owner','upstream-owner','credit',CURRENT_TIMESTAMP)"
+                    )
+                )
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        async with engine.connect() as connection:
+            assert not await connection.scalar(text("SELECT sticky_threads_enabled FROM dashboard_settings WHERE id=1"))
+            assert not await connection.scalar(
+                text("SELECT desktop_reset_pool_enabled FROM dashboard_settings WHERE id=1")
+            )
+            before = (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all()
+            assert len(before) == (1 if starting_revision == REVISION else 0)
+            if before:
+                assert tuple(before[0][:5]) == ("caller", "attempt", "deleted-owner", "upstream-owner", "credit")
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), starting_revision))
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT * FROM desktop_reset_credit_redemptions"))).all() == before
+            revisions = set((await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars())
+            assert revisions == {REVISION, "20260910_000000_request_logs_missing_cost_index"}
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+    finally:
+        await engine.dispose()
