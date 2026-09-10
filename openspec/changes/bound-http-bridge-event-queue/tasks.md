@@ -127,5 +127,15 @@ PR delivery record.
 - [x] 13.2 Prove combined routed-client dispatch and assess retry/backoff overlap with queue and completion ownership
 - [x] 13.3 Run isolated affected tests, strict specs, and independent reviews on the composed candidate
 
-The existing delivery-stall, aggregate replay-budget, native, and performance
-acceptance decisions remain open. This composition does not choose a policy.
+The later September 10 disposition accepts live-only budget scope and the
+delivery-stall failure/cleanup outcome. Numeric stall duration, native, and
+performance acceptance remain open. See section 14.
+
+## 14. Accepted delivery-stall contract
+
+- [x] 14.1 Reconcile live-only budget scope and accepted retained-prefix/failure/EOS, reservation release, and sibling-progress requirements with the September 10 maintainer disposition
+- [x] 14.2 Prepare duration-independent regression design and identify limits of existing deadline proofs in `accepted-stall-contract.md`
+- [ ] 14.3 Obtain the maintainer's numeric maximum continuous delivery stall
+- [ ] 14.4 Prove the public/shared-reader regression fails for the missing stall bound with request deadlines still in the future, then implement the accepted bound
+- [ ] 14.5 Prove retained-prefix/failure/EOS, blocked and retained byte accounting, real reservation settlement, same-session sibling success, and cancellation/timer cleanup
+- [ ] 14.6 Complete required checks, independent candidate review, and hosted verification before claiming the stall path delivered
