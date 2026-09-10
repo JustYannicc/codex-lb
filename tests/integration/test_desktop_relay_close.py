@@ -12,6 +12,7 @@ async def test_empty_upstream_close_reaches_desktop_as_normal_closure():
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         # Emit a valid close frame with no status payload at the peer boundary.
+        assert ws._writer is not None
         await ws._writer.send_frame(b"", WSMsgType.CLOSE)
         await ws.receive()
         return ws
