@@ -17542,7 +17542,12 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
-        {"model": "gpt-5.4", "instructions": "hi", "input": "hello"},
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            # Opaque state exercises owner fallback and the legacy-forward fence.
+            "input": [{"type": "reasoning", "encrypted_content": "opaque-test-state", "summary": []}],
+        },
     )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-fallback-owner-proof",
