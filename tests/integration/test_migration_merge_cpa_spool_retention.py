@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from app.core.config.settings import get_settings
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
 from app.db.migration_url import to_sync_database_url
+from tests.integration.test_migration_merge_cpa_guest import _assert_historical_identity_drift
 
 pytestmark = pytest.mark.integration
 
@@ -143,10 +144,7 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
         for old, new in zip(before[table]["rows"], merged[table]["rows"], strict=True):
             assert {column: new[column] for column in old} == old
     historical_drift = check_schema_drift(database.url)
-    assert len(historical_drift) == 1
-    assert historical_drift[0].startswith(
-        "('add_column', None, 'dashboard_settings', Column('guest_session_generation', Integer()"
-    )
+    _assert_historical_identity_drift(historical_drift, missing_guest=True)
 
     for parent in _PARENTS:
         if parent not in database.parents:
