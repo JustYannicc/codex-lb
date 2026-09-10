@@ -13,3 +13,7 @@ All seven implementation tasks complete. The added durable-observation requireme
 - Independent standards/spec reviews found no code or requirement violations. The spec review's session-key test gap was addressed above.
 
 No routing, health, callback, settlement, or drain ownership changes. No frontend or new settings. PostgreSQL resources were removed after proof. Hosted CI and maintainer review are tracked separately in the PR delivery receipt.
+
+## Main migration composition
+
+Main d6a7ca662 added the guest-session sibling migration. A populated public upgrade reproduced MultipleHeads before correction. Original affinity migration blob 058d2f59aa0c880c56b7392dce4ce4a932985e47 is unchanged; a no-op merge joins the two published histories. SQLite five lifecycle tests and PostgreSQL fresh/bootstrap plus both populated parent histories pass. Merge-only downgrade preserves both heads and complete synthetic account/log data plus guest generation; reupgrade has no schema drift. Disposable PostgreSQL resources were removed. Independent composition review found no actionable issue. Public permission/metadata and guest-session compatibility checks pass against this main revision.

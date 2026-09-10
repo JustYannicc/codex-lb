@@ -13,6 +13,8 @@ pytestmark = pytest.mark.integration
 
 _PARENT = "20260910_010000_dashboard_spool_retention"
 _REVISION = "20260910_143000_request_log_affinity"
+_GUEST = "20260908_000000_add_guest_session_generation"
+_HEAD = "20260910_180000_merge_affinity_guest_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 
 
@@ -39,7 +41,7 @@ def test_populated_upgrade_and_downgrade_preserve_logs_and_ownership(tmp_path: P
             )
             before = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
             owner = tuple(connection.execute(text("SELECT * FROM accounts")).one())
-        run_upgrade(url, "head", bootstrap_legacy=False)
+        run_upgrade(url, _REVISION, bootstrap_legacy=False)
         with engine.begin() as connection:
             after = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
             assert {column: after.pop(column) for column in _COLUMNS} == dict.fromkeys(_COLUMNS)
@@ -65,9 +67,10 @@ def test_fresh_upgrade_has_single_affinity_head_and_nullable_metadata(tmp_path: 
     path = tmp_path / "fresh.sqlite"
     url = f"sqlite+aiosqlite:///{path}"
     script = ScriptDirectory.from_config(_build_alembic_config(url))
-    assert script.get_heads() == [_REVISION]
+    assert script.get_heads() == [_HEAD]
+    assert script.get_revision(_HEAD).down_revision == (_REVISION, _GUEST)
     assert script.get_revision(_REVISION).down_revision == _PARENT
-    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _REVISION
+    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
     assert check_schema_drift(url) == ()
     engine = create_engine(f"sqlite:///{path}")
     try:
@@ -96,10 +99,78 @@ def test_bootstrap_existing_schema_preserves_affinity_values(tmp_path: Path) -> 
             )
             before = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
         result = run_upgrade(url, "head", bootstrap_legacy=True)
-        assert result.current_revision == _REVISION
+        assert result.current_revision == _HEAD
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             after = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
             assert {name: after[name] for name in before} == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("starting_revision", [_REVISION, _GUEST])
+def test_populated_branch_merge_preserves_affinity_and_guest_state(tmp_path: Path, starting_revision: str) -> None:
+    path = tmp_path / "populated-branch.sqlite"
+    _prove_populated_branch_merge(f"sqlite+aiosqlite:///{path}", starting_revision)
+
+
+def _prove_populated_branch_merge(url: str, starting_revision: str) -> None:
+    engine = create_engine(url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg"))
+    try:
+        run_upgrade(url, starting_revision, bootstrap_legacy=False)
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO accounts (id, codex_installation_id, email, plan_type,
+                    access_token_encrypted, refresh_token_encrypted, id_token_encrypted, last_refresh, status)
+                VALUES ('merge-owner', 'synthetic-installation', 'synthetic@example.invalid', 'plus',
+                    :token, :token, :token, '2026-09-10 00:00:00', 'active')
+            """),
+                {"token": b"synthetic"},
+            )
+            connection.execute(
+                text("""
+                INSERT INTO request_logs (account_id, request_id, model, status)
+                VALUES ('merge-owner', 'synthetic-merge', 'synthetic-model', 'success')
+            """)
+            )
+            if starting_revision == _REVISION:
+                connection.execute(
+                    text("""
+                    UPDATE request_logs SET sticky_key_source='session_id',
+                        sticky_kind='session', sticky_key_hash='synthetic-hash'
+                """)
+                )
+            else:
+                connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=7 WHERE id=1"))
+            owner = dict(connection.execute(text("SELECT * FROM accounts")).mappings().one())
+            before = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
+        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+        with engine.begin() as connection:
+            after = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
+            assert {name: after[name] for name in before} == before
+            if starting_revision == _GUEST:
+                assert {name: after[name] for name in _COLUMNS} == dict.fromkeys(_COLUMNS)
+            assert connection.execute(
+                text("SELECT guest_session_generation FROM dashboard_settings WHERE id=1")
+            ).scalar_one() == (7 if starting_revision == _GUEST else 0)
+            connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=9 WHERE id=1"))
+        command.downgrade(_build_alembic_config(url), starting_revision)
+        with engine.connect() as connection:
+            assert set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars()) == {
+                _REVISION,
+                _GUEST,
+            }
+            assert dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one()) == after
+            assert dict(connection.execute(text("SELECT * FROM accounts")).mappings().one()) == owner
+            assert (
+                connection.execute(
+                    text("SELECT guest_session_generation FROM dashboard_settings WHERE id=1")
+                ).scalar_one()
+                == 9
+            )
+        assert check_schema_drift(url) == ()
+        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+        assert check_schema_drift(url) == ()
     finally:
         engine.dispose()

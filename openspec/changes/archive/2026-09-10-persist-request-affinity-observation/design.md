@@ -24,4 +24,4 @@ Use 16 hexadecimal SHA-256 characters as requested. This enables equality groupi
 
 ## Migration Plan
 
-Add nullable columns after `20260910_010000_dashboard_spool_retention`, verified on upstream `6d11e560c9324a5f2ad7a0c6260780f1d2df2ea9`. Historical values remain null. Downgrade removes only these columns. Live migration is outside this task; hosted delivery goes to readiness after verification.
+Add nullable columns after `20260910_010000_dashboard_spool_retention`. Preserve this published revision and its parent. Main `d6a7ca662860e2b427e462f434319273bcd240bd` added a sibling guest-session migration during review; the public populated upgrade reproduced the resulting two-head failure. Append the no-op `20260910_180000_merge_affinity_guest_heads` revision joining affinity and guest-session histories. Both populated parent histories must upgrade without losing data; merge-only downgrade and reupgrade must leave schema and data intact. Historical affinity values remain null. Downgrading the affinity branch removes only its columns. Live migration is outside this task; hosted delivery goes to readiness after verification.
