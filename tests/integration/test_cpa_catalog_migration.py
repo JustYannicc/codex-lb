@@ -15,7 +15,7 @@ from app.db.session import engine
 pytestmark = pytest.mark.integration
 
 _PARENT = "20260910_000000_request_logs_missing_cost_index"
-_HEAD = "20260910_040000_merge_cpa_dashboard_identity"
+_HEAD = "20260910_050000_merge_cpa_dashboard_invites"
 
 
 def test_cpa_catalog_migration_preserves_manual_sources(tmp_path):

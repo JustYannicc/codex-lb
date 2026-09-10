@@ -28,9 +28,11 @@ _LEGACY_SECRET = b"\x00legacy-encrypted-totp\xff"
 _USER_SECRET = b"\x00user-encrypted-totp\xfe"
 
 
-def test_cpa_dashboard_identity_merge_is_only_head_and_keeps_original_parents(tmp_path: Path) -> None:
+def test_cpa_dashboard_identity_merge_is_on_single_head_graph_and_keeps_original_parents(tmp_path: Path) -> None:
     script = ScriptDirectory.from_config(_build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}"))
-    assert script.get_heads() == [_MERGE]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     expected_parents = {
@@ -45,7 +47,7 @@ def test_cpa_dashboard_identity_merge_is_only_head_and_keeps_original_parents(tm
         assert original is not None and original.down_revision == parent
 
 
-def _state(engine: Engine) -> dict[str, Any]:
+def _state(engine: Engine, *, include_invites: bool = False) -> dict[str, Any]:
     with engine.connect() as connection:
         inspector = inspect(connection)
         result = {}
@@ -59,6 +61,7 @@ def _state(engine: Engine) -> dict[str, Any]:
             "dashboard_identities",
             "api_keys",
             "audit_logs",
+            *(("dashboard_user_invites",) if include_invites else ()),
         ):
             if not inspector.has_table(table):
                 continue
@@ -143,6 +146,40 @@ def _seed_branch(engine: Engine, revision: str) -> None:
         )
 
 
+def _seed_common(engine: Engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO model_sources (id, name, base_url, api_key_encrypted) "
+                "VALUES ('retained', 'CPA', 'http://localhost:8317/v1', :key)"
+            ),
+            {"key": _KEY},
+        )
+        connection.execute(text("INSERT INTO model_source_models (source_id, model) VALUES ('retained', 'kept-model')"))
+        connection.execute(
+            text(
+                f"UPDATE dashboard_settings SET {_RETENTION} = 86400.5, guest_session_generation = 7, "
+                "password_hash = '$2b$legacy-admin', totp_secret_encrypted = :secret, "
+                "totp_last_verified_step = 42 WHERE id = 1"
+            ),
+            {"secret": _LEGACY_SECRET},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
+                "VALUES ('retained-key', 'Retained key', 'retained-key-hash', 'retained-prefix', :active)"
+            ),
+            {"active": False},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO audit_logs (timestamp, action, actor_ip, details, request_id) "
+                "VALUES ('2026-09-10 12:34:56', 'historical.action', '192.0.2.2', "
+                "'historical details', 'historical-request')"
+            )
+        )
+
+
 @pytest.fixture(params=[(_CPA,), (_IDENTITY,), _PARENTS], ids=["cpa-parent", "identity-parent", "both-parents"])
 def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) -> Iterator[_BranchDatabase]:
     configured_url = get_settings().database_url
@@ -155,39 +192,7 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) ->
                 connection.execute(text("DROP SCHEMA public CASCADE"))
                 connection.execute(text("CREATE SCHEMA public"))
         run_upgrade(url, _COMMON, bootstrap_legacy=False)
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "INSERT INTO model_sources (id, name, base_url, api_key_encrypted) "
-                    "VALUES ('retained', 'CPA', 'http://localhost:8317/v1', :key)"
-                ),
-                {"key": _KEY},
-            )
-            connection.execute(
-                text("INSERT INTO model_source_models (source_id, model) VALUES ('retained', 'kept-model')")
-            )
-            connection.execute(
-                text(
-                    f"UPDATE dashboard_settings SET {_RETENTION} = 86400.5, guest_session_generation = 7, "
-                    "password_hash = '$2b$legacy-admin', totp_secret_encrypted = :secret, "
-                    "totp_last_verified_step = 42 WHERE id = 1"
-                ),
-                {"secret": _LEGACY_SECRET},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
-                    "VALUES ('retained-key', 'Retained key', 'retained-key-hash', 'retained-prefix', :active)"
-                ),
-                {"active": False},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO audit_logs (timestamp, action, actor_ip, details, request_id) "
-                    "VALUES ('2026-09-10 12:34:56', 'historical.action', '192.0.2.2', "
-                    "'historical details', 'historical-request')"
-                )
-            )
+        _seed_common(engine)
         parents = request.param
         for revision in parents:
             run_upgrade(url, revision, bootstrap_legacy=False)
@@ -201,7 +206,7 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) ->
 def test_populated_branches_merge_and_downgrade_without_data_loss(branch_database: _BranchDatabase) -> None:
     database = branch_database
     before = _state(database.engine)
-    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
+    result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
     assert result.current_revision == _MERGE
     assert _revisions(database.engine) == (_MERGE,)
     merged = _state(database.engine)
@@ -255,7 +260,9 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
         assert attributed["target_type"] == "api_key"
         assert attributed["target_id"] == "retained-key"
         assert attributed["severity"] == "warning"
-    assert check_schema_drift(database.url) == ()
+    historical_drift = check_schema_drift(database.url)
+    assert len(historical_drift) == 1
+    assert historical_drift[0].startswith("('add_table', Table('dashboard_user_invites',")
 
     for parent in _PARENTS:
         if parent not in database.parents:
@@ -265,9 +272,15 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
         command.downgrade(_build_alembic_config(database.url), parent)
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
-        result = run_upgrade(database.url, "head", bootstrap_legacy=False)
+        assert check_schema_drift(database.url) == historical_drift
+        result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
         assert result.current_revision == _MERGE
         assert _revisions(database.engine) == (_MERGE,)
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
+        assert check_schema_drift(database.url) == historical_drift
+
+    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
+    script = ScriptDirectory.from_config(_build_alembic_config(database.url))
+    assert result.current_revision == script.get_heads()[0]
+    assert _state(database.engine) == populated
+    assert check_schema_drift(database.url) == ()

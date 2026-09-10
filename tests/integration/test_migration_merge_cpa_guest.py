@@ -177,7 +177,13 @@ def _assert_historical_identity_drift(drift: tuple[str, ...], *, missing_guest: 
     expected_prefixes = [
         *(
             f"('add_table', Table('{table}',"
-            for table in ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
+            for table in (
+                "dashboard_roles",
+                "dashboard_role_grants",
+                "dashboard_users",
+                "dashboard_identities",
+                "dashboard_user_invites",
+            )
         ),
         "('add_index', Index('idx_dashboard_identities_user_id',",
         "('add_index', Index('idx_audit_logs_actor_user_id',",
