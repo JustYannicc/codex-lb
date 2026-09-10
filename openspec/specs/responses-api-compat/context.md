@@ -463,3 +463,7 @@ A complete request containing a notes read can therefore retry on eligible B aft
 ## Stateless turn-state placeholders
 
 A proxy-generated marker can be echoed after WebSocket acceptance even if no upstream account was selected. Treating that marker alone as a missing continuation owner blocked fresh requests in pools with multiple accounts. HTTP bridge, raw HTTP and direct WebSocket now retain placeholder behavior only when the complete original body passes the existing account-neutral fresh-replay validator. They do not project or remove fields to make it pass. Opaque history and unresolved tool outputs still need owner evidence; a successful fresh request does not prove those continuations recovered.
+
+## Detached retirement sweep deadline
+
+Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
