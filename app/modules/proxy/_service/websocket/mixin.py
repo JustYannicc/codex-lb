@@ -7013,8 +7013,12 @@ class _WebSocketMixin:
                 ):
                     penalty_code = request_error_code
                     penalty_message = request_error_message
-                    penalty_model = request_state.model
-                    penalty_service_tier = request_state.service_tier
+                    if request_state.error_code_override or all(
+                        (pending.model, pending.service_tier) == (request_state.model, request_state.service_tier)
+                        for pending in remaining
+                    ):
+                        penalty_model = request_state.model
+                        penalty_service_tier = request_state.service_tier
                     break
 
         reservation_release_succeeded = True

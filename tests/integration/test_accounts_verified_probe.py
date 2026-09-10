@@ -316,3 +316,56 @@ async def test_malformed_stream_preserves_hold(async_client, monkeypatch, held_a
     assert response.json()["probeCompleted"] is False
     assert response.json()["holdRecovered"] is False
     assert (await account_snapshot(held_account))[0] == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("other_model", "other_tier", "can_recover"),
+    [("gpt-5.4", "default", False), ("gpt-6-astra", "priority", False), ("gpt-6-astra", "default", True)],
+)
+async def test_probe_preserves_ambiguous_shared_websocket_hold(
+    async_client, app_instance, monkeypatch, held_account, other_model, other_tier, can_recover
+):
+    import time
+    from collections import deque
+
+    import anyio
+
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy.service import _WebSocketRequestState
+
+    service = get_proxy_service_for_app(app_instance)
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_by_id(held_account)
+        assert account is not None
+        session.expunge(account)
+    pending = deque(
+        _WebSocketRequestState(
+            request_id=request_id,
+            model=model,
+            service_tier=tier,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+        )
+        for request_id, model, tier in (
+            ("shared-first", "gpt-6-astra", "default"),
+            ("shared-other", other_model, other_tier),
+        )
+    )
+    assert await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=held_account,
+        pending_requests=pending,
+        pending_lock=anyio.Lock(),
+        error_code="usage_limit_reached",
+        error_message="shared upstream failure",
+        api_key=None,
+    )
+    upstream(monkeypatch)
+    response = await async_client.post(f"/api/accounts/{held_account}/probe", json={"model": "gpt-6-astra"})
+    assert response.status_code == 200
+    assert response.json()["probeCompleted"] is True
+    assert response.json()["holdRecovered"] is can_recover
+    snapshot = await account_snapshot(held_account)
+    assert snapshot[0] == (AccountStatus.ACTIVE if can_recover else AccountStatus.RATE_LIMITED)
