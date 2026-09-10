@@ -337,6 +337,8 @@ async def test_dashboard_user_composition_preserves_roles_sessions_and_reset_bin
                     for table in tables
                 }
         await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
+        # Alembic uses another connection; discard prepared SELECT * plans after its DDL.
+        await engine.dispose()
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
         async with engine.connect() as connection:
             settings_after = (await connection.execute(text("SELECT * FROM dashboard_settings"))).mappings().one()
