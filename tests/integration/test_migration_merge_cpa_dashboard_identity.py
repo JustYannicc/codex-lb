@@ -21,7 +21,7 @@ pytestmark = pytest.mark.integration
 
 _COMMON = "20260908_000000_add_guest_session_generation"
 _CPA = "20260910_030000_merge_cpa_guest_heads"
-_IDENTITY = "20260909_020000_reproject_compat_admin_credentials"
+_IDENTITY = "20260909_030000_add_audit_actor_columns"
 _PARENTS = (_CPA, _IDENTITY)
 _MERGE = "20260910_040000_merge_cpa_dashboard_identity"
 _LEGACY_SECRET = b"\x00legacy-encrypted-totp\xff"
@@ -35,7 +35,8 @@ def test_cpa_dashboard_identity_merge_is_only_head_and_keeps_original_parents(tm
     assert merge is not None and merge.down_revision == _PARENTS
     expected_parents = {
         _CPA: ("20260910_020000_merge_cpa_spool_retention", _COMMON),
-        _IDENTITY: "20260909_010000_add_dashboard_users",
+        _IDENTITY: "20260909_020000_reproject_compat_admin_credentials",
+        "20260909_020000_reproject_compat_admin_credentials": "20260909_010000_add_dashboard_users",
         "20260909_010000_add_dashboard_users": "20260909_000000_add_dashboard_roles",
         "20260909_000000_add_dashboard_roles": _COMMON,
     }
@@ -57,6 +58,7 @@ def _state(engine: Engine) -> dict[str, Any]:
             "dashboard_users",
             "dashboard_identities",
             "api_keys",
+            "audit_logs",
         ):
             if not inspector.has_table(table):
                 continue
@@ -114,6 +116,21 @@ def _seed_branch(engine: Engine, revision: str) -> None:
                 "'retained-provider', 'retained-subject', '[\"ops\"]')"
             )
         )
+        connection.execute(
+            text(
+                "UPDATE api_keys SET owner_user_id = 'retained-user', created_by_user_id = 'retained-user', "
+                "deactivated_reason = 'manual' WHERE id = 'retained-key'"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO audit_logs (timestamp, action, actor_ip, details, request_id, actor_user_id, "
+                "actor_username, actor_role_slug, auth_method, target_type, target_id, severity) "
+                "VALUES ('2026-09-10 12:34:56.123456', 'api_key.disable', '192.0.2.1', 'retained details', "
+                "'attributed-request', 'retained-user', 'retained-user', 'retained-role', 'password', "
+                "'api_key', 'retained-key', 'warning')"
+            )
+        )
         # The user row became authoritative at this parent. Replaying the
         # credential projection during a merge would overwrite these bytes.
         connection.execute(
@@ -157,6 +174,20 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path, db_setup) ->
                 ),
                 {"secret": _LEGACY_SECRET},
             )
+            connection.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
+                    "VALUES ('retained-key', 'Retained key', 'retained-key-hash', 'retained-prefix', :active)"
+                ),
+                {"active": False},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO audit_logs (timestamp, action, actor_ip, details, request_id) "
+                    "VALUES ('2026-09-10 12:34:56', 'historical.action', '192.0.2.2', "
+                    "'historical details', 'historical-request')"
+                )
+            )
         parents = request.param
         for revision in parents:
             run_upgrade(url, revision, bootstrap_legacy=False)
@@ -186,8 +217,13 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
     for table, old_state in before.items():
         new_state = merged[table]
         for old, new in zip(old_state["rows"], new_state["rows"], strict=True):
-            assert {column: new[column] for column in old} == old
-        if table not in ("model_sources", "api_keys"):
+            expected = dict(old)
+            if table == "audit_logs" and _IDENTITY not in database.parents and database.engine.dialect.name == "sqlite":
+                # The audit revision pads second-precision SQLite text once.
+                assert old["timestamp"] == "2026-09-10 12:34:56"
+                expected["timestamp"] = "2026-09-10 12:34:56.000000"
+            assert {column: new[column] for column in old} == expected
+        if table not in ("model_sources", "api_keys", "audit_logs"):
             assert new_state == old_state
     users = {row["username"]: row for row in merged["dashboard_users"]["rows"]}
     if _IDENTITY in database.parents:
@@ -200,6 +236,25 @@ def test_populated_branches_merge_and_downgrade_without_data_loss(branch_databas
         assert users["admin"]["totp_secret_encrypted"] == _LEGACY_SECRET
         assert users["admin"]["totp_last_verified_step"] == 42
         assert users["admin"]["session_generation"] == 0
+    key = merged["api_keys"]["rows"][0]
+    assert key["key_hash"] == "retained-key-hash"
+    assert key["owner_user_id"] == ("retained-user" if _IDENTITY in database.parents else None)
+    assert key["created_by_user_id"] == key["owner_user_id"]
+    assert key["deactivated_reason"] == ("manual" if _IDENTITY in database.parents else None)
+    audit = {row["request_id"]: row for row in merged["audit_logs"]["rows"]}
+    historical = audit["historical-request"]
+    assert historical["severity"] == "info"
+    for column in ("actor_user_id", "actor_username", "actor_role_slug", "auth_method", "target_type", "target_id"):
+        assert historical[column] is None
+    if _IDENTITY in database.parents:
+        attributed = audit["attributed-request"]
+        assert attributed["actor_user_id"] == "retained-user"
+        assert attributed["actor_username"] == "retained-user"
+        assert attributed["actor_role_slug"] == "retained-role"
+        assert attributed["auth_method"] == "password"
+        assert attributed["target_type"] == "api_key"
+        assert attributed["target_id"] == "retained-key"
+        assert attributed["severity"] == "warning"
     assert check_schema_drift(database.url) == ()
 
     for parent in _PARENTS:

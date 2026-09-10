@@ -6,6 +6,7 @@ import pytest
 from aiohttp import web
 from httpx import ASGITransport, AsyncClient
 
+from app.core.audit.service import drain_audit_log_tasks
 from tests.integration.model_source_helpers import stub_source_upstreams
 
 pytestmark = pytest.mark.integration
@@ -151,3 +152,27 @@ async def test_guest_cannot_change_cpa_source_and_revocation_preserves_public_ca
             assert login.status_code == 200
             assert (await other_admin.delete(f"/api/model-sources/{source_id}")).status_code == 204
             assert (await guest.get("/api/model-sources/")).json()["sources"] == []
+
+            assert await drain_audit_log_tasks(5.0)
+            audit = await other_admin.get("/api/audit-logs", params={"target_type": "model_source"})
+            assert audit.status_code == 200, audit.text
+            entries = audit.json()
+            # Only the three accepted mutations produce source audit events.
+            assert sorted(entry["action"] for entry in entries) == [
+                "model_source_created",
+                "model_source_deleted",
+                "model_source_updated",
+            ]
+            for entry in entries:
+                assert entry["actor"] == {
+                    "userId": setup.json()["user"]["id"],
+                    "username": "admin",
+                    "roleSlug": "admin",
+                    "authMethod": "password",
+                }
+                assert entry["target"] == {"type": "model_source", "id": source_id}
+                assert entry["actorIp"] == "203.0.113.31"
+            assert "fixture-cpa-key" not in audit.text
+            guest_audit = await guest.get("/api/audit-logs", params={"target_type": "model_source"})
+            assert guest_audit.status_code == 403
+            assert guest_audit.json()["error"]["code"] == "permission_required"

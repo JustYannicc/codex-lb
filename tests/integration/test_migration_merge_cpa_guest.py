@@ -180,6 +180,20 @@ def _assert_historical_identity_drift(drift: tuple[str, ...], *, missing_guest: 
             for table in ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
         ),
         "('add_index', Index('idx_dashboard_identities_user_id',",
+        "('add_index', Index('idx_audit_logs_actor_user_id',",
+        "('add_index', Index('idx_audit_logs_target',",
+        *(
+            f"('add_column', None, 'audit_logs', Column('{column}',"
+            for column in (
+                "actor_user_id",
+                "actor_username",
+                "actor_role_slug",
+                "auth_method",
+                "target_type",
+                "target_id",
+                "severity",
+            )
+        ),
         *(
             f"('add_column', None, 'api_keys', Column('{column}',"
             for column in ("owner_user_id", "created_by_user_id", "deactivated_reason")

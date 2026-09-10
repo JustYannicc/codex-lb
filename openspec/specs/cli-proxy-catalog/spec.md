@@ -111,7 +111,7 @@ CPA Responses forwarding SHALL normalize supported aliases in nested allowed-too
 
 ### Requirement: Dashboard identity migration convergence
 
-CPA catalog and dashboard identity migration histories SHALL converge through an append-only merge revision without changing published revisions. Upgrades SHALL preserve existing CPA source identities, encrypted source keys, catalog state, retention settings and guest generation. Existing role rows, grants and user identities and credentials SHALL remain intact after their identity parent has completed. Upgrades from older histories SHALL apply the existing identity migrations' documented legacy credential conversion.
+CPA catalog and dashboard identity migration histories SHALL converge through an append-only merge revision without changing published revisions. Upgrades SHALL preserve existing CPA source identities, encrypted source keys, catalog state, retention settings and guest generation. Existing role rows, grants and user identities and credentials SHALL remain intact after their identity parent has completed. Upgrades from older histories SHALL apply the existing identity migrations' documented legacy credential conversion and audit timestamp normalization. Audit history and existing actor/target attribution SHALL remain intact.
 
 #### Scenario: Populated independent histories
 
