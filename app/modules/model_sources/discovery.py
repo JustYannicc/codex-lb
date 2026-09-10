@@ -31,11 +31,16 @@ async def refresh_cpa_catalogs() -> None:
             select(ModelSource.id).where(ModelSource.catalog_mode == "cli_proxy_api", ModelSource.is_enabled.is_(True))
         )
         source_ids = list(result.scalars())
-    # Every acquisition owns its sessions, and all work ends with this request.
-    for offset in range(0, len(source_ids), 4):
-        async with asyncio.TaskGroup() as group:
-            for source_id in source_ids[offset : offset + 4]:
-                group.create_task(_refresh_source(source_id))
+    # One budget covers every source. TaskGroup drains cancelled acquisitions
+    # before returning the stored catalog, including on client disconnect.
+    try:
+        async with asyncio.timeout(_TIMEOUT_SECONDS):
+            for offset in range(0, len(source_ids), 4):
+                async with asyncio.TaskGroup() as group:
+                    for source_id in source_ids[offset : offset + 4]:
+                        group.create_task(_refresh_source(source_id))
+    except TimeoutError:
+        logger.warning("CPA catalog refresh budget exhausted; serving stored catalog")
 
 
 async def _refresh_source(source_id: str) -> None:

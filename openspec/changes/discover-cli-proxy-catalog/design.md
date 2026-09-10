@@ -8,9 +8,9 @@ Keep acquisition and reconciliation behind one model-source discovery interface.
 
 ## Decisions
 
-Opt in through a persisted source catalog mode, defaulting to manual. This is a source topology choice, not a global environment setting. Acquire during catalog reads with a bounded refresh interval, and store the last successful models. This avoids a second scheduled background lifecycle and makes discovery follow actual catalog use.
+Opt in through a persisted source catalog mode, defaulting to manual. This is a source topology choice, not a global environment setting. Acquire during catalog reads with a 60-second per-source refresh interval and one five-second acquisition budget across all sources. Store the last successful models. This avoids a second scheduled background lifecycle and makes discovery follow actual catalog use.
 
-Fetch outside database transactions. Reconcile under a source configuration/concurrency fence. Validate the entire response before applying it. Update existing rows in place and mark omissions disabled, preserving ownership and history. Existing disabled-source routing supplies an explicit error instead of native fallback.
+Fetch outside database transactions. Reconcile under a source configuration/concurrency fence. Validate the entire response before applying it. Require context metadata instead of inheriting the manual-source 128k fallback; enforce display-name and PostgreSQL integer bounds. An upstream template value is still a claim, even when structurally valid. Update existing rows in place and mark omissions disabled, preserving ownership and history. Existing disabled-source routing supplies an explicit error instead of native fallback.
 
 Follow successful CPA list omissions for picker visibility and restore reappearing entries. This conservative, reversible assumption isolates the still-open suspension question; it does not infer permanent removal.
 

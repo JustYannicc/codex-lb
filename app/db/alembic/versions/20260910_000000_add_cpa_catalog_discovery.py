@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260910_000000_add_cpa_catalog_discovery"
-down_revision = "20260909_090000_dashboard_background_job_toggles"
+down_revision = "20260910_000000_request_logs_missing_cost_index"
 branch_labels = None
 depends_on = None
 

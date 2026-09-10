@@ -2,7 +2,7 @@
 
 Expose separately operated CLIProxyAPI model catalogs through CodexLB while preserving native subscription ownership and unavailable external identities.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Automatic external discovery
 

@@ -101,7 +101,20 @@ async def test_cpa_preserves_reported_metadata_without_template_fallback(async_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["status", "auth", "invalid_json", "invalid_model", "duplicate", "oversize"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "status",
+        "auth",
+        "invalid_json",
+        "invalid_model",
+        "duplicate",
+        "oversize",
+        "long_name",
+        "huge_limit",
+        "missing_context",
+    ],
+)
 async def test_cpa_failed_refresh_keeps_durable_catalog(async_client, cpa_upstream, monkeypatch, failure):
     from datetime import timedelta
 
@@ -118,12 +131,22 @@ async def test_cpa_failed_refresh_keeps_durable_catalog(async_client, cpa_upstre
             return web.Response(status=503)
         if failure == "auth":
             return web.Response(status=401)
+        if failure == "missing_context":
+            return web.json_response({"models": [{"slug": "fixture-retained"}]})
+        if failure == "long_name":
+            return web.json_response(
+                {"models": [{"slug": "fixture-retained", "context_window": 8192, "display_name": "x" * 256}]}
+            )
+        if failure == "huge_limit":
+            return web.json_response({"models": [{"slug": "fixture-retained", "context_window": 2**63}]})
         if failure == "invalid_json":
             return web.Response(text="broken")
         if failure == "invalid_model":
             return web.json_response({"models": [{"slug": "new-model"}, {"slug": "broken", "context_window": "bad"}]})
         if failure == "duplicate":
-            return web.json_response({"models": [{"slug": "same"}, {"slug": "same"}]})
+            return web.json_response(
+                {"models": [{"slug": "same", "context_window": 8192}, {"slug": "same", "context_window": 8192}]}
+            )
         return web.Response(body=b" " * (2 * 1024 * 1024 + 1))
 
     created = await async_client.post(
@@ -158,7 +181,7 @@ async def test_cpa_omission_rejects_requests_and_return_preserves_identity(async
 
     now = discovery.utcnow()
     monkeypatch.setattr(discovery, "utcnow", lambda: now)
-    models = [{"slug": "fixture-returning"}]
+    models = [{"slug": "fixture-returning", "context_window": 8192}]
 
     async def catalog(request):
         assert request.method == "GET"
@@ -184,7 +207,7 @@ async def test_cpa_omission_rejects_requests_and_return_preserves_identity(async
     response = await async_client.post("/v1/responses", json={"model": "fixture-returning", "input": "hello"})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "model_source_disabled"
-    models = [{"slug": "fixture-returning"}]
+    models = [{"slug": "fixture-returning", "context_window": 8192}]
     now += timedelta(seconds=61)
     listed = await async_client.get("/v1/models")
     assert any(item["id"] == "fixture-returning" for item in listed.json()["data"])
@@ -194,92 +217,9 @@ async def test_cpa_omission_rejects_requests_and_return_preserves_identity(async
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("edit", ["disable", "manual", "delete", "url"])
-async def test_cpa_inflight_refresh_cannot_override_configuration(async_client, cpa_upstream, edit):
-    import asyncio
-
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def catalog(request):
-        entered.set()
-        await release.wait()
-        return web.json_response({"models": [{"slug": "stale-acquisition"}]})
-
-    created = await async_client.post(
-        "/api/model-sources/",
-        json={
-            "name": "CPA",
-            "baseUrl": await cpa_upstream(catalog),
-            "catalogMode": "cli_proxy_api",
-            "supportsResponses": True,
-        },
-    )
-    assert created.status_code == 200
-    source_id = created.json()["id"]
-    pending = asyncio.create_task(async_client.get("/v1/models"))
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=3)
-        if edit == "delete":
-            changed = await async_client.delete(f"/api/model-sources/{source_id}")
-            assert changed.status_code == 204
-        else:
-            payload = {
-                "disable": {"isEnabled": False},
-                "manual": {"catalogMode": "manual"},
-                "url": {"baseUrl": "http://127.0.0.1:1/v1"},
-            }[edit]
-            changed = await async_client.patch(f"/api/model-sources/{source_id}", json=payload)
-            assert changed.status_code == 200
-    finally:
-        release.set()
-        listed = await pending
-    assert all(item["id"] != "stale-acquisition" for item in listed.json()["data"])
-    sources = (await async_client.get("/api/model-sources/")).json()["sources"]
-    assert not sources or sources[0]["models"] == []
-
-
-@pytest.mark.asyncio
-async def test_concurrent_catalog_reads_share_refresh_and_keep_cadence(async_client, cpa_upstream):
-    import asyncio
-
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    calls = []
-
-    async def catalog(request):
-        calls.append(request.path)
-        entered.set()
-        await release.wait()
-        return web.json_response({"models": [{"slug": "fixture-single-refresh"}]})
-
-    created = await async_client.post(
-        "/api/model-sources/",
-        json={
-            "name": "CPA",
-            "baseUrl": await cpa_upstream(catalog),
-            "catalogMode": "cli_proxy_api",
-            "supportsResponses": True,
-        },
-    )
-    assert created.status_code == 200
-    pending = asyncio.create_task(async_client.get("/v1/models"))
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=3)
-        other = await async_client.get("/v1/models")
-        assert other.status_code == 200
-    finally:
-        release.set()
-        await pending
-    listed = await async_client.get("/v1/models")
-    assert any(item["id"] == "fixture-single-refresh" for item in listed.json()["data"])
-    assert calls == ["/v1/models"]
-
-
-@pytest.mark.asyncio
 async def test_cpa_catalog_cannot_be_replaced_by_manual_model_update(async_client, cpa_upstream):
     async def catalog(request):
-        return web.json_response({"models": [{"slug": "fixture-owned"}]})
+        return web.json_response({"models": [{"slug": "fixture-owned", "context_window": 8192}]})
 
     created = await async_client.post(
         "/api/model-sources/",

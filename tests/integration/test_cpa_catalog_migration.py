@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
 
-_PARENT = "20260909_090000_dashboard_background_job_toggles"
+_PARENT = "20260910_000000_request_logs_missing_cost_index"
 _HEAD = "20260910_000000_add_cpa_catalog_discovery"
 
 

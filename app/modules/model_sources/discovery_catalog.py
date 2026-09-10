@@ -18,12 +18,12 @@ class CpaReasoningLevel(BaseModel):
 class CpaCatalogModel(BaseModel):
     model_config = ConfigDict(strict=True)
     slug: str = Field(min_length=1, max_length=255, pattern=r"^\S+$")
-    display_name: str | None = None
+    display_name: str | None = Field(default=None, max_length=255)
     description: str | None = None
     support_verbosity: bool = False
     default_verbosity: str | None = None
-    context_window: int | None = Field(default=None, gt=0)
-    max_tokens: int | None = Field(default=None, gt=0)
+    context_window: int = Field(gt=0, le=2**31 - 1)
+    max_tokens: int | None = Field(default=None, gt=0, le=2**31 - 1)
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     supports_parallel_tool_calls: bool = False
     supported_reasoning_levels: list[CpaReasoningLevel] = Field(default_factory=list)
