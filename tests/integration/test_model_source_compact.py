@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from aiohttp import web
 
+from app.core.openai.model_registry import get_model_registry
 from tests.integration.model_source_helpers import _create_model_source, _enable_api_key_auth, stub_source_upstreams
 
 pytestmark = pytest.mark.integration
@@ -188,3 +191,51 @@ async def test_compact_uses_enforced_model_and_assigned_source(async_client, rou
     assert response.status_code == 200, response.text
     assert received[0][0] == "Bearer token-assigned"
     assert received[0][1]["model"] == "external-compact-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/responses/compact", "/backend-api/codex/responses/compact"])
+async def test_compact_retains_enforced_tier_in_source_request_log(async_client, route):
+    registry = get_model_registry()
+    model = replace(registry.get_models_for_metadata()["gpt-5.6-sol"], raw={"service_tiers": [{"slug": "default"}]})
+    await registry.update(
+        {"pro": [model]},
+        per_account_results={"fixture-account": ("pro", [model])},
+        active_account_plans={"fixture-account": "pro"},
+    )
+    received = []
+
+    async def compact(request):
+        received.append(await request.json())
+        return web.json_response(
+            {
+                "id": "cmp_tier",
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "state"}],
+                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+            }
+        )
+
+    async with stub_source_upstreams() as start:
+        base = await start(compact)
+        source_id = await _create_model_source(
+            async_client, name="tier", model="gpt-5.6-sol", base_url=base, supports_responses=True
+        )
+        await _enable_api_key_auth(async_client)
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={"name": "tier", "assignedSourceIds": [source_id], "enforcedServiceTier": "priority"},
+        )
+        assert created.status_code == 200, created.text
+        response = await async_client.post(
+            route,
+            headers={"Authorization": f"Bearer {created.json()['key']}"},
+            json={"model": "gpt-5.6-sol", "instructions": "Compact", "input": []},
+        )
+
+    assert response.status_code == 200, response.text
+    logs = await async_client.get("/api/request-logs")
+    assert logs.status_code == 200, logs.text
+    row = next(row for row in logs.json()["requests"] if row["requestId"] == "cmp_tier")
+    assert row["requestedServiceTier"] == "priority"
+    assert row["serviceTier"] is None
