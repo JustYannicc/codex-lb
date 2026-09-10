@@ -422,6 +422,7 @@ accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
 
+<<<<<<< HEAD
 ## HTTP response ownership before delivery
 
 An HTTP response can expose its upstream ID before the detached request-log write finishes. The stream now publishes each authoritative lifecycle ID to the existing bounded process cache before delivering that event, beginning with `response.created` when present. An immediate follow-up can resolve the selected account while the original stream or its log write is still pending. This is same-process owner readiness; it does not promise that an unfinished response is already usable by the upstream provider.
@@ -443,3 +444,8 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+=======
+## Stateless turn-state placeholders
+
+A proxy-generated marker can be echoed after WebSocket acceptance even if no upstream account was selected. Treating that marker alone as a missing continuation owner blocked fresh requests in pools with multiple accounts. HTTP bridge, raw HTTP and direct WebSocket now retain placeholder behavior only when the complete original body passes the existing account-neutral fresh-replay validator. They do not project or remove fields to make it pass. Opaque history and unresolved tool outputs still need owner evidence; a successful fresh request does not prove those continuations recovered.
+>>>>>>> 743c96313 (fix(proxy): retain stateless turn-state placeholder compatibility)
