@@ -2460,24 +2460,39 @@ that reused the same instance id.
 Capability-gated forwards MUST carry `x-codex-bridge-owner-process-epoch`
 with the proven process epoch, authenticated by the exact-body signature.
 The receiving owner MUST reject a signed epoch unequal to its local process
-epoch before continuity selection. These forwards MUST NOT include a legacy
-primary signature or accept primary-signature fallback, so a predecessor
-process that ignores the epoch cannot accept the request after a rollback.
+epoch before continuity selection. These forwards MUST carry only
+`x-codex-bridge-input-shape-signature-v2` as their body proof and MUST NOT
+include either the legacy primary signature or the public
+`x-codex-bridge-signature-v2` proof. A predecessor process that ignores the
+epoch therefore cannot accept the request after a rollback.
 
 An upgraded owner-forward request MUST advertise
 `x-codex-bridge-input-shape-version: 2` when it posts a body whose exact input
-shape is known. The value MUST be included in the exact-body bridge signature.
+shape is known. The exact posted body, marker value, and optional owner process
+epoch MUST be authenticated by the independent
+`x-codex-bridge-input-shape-signature-v2` proof.
 The owner MUST trust the current-shape mode only when that signature validates
 with the same header value; a missing, malformed, or primary-signature-only
 marker MUST keep legacy compatibility classification. Receivers implementing
 this versioned input-shape contract MUST reject an unsupported nonempty
 version before the forwarded request reaches continuity selection.
 
+For ordinary forwards, `x-codex-bridge-signature-v2` MUST retain the public
+pre-input-shape codec: it signs `model_dump_for_forwarding()` and MUST NOT add
+the input-shape marker or owner process epoch to its structured payload. The
+origin MUST send this proof alongside the independent exact-shape proof so a
+pre-input-shape owner can authenticate file-bound forwards without using the
+legacy primary fallback. An upgraded receiver MUST also accept the previously
+deployed shape-v2 layout in which the exact-shape proof bytes were carried in
+`x-codex-bridge-signature-v2`; this acceptance MUST still require the signed
+marker and, when present, the matching local owner process epoch.
+
 The marker advertises the origin's input-shape provenance, not the selected
 owner's capability. For inputs whose current and legacy classifications agree,
 forwarding MUST NOT require classifier capability proof and MUST retain the
 existing primary-signature fallback, subject to its existing restrictions.
-A predecessor owner may ignore the additive marker and validate that fallback.
+A predecessor owner may ignore the additive marker and exact-shape proof and
+validate the public full-context proof, including for file-bound requests.
 The origin MUST NOT remove a known-shape marker merely because the destination
 lacks classifier capability proof.
 

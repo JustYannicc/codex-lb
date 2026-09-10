@@ -103,6 +103,8 @@ async def test_owner_forward_checks_proven_epoch_at_http_receive(
         assert request.headers[forwarding.HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER] == "proven-process"
         assert forwarding.HTTP_BRIDGE_SIGNATURE_HEADER not in request.headers
         assert forwarding.HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER not in request.headers
+        assert forwarding.HTTP_BRIDGE_SIGNATURE_V2_HEADER not in request.headers
+        assert forwarding.HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER in request.headers
         wire_payload = ResponsesRequest.model_validate(await request.json())
         forwarded, error = forwarding.parse_forwarded_request(
             request.headers,
@@ -171,7 +173,7 @@ def test_epoch_bound_forward_cannot_downgrade(
     elif tamper == "strip-shape-marker":
         headers.pop(forwarding.HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER)
     else:
-        headers.pop(forwarding.HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+        headers.pop(forwarding.HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER)
         if tamper == "primary-only":
             headers[forwarding.HTTP_BRIDGE_SIGNATURE_HEADER] = forwarding._bridge_forward_signature(
                 payload=payload,

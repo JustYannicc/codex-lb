@@ -67,16 +67,10 @@ HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
-# Additive tamper-proofing header (#1203): a second signature bound to the
-# exact forwarding body (``model_dump_for_http_bridge_owner_forwarding``) that is posted, so an
-# in-transit rewrite injecting ``"tools": []`` is detected even though the
-# primary signature hashes a plain ``model_dump`` that synthesizes the same
-# empty list. Orthogonal to ``x-codex-bridge-signature-version`` below (which
-# domain-separates the *primary* signature for unanchored parallel requests,
-# #1169): this header carries its own full-context structured signature. Kept
-# as a one-release rolling-upgrade shim alongside the legacy primary
-# signature; see the ROLLOUT SHIM notes in ``build_owner_forward_headers`` and
-# ``parse_forwarded_request``.
+# Public full-context signature from #1203. Keep this header's codec stable:
+# predecessor owners require it for file-bound forwards where primary fallback
+# is forbidden. Exact input shape and owner epoch use the independent proof
+# below.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # Additive input-shape capability marker. Unlike the primary signature
@@ -84,6 +78,7 @@ _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # It is trusted only when the exact-body signature below authenticates the
 # same value; an absent or unauthenticated marker keeps the legacy fallback.
 HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER = "x-codex-bridge-input-shape-version"
+HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER = "x-codex-bridge-input-shape-signature-v2"
 _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2 = "2"
 
 
@@ -106,6 +101,12 @@ class HTTPBridgeForwardContext:
 @dataclass(frozen=True, slots=True)
 class HTTPBridgeForwardedRequest:
     context: HTTPBridgeForwardContext
+
+
+@dataclass(frozen=True, slots=True)
+class HTTPBridgeOwnerForwardRequest:
+    body: JsonObject
+    headers: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,12 +219,11 @@ class HTTPBridgeOwnerClient:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
-            request_payload = payload.model_dump_for_http_bridge_owner_forwarding()
-            request_headers = build_owner_forward_headers(headers=headers, payload=payload, context=context)
+            owner_request = build_owner_forward_request(headers=headers, payload=payload, context=context)
             request_context = session.post(
                 request_url,
-                json=request_payload,
-                headers=request_headers,
+                json=owner_request.body,
+                headers=owner_request.headers,
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             )
             # I/O begins when __aenter__ is awaited. Cancellation after that
@@ -311,6 +311,20 @@ def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest)
     except (OverflowError, TypeError, ValueError):
         legacy_full_resend = False
     return current_full_resend != legacy_full_resend
+
+
+def build_owner_forward_request(
+    *,
+    headers: Mapping[str, str],
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+) -> HTTPBridgeOwnerForwardRequest:
+    """Build the one body/header pair authenticated on the owner wire."""
+
+    return HTTPBridgeOwnerForwardRequest(
+        body=payload.model_dump_for_http_bridge_owner_forwarding(),
+        headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+    )
 
 
 def build_owner_forward_headers(
@@ -405,16 +419,26 @@ def build_owner_forward_headers(
             include_client_ip=False,
             signature_version=signature_version,
         )
-    # Additive tamper-proofing signature bound to the exact posted forwarding
-    # body; covers the full authenticated context (including the unanchored /
-    # signature-version domain) so it cannot be replayed against a different
-    # forward.
+    # Keep the public pre-input-shape full-context proof byte-compatible. It is
+    # the only file-owner proof understood by a predecessor owner, and primary
+    # fallback is deliberately forbidden for file-bearing forwards. An
+    # epoch-gated request must not carry any proof that a predecessor accepts.
+    if context.expected_owner_process_epoch is None:
+        forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            signature_version=signature_version,
+        )
+    # Bind the exact posted body, shape marker, and optional owner epoch in an
+    # independent proof. Its bytes match the shape-v2 codec deployed before
+    # this header split, which lets the decoder accept an old origin that sent
+    # those bytes in HTTP_BRIDGE_SIGNATURE_V2_HEADER.
     input_shape_version = (
         None if payload._codex_lb_legacy_owner_forwarding_input_shape else _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
     )
     if input_shape_version is not None:
         forwarded[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] = input_shape_version
-    forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
+    forwarded[HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER] = _bridge_forward_input_shape_signature(
         payload=payload,
         context=context,
         signature_version=signature_version,
@@ -476,8 +500,8 @@ def parse_forwarded_request(
         signature_version=signature_version,
         expected_owner_process_epoch=_optional_header(headers.get(HTTP_BRIDGE_OWNER_PROCESS_EPOCH_HEADER)),
     )
-    # Tamper-proofing fast path (#1203): a VALIDATING tamper-proofing
-    # signature proves the received body was not rewritten in transit —
+    # Exact-shape fast path: a validating shape signature proves the received
+    # body was not rewritten in transit —
     # including an injected ``"tools": []`` that the primary plain-dump
     # signature cannot distinguish from an omitted field — and it also
     # authenticates the full forward context (structured, delimiter-safe), so
@@ -487,16 +511,22 @@ def parse_forwarded_request(
     # value on an honestly primary-signed forward, so a present-but-invalid
     # header simply falls through to the primary verification.
     tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
-    tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
-        tools_bound_signature,
-        _bridge_forward_tools_bound_signature(
-            payload=payload,
-            context=context,
-            signature_version=signature_version,
-            input_shape_version=input_shape_version,
-        ),
+    input_shape_signature = _optional_header(headers.get(HTTP_BRIDGE_INPUT_SHAPE_SIGNATURE_HEADER))
+    expected_input_shape_signature = _bridge_forward_input_shape_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+        input_shape_version=input_shape_version,
     )
-    if tools_bound_valid:
+    input_shape_valid = input_shape_signature is not None and hmac.compare_digest(
+        input_shape_signature, expected_input_shape_signature
+    )
+    # The currently deployed shape-v2 build used the old V2 header for these
+    # exact same bytes. Accept that origin layout during the controlled cutover.
+    deployed_shape_v2_valid = tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature, expected_input_shape_signature
+    )
+    if input_shape_valid or deployed_shape_v2_valid:
         if (
             context.expected_owner_process_epoch is not None
             and context.expected_owner_process_epoch != http_bridge_owner_process_epoch()
@@ -513,6 +543,18 @@ def parse_forwarded_request(
         payload._codex_lb_legacy_owner_forwarding_input_shape = (
             input_shape_version != _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
         )
+        return HTTPBridgeForwardedRequest(context=context), None
+    tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature,
+        _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            signature_version=signature_version,
+        ),
+    )
+    if tools_bound_valid:
+        payload._codex_lb_input_shape_wire_version = None
+        payload._codex_lb_legacy_owner_forwarding_input_shape = True
         return HTTPBridgeForwardedRequest(context=context), None
     if (
         context.expected_owner_process_epoch is not None
@@ -706,23 +748,33 @@ def _bridge_forward_tools_bound_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     signature_version: str | None = None,
+) -> str:
+    """Public pre-input-shape full-context signature.
+
+    Keep this codec byte-compatible for predecessor file-owner forwards. The
+    independent exact-shape proof below owns the posted-body, marker, and epoch
+    binding added by this change.
+    """
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    signing_payload = _structured_bridge_signing_payload(
+        body_digest=body_digest,
+        context=context,
+        include_client_ip=True,
+        signature_version=signature_version,
+        protocol="codex-lb-http-bridge-forward-tools-bound",
+    )
+    return _sign_bridge_payload(signing_payload)
+
+
+def _bridge_forward_input_shape_signature(
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+    signature_version: str | None = None,
     input_shape_version: str | None = _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2,
 ) -> str:
-    """Tamper-proofing signature bound to the exact posted forwarding body.
+    """Authenticate the exact owner body, input shape, and optional epoch."""
 
-    Signs the same forwarding dump that is actually posted
-    (``model_dump_for_http_bridge_owner_forwarding``), not a plain
-    ``model_dump`` that
-    synthesizes ``"tools": []`` for clients that omitted the field. A plain
-    dump would make the omitted-tools and explicit-``tools: []`` bodies sign
-    identically, so a body rewritten in transit to inject ``"tools": []``
-    would still verify on the owner instance and re-mark ``tools`` as
-    explicitly set (issue #1184). Uses a distinct protocol domain so it can
-    never be confused with the primary signature, and reuses the same
-    canonical structured encoding (covering the full authenticated context,
-    including the unanchored / signature-version domain) so the binding also
-    carries #1169's isolation guarantees. Always authenticates ``client_ip``.
-    """
     body_digest = _bridge_forward_body_digest(payload.model_dump_for_http_bridge_owner_forwarding())
     signing_payload = _structured_bridge_signing_payload(
         body_digest=body_digest,
@@ -731,6 +783,7 @@ def _bridge_forward_tools_bound_signature(
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
         input_shape_version=input_shape_version,
+        include_owner_process_epoch=True,
     )
     return _sign_bridge_payload(signing_payload)
 
@@ -748,6 +801,7 @@ def _structured_bridge_signing_payload(
     signature_version: str | None,
     protocol: str,
     input_shape_version: str | None = None,
+    include_owner_process_epoch: bool = False,
 ) -> str:
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
@@ -779,7 +833,7 @@ def _structured_bridge_signing_payload(
     }
     if input_shape_version is not None:
         signing_fields["input_shape_version"] = input_shape_version
-    if context.expected_owner_process_epoch is not None:
+    if include_owner_process_epoch and context.expected_owner_process_epoch is not None:
         signing_fields["expected_owner_process_epoch"] = context.expected_owner_process_epoch
     return json.dumps(
         signing_fields,
