@@ -1980,7 +1980,11 @@ class _HTTPBridgeStreamingMixin:
                 ("bridge", request_state.preferred_account_id),
                 ("registered turn state", turn_state_owner_account_id),
             )
-            owner_miss_continuation = rewritten_file_account_id is None
+            # Echoed placeholders can precede any upstream dispatch. A
+            # complete account-neutral body needs no missing owner recovered.
+            owner_miss_continuation = rewritten_file_account_id is None and not (
+                _http_bridge_payload_is_account_neutral_fresh_replay(payload)
+            )
         required_continuity_owner_missing = (
             (owner_miss_continuation and request_state.preferred_account_id is None)
             or durable_owner_missing

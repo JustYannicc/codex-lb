@@ -416,3 +416,7 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Stateless turn-state placeholders
+
+A proxy-generated marker can be echoed after WebSocket acceptance even if no upstream account was selected. Treating that marker alone as a missing continuation owner blocked fresh requests in pools with multiple accounts. HTTP bridge, raw HTTP and direct WebSocket now retain placeholder behavior only when the complete original body passes the existing account-neutral fresh-replay validator. They do not project or remove fields to make it pass. Opaque history and unresolved tool outputs still need owner evidence; a successful fresh request does not prove those continuations recovered.
