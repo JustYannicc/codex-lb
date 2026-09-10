@@ -48,7 +48,7 @@ def seed_fixture(engine: Engine, *, rows: int, accounts: int, seed: int) -> dict
             connection.execute(
                 text(
                     f"INSERT INTO {table} ({', '.join(selected)}) "
-                    f"SELECT {', '.join(selected.values())} FROM generate_series(1, :count) AS i"
+                    f"SELECT {', '.join(selected.values())} FROM generate_series(1::bigint, :count) AS i"
                 ),
                 {**parameters, "count": count},
             )

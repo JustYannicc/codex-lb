@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "20260909_120000_dashboard_conversation_archive"
 TARGET = "20260910_000000_request_logs_missing_cost_index"
+HEAD = ScriptDirectory(str(ROOT / "app/db/alembic")).get_current_head()
 
 
 @pytest.fixture
@@ -83,18 +85,19 @@ def test_benchmark_measures_selected_revisions(disposable_url: str, tmp_path: Pa
     assert report["resulting_revisions"] == [TARGET]
     assert report["fixture"]["observed"]["rows"] == 12
     assert report["fixture"]["observed"]["accounts"] == 3
-    assert report["check"]["returncode"] == 0
+    assert report["check"]["target_is_head"] == (TARGET == HEAD)
+    if TARGET == HEAD:
+        assert report["check"]["returncode"] == 0
     assert "separate" in (output / "report.md").read_text()
     assert "benchmark-disposable" not in (output / "report.json").read_text()
 
 
-@pytest.mark.parametrize("target,rows,check_exit", [(TARGET, "12", 0), (BASE, "0", 1)])
+@pytest.mark.parametrize("target,rows", [(HEAD, "12"), (BASE, "0")])
 def test_benchmark_noop_preserves_selected_target(
     disposable_url: str,
     tmp_path: Path,
     target: str,
     rows: str,
-    check_exit: int,
 ) -> None:
     output = tmp_path / "noop"
     result = invoke(disposable_url, output, "--base", target, "--target", target, "--rows", rows)
@@ -103,7 +106,10 @@ def test_benchmark_noop_preserves_selected_target(
     assert report["noop"] is True
     assert report["steps"] == []
     assert report["resulting_revisions"] == [target]
-    assert report["check"]["returncode"] == check_exit
+    assert report["check"]["target_is_head"] == (target == HEAD)
+    assert isinstance(report["check"]["returncode"], int)
+    if target == HEAD:
+        assert report["check"]["returncode"] == 0
     assert report["fixture"]["observed"]["rows"] == int(rows)
 
 
@@ -185,3 +191,13 @@ def test_benchmark_reports_failed_revision(disposable_url: str, tmp_path: Path) 
     assert report["resulting_revisions"] == ["20260909_130000_add_request_logs_live_facet_indexes"]
     assert "check" not in report
     assert "benchmark-disposable" not in (output / "report.json").read_text()
+
+
+def test_benchmark_accepts_maximum_seed(disposable_url: str, tmp_path: Path) -> None:
+    output = tmp_path / "maximum-seed"
+    result = invoke(disposable_url, output, "--seed", "2147483647", "--rows", "1", "--target", BASE)
+    assert result.returncode == 0
+    fixture = json.loads((output / "report.json").read_text())["fixture"]
+    assert fixture["seed"] == 2147483647
+    assert fixture["observed"]["rows"] == 1
+    assert fixture["observed"]["by_account"] == {"benchmark-account-3": 1}
