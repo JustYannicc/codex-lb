@@ -467,3 +467,7 @@ A proxy-generated marker can be echoed after WebSocket acceptance even if no ups
 ## Detached retirement sweep deadline
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
+
+## Ready transcript backlog
+
+The background spooler continues bounded passes while eligible events remain, giving each operation one batch per pass. For example, 320 events queued before the first pass at batch size 32 require ten writes, without nine extra flush-interval waits. This changes backlog scheduling; paced-event coalescing and terminal persistence retain their existing behavior. Isolated database measurements and limits are recorded in `openspec/changes/archive/2026-09-10-drain-ready-http-bridge-spool/verification.md`.
