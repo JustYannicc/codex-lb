@@ -72,3 +72,7 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Rejection evidence during bootstrap
+
+An unversioned or legacy-stamped database can already contain rejection-generation columns. The rejection migration inspects existing columns and adds only missing columns, preserving recorded generations and scope. For example, generation 7 and its rejected model survive an upgrade that adds missing probe-claim columns. This follows the existing schema-bootstrap convention; stamping fixtures at head would hide the failing startup path. See [the bootstrap contract](spec.md#requirement-rejection-evidence-schema-bootstrap).

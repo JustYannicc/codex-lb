@@ -1263,3 +1263,9 @@ Recovery MUST preserve routing policy, model eligibility, file ownership, regist
 - **GIVEN** a held account whose scope matches the probe
 - **WHEN** upstream returns HTTP 200 followed by failure, incomplete execution or EOF without completion
 - **THEN** the persisted hold remains unchanged
+
+#### Scenario: Transient error arrives before recovered replica selection
+- **GIVEN** a replica retains an older hold and the persisted account has a newer recovered generation
+- **WHEN** a transient error is recorded before that replica next selects an account
+- **THEN** the recovered hold MUST NOT be restored or retained
+- **AND** ordinary transient-error accounting MUST still apply

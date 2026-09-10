@@ -6,4 +6,4 @@
 
 ## 2. Verify delivery
 
-- [ ] 2.1 Run affected checks, strict specs and independent exact-candidate review; sync and archive verified specs.
+- [x] 2.1 Run affected checks, strict specs and independent exact-candidate review; sync and archive verified specs.

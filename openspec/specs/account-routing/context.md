@@ -190,3 +190,7 @@ The provider request is bounded to 30 seconds. A 60-second per-account database 
 Scope metadata describes the execution that can prove recovery, not a new model-scoped upstream penalty policy. Account-wide hold and ownership rules remain intact. All rejection writers must run the new version before operators rely on generation fencing in a multi-replica deployment.
 
 The response separately reports HTTP status, completed execution and whether the guarded hold update landed. A later rejection can therefore leave accountStatusAfter limited even when an earlier guarded recovery did land. No credits are consumed or identity replaced by this endpoint.
+
+## Recovery before failure recording
+
+A replica can receive a recovered account row before its next selection. For example, an ordinary transient error can arrive just after an operator probe clears the old hold. Generation reconciliation runs before either selection or failure recording constructs runtime state. This prevents the error path from persisting the previous hold again while retaining transient-error accounting. Older recovered snapshots cannot clear newer rejection evidence. See [the recovery requirements](spec.md#requirement-completed-operator-probe-recovery).
