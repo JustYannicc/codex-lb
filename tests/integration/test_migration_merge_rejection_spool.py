@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,8 +123,8 @@ def _state(engine: Engine) -> dict[str, Any]:
         }
 
 
-@pytest.fixture(params=[(_REJECTION,), (_SPOOL,), _PARENTS], ids=["rejection-parent", "spool-parent", "both-parents"])
-def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_MigrationDatabase]:
+@contextmanager
+def _disposable_database(tmp_path: Path) -> Iterator[_MigrationDatabase]:
     configured_url = os.environ["CODEX_LB_TEST_DATABASE_URL"]
     admin = None
     database_name = f"merge_rejection_spool_{uuid4().hex}"
@@ -137,16 +138,7 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         url = f"sqlite+aiosqlite:///{tmp_path / 'merge-parents.sqlite'}"
     engine = create_engine(to_sync_database_url(url))
     try:
-        run_upgrade(url, _COMMON_PARENT, bootstrap_legacy=False)
-        with engine.begin() as connection:
-            _seed_common(connection)
-        starting_revisions = request.param
-        for revision in starting_revisions:
-            run_upgrade(url, revision, bootstrap_legacy=False)
-            with engine.begin() as connection:
-                _seed_parent(connection, revision)
-        assert _revisions(engine) == tuple(sorted(starting_revisions))
-        yield _MigrationDatabase(url, engine, starting_revisions)
+        yield _MigrationDatabase(url, engine, ())
     finally:
         engine.dispose()
         if admin is not None:
@@ -155,6 +147,21 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
                     connection.execute(text(f'DROP DATABASE "{database_name}"'))
             finally:
                 admin.dispose()
+
+
+@pytest.fixture(params=[(_REJECTION,), (_SPOOL,), _PARENTS], ids=["rejection-parent", "spool-parent", "both-parents"])
+def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_MigrationDatabase]:
+    with _disposable_database(tmp_path) as database:
+        run_upgrade(database.url, _COMMON_PARENT, bootstrap_legacy=False)
+        with database.engine.begin() as connection:
+            _seed_common(connection)
+        database.starting_revisions = request.param
+        for revision in database.starting_revisions:
+            run_upgrade(database.url, revision, bootstrap_legacy=False)
+            with database.engine.begin() as connection:
+                _seed_parent(connection, revision)
+        assert _revisions(database.engine) == tuple(sorted(database.starting_revisions))
+        yield database
 
 
 def test_rejection_spool_histories_converge_at_one_head(tmp_path: Path) -> None:
@@ -168,7 +175,7 @@ def test_rejection_spool_histories_converge_at_one_head(tmp_path: Path) -> None:
         assert parent is not None and parent.down_revision == _COMMON_PARENT
 
 
-def test_populated_cli_upgrade_and_merge_only_downgrades_preserve_both_branches(
+def test_populated_cli_upgrade_preserves_both_branches(
     branch_database: _MigrationDatabase,
 ) -> None:
     database = branch_database
@@ -190,31 +197,47 @@ def test_populated_cli_upgrade_and_merge_only_downgrades_preserve_both_branches(
     (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
     assert _revisions(database.engine) == (head,)
     merged_rows = _state(database.engine)["rows"]
-    # Later revisions may add nullable columns; retain the original parent checks.
+    # Guest revocation adds generation zero; other later nullable fields start NULL.
     for table, expected in expected_rows.items():
         actual = merged_rows[table]
         for row in actual:
             for column in set(row) - set(expected[0]):
-                assert row.pop(column) is None
+                if table == "dashboard_settings" and column == "guest_session_generation":
+                    assert row.pop(column) == 0
+                else:
+                    assert row.pop(column) is None
         assert actual == expected
     output = _cli(database.url, "check")
     assert "migration_policy=ok" in output and "schema_drift=none" in output
 
-    # Populate the newly applied branch before testing the no-op downgrade.
+
+def test_isolated_rejection_spool_merge_only_downgrades_preserve_both_branches(
+    branch_database: _MigrationDatabase,
+) -> None:
+    database = branch_database
+    # Later joins retain sibling stamps on downgrade. Start at this merge directly
+    # so this test exercises only the original no-op merge and its two parents.
+    _cli(database.url, "upgrade", _MERGE)
     with database.engine.begin() as connection:
         for revision in _PARENTS:
             if revision not in database.starting_revisions:
                 _seed_parent(connection, revision)
     populated = _state(database.engine)
+    merge_drift = check_schema_drift(database.url)
     for parent in _PARENTS:
-        command.downgrade(_build_alembic_config(database.url), _MERGE)
-        at_merge = _state(database.engine)
-        merge_drift = check_schema_drift(database.url)
+        assert _revisions(database.engine) == (_MERGE,)
         command.downgrade(_build_alembic_config(database.url), parent)
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
-        assert _state(database.engine) == at_merge
-        assert check_schema_drift(database.url) == merge_drift
-        _cli(database.url, "upgrade", "head")
-        assert _revisions(database.engine) == (head,)
         assert _state(database.engine) == populated
-        assert "schema_drift=none" in _cli(database.url, "check")
+        assert check_schema_drift(database.url) == merge_drift
+        _cli(database.url, "upgrade", _MERGE)
+        assert _revisions(database.engine) == (_MERGE,)
+        assert _state(database.engine) == populated
+    _cli(database.url, "upgrade", "head")
+    (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
+    assert _revisions(database.engine) == (head,)
+    roundtrip_rows = _state(database.engine)["rows"]
+    for table, rows in populated["rows"].items():
+        assert [{column: row[column] for column in rows[0]} for row in roundtrip_rows[table]] == rows
+    assert roundtrip_rows["dashboard_settings"][0]["guest_session_generation"] == 0
+    assert "schema_drift=none" in _cli(database.url, "check")
