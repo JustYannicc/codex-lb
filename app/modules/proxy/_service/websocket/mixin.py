@@ -2103,6 +2103,9 @@ class _WebSocketMixin:
                             and _is_synthesized_turn_state(turn_state)
                             and request_state.preferred_account_id is None
                             and request_state.replay_required_account_id is None
+                            and not _facade()._websocket_request_text_is_account_neutral_fresh_replay(
+                                request_state.request_text
+                            )
                         )
                         if (
                             owner_miss_continuation

@@ -1288,6 +1288,7 @@ class _StreamingRetryMixin:
                 and turn_state != synthesized_turn_state
                 and turn_state_owner_account_id is None
                 and rewritten_file_account_id is None
+                and not responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
             )
             if owner_miss_continuation:
                 previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
