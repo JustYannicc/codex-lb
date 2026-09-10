@@ -79,3 +79,10 @@
 - [x] 14.1 Reproduce reservation leakage after compact owner lookup and both immediate release attempts fail through both HTTP compact routes.
 - [x] 14.2 Transfer failed compact cleanup to the tracked cancellation-safe release retry before signaling cleanup readiness, preserving unconfirmed-settlement errors and deferring health writes.
 - [x] 14.3 Verify retry recovery, confirmed-release controls, and compact settlement regressions before delivery.
+
+## 15. Current fail-closed main and bounded compact cleanup
+
+- [x] 15.1 Reconcile main `6d11e560` while preserving removed recovery modes and owner/marker invariants.
+- [x] 15.2 Replace section 14's indefinite compact retries with the accepted exceptional stale-reclamation contract; verify both routes, accounting, cancellation and retained-work bounds.
+- [x] 15.3 Resolve scope-assertion and design-reference feedback; complete independent standards/input review.
+- [ ] 15.4 Publish the reviewed head and transfer current-head hosted monitoring and review disposition.
