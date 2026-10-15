@@ -10407,8 +10407,66 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
     assert request_state.api_key_reservation is None
 
 
-@pytest.mark.asyncio
 async def test_http_bridge_hard_turn_without_durable_fence_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-hard-turn-no-durable-fence")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-no-durable-fence",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        session_id="turn-state-without-durable-fence",
+        hard_continuity_anchor=True,
+    )
+    submit = AsyncMock()
+    sleep = AsyncMock()
+    retire = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+    service._scheduler = _SleepThroughScheduler(sleep)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state="turn-state-without-durable-fence",
+        ):
+            pass
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
+    submit.assert_not_awaited()
+    sleep.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(session)
+    assert (
+        http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+            session=session,
+            key=session.key,
+            incoming_turn_state=None,
+            previous_response_id=None,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_startup_cooldown_preserves_pending_terminal_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
