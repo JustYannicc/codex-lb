@@ -27,8 +27,6 @@ from app.codex_session_metadata import (
 from app.codex_sessions_retag import (
     _backup_sqlite_db,
     _connect_sqlite,
-    _copy_sqlite_to_temp,
-    _replace_sqlite_db,
 )
 
 
@@ -83,19 +81,8 @@ def _update_state_rows(path: Path, rows: Sequence[StateMetadata], provider: str,
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).casefold():
             raise
-        # Some bind mounts reject direct SQLite writes. Update a sibling copy and
-        # move it back so only the selected rows change, as the retag command does.
-        _update_state_rows_via_copy(path, rows, provider, progress)
-
-
-def _update_state_rows_via_copy(path: Path, rows: Sequence[StateMetadata], provider: str, progress: Progress) -> None:
-    temp = _copy_sqlite_to_temp(path)
-    try:
-        with closing(_connect_sqlite(temp)) as conn, conn:
-            _execute_state_updates(conn, rows, provider, progress)
-        _replace_sqlite_db(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+        # A copy-and-replace would drop rows Codex writes during the window, so refuse; the backup is retained.
+        raise ValueError(f"State database rejected direct write; refusing copy fallback: {path}") from exc
 
 
 def _execute_state_updates(conn: sqlite3.Connection, rows: Sequence[StateMetadata], provider: str, progress: Progress) -> None:

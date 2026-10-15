@@ -341,7 +341,7 @@ def test_directory_traversal_error_fails_closed_before_mutation(tmp_path: Path, 
     assert snapshot(tmp_path) == before
 
 
-def test_sqlite_direct_write_rejection_falls_back_to_scoped_copy(
+def test_sqlite_direct_write_rejection_refuses_copy_fallback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import app.codex_session_repair as repair
@@ -356,11 +356,15 @@ def test_sqlite_direct_write_rejection_falls_back_to_scoped_copy(
         return real_connect(path, read_only=read_only, immutable=immutable)
 
     monkeypatch.setattr(repair, "_connect_sqlite", reject_direct_write)
-    cli.main(repair_args(tmp_path, "--provider", "openai", "--session-id", "split", "--yes"))
+    with sqlite3.connect(state_path) as conn:
+        before_rows = dict(conn.execute("SELECT id, model_provider FROM threads"))
+    with pytest.raises(SystemExit, match="refusing copy fallback"):
+        cli.main(repair_args(tmp_path, "--provider", "openai", "--session-id", "split", "--yes"))
     capsys.readouterr()
-    with sqlite3.connect(tmp_path / "state_5.sqlite") as conn:
-        rows = dict(conn.execute("SELECT id, model_provider FROM threads"))
-    assert rows == {"split": "openai", "unrelated": "openai"}
+    with sqlite3.connect(state_path) as conn:
+        assert dict(conn.execute("SELECT id, model_provider FROM threads")) == before_rows
+    backups = list((tmp_path / "backups/session-metadata-repair").glob("repair-*/state_5.sqlite"))
+    assert len(backups) == 1
 
 
 def test_interrupt_reports_retained_backup_before_propagating(
