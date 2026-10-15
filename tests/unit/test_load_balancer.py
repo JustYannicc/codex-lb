@@ -4042,14 +4042,12 @@ def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
         secondary_entry=monthly,
     )
 
-    if usage_core.capacity_for_plan(plan_type, "monthly") is None:
-        assert state.status == AccountStatus.ACTIVE
-        assert state.reset_at is None
-        assert state.blocked_at is None
-    else:
-        assert state.status == AccountStatus.RATE_LIMITED
-        assert state.reset_at == account.reset_at
-        assert state.blocked_at == account.blocked_at
+    # Observed monthly exhaustion (used_percent set) is routing-relevant on
+    # every plan per the review requirement; only unsupported (unobserved)
+    # monthly rows may be ignored when monthly capacity is unknown.
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == account.reset_at
+    assert state.blocked_at == account.blocked_at
 
 
 def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
