@@ -33735,6 +33735,44 @@ async def test_http_bridge_retry_circuit_stream_incomplete_remains_genuine_failu
     assert state.consecutive_failures == 2
     persist_retry_circuit.assert_awaited_once()
 
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_claimless_strike_preserves_live_sibling_lease() -> None:
+    """A claimless failure strike must not clear another request's live lease."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-claimless-strike-live-lease")
+    owner = _make_eventless_http_bridge_owner(request_id="req-claimless-live-lease")
+    owner.response_create_attempt_count = 1
+    owner.bridge_request_deadline = time.monotonic() + 600.0
+    lease_until = time.monotonic() + 60.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=0.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+        half_open_until=lease_until,
+        half_open_owner_session=session,
+        half_open_owner_token=owner,
+        half_open_lease_generation=7,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    persist_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_retry_circuit,
+    )
+
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="stream_incomplete",
+    )
+
+    assert consecutive_failures == 3
+    assert state.consecutive_failures == 3
+    assert state.half_open_until == lease_until
+    assert state.half_open_owner_session is session
+    assert state.half_open_owner_token is owner
+    assert state.half_open_lease_generation == 7
+
 
 @pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_reacquires_probe_after_abandoned_lease_expires() -> None:
