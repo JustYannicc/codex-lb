@@ -239,3 +239,83 @@ async def test_compact_retains_enforced_tier_in_source_request_log(async_client,
     row = next(row for row in logs.json()["requests"] if row["requestId"] == "cmp_tier")
     assert row["requestedServiceTier"] == "priority"
     assert row["serviceTier"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/responses/compact", "/backend-api/codex/responses/compact"])
+async def test_compact_normalizes_reasoning_alias_under_allowlist(async_client, route):
+    received = []
+
+    async def compact(request):
+        received.append(await request.json())
+        return web.json_response(
+            {"object": "response.compaction", "output": [{"type": "compaction", "encrypted_content": "state"}]}
+        )
+
+    async with stub_source_upstreams() as start:
+        base = await start(compact)
+        source_id = await _create_model_source(
+            async_client, name="alias", model="external-alias-model", base_url=base, supports_responses=True
+        )
+        await _enable_api_key_auth(async_client)
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "alias-allowlist",
+                "assignedSourceIds": [source_id],
+                "allowedReasoningEfforts": ["low"],
+            },
+        )
+        assert created.status_code == 200, created.text
+        response = await async_client.post(
+            route,
+            headers={"Authorization": f"Bearer {created.json()['key']}"},
+            json={
+                "model": "external-alias-model",
+                "instructions": "Compact",
+                "input": [],
+                "reasoningEffort": "low",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert "reasoningEffort" not in received[0]
+    assert "reasoning_effort" not in received[0]
+    assert received[0]["reasoning"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/responses/compact", "/backend-api/codex/responses/compact"])
+async def test_compact_applies_source_request_overrides(async_client, route):
+    received = []
+
+    async def compact(request):
+        received.append(await request.json())
+        return web.json_response(
+            {"object": "response.compaction", "output": [{"type": "compaction", "encrypted_content": "state"}]}
+        )
+
+    async with stub_source_upstreams() as start:
+        base = await start(compact)
+        source_id = await _create_model_source(
+            async_client,
+            name="overrides",
+            model="external-override-model",
+            base_url=base,
+            supports_responses=True,
+            raw_metadata_json='{"source_request_overrides":{"options":{"num_ctx":32768}}}',
+        )
+        await _enable_api_key_auth(async_client)
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={"name": "overrides", "assignedSourceIds": [source_id]},
+        )
+        assert created.status_code == 200, created.text
+        response = await async_client.post(
+            route,
+            headers={"Authorization": f"Bearer {created.json()['key']}"},
+            json={"model": "external-override-model", "instructions": "Compact", "input": []},
+        )
+
+    assert response.status_code == 200, response.text
+    assert received[0]["options"] == {"num_ctx": 32768}
