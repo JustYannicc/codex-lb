@@ -9228,6 +9228,9 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = classify_event_type(normalized_payload)
+        if enforce_openai_sdk_contract and event_type == "codex_lb.warning":
+            yield format_sse_event(normalized_payload)
+            continue
         synthetic_created = None
         if (
             enforce_openai_sdk_contract
@@ -9646,6 +9649,7 @@ def _normalize_public_stream_payload(
         enforce_openai_sdk_contract
         and isinstance(event_type, str)
         and event_type != "error"
+        and event_type != "codex_lb.warning"
         and not event_type.startswith("response.")
     ):
         return None, None
