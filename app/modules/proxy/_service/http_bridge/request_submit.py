@@ -54,7 +54,7 @@ from app.core.clients.thread_cache_identity import (
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.config.dashboard_overrides import with_dashboard_overrides
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
