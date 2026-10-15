@@ -23,8 +23,7 @@ const REQUIRED_API_PATHS = [
   "/api/settings/telemetry",
 ] as const;
 
-async function installMobileContainmentFixtures(page: Page): Promise<void> {
-  const accounts = [
+async function installMobileContainmentFixtures(page: Page, accounts = [
     createAccountSummary({
       accountId: "acc_primary",
       email: "primary-operator@northstar",
@@ -37,7 +36,7 @@ async function installMobileContainmentFixtures(page: Page): Promise<void> {
       displayName: "secondary-operator@northstar",
       usage: { primaryRemainingPercent: 45, secondaryRemainingPercent: 12 },
     }),
-  ];
+  ]): Promise<void> {
   const fixtures: Record<string, unknown> = {
     "/api/dashboard-auth/session": createDashboardAuthSession({ authenticated: true, passwordRequired: true }),
     "/api/dashboard/overview": createDashboardOverview({ accounts }),
@@ -92,6 +91,36 @@ async function openLongSettingsPage(page: Page, scrollTop: number): Promise<void
 
   await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" }), scrollTop);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTop);
+}
+
+// `page.setViewportSize` resolves when the resize is dispatched, not when the
+// browser has finished reflowing for it. Reading geometry immediately after
+// has caught the 1440x900 case mid-reflow, reporting a 1488px document
+// scrollWidth that settles back to 1440 a frame later. Hold until the document
+// width stops moving, with a frame cap so a page that never settles fails on
+// its assertion instead of hanging.
+async function resizeViewportAndSettle(page: Page, size: { width: number; height: number }): Promise<void> {
+  await page.setViewportSize(size);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let lastWidth = -1;
+        let stableFrames = 0;
+        let observedFrames = 0;
+        const measure = () => {
+          const width = document.documentElement.scrollWidth;
+          stableFrames = width === lastWidth ? stableFrames + 1 : 0;
+          lastWidth = width;
+          observedFrames += 1;
+          if (stableFrames >= 3 || observedFrames >= 120) {
+            resolve();
+            return;
+          }
+          requestAnimationFrame(measure);
+        };
+        requestAnimationFrame(measure);
+      }),
+  );
 }
 
 test("the built dashboard accepts real backend responses", async ({ page }) => {
@@ -188,7 +217,7 @@ test("dashboard usage donuts stay within supported viewports", async ({ page }) 
   await expect(requestTable).toBeVisible();
 
   for (const viewportCase of viewportCases) {
-    await page.setViewportSize(viewportCase.size);
+    await resizeViewportAndSettle(page, viewportCase.size);
 
     const usageMetrics = await usageHeadings.evaluateAll((headings) =>
       headings.map((heading) => {
@@ -379,4 +408,172 @@ test("the API key create dialog stays inside supported viewports", async ({ page
   await expect(dialog).toBeVisible();
   await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
   await expect(dialog).toBeHidden();
+});
+
+
+test("deactivated account actions stay inside list cells and responsive cards", async ({ page }) => {
+  const accounts = [
+    createAccountSummary({ accountId: "acc_recover", displayName: "Recovery account", status: "deactivated", availableResetCredits: 1 }),
+    createAccountSummary({ accountId: "acc_reauth", displayName: "Reauth account", status: "reauth_required" }),
+    createAccountSummary({ accountId: "acc_paused", displayName: "Paused account", status: "paused" }),
+  ];
+  await installMobileContainmentFixtures(page, accounts);
+  await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+  await page.getByRole("radio", { name: "View accounts as list" }).click();
+  const row = page.getByTestId("account-list-row").filter({ hasText: "Recovery account" });
+  await expect(row.getByRole("button", { name: "Resume Recovery account", exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Re-authenticate Recovery account", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume Reauth account", exact: true })).toHaveCount(0);
+  const actions = row.locator(":scope > div").last();
+  await expect.poll(() => actions.evaluate((el) => {
+    const parent = el.getBoundingClientRect();
+    return Array.from(el.querySelectorAll("button")).every((button) => {
+      const box = button.getBoundingClientRect();
+      return box.left >= parent.left - 1 && box.right <= parent.right + 1 && box.top >= parent.top - 1 && box.bottom <= parent.bottom + 1;
+    });
+  })).toBe(true);
+  for (const width of [640, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByRole("radio", { name: "View accounts as cards" }).click();
+    const card = page.getByTestId("dashboard-account-cards").locator(":scope > div").filter({ hasText: "Recovery account" });
+    await expect(card.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Re-auth", exact: true })).toBeVisible();
+    await expect.poll(() => card.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return Array.from(el.querySelectorAll("button")).every((button) => {
+        const action = button.getBoundingClientRect();
+        return action.left >= box.left - 1 && action.right <= box.right + 1;
+      });
+    })).toBe(true);
+  }
+});
+
+test("the model source dialogs stay inside supported viewports", async ({ page }) => {
+  const viewportSizes = [
+    { width: 320, height: 568 },
+    { width: 390, height: 844 },
+    { width: 1440, height: 900 },
+  ] as const;
+
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await acceptTelemetryConsentIfShown(page);
+
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  await expect(page.getByRole("heading", { name: "Model sources", exact: true })).toBeVisible();
+
+  const openDialogButton = page.getByRole("button", { name: "Add source" });
+  const dialog = page.getByRole("dialog", { name: "Create model source" });
+  const title = dialog.getByRole("heading", { name: "Create model source" });
+  const closeButton = dialog.getByRole("button", { name: "Close" });
+  const createButton = dialog.getByRole("button", { name: "Create" });
+
+  for (const size of viewportSizes) {
+    await page.setViewportSize(size);
+    await openDialogButton.click();
+
+    // Enabling Reasoning reveals the effort fields, which is what pushed the
+    // form past the viewport: with the capability off the default form still
+    // fits on a desktop viewport. The capability checkboxes are Radix buttons
+    // with no accessible name, so drive the wrapping label instead. The draft
+    // survives closing the dialog, so toggle only when it is actually off.
+    const reasoningToggle = dialog.locator("label", { hasText: /^Reasoning$/ });
+    const reasoningCheckbox = reasoningToggle.locator('[role="checkbox"]');
+    if ((await reasoningCheckbox.getAttribute("data-state")) !== "checked") {
+      await reasoningToggle.click();
+    }
+    await expect(reasoningCheckbox).toHaveAttribute("data-state", "checked");
+    await expect(dialog.locator("#model-source-reasoning-efforts")).toBeVisible();
+
+    // The regression this covers: the dialog rendered taller than the viewport
+    // with no scroll container, so the submit button was unreachable. These are
+    // retrying assertions on purpose — the dialog opens with a zoom/fade
+    // animation and the Reasoning toggle relayouts it, so a single
+    // boundingBox() read can catch mid-animation geometry.
+    for (const element of [dialog, title, closeButton, createButton]) {
+      await expect(element).toBeInViewport({ ratio: 1 });
+    }
+
+    await expect(dialog).toHaveCSS("overflow-y", "clip");
+
+    const scrollRegion = dialog.getByTestId("model-source-create-scroll-region");
+    await expect(scrollRegion).toHaveCount(1);
+    await expect(scrollRegion).toHaveCSS("overflow-y", "auto");
+    await expect
+      .poll(async () =>
+        scrollRegion.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(0);
+
+    // The numeric and capability inputs carry no accessible name, so prove
+    // reachability through the scroller itself: the end of the content must be
+    // scrollable into view.
+    const scrolled = await scrollRegion.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(scrolled.scrollTop).toBeGreaterThan(0);
+    expect(scrolled.scrollTop + scrolled.clientHeight).toBeGreaterThanOrEqual(
+      scrolled.scrollHeight - 1,
+    );
+
+    // Scrolling the body must not carry the header or footer out of view.
+    await expect(title).toBeInViewport({ ratio: 1 });
+    await expect(closeButton).toBeInViewport({ ratio: 1 });
+    await expect(createButton).toBeInViewport({ ratio: 1 });
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+});
+
+test("the model source edit dialog keeps Save visible in compact viewports", async ({ page, request }) => {
+  const created = await request.post("/api/model-sources/", {
+    data: {
+      name: "Viewport regression source",
+      baseUrl: "http://127.0.0.1:9/v1",
+      models: [{
+        model: "viewport-regression-model",
+        rawMetadataJson: JSON.stringify({ supports_reasoning: true, reasoning_efforts: ["low", "high"] }),
+      }],
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const source = await created.json() as { id: string };
+  try {
+    await page.goto("/settings", { waitUntil: "domcontentloaded" });
+    await acceptTelemetryConsentIfShown(page);
+    await page.getByRole("button", { name: "Show advanced settings" }).click();
+    for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size);
+      await page.getByRole("button", { name: "Edit Viewport regression source model source", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Edit model source" });
+      const save = dialog.getByRole("button", { name: "Save", exact: true });
+      const title = dialog.getByRole("heading", { name: "Edit model source" });
+      const close = dialog.getByRole("button", { name: "Close" });
+      await expect(dialog).toHaveCSS("overflow-y", "clip");
+      const scroll = dialog.getByTestId("model-source-edit-scroll-region");
+      await expect(scroll).toHaveCount(1);
+      await expect(scroll).toHaveCSS("overflow-y", "auto");
+      for (const control of [dialog, title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      // Assert rendered spacing, so a missing utility fails this browser path.
+      await expect.poll(() => scroll.evaluate((el) => {
+        const first = el.children[0].getBoundingClientRect();
+        const second = el.children[1].getBoundingClientRect();
+        return second.top - first.bottom;
+      })).toBeGreaterThanOrEqual(15);
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(0);
+      await scroll.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+      for (const control of [title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+    }
+  } finally {
+    expect((await request.delete(`/api/model-sources/${source.id}`)).ok()).toBe(true);
+  }
 });
