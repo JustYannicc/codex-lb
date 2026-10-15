@@ -13,6 +13,7 @@ from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.db.models import Account, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.proxy.load_balancer import effective_routing_tunables
+from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.unit
 
@@ -1355,7 +1356,7 @@ async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: 
             assert session_closed is True
             fetch_started.set()
             await release_fetch.wait()
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
 
     class _Session:
         def expunge_all(self) -> None:
@@ -1517,7 +1518,7 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
             selected = selected_accounts[0]
             assert set(latest_usage) == {selected.id}
             updater_calls.append(selected.id)
-            return len(updater_calls) == 2
+            return AccountRefreshResult(usage_written=len(updater_calls) == 2, fetch_succeeded=True)
 
     class _WarmupService:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -1561,12 +1562,8 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         ("primary", ("acc_a",)),
         ("secondary", ("acc_a",)),
         ("monthly", ("acc_a",)),
-        ("primary", ("acc_a",)),
-        ("secondary", ("acc_a",)),
-        ("monthly", ("acc_a",)),
     ]
-    assert len(warmup_calls) == 1
-    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_a"]
+    assert warmup_calls == []
     assert invalidations == 0
 
     assert await scheduler._refresh_once() == 30.0
@@ -1579,14 +1576,14 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         ("secondary", ("acc_b",)),
         ("monthly", ("acc_b",)),
     ]
-    assert len(warmup_calls) == 2
-    assert [account.id for account in cast("list[Account]", warmup_calls[1]["accounts"])] == ["acc_b"]
-    assert [account.id for account in cast("list[Account]", warmup_calls[1]["stagger_accounts"])] == [
+    assert len(warmup_calls) == 1
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])] == [
         "acc_a",
         "acc_b",
     ]
-    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["before_primary"])) == {"acc_b"}
-    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["after_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
     assert invalidations == 1
     assert open_sessions == 0
 
@@ -2404,3 +2401,190 @@ async def test_resolve_reset_evidence_keeps_warmup_evidence_out_of_recovery() ->
 
     assert account.id in evidence.warmup
     assert account.id not in evidence.recovery
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_skips_followup_reads_when_warmup_disabled_and_no_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: a freshness skip with warm-up disabled must not reopen session-2 reads."""
+    account = _make_account("acc_fast_path", status=AccountStatus.ACTIVE)
+    open_sessions = 0
+    query_scopes: list[tuple[str | None, tuple[str, ...]]] = []
+    warmup_calls: list[dict[str, object]] = []
+    invalidations = 0
+
+    class _Leader:
+        async def run_if_leader(self, fn):
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            query_scopes.append((window, tuple(account_ids or ())))
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return [account]
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> DashboardSettings:
+            return DashboardSettings(limit_warmup_enabled=False)
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            selected_accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> AccountRefreshResult:
+            assert len(selected_accounts) == 1
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            warmup_calls.append(kwargs)
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            yield _Session()
+        finally:
+            open_sessions -= 1
+
+    async def _invalidate() -> None:
+        nonlocal invalidations
+        invalidations += 1
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    assert await scheduler._refresh_once() == 60.0
+    assert query_scopes == [
+        ("primary", ("acc_fast_path",)),
+        ("secondary", ("acc_fast_path",)),
+        ("monthly", ("acc_fast_path",)),
+    ]
+    assert warmup_calls == []
+    assert invalidations == 1
+    assert open_sessions == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_skips_reset_recovery_after_failed_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1: a failed fetch must not create/consume a warm-up attempt from stale usage."""
+    account = _make_account("acc_failed_fetch", status=AccountStatus.ACTIVE)
+    open_sessions = 0
+    recover_calls: list[dict[str, object]] = []
+    warmup_calls: list[dict[str, object]] = []
+
+    class _Leader:
+        async def run_if_leader(self, fn):
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return [account]
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> DashboardSettings:
+            return DashboardSettings(limit_warmup_enabled=True)
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            selected_accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> AccountRefreshResult:
+            assert len(selected_accounts) == 1
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+    async def _fake_recover(**kwargs: object) -> dict[str, object]:
+        recover_calls.append(kwargs)
+        return {}
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            assert open_sessions == 0
+            warmup_calls.append(kwargs)
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            yield _Session()
+        finally:
+            open_sessions -= 1
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "recover_current_reset_evidence", _fake_recover)
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    assert await scheduler._refresh_once() == 60.0
+    assert recover_calls == []
+    assert len(warmup_calls) == 1
+    assert warmup_calls[0]["reset_evidence"] == {}
+    assert open_sessions == 0

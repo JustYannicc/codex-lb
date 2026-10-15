@@ -231,9 +231,9 @@ async def test_live_snapshot_during_skipped_poll_does_not_enable_non_reset_trigg
 
     async def refresh_then_ingest(
         self: updater.UsageUpdater, accounts: list[Account], latest_usage: Mapping[str, UsageHistory]
-    ) -> bool:
+    ) -> updater.AccountRefreshResult:
         written = await original_refresh(self, accounts, latest_usage)
-        assert written is False
+        assert written.usage_written is False
         await publish_and_wait(ingestor, snapshot, account.id, window)
         return written
 

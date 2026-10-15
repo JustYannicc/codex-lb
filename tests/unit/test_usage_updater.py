@@ -515,7 +515,8 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
         own_singleflight_sessions=True,
     )
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
+    assert refreshed.fetch_succeeded is True
     assert refresh_called is False
 
 
@@ -1256,7 +1257,7 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
 
     force_refresh_account.assert_not_awaited()
     release_stale.set()
-    assert await stale_task is False
+    assert (await stale_task).usage_written is False
     refreshed = await force_task
 
     assert refreshed is True
@@ -1308,7 +1309,7 @@ async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refre
         await force_task
 
     release_stale.set()
-    assert await stale_task is False
+    assert (await stale_task).usage_written is False
     force_refresh_account.assert_not_awaited()
 
 
