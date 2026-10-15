@@ -59,6 +59,8 @@ Use a metadata-only stamp for an image rollback only after these checks:
 
 For example, a new release might add an optional column that the previous release ignores. Stamping back can be considered only after the previous release's reads and writes pass on a copy, including constraints and data semantics. A removed column or an unfinished backfill required by that release rules out this shortcut.
 
+After a metadata-only stamp, the physical schema can still contain newer objects that the rollback image's ORM does not declare. For example, the optional column in the previous paragraph is reported as drift, so `python -m app.db.migrate check` exits nonzero and startup raises by default because `CODEX_LB_DATABASE_MIGRATIONS_FAIL_FAST` is `true`. This is expected drift and does not by itself mean the rollback failed. Set `CODEX_LB_DATABASE_MIGRATIONS_FAIL_FAST=false` on the rollback image only after the read/write rehearsal on a copy has passed, record that override in the incident notes, and restore the default once the rollback is verified. If the drift cannot be accepted, use a physical downgrade instead.
+
 ---
 
 ## Advisory migration measurements

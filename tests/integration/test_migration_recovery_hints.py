@@ -62,3 +62,12 @@ def test_old_build_cannot_stamp_unknown_revision(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "Can't locate revision identified by '20990101_000000_future'" in result.stderr
     assert database.read_bytes() == before
+
+
+def test_recovery_hint_points_to_published_docs_and_states_expected_drift() -> None:
+    from app.db.migrate import DATABASE_RECOVERY_DOCS_URL, schema_ahead_recovery_hint
+
+    hint = schema_ahead_recovery_hint()
+    assert DATABASE_RECOVERY_DOCS_URL in hint
+    assert "docs/database.md" not in hint
+    assert "python -m app.db.migrate stamp <revision>" in hint
