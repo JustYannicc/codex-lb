@@ -11235,7 +11235,6 @@ still awaiting I/O.
 - **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
 
-<<<<<<< HEAD
 ### Requirement: Eventless bridge failures terminate with a stable response id
 
 When an anchored HTTP bridge continuation fails before any downstream response
@@ -11254,7 +11253,6 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
-=======
 ### Requirement: Stateless requests retain synthetic turn-state placeholder compatibility
 
 For HTTP and direct WebSocket Responses requests, an unregistered proxy-shaped turn-state marker without a previous-response anchor MUST NOT by itself establish an owner-miss continuation when the complete original request is proven account-neutral and self-contained. Such a request MUST use normal eligible account selection, including when multiple accounts are configured, and MUST preserve its complete input and controls without projection or dropping fields.
@@ -11284,4 +11282,3 @@ The proof MUST reject opaque reasoning or compaction state, unresolved tool outp
 
 - **WHEN** a registered marker, previous response, durable bridge or file identifies an owner
 - **THEN** that owner remains binding regardless of whether the request body is stateless
->>>>>>> 743c96313 (fix(proxy): retain stateless turn-state placeholder compatibility)
