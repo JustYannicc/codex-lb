@@ -4818,11 +4818,6 @@ class _HTTPBridgeStreamingMixin:
             # gate, reservation, and pending queue entry while marking the
             # upstream handoff for retirement.
             await detach_downstream_request()
-            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
