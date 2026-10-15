@@ -3025,6 +3025,9 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=owner_recovery_scope_id,
                     )
                 retry_request_state: _WebSocketRequestState | None = None
+                retry_api_key_reservation = request_state.api_key_reservation
+                retry_reservation_reacquired = False
+                retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
                 try:
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
