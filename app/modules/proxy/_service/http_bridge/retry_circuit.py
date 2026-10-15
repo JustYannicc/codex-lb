@@ -1449,7 +1449,6 @@ class _HTTPBridgeRetryCircuitMixin:
         probe_owner: object | None = None,
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
-        allow_operation_fenced_continuity_replay: bool = False,
         claimed_lease_out: list[_HTTP_BRIDGE_RETRY_CIRCUIT_LEASE] | None = None,
     ) -> bool:
         """Avoid replaying a repeatedly failing hard-affinity request in a tight loop."""

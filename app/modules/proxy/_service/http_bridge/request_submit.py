@@ -1149,7 +1149,6 @@ class _HTTPBridgeRequestSubmitMixin:
             session,
             probe_owner=request_state,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
-            allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
             claimed_lease_out=admission_claims,
         )
         # The exact lease this admission claimed, handed out by the claim
