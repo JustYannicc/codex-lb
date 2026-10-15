@@ -98,12 +98,18 @@ def read_metadata(path: Path) -> JsonlMetadata | None:
     return JsonlMetadata(path, session_id, provider if isinstance(provider, str) else None, header, identity)
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
 def discover_metadata(home: Path, progress: Progress) -> MetadataPlan:
     jsonl: list[JsonlMetadata] = []
     rows: list[StateMetadata] = []
     scanned = 0
     for directory in (home / "sessions", home / "archived_sessions"):
-        for root, dirs, files in os.walk(directory, followlinks=False):
+        if not directory.is_dir():
+            continue
+        for root, dirs, files in os.walk(directory, followlinks=False, onerror=_raise_walk_error):
             dirs[:] = sorted(name for name in dirs if not (Path(root) / name).is_symlink())
             for name in sorted(files):
                 path = Path(root) / name

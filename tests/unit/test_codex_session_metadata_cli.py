@@ -320,3 +320,79 @@ def test_noop_repair_verifies_without_backup(tmp_path: Path, capsys: pytest.Capt
     assert json.loads(captured.out)["backup_path"] is None
     assert json.loads(captured.err.splitlines()[-1])["phase"] == "verification"
     assert snapshot(tmp_path) == before
+
+
+def test_directory_traversal_error_fails_closed_before_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    make_home(tmp_path)
+    (tmp_path / "archived_sessions").mkdir()
+    before = snapshot(tmp_path)
+    real_scandir = os.scandir
+
+    def unreadable(path: object = ".") -> object:
+        if os.fsdecode(path).endswith("archived_sessions"):
+            raise PermissionError("Permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unreadable)
+    with pytest.raises(SystemExit, match="Permission denied"):
+        cli.main(repair_args(tmp_path, "--provider", "codex-lb", "--session-id", "split", "--yes"))
+    assert snapshot(tmp_path) == before
+
+
+def test_sqlite_direct_write_rejection_falls_back_to_scoped_copy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.codex_session_repair as repair
+
+    make_home(tmp_path)
+    real_connect = repair._connect_sqlite
+    state_path = (tmp_path / "state_5.sqlite").resolve()
+
+    def reject_direct_write(path: Path, *, read_only: bool = False, immutable: bool = False) -> sqlite3.Connection:
+        if not read_only and Path(path).resolve() == state_path:
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(path, read_only=read_only, immutable=immutable)
+
+    monkeypatch.setattr(repair, "_connect_sqlite", reject_direct_write)
+    cli.main(repair_args(tmp_path, "--provider", "openai", "--session-id", "split", "--yes"))
+    capsys.readouterr()
+    with sqlite3.connect(tmp_path / "state_5.sqlite") as conn:
+        rows = dict(conn.execute("SELECT id, model_provider FROM threads"))
+    assert rows == {"split": "openai", "unrelated": "openai"}
+
+
+def test_interrupt_reports_retained_backup_before_propagating(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.codex_session_repair as repair
+
+    make_home(tmp_path)
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(repair, "_verify", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(repair_args(tmp_path, "--provider", "codex-lb", "--session-id", "split", "--yes"))
+    backups = list((tmp_path / "backups/session-metadata-repair").glob("repair-*"))
+    assert len(backups) == 1
+    assert f"retained backup at {backups[0]}" in capsys.readouterr().err
+
+
+def test_owner_preservation_failure_rejects_replacement_before_live_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    make_home(tmp_path)
+    before = (tmp_path / "sessions/split.jsonl").read_bytes()
+
+    def refuse_chown(path: object, uid: int, gid: int, **kwargs: object) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(os, "chown", refuse_chown)
+    with pytest.raises(SystemExit, match="owner"):
+        cli.main(repair_args(tmp_path, "--provider", "codex-lb", "--session-id", "split", "--yes"))
+    assert (tmp_path / "sessions/split.jsonl").read_bytes() == before

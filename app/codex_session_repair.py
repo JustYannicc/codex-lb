@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
+import sys
 from collections.abc import Sequence
 from contextlib import closing
 from pathlib import Path
@@ -15,13 +17,19 @@ from app.codex_session_metadata import (
     JsonlMetadata,
     MetadataPlan,
     Progress,
+    StateMetadata,
     discover_metadata,
     file_identity,
     metadata_payload,
     read_metadata,
     validate_provider,
 )
-from app.codex_sessions_retag import _backup_sqlite_db, _connect_sqlite
+from app.codex_sessions_retag import (
+    _backup_sqlite_db,
+    _connect_sqlite,
+    _copy_sqlite_to_temp,
+    _replace_sqlite_db,
+)
 
 
 def repair_metadata(home: Path, provider: str, session_ids: Sequence[str], progress: Progress) -> Path | None:
@@ -55,23 +63,58 @@ def repair_metadata(home: Path, provider: str, session_ids: Sequence[str], progr
             _rewrite(item, provider, progress)
         progress("sqlite", 0)
         for path in sorted({item.path for item in changed.rows}):
-            with closing(_connect_sqlite(path)) as conn, conn:
-                for item in changed.rows:
-                    if item.path != path:
-                        continue
-                    if path.is_symlink() or file_identity(path)[:2] != item.identity:
-                        raise ValueError(f"State database changed before update: {path}")
-                    cursor = conn.execute(
-                        "UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?",
-                        (provider, item.session_id, item.provider),
-                    )
-                    if cursor.rowcount != 1:
-                        raise ValueError(f"Session changed before SQLite update: {item.session_id}")
-                    progress("sqlite", 1)
+            rows = [item for item in changed.rows if item.path == path]
+            if path.is_symlink() or any(file_identity(path)[:2] != item.identity for item in rows):
+                raise ValueError(f"State database changed before update: {path}")
+            _update_state_rows(path, rows, provider, progress)
         _verify(plan, provider, progress)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            print(f"Repair interrupted; retained backup at {backup}", file=sys.stderr, flush=True)
+            raise
         raise ValueError(f"Repair failed; retained backup at {backup}: {exc}") from exc
     return backup
+
+
+def _update_state_rows(path: Path, rows: Sequence[StateMetadata], provider: str, progress: Progress) -> None:
+    try:
+        with closing(_connect_sqlite(path)) as conn, conn:
+            _execute_state_updates(conn, rows, provider, progress)
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc).casefold():
+            raise
+        # Some bind mounts reject direct SQLite writes. Update a sibling copy and
+        # move it back so only the selected rows change, as the retag command does.
+        _update_state_rows_via_copy(path, rows, provider, progress)
+
+
+def _update_state_rows_via_copy(path: Path, rows: Sequence[StateMetadata], provider: str, progress: Progress) -> None:
+    temp = _copy_sqlite_to_temp(path)
+    try:
+        with closing(_connect_sqlite(temp)) as conn, conn:
+            _execute_state_updates(conn, rows, provider, progress)
+        _replace_sqlite_db(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _execute_state_updates(conn: sqlite3.Connection, rows: Sequence[StateMetadata], provider: str, progress: Progress) -> None:
+    for item in rows:
+        cursor = conn.execute(
+            "UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?",
+            (provider, item.session_id, item.provider),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"Session changed before SQLite update: {item.session_id}")
+        progress("sqlite", 1)
+
+
+def _preserve_owner(temp: Path, target: Path) -> None:
+    original = target.stat()
+    try:
+        os.chown(temp, original.st_uid, original.st_gid)
+    except OSError as exc:
+        raise ValueError(f"Cannot preserve session file owner; refusing cross-owner replacement: {target}") from exc
 
 
 def _check_plan(plan: MetadataPlan) -> None:
@@ -128,6 +171,7 @@ def _rewrite(item: JsonlMetadata, provider: str, progress: Progress) -> None:
             os.fsync(target.fileno())
         if item.path.is_symlink() or file_identity(item.path) != item.identity:
             raise ValueError(f"Session changed before replacement: {item.path}")
+        _preserve_owner(temp, item.path)
         shutil.copymode(item.path, temp)
         temp.replace(item.path)
     finally:
