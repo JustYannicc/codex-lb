@@ -283,11 +283,13 @@ class _HTTPBridgeRetryCircuitMixin:
         # lease active even after that bound so durable reconciliation cannot
         # clear it before the admission path renews it through the request
         # deadline.
-        return _HTTPBridgeRetryCircuitMixin._http_bridge_retry_circuit_half_open_owner_is_live(state)
+        return _HTTPBridgeRetryCircuitMixin._http_bridge_retry_circuit_half_open_owner_is_live(state, now=now)
 
     @staticmethod
     def _http_bridge_retry_circuit_half_open_owner_is_live(
         state: _HTTPBridgeRetryCircuitState,
+        *,
+        now: float,
     ) -> bool:
         """Return whether an expired local lease still has a live request owner.
 
@@ -307,6 +309,11 @@ class _HTTPBridgeRetryCircuitMixin:
         if not hasattr(owner_token, "response_create_attempt_count"):
             return False
         if getattr(owner_token, "response_create_attempt_count", 0) <= 0:
+            return False
+        bridge_deadline = getattr(owner_token, "bridge_request_deadline", None)
+        if isinstance(bridge_deadline, (int, float)) and 0.0 < bridge_deadline <= now:
+            # An elapsed request budget makes the owner abandoned, not live;
+            # renewing past it would keep the hard key suppressed indefinitely.
             return False
         if getattr(owner_token, "draining_until_terminal", False):
             return False
@@ -1479,7 +1486,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 if (
                     abandoned_half_open_lease
                     and state is not None
-                    and self._http_bridge_retry_circuit_half_open_owner_is_live(state)
+                    and self._http_bridge_retry_circuit_half_open_owner_is_live(state, now=now)
                 ):
                     # A request can legitimately run past the default
                     # six-hundred-second probe window (the bridge budget is
@@ -2056,10 +2063,15 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                     state.last_touched_monotonic = now
                     state.last_failure_monotonic = now
-                    state.half_open_until = 0.0
-                    state.half_open_owner_session = None
-                    state.half_open_owner_token = None
-                    state.half_open_lease_generation = 0
+                    if claimed_probe is not None or not (
+                        self._http_bridge_retry_circuit_has_active_half_open_lease(state, now=now)
+                    ):
+                        # A strike without a captured claim must not clear another
+                        # request's live lease; only the claim's own owner may.
+                        state.half_open_until = 0.0
+                        state.half_open_owner_session = None
+                        state.half_open_owner_token = None
+                        state.half_open_lease_generation = 0
                     if scoped_attempt is not None:
                         scoped_attempt.retry_circuit_failure_recorded = True
                         scoped_attempt.retry_circuit_failure_settled = anyio.Event()
