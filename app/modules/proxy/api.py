@@ -5201,8 +5201,12 @@ async def _source_responses_response(
             compact_source_payload = strip_source_telemetry(payload.model_dump(mode="json", exclude_none=True))
             compact_source_payload.pop("store", None)
             compact_source_payload.pop("stream", None)
-            if api_key is not None and api_key.enforced_reasoning_effort is not None:
+            if api_key is not None and (
+                api_key.enforced_reasoning_effort is not None
+                or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)
+            ):
                 normalize_source_reasoning_aliases(compact_source_payload)
+            _apply_source_response_request_overrides(compact_source_payload, source_model_request_overrides(source, payload.model))
         admission_budget = estimate_api_key_request_usage(payload, upstream_payload=compact_source_payload)
         reservation = await _enforce_request_limits(
             api_key,
