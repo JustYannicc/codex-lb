@@ -18427,6 +18427,62 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
     assert cast(dict[str, str], captured["headers"])["x-codex-session-id"] == "sid-123"
 
 
+@pytest.mark.parametrize(
+    ("downstream_turn_state", "expected_synthesized"),
+    [
+        ("turn_" + "a" * 32, True),
+        ("http_turn_" + "b" * 32, True),
+        ("http_turn_generated", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_marks_synthesized_turn_state(
+    monkeypatch: pytest.MonkeyPatch,
+    downstream_turn_state: str,
+    expected_synthesized: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(**kwargs: object):
+        captured.update(kwargs)
+        if False:
+            yield ""
+        return
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={"x-codex-session-id": "sid-123"},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state=downstream_turn_state,
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == []
+    context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
+    assert context.downstream_turn_state == downstream_turn_state
+    assert context.downstream_turn_state_synthesized is expected_synthesized
+
+
 @pytest.mark.asyncio
 async def test_forward_http_bridge_request_to_owner_proves_ambiguous_shape_capability(
     monkeypatch: pytest.MonkeyPatch,
