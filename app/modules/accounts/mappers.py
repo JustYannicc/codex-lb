@@ -129,10 +129,6 @@ def _account_to_summary(
         and any(
             row is not None
             and row.window_minutes
-            in {
-                usage_core.DEFAULT_WINDOW_MINUTES_PRIMARY,
-                usage_core.DEFAULT_WINDOW_MINUTES_SECONDARY,
-            }
             and row.recorded_at > monthly_usage.recorded_at
             for row in (primary_usage, secondary_usage)
         )
