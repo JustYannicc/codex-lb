@@ -144,6 +144,7 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy.affinity import (
     _extract_model_class,
+    _is_synthesized_turn_state,
 )
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS,
@@ -423,6 +424,9 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            downstream_turn_state_synthesized=(
+                forwarded_turn_state is not None and _is_synthesized_turn_state(forwarded_turn_state)
+            ),
             original_request_unanchored=(
                 recovery_forward
                 or (
