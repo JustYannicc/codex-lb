@@ -81,3 +81,5 @@ def test_cli_upgrade_prints_progress_to_stderr(tmp_path: Path) -> None:
     assert "Migration started revision=20260213_000000_base_schema" in result.stderr
     assert "Migration executed revision=20260213_000000_base_schema" in result.stderr
     assert result.stdout.strip() == "current_revision=20260213_000000_base_schema"
+    assert "Running upgrade" not in result.stderr
+    assert "create base schema" not in result.stderr
