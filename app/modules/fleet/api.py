@@ -140,6 +140,7 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
             get_account_selection_cache().invalidate()
         return FleetRefreshResponse(
             usage_written=usage_written,
+            account_count=len(accounts),
             attempted_count=len(eligible_accounts),
             generated_at=utcnow(),
         )
