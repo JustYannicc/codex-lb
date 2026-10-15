@@ -246,11 +246,19 @@ class UsageRefreshScheduler:
 
                 updater = build_background_usage_updater()
                 refresh_started_at = usage_updater_module.utcnow()
-                usage_written = await updater.refresh_accounts([selected_account], before_primary)
+                refresh_result = await updater.refresh_accounts([selected_account], before_primary)
+                usage_written = refresh_result.usage_written
+                fetch_succeeded = refresh_result.fetch_succeeded
+                async with get_background_session() as session:
+                    dashboard_settings = await SettingsRepository(session).get_or_create()
+                    detach_session_objects(session)
+                if not usage_written and not dashboard_settings.limit_warmup_enabled:
+                    if cycle_complete:
+                        await _invalidate_usage_refresh_caches()
+                    return _usage_refresh_slice_seconds(self.interval_seconds, account_count)
                 async with get_background_session() as session:
                     usage_repo = UsageRepository(session)
                     accounts_repo = AccountsRepository(session)
-                    settings_repo = SettingsRepository(session)
                     after_primary = await usage_repo.latest_by_account(
                         window="primary",
                         account_ids=selected_account_ids,
@@ -263,7 +271,6 @@ class UsageRefreshScheduler:
                         window="monthly",
                         account_ids=selected_account_ids,
                     )
-                    dashboard_settings = await settings_repo.get_or_create()
                     refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
                     refreshed_selected_accounts = [
                         account for account in refreshed_accounts if account.id == selected_account.id
@@ -274,19 +281,21 @@ class UsageRefreshScheduler:
                         before_monthly=before_monthly,
                         after_monthly=after_monthly,
                     )
-                    persisted_reset_evidence = await recover_current_reset_evidence(
-                        accounts=refreshed_selected_accounts,
-                        settings=dashboard_settings,
-                        primary=after_primary,
-                        secondary=_select_long_window_entries(
+                    persisted_reset_evidence: dict[str, object] = {}
+                    if fetch_succeeded:
+                        persisted_reset_evidence = await recover_current_reset_evidence(
                             accounts=refreshed_selected_accounts,
-                            monthly_entries=after_monthly,
-                            secondary_entries=after_secondary,
-                        ),
-                        usage_repo=usage_repo,
-                        warmup_repo=LimitWarmupRepository(session),
-                        now=usage_updater_module.utcnow(),
-                    )
+                            settings=dashboard_settings,
+                            primary=after_primary,
+                            secondary=_select_long_window_entries(
+                                accounts=refreshed_selected_accounts,
+                                monthly_entries=after_monthly,
+                                secondary_entries=after_secondary,
+                            ),
+                            usage_repo=usage_repo,
+                            warmup_repo=LimitWarmupRepository(session),
+                            now=usage_updater_module.utcnow(),
+                        )
                     detach_session_objects(session)
                 warmup_before_monthly = dict(before_monthly)
                 warmup_after_monthly = dict(after_monthly)
