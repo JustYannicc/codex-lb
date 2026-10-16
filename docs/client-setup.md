@@ -6,7 +6,7 @@ Model availability is discovered from the upstream Codex model catalog and can v
 
 The examples use `gpt-6-astra` for complex reasoning and coding, following [OpenAI's model guidance](https://developers.openai.com/api/docs/guides/latest-model). `gpt-5.6-terra` and `gpt-5.6-luna` remain alternative examples. Confirm that your live model catalog includes each selected model before using these configs.
 
-The client budgets below are conservative example settings, not Astra's maximum context or output limits. Use your live catalog's limits when adjusting them. The [872k opt-in instructions](#opting-into-the-872k-context-window) describe the GPT-5.6 family specifically. Existing pinned model IDs remain valid only while your upstream account serves them.
+The client budgets below are conservative example settings, not Astra's maximum context or output limits. Use your live catalog's limits when adjusting them. The [872k opt-in](#opting-into-the-872k-context-window) applies to any model whose catalog entry reports a `max_context_window` above its `context_window` — check `GET /backend-api/codex/models` for the model you select. Existing pinned model IDs remain valid only while your upstream account serves them; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
 
 | Client | Endpoint | Config |
 |--------|----------|--------|
@@ -54,7 +54,7 @@ model_context_window = 872000
 - Cost: input beyond the 272,000-token threshold is metered at the upstream
   long-context rate. That threshold is why 272,000 stays the default.
 
-These keys are Codex-CLI-only. For GPT-5.6, `/v1/models` reports the default
+These keys are Codex-CLI-only. `/v1/models` reports the default
 input budget, not the ceiling. The OpenCode and OpenClaw examples below use
 conservative client budgets; adjust them against your selected model's live catalog entry.
 
