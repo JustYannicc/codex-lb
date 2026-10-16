@@ -16,9 +16,9 @@ When a step fails, compare the candidate, failure and operating conditions befor
 
 ## Protect the running service
 
-The contributor may be using CodexLB to run this agent. Use isolated test state and retain ownership of the processes you start. Identify exact process or container IDs before stopping anything. Live runtime changes belong to the explicitly designated deployment owner.
+The contributor may be using CodexLB to run this agent. Use isolated test state and retain ownership of the processes you start. Identify exact process or container IDs before stopping anything. Do not restart, redeploy or mutate a running instance you did not start.
 
-Before importing the app for tests, set `CODEX_LB_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_URL` to the same dedicated disposable database. Verify foreground, background and fixture engines before any reset. Rehearse migrations against a consistent snapshot or restored backup, preserving the original data and keys. Keep secrets and request contents out of logs and published evidence.
+For tests, set `CODEX_LB_TEST_DATABASE_URL`; `tests/conftest.py` derives `CODEX_LB_DATABASE_URL` from it. Point it only at a throwaway database: the PostgreSQL integration suites `DROP SCHEMA public CASCADE` and recreate it in setup and teardown. Set `CODEX_LB_DATABASE_URL` explicitly for ad-hoc scripts that import `app.db.session` outside pytest, which otherwise bind the operator's real store. Verify foreground, background and fixture engines before any reset. Rehearse migrations against a consistent snapshot or restored backup, preserving the original data and keys. Keep secrets and request contents out of logs and published evidence.
 
 ## Code Conventions
 
@@ -32,6 +32,8 @@ The `/project-conventions` skill is auto-activated on code edits (PreToolUse gua
 ## OpenSpec and documentation
 
 OpenSpec is the source of truth for behavior, API, schema, CLI, dashboard-visible, routing, operator and compatibility requirements.
+
+Code/tests alone are not enough when OpenSpec is required.
 
 1. Read the relevant capability under `openspec/specs/`.
 2. Before changing its behavior or contract, create `openspec/changes/<slug>/` with proposal, design where needed, delta requirements and tasks.
