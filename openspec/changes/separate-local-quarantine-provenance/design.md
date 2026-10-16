@@ -10,6 +10,12 @@ Pass the cutoff explicitly through completion loads and their revocations. Keep 
 
 Fence primary cleanup by the canonical session or its weak owner reference. A planning-only durable probe owns no session reference. The sequence survives entry eviction, preventing a recreated entry from matching an old fence. Revocation clears local poison metadata so a later arm cannot reuse its disproved deadline.
 
+The `_http_bridge_quarantine_sequence` generation advances for every local
+failure, including first strikes, and survives entry eviction so a recreated
+entry cannot match an old fence. This generation change is kept in this
+proposal's design; splitting it into its own commit would require rewriting the
+author's branch history.
+
 ## Scope and verification
 
 The existing poison-preserving soft cap, TTLs and unknown-key behavior remain unchanged. This resolves the cleanup concern without choosing PR2276's broader overflow policy. The quarantine module remains one cohesive responsibility; callers pass only the cleanup authorities it needs.
